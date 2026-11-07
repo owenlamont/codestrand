@@ -53,10 +53,11 @@ per hour); private repositories need a token with repository access. Rate limits
 network failures leave playback available. HTTPS uses Rustls with ring and the operating
 system trust store; no bundled certificate roots are used on Linux, macOS or Windows.
 
-If GitHub supplies no image, Gravatar is tried with a SHA-256 hash of the trimmed, lowercase
-email and `d=404`, so a missing Gravatar never becomes a generic placeholder. Email
-hashes are identifying information: opting in discloses the hash to Gravatar, account
-names to GitHub, and the repository/commit to GitHub's API. Raw emails are never sent.
+If GitHub supplies no image, Gravatar is tried with a SHA-256 hash of the trimmed,
+lowercase email and `d=404`, so a missing Gravatar never becomes a generic placeholder.
+Email hashes are identifying information: opting in discloses the hash to Gravatar,
+account names to GitHub, and the repository/commit to GitHub's API. Raw emails are never
+sent.
 
 Portraits and account resolutions live under `codestrand/avatars-v2/` in the existing
 platform cache directory, keyed by a hash of email, explicit accounts and remote.

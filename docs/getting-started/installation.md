@@ -1,8 +1,16 @@
 # Installation
 
 Codestrand ships as a native binary. Choose a channel matching your tools.
-The guides describe the CLI on current main; an older installed release may have
-fewer options. Check `codestrand --version` and the command's `--help`.
+The guides describe current `main`. Published releases are v0.1.1, which lacks
+`--seconds-per-day`, `--fetch-avatars`, the `[` / `]` playback speed keys and the
+avatar cache. Until the next release (0.2.0), build from `main` to use these features:
+
+```sh
+cargo install --locked --git https://github.com/owenlamont/codestrand --branch main
+```
+
+This requires Rust and the native build prerequisites described below.
+Check `codestrand --version` and the command's `--help` after installing.
 
 ## PyPI
 

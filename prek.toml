@@ -53,6 +53,14 @@ hooks = [
     pass_filenames = false,
   },
   {
+    id = "docs-logo",
+    name = "Documentation logo matches root asset",
+    entry = "bash scripts/check_docs_logo.sh",
+    language = "system",
+    files = '^(assets/codestrand\.svg|docs/assets/codestrand\.svg|scripts/check_docs_logo\.sh)$',
+    pass_filenames = false,
+  },
+  {
     id = "docs-build",
     name = "Strict documentation build",
     entry = "uv run --locked --only-group docs zensical build --clean --strict",
