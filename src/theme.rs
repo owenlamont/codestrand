@@ -203,15 +203,15 @@ impl Theme {
         let green = Color::srgb_u8(0x39, 0xff, 0x6a);
         let dark = Color::srgb_u8(0x0b, 0x13, 0x0d);
         theme.clear = Color::BLACK;
-        theme.floor.base_color = dark;
+        theme.floor.base_color = Color::BLACK;
         theme.grid.base_color = Color::srgb(0.045, 0.105, 0.055);
         theme.edge.base_color = Color::srgb(0.10, 0.32, 0.16);
         theme.descending.base_color = green;
         theme.rising.base_color = Color::srgb(0.65, 1.0, 0.72);
         let contributors = [
-            Color::hsl(100.0, 0.90, 0.68),
+            Color::hsl(100.0, 0.90, 0.60),
             Color::hsl(112.0, 0.85, 0.46),
-            Color::hsl(124.0, 0.95, 0.76),
+            Color::hsl(124.0, 0.95, 0.84),
             Color::hsl(136.0, 0.80, 0.54),
             Color::hsl(148.0, 0.90, 0.65),
             Color::hsl(160.0, 0.95, 0.42),
@@ -314,6 +314,9 @@ mod tests {
     #[test]
     fn phosphor_contributors_have_distinct_shades() {
         let theme = ThemeName::Phosphor.build();
+        let lime = Hsla::from(theme.avatars[0].base_color);
+        let mint = Hsla::from(theme.avatars[2].base_color);
+        assert!(mint.lightness - lime.lightness >= 0.20);
         for (index, avatar) in theme.avatars.iter().enumerate() {
             for other in &theme.avatars[index + 1..] {
                 assert_ne!(avatar.base_color, other.base_color);
@@ -340,6 +343,8 @@ mod tests {
         assert_eq!(ThemeName::default(), ThemeName::Neon);
         let phosphor = ThemeName::Phosphor.build();
         assert_eq!(phosphor.clear, Color::BLACK);
+        assert_eq!(phosphor.floor.base_color, Color::BLACK);
+        assert!(phosphor.floor.unlit);
         assert_eq!(phosphor.glyph_ink, Some([57, 255, 106]));
     }
 
