@@ -18,6 +18,14 @@ proof reports on issues.
 
 ## Checks
 
+Zensical renders user documentation from `docs/` with `zensical.toml`.
+Build: `uv run --locked --only-group docs zensical build --clean --strict`.
+Preview: `uv run --locked --only-group docs zensical serve`.
+The docs group in `pyproject.toml` and `uv.lock` avoids building the Rust package.
+Prek and CI validate the strict build and links with lychee. Keep new pages in
+navigation and verify CLI examples against current help and behaviour.
+See [Contributing](CONTRIBUTING.md#documentation) for the build and hosting setup.
+
 Keep fixtures small and readable; build inline instead of committing recorded history.
 
 ```sh

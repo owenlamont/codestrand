@@ -53,6 +53,22 @@ hooks = [
     pass_filenames = false,
   },
   {
+    id = "docs-logo",
+    name = "Documentation logo matches root asset",
+    entry = "bash scripts/check_docs_logo.sh",
+    language = "system",
+    files = '^(assets/codestrand\.svg|docs/assets/codestrand\.svg|scripts/check_docs_logo\.sh)$',
+    pass_filenames = false,
+  },
+  {
+    id = "docs-build",
+    name = "Strict documentation build",
+    entry = "uv run --locked --only-group docs zensical build --clean --strict",
+    language = "system",
+    files = '^(docs/|zensical\.toml$|pyproject\.toml$|uv\.lock$)',
+    pass_filenames = false,
+  },
+  {
     id = "python-check",
     name = "Python lint",
     entry = "uvx ruff==0.17.3 check --target-version py315 --select E,F,I,UP,B,ANN",
@@ -145,6 +161,18 @@ hooks = [
     entry = "npx --yes publint",
     language = "system",
     files = '^package\.json$',
+    pass_filenames = false,
+  },
+]
+
+[[repos]]
+repo = "https://github.com/owenlamont/lychee-pre-commit"
+rev = "v0.24.2"
+hooks = [
+  {
+    id = "lychee",
+    args = ["--include-fragments", "--no-progress", "docs", "README.md", "CONTRIBUTING.md", "AGENTS.md"],
+    always_run = true,
     pass_filenames = false,
   },
 ]
