@@ -37,9 +37,24 @@ pub(super) fn run(
     fps: u16,
     delay_ms: u16,
 ) -> anyhow::Result<()> {
+    render(
+        directory,
+        scene::headless(simulation, title, fps),
+        frames,
+        fps,
+        delay_ms,
+    )
+}
+
+fn render(
+    directory: &Path,
+    (mut app, target): (App, Handle<Image>),
+    frames: u32,
+    fps: u16,
+    delay_ms: u16,
+) -> anyhow::Result<()> {
     let mut manifest = BufWriter::new(File::create(directory.join("frames.csv"))?);
     writeln!(manifest, "frame,seconds,commit,files,avatars,beams")?;
-    let (mut app, target) = scene::headless(simulation, title, fps);
     let started = Instant::now();
     while app.plugins_state() != PluginsState::Ready {
         if started.elapsed() > WAIT_LIMIT {
@@ -153,4 +168,72 @@ fn update(app: &mut App) -> anyhow::Result<()> {
         })
         .context("wait for GPU frame completion")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        contributors, model,
+        theme::{Theme, ThemeName},
+        timeline,
+    };
+    use bevy::prelude::IntoScheduleConfigs;
+
+    #[test]
+    #[ignore = "requires a graphics adapter; writes a live theme-switch sequence"]
+    fn live_theme_switch_export() {
+        let scratch = tempfile::tempdir().unwrap();
+        let output = std::env::var_os("CODESTRAND_THEME_PROOF").map_or_else(
+            || scratch.path().join("live-switch"),
+            std::path::PathBuf::from,
+        );
+        prepare(&output).unwrap();
+        let mut events = timeline::synthetic();
+        contributors::Mappings::default().apply(&mut events);
+        let mut pixels = vec![0; 128 * 128 * 4];
+        for (index, pixel) in pixels.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            let color = if (index % 128 / 16 + index / 128 / 16) % 2 == 0 {
+                [230, 160, 65, 255]
+            } else {
+                [65, 105, 190, 255]
+            };
+            pixel.copy_from_slice(&color);
+        }
+        let portrait = std::sync::Arc::new(crate::avatars::Portrait { pixels });
+        let key = events[0].contributor.as_ref().unwrap().key.clone();
+        for event in &mut events {
+            let contributor = event.contributor.as_mut().unwrap();
+            if contributor.key == key {
+                contributor.portrait = Some(portrait.clone());
+            }
+        }
+        let simulation = Simulation::new(
+            events,
+            &model::Options::default(),
+            &Theme::neon(),
+            &contributors::Mappings::default(),
+        );
+        let (mut app, target) = scene::headless(
+            simulation,
+            "Live theme switch / portrait fixture".to_owned(),
+            15,
+        );
+        app.add_systems(
+            bevy::prelude::Update,
+            (|world: &mut bevy::prelude::World| {
+                let index = world.resource::<scene::Frame>().index;
+                let wanted = if (45..90).contains(&index) {
+                    ThemeName::Phosphor
+                } else {
+                    ThemeName::Neon
+                };
+                if world.resource::<scene::Playback>().0.theme().name != wanted {
+                    scene::switch_theme(world, wanted);
+                }
+            })
+            .before(scene::animate),
+        );
+        render(&output, (app, target), 120, 15, 0).unwrap();
+    }
 }

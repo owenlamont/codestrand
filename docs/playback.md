@@ -10,15 +10,22 @@ explicit frame times, with a fixed camera and a 1x playback multiplier.
 | Escape | Close preview |
 | `[` | Halve live speed, down to 0.125x |
 | `]` | Double live speed, up to 8x |
+| `,` / `.` | Previous or next theme |
 | WASD | Pan; return from contributor follow to free camera |
 | Right mouse drag | Orbit |
 | Scroll wheel | Zoom |
 | Tab | Follow or cycle visible contributors |
 | Space | Restore the fit-to-scene camera over half a second |
 
-The caption shows the live multiplier, camera mode and follow target. Following
+The caption shows the live multiplier, theme, camera mode and follow target. Following
 returns to free camera when the target fades out. Preview controls do not change
 the exported camera or timeline.
+
+## Themes
+
+`--theme neon|phosphor` selects the starting theme for preview and export;
+the default is `neon`. Switching themes in preview changes only colours and icons:
+layout, playback position and camera stay put.
 
 ## Range and pacing
 

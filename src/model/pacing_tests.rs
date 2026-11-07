@@ -55,6 +55,35 @@ fn snapshot(sim: &Simulation) -> String {
 }
 
 #[test]
+fn themes_preserve_simulation_during_playback_seek_and_restart() {
+    let events = crate::timeline::synthetic()
+        .into_iter()
+        .take(2)
+        .collect::<Vec<_>>();
+    let mut switched = simulation(events.clone(), &Options::default());
+    let mut reference = simulation(events, &Options::default());
+    switched.change_rate(2.0);
+    reference.change_rate(2.0);
+    for frame in [30, 90, 45, 120] {
+        switched.advance_to(frame, 30);
+        reference.advance_to(frame, 30);
+        for name in crate::theme::ThemeName::ALL {
+            switched.set_theme(name.build());
+            assert_eq!(snapshot(&switched), snapshot(&reference));
+            assert_eq!(switched.starts, reference.starts);
+            assert_eq!(switched.duration(), reference.duration());
+            assert_eq!(
+                switched.playback_multiplier(),
+                reference.playback_multiplier()
+            );
+        }
+    }
+    switched.restart();
+    reference.restart();
+    assert_eq!(snapshot(&switched), snapshot(&reference));
+}
+
+#[test]
 fn mid_gap_rate_changes_preserve_state_and_schedule() {
     let mut sim = simulation(growth(), &Options::default());
     sim.advance_to(585, 60);
