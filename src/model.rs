@@ -313,6 +313,11 @@ impl Simulation {
             theme.geometry(),
             "themes share geometry"
         );
+        debug_assert_eq!(
+            self.theme.file_tile.is_some(),
+            theme.file_tile.is_some(),
+            "live themes share tile presence"
+        );
         self.theme = theme;
     }
 

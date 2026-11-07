@@ -73,7 +73,7 @@ cargo run --locked --release -- export frames --repository /path/to/repository \
 
 Without `--repository`, the synthetic history plays, including a move between
 directories, deletions and a 65-file commit. `--start` lays out and settles earlier
-commits before playback; `--commits` limits what plays after it. Preview loops;
+commits before playback; `--commits` limits what plays after it. Preview loops.
 Use `--theme neon|phosphor` for preview/export; `,`/`.` cycle preview themes.
 Escape closes the window. `]` doubles the live playback multiplier; `[` halves
 it, from 0.125x to 8x. The caption shows the multiplier. Live playback advances the
