@@ -6,3 +6,6 @@
 Thumbs.db
 __pycache__/
 .pytest_cache/
+/.venv/
+/site/
+/.cache/

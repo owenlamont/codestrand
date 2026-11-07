@@ -10,6 +10,11 @@ status=0
 git diff --quiet --no-ext-diff --no-renames HEAD^1 HEAD -- . \
   ':(top,exclude)README.md' \
   ':(top,exclude)AGENTS.md' \
+  ':(top,exclude)CONTRIBUTING.md' \
+  ':(top,exclude)zensical.toml' \
+  ':(top,exclude)lychee.toml' \
+  ':(top,glob,exclude)docs/assets/**' \
+  ':(top,exclude)scripts/check_docs_logo.sh' \
   ':(top,glob,exclude)docs/**/*.md' \
   ':(top,exclude)assets/codestrand.svg' || status=$?
 case "$status" in

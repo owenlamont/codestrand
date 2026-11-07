@@ -31,3 +31,8 @@ Issues = "https://github.com/owenlamont/codestrand/issues"
 [tool.maturin]
 bindings = "bin"
 sdist = true
+
+[dependency-groups]
+docs = [
+    "zensical>=0.0.42",
+]
