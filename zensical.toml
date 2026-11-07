@@ -18,6 +18,7 @@ nav = [
   { "Export" = "export.md" },
   { "Contributors and avatars" = "contributors.md" },
   { "Troubleshooting" = "troubleshooting.md" },
+  { "Related tools" = "related-tools.md" },
 ]
 [project.theme]
 language = "en"
