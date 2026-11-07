@@ -53,11 +53,15 @@ enum Command {
     },
     /// Play history in a loop; [ halves and ] doubles live speed (0.125x–8x). Escape closes it.
     Preview {
+        #[arg(long, value_enum, default_value = "neon")]
+        theme: theme::ThemeName,
         #[command(flatten)]
         source: Source,
     },
     /// Write numbered PNG frames and a logical-state manifest to a new directory.
     Export {
+        #[arg(long, value_enum, default_value = "neon")]
+        theme: theme::ThemeName,
         directory: PathBuf,
         #[command(flatten)]
         source: Source,
@@ -210,11 +214,13 @@ fn main() -> anyhow::Result<()> {
             let history = history::import(&repository, &revision)?;
             serde_json::to_writer_pretty(std::io::stdout().lock(), &history)?;
         }
-        Some(Command::Preview { source }) => {
-            let (simulation, title) = source.load()?;
+        Some(Command::Preview { source, theme }) => {
+            let (mut simulation, title) = source.load()?;
+            simulation.set_theme(theme.build());
             scene::preview(simulation, title);
         }
         Some(Command::Export {
+            theme,
             directory,
             source,
             frames,
@@ -222,9 +228,10 @@ fn main() -> anyhow::Result<()> {
             frame_delay_ms,
         }) => {
             export::prepare(&directory)?;
-            let (simulation, title) = source.load().inspect_err(|_| {
+            let (mut simulation, title) = source.load().inspect_err(|_| {
                 let _ = std::fs::remove_dir(&directory);
             })?;
+            simulation.set_theme(theme.build());
             let frames = frames
                 .map_or_else(|| model::frames_for(simulation.duration(), fps), Ok)
                 .inspect_err(|_| {
@@ -240,6 +247,47 @@ fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cli_selects_registered_themes_for_preview_and_export() {
+        for name in ["neon", "phosphor"] {
+            let cli = Cli::try_parse_from(["codestrand", "preview", "--theme", name])
+                .unwrap();
+            let Some(Command::Preview { theme, .. }) = cli.command else {
+                panic!("preview")
+            };
+            assert_eq!(theme.build().name, theme);
+            let cli = Cli::try_parse_from([
+                "codestrand",
+                "export",
+                "frames",
+                "--theme",
+                name,
+            ])
+            .unwrap();
+            let Some(Command::Export {
+                theme: exported, ..
+            }) = cli.command
+            else {
+                panic!("export")
+            };
+            assert_eq!(theme, exported);
+        }
+        for command in [
+            vec!["codestrand", "preview", "--theme", "unknown"],
+            vec!["codestrand", "export", "frames", "--theme", "unknown"],
+        ] {
+            assert!(Cli::try_parse_from(command).is_err());
+        }
+        let cli = Cli::try_parse_from(["codestrand", "preview"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Preview {
+                theme: theme::ThemeName::Neon,
+                ..
+            })
+        ));
+    }
 
     #[test]
     fn minimum_idle_cap_is_accepted_by_cli() {

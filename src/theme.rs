@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct Geometry {
     pub file_min: Vec3,
     pub file_max: Vec3,
@@ -10,8 +10,44 @@ pub(super) struct Geometry {
 }
 mod icons;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+pub(super) enum ThemeName {
+    #[default]
+    Neon,
+    Phosphor,
+}
+
+impl ThemeName {
+    pub(super) const ALL: [Self; 2] = [Self::Neon, Self::Phosphor];
+
+    pub(super) fn cycle(self, next: bool) -> Self {
+        let index = Self::ALL
+            .iter()
+            .position(|name| *name == self)
+            .expect("registered theme");
+        let step = if next { 1 } else { Self::ALL.len() - 1 };
+        Self::ALL[(index + step) % Self::ALL.len()]
+    }
+
+    pub(super) fn title(self) -> &'static str {
+        match self {
+            Self::Neon => "Neon",
+            Self::Phosphor => "Phosphor",
+        }
+    }
+
+    pub(super) fn build(self) -> Theme {
+        match self {
+            Self::Neon => Theme::neon(),
+            Self::Phosphor => Theme::phosphor(),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct Theme {
+    pub(super) name: ThemeName,
+    pub(super) glyph_ink: Option<[u8; 3]>,
     pub(super) glyphs: &'static [FileGlyph],
     pub(super) glyph_material: StandardMaterial,
     pub(super) glyph_texture: GlyphTexture,
@@ -79,6 +115,8 @@ impl Theme {
             ..default()
         };
         Self {
+            name: ThemeName::Neon,
+            glyph_ink: None,
             glyphs: icons::material(),
             glyph_texture: GlyphTexture {
                 size: 256,
@@ -144,6 +182,38 @@ impl Theme {
         }
     }
 
+    fn phosphor() -> Self {
+        let mut theme = Self::neon();
+        theme.name = ThemeName::Phosphor;
+        theme.glyph_ink = Some([0x39, 0xff, 0x6a]);
+        let green = Color::srgb_u8(0x39, 0xff, 0x6a);
+        let dark = Color::srgb_u8(0x0b, 0x13, 0x0d);
+        theme.clear = dark;
+        theme.floor.base_color = dark;
+        theme.grid.base_color = Color::srgb(0.045, 0.105, 0.055);
+        theme.edge.base_color = Color::srgb(0.10, 0.32, 0.16);
+        theme.descending.base_color = green;
+        theme.rising.base_color = Color::srgb(0.65, 1.0, 0.72);
+        for material in &mut theme.avatars {
+            material.base_color = green;
+        }
+        for material in &mut theme.glass {
+            material.base_color = green.with_alpha(0.24);
+        }
+        for depths in &mut theme.directories {
+            for (depth, material) in depths.iter_mut().enumerate() {
+                let strength = [0.46, 0.40, 0.35, 0.30][depth];
+                material.base_color = Color::srgb(0.12, strength, 0.21);
+            }
+        }
+        theme.heading = green;
+        theme.label = Color::srgb(0.56, 0.85, 0.63);
+        theme.label_emphasis = Color::srgb(0.77, 1.0, 0.82);
+        theme.label_landmark = Color::srgb(0.38, 0.78, 0.48);
+        theme.label_shadow.color = dark;
+        theme
+    }
+
     pub(super) fn geometry(&self) -> Geometry {
         let pieces = [
             (self.file_glyph_transform, Vec3::new(0.5, 0.5, 0.0)),
@@ -207,6 +277,20 @@ impl Theme {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn registry_cycles_and_keeps_one_geometry() {
+        let geometry = Theme::neon().geometry();
+        for name in ThemeName::ALL {
+            assert_eq!(name.build().geometry(), geometry);
+            assert_eq!(name.cycle(true).cycle(false), name);
+            assert_ne!(name.cycle(true), name);
+        }
+        assert_eq!(ThemeName::default(), ThemeName::Neon);
+        let phosphor = ThemeName::Phosphor.build();
+        assert_eq!(phosphor.clear, Color::srgb_u8(11, 19, 13));
+        assert_eq!(phosphor.glyph_ink, Some([57, 255, 106]));
+    }
 
     #[test]
     fn file_bounds_follow_icons_rings_and_optional_tiles() {

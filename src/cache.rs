@@ -176,7 +176,7 @@ mod tests {
             "--contributors",
             config.to_str().unwrap(),
         ]);
-        let Some(crate::Command::Preview { source }) = cli.command else {
+        let Some(crate::Command::Preview { source, .. }) = cli.command else {
             panic!("preview command parsed")
         };
         for name in ["First", "Changed"] {
@@ -310,7 +310,7 @@ emails = ["author@example.invalid"]
             repo.path().to_str().unwrap(),
             "--no-cache",
         ]);
-        let Some(crate::Command::Preview { source }) = cli.command else {
+        let Some(crate::Command::Preview { source, .. }) = cli.command else {
             panic!("preview command parsed")
         };
         let events = source.events(Some(cache.path())).expect("bypass imports");

@@ -74,6 +74,7 @@ struct Palette {
     disc: Handle<Mesh>,
     beam: Handle<Mesh>,
     edge: Handle<StandardMaterial>,
+    floor: Handle<StandardMaterial>,
     grid: Handle<StandardMaterial>,
     descending: Handle<StandardMaterial>,
     rising: Handle<StandardMaterial>,
@@ -82,6 +83,7 @@ struct Palette {
     tile: Option<(Handle<StandardMaterial>, Transform)>,
     glyph_mesh: Handle<Mesh>,
     glyphs: Vec<Handle<StandardMaterial>>,
+    glyph_textures: Vec<(crate::theme::ThemeName, Vec<Handle<Image>>)>,
     avatars: Vec<Handle<StandardMaterial>>,
     glass: Vec<Handle<StandardMaterial>>,
     directories: Vec<Vec<Handle<StandardMaterial>>>,
@@ -101,20 +103,36 @@ impl Palette {
         ));
         let activity_mesh =
             meshes.add(Annulus::new(theme.activity_radii.x, theme.activity_radii.y));
-        let textures: Vec<_> = theme
-            .glyphs
-            .iter()
-            .map(|glyph| {
-                let image = glyph_image(glyph.svg, theme.glyph_texture);
-                world.resource_mut::<Assets<Image>>().add(image)
+        let glyph_textures: Vec<_> = crate::theme::ThemeName::ALL
+            .into_iter()
+            .map(|name| {
+                let registered = if name == theme.name {
+                    theme.clone()
+                } else {
+                    name.build()
+                };
+                let textures = registered
+                    .glyphs
+                    .iter()
+                    .map(|glyph| {
+                        let image = themed_glyph_image(glyph.svg, &registered);
+                        world.resource_mut::<Assets<Image>>().add(image)
+                    })
+                    .collect::<Vec<_>>();
+                (name, textures)
             })
             .collect();
+        let textures = &glyph_textures
+            .iter()
+            .find(|(name, _)| *name == theme.name)
+            .expect("registered theme textures")
+            .1;
         let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
         let glyphs = textures
-            .into_iter()
+            .iter()
             .map(|texture| {
                 materials.add(StandardMaterial {
-                    base_color_texture: Some(texture),
+                    base_color_texture: Some(texture.clone()),
                     ..theme.glyph_material.clone()
                 })
             })
@@ -124,6 +142,7 @@ impl Palette {
             .as_ref()
             .map(|tile| (materials.add(tile.material.clone()), tile.transform));
         let edge = materials.add(theme.edge.clone());
+        let floor = materials.add(theme.floor.clone());
         let grid = materials.add(theme.grid.clone());
         let descending = materials.add(theme.descending.clone());
         let rising = materials.add(theme.rising.clone());
@@ -154,6 +173,7 @@ impl Palette {
             disc,
             beam,
             edge,
+            floor,
             grid,
             descending,
             rising,
@@ -162,6 +182,7 @@ impl Palette {
             tile,
             glyph_mesh,
             glyphs,
+            glyph_textures,
             avatars,
             glass,
             directories,
@@ -323,12 +344,9 @@ fn setup(world: &mut World) {
     ));
     let theme = world.resource::<Playback>().0.theme().clone();
     let palette = Palette::new(world, &theme);
-    let floor = world
-        .resource_mut::<Assets<StandardMaterial>>()
-        .add(theme.floor.clone());
     world.spawn((
         Mesh3d(palette.cube.clone()),
-        MeshMaterial3d(floor),
+        MeshMaterial3d(palette.floor.clone()),
         Transform::from_xyz(0.0, -0.2, 0.0).with_scale(Vec3::new(4000.0, 0.1, 4000.0)),
     ));
     let grid: Vec<_> = (0..(4 * GRID_LINES + 2))
@@ -394,6 +412,7 @@ fn heading(
 }
 
 fn preview_clock(world: &mut World, mut elapsed: Local<std::time::Duration>) {
+    preview_theme(world);
     let keys = world.resource::<ButtonInput<KeyCode>>();
     let factor = if keys.just_pressed(KeyCode::BracketRight) {
         Some(2.0)
@@ -425,6 +444,121 @@ fn preview_clock(world: &mut World, mut elapsed: Local<std::time::Duration>) {
     {
         world.write_message(AppExit::Success);
     }
+}
+
+fn preview_theme(world: &mut World) {
+    let keys = world.resource::<ButtonInput<KeyCode>>();
+    let next = if keys.just_pressed(KeyCode::Period) {
+        true
+    } else if keys.just_pressed(KeyCode::Comma) {
+        false
+    } else {
+        return;
+    };
+    let name = world.resource::<Palette>().theme.name.cycle(next);
+    switch_theme(world, name);
+}
+
+pub(super) fn switch_theme(world: &mut World, name: crate::theme::ThemeName) {
+    let theme = name.build();
+    world.resource_mut::<Playback>().0.set_theme(theme.clone());
+    world.resource_scope(|world, mut palette: Mut<Palette>| {
+        let mut meshes = world.resource_mut::<Assets<Mesh>>();
+        *meshes.get_mut(&palette.sphere).expect("avatar mesh") =
+            Sphere::new(theme.avatar_radius).into();
+        *meshes.get_mut(&palette.disc).expect("portrait mesh") =
+            Circle::new(theme.avatar_radius).into();
+        *meshes
+            .get_mut(&palette.membership_mesh)
+            .expect("membership mesh") =
+            Annulus::new(theme.membership_radii.x, theme.membership_radii.y).into();
+        *meshes
+            .get_mut(&palette.activity_mesh)
+            .expect("activity mesh") =
+            Annulus::new(theme.activity_radii.x, theme.activity_radii.y).into();
+        let replacements = [
+            (&palette.edge, &theme.edge),
+            (&palette.floor, &theme.floor),
+            (&palette.grid, &theme.grid),
+            (&palette.descending, &theme.descending),
+            (&palette.rising, &theme.rising),
+        ]
+        .into_iter()
+        .chain(palette.avatars.iter().zip(&theme.avatars))
+        .chain(palette.glass.iter().zip(&theme.glass))
+        .chain(
+            palette
+                .directories
+                .iter()
+                .flatten()
+                .zip(theme.directories.iter().flatten()),
+        );
+        let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
+        for (handle, replacement) in replacements {
+            *materials.get_mut(handle).expect("palette material") = replacement.clone();
+        }
+        let textures = &palette
+            .glyph_textures
+            .iter()
+            .find(|(name, _)| *name == theme.name)
+            .expect("registered theme textures")
+            .1;
+        for (handle, texture) in palette.glyphs.iter().zip(textures) {
+            *world
+                .resource_mut::<Assets<StandardMaterial>>()
+                .get_mut(handle)
+                .expect("glyph material") = StandardMaterial {
+                base_color_texture: Some(texture.clone()),
+                ..theme.glyph_material.clone()
+            };
+        }
+        palette.theme = theme.clone();
+    });
+    world.insert_resource(ClearColor(theme.clear));
+    for (mut color, label) in world
+        .query::<(&mut TextColor, Has<Label>)>()
+        .iter_mut(world)
+    {
+        color.0 = if label { theme.label } else { theme.heading };
+    }
+    for mut shadow in world
+        .query_filtered::<&mut TextShadow, With<Label>>()
+        .iter_mut(world)
+    {
+        *shadow = theme.label_shadow;
+    }
+}
+
+fn themed_glyph_image(svg: &str, theme: &Theme) -> Image {
+    let mut image = glyph_image(svg, theme.glyph_texture);
+    if let Some(ink) = theme.glyph_ink {
+        let pixels = image.data.as_mut().expect("glyph pixels");
+        let mut offset = 0;
+        for level in 0..image.texture_descriptor.mip_level_count {
+            let size = u32::from(theme.glyph_texture.size) >> level;
+            let length = usize::try_from(size * size * 4).expect("small glyph");
+            let mip = &mut pixels[offset..offset + length];
+            let source = image::RgbaImage::from_raw(size, size, mip.to_vec())
+                .expect("glyph dimensions");
+            let glow = image::imageops::blur(&source, 1.5);
+            for (pixel, blurred) in
+                mip.as_chunks_mut::<4>().0.iter_mut().zip(glow.pixels())
+            {
+                let luminance = (54 * u32::from(pixel[0])
+                    + 183 * u32::from(pixel[1])
+                    + 19 * u32::from(pixel[2]))
+                    / 256;
+                let strength = 48 + 207 * luminance / 255;
+                for (channel, tint) in pixel[..3].iter_mut().zip(ink) {
+                    *channel = u8::try_from(u32::from(tint) * strength / 255)
+                        .expect("tinted channel fits in a byte");
+                }
+                pixel[3] = pixel[3].max(blurred[3] / 2);
+            }
+            offset += length;
+        }
+    }
+    image
 }
 
 fn preview_camera(world: &mut World, mut drag_from: Local<Option<Vec2>>) {
@@ -475,7 +609,7 @@ fn preview_camera(world: &mut World, mut drag_from: Local<Option<Vec2>>) {
     });
 }
 
-fn animate(world: &mut World) {
+pub(super) fn animate(world: &mut World) {
     let frame = world.resource::<Frame>();
     let (index, fps) = (frame.index, frame.fps);
     world.resource_scope(|world, mut playback: Mut<Playback>| {
@@ -1103,6 +1237,8 @@ fn labels(world: &mut World) {
     let (camera, transform) = (camera.clone(), *transform);
     let playback = world.resource::<Playback>();
     let mut caption = playback.0.caption();
+    caption.push_str("  |  ");
+    caption.push_str(playback.0.theme().name.title());
     if let Some(camera) = world.get_resource::<PreviewCamera>() {
         caption.push_str("  |  ");
         caption.push_str(&camera.caption());
@@ -1346,6 +1482,122 @@ mod tests {
         };
         assert_eq!(projection.fov, 0.8);
         assert_labels_stay_below_avatars_without_redundant_updates(&mut world, scene);
+        assert_switches_preserve_playback_and_portraits(&mut world, scene, face);
+    }
+
+    fn assert_switches_preserve_playback_and_portraits(
+        world: &mut World,
+        scene: Entity,
+        face: Entity,
+    ) {
+        let layer = RenderLayers::layer(AVATAR_LAYER);
+        world.init_resource::<ButtonInput<KeyCode>>();
+        let transforms: Vec<_> = world
+            .query::<(Entity, &Transform)>()
+            .iter(world)
+            .map(|(entity, transform)| (entity, *transform))
+            .collect();
+        let positions: Vec<_> = world
+            .resource::<Playback>()
+            .0
+            .layout()
+            .files()
+            .map(|(id, file)| (id, file.position))
+            .collect();
+        let seconds = world.resource::<Playback>().0.seconds();
+        let starts = world.resource::<Playback>().0.scheduled_starts().to_vec();
+        let portrait_material = world
+            .get::<MeshMaterial3d<StandardMaterial>>(face)
+            .unwrap()
+            .0
+            .clone();
+        let portrait_texture = world
+            .resource::<Assets<StandardMaterial>>()
+            .get(&portrait_material)
+            .unwrap()
+            .base_color_texture
+            .clone();
+        let asset_counts = (
+            world.resource::<Assets<Mesh>>().len(),
+            world.resource::<Assets<Image>>().len(),
+            world.resource::<Assets<StandardMaterial>>().len(),
+        );
+        for key in [
+            KeyCode::Period,
+            KeyCode::Comma,
+            KeyCode::Comma,
+            KeyCode::Period,
+        ] {
+            world.resource_mut::<ButtonInput<KeyCode>>().press(key);
+            preview_theme(world);
+            world.resource_mut::<ButtonInput<KeyCode>>().reset_all();
+            assert_eq!(world.resource::<Playback>().0.seconds(), seconds);
+            assert_eq!(world.resource::<Playback>().0.scheduled_starts(), starts);
+            assert_eq!(world.resource::<Playback>().0.playback_multiplier(), 1.0);
+            assert_eq!(world.resource::<Frame>().index, 30);
+            for &(entity, transform) in &transforms {
+                assert_eq!(world.get::<Transform>(entity), Some(&transform));
+            }
+            assert_eq!(
+                world
+                    .resource::<Playback>()
+                    .0
+                    .layout()
+                    .files()
+                    .map(|(id, file)| (id, file.position))
+                    .collect::<Vec<_>>(),
+                positions
+            );
+            assert_eq!(
+                (
+                    world.resource::<Assets<Mesh>>().len(),
+                    world.resource::<Assets<Image>>().len(),
+                    world.resource::<Assets<StandardMaterial>>().len()
+                ),
+                asset_counts
+            );
+            assert_eq!(
+                world
+                    .resource::<Assets<StandardMaterial>>()
+                    .get(&portrait_material)
+                    .unwrap()
+                    .base_color_texture,
+                portrait_texture
+            );
+            assert_eq!(world.get::<RenderLayers>(face), Some(&layer));
+            assert_theme_textures(world);
+            assert_labels_stay_below_avatars_without_redundant_updates(world, scene);
+            let caption = world
+                .query_filtered::<&Text, With<Caption>>()
+                .single(world)
+                .unwrap();
+            assert!(
+                caption
+                    .0
+                    .contains(world.resource::<Palette>().theme.name.title())
+            );
+        }
+    }
+
+    fn assert_theme_textures(world: &World) {
+        let palette = world.resource::<Palette>();
+        let textures = &palette
+            .glyph_textures
+            .iter()
+            .find(|(name, _)| *name == palette.theme.name)
+            .unwrap()
+            .1;
+        for (material, texture) in palette.glyphs.iter().zip(textures) {
+            assert_eq!(
+                world
+                    .resource::<Assets<StandardMaterial>>()
+                    .get(material)
+                    .unwrap()
+                    .base_color_texture
+                    .as_ref(),
+                Some(texture)
+            );
+        }
     }
 
     fn assert_labels_stay_below_avatars_without_redundant_updates(

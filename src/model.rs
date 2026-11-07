@@ -307,6 +307,15 @@ impl Simulation {
         &self.theme
     }
 
+    pub(super) fn set_theme(&mut self, theme: Theme) {
+        assert_eq!(
+            self.state.geometry,
+            theme.geometry(),
+            "themes share geometry"
+        );
+        self.theme = theme;
+    }
+
     pub(super) fn layout(&self) -> &Layout {
         &self.state.layout
     }
