@@ -265,3 +265,29 @@ fn padded_state_replays_identically_at_thirty_and_sixty_fps_and_after_rewind() {
         }
     }
 }
+
+#[test]
+fn first_selected_padding_aligns_playback_and_full_history_layout() {
+    let events: Vec<_> = (0..5)
+        .map(|day| event(day, changes("a", 1, &Kind::Added)))
+        .collect();
+    let options = Options {
+        start: 2,
+        ..Options::default()
+    };
+    let mut sim = Simulation::build(
+        events,
+        &options,
+        &Theme::neon(),
+        &Mappings::default(),
+        &[(2, 60)],
+    );
+    assert_eq!(sim.schedule.starts[0], 1.5);
+    sim.advance_to(90, 60);
+    assert_eq!(sim.commit(), 3);
+    assert_eq!(sim.layout().planned_time(), 2.5);
+    sim.advance_to(120, 60);
+    assert_eq!(sim.layout().planned_time(), 3.0);
+    sim.advance_to(90, 60);
+    assert_eq!(sim.layout().planned_time(), 2.5);
+}

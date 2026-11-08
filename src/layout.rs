@@ -86,6 +86,11 @@ pub(super) struct Layout {
 }
 
 impl Layout {
+    #[cfg(test)]
+    pub(crate) fn planned_time(&self) -> f32 {
+        self.plan.time
+    }
+
     fn empty() -> Self {
         let root = Dir {
             path: String::new(),

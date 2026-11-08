@@ -44,7 +44,10 @@ impl Schedule {
                 previous = event.seconds;
                 let padding = padding(index);
                 extra += u64::from(padding);
-                let start = now + tick_time(extra);
+                let seconds = Duration::from_secs(extra / u64::from(TICK_RATE))
+                    .as_secs_f32()
+                    + tick_time(extra % u64::from(TICK_RATE));
+                let start = now + seconds;
                 services.push(Service {
                     tick: first_tick(start),
                     padding,
@@ -110,6 +113,20 @@ fn first_tick(start: f32) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accumulated_padding_remains_beyond_the_clock_range() {
+        let mut event = crate::timeline::synthetic().remove(0);
+        event.seconds = 0;
+        let events = vec![event; 120];
+        let padded = Schedule::with_padding(&events, 0.5, 1.0, |_| u32::MAX);
+        let expected = 120.0 * f64::from(u32::MAX) / f64::from(TICK_RATE);
+        assert!(f64::from(padded.starts[119]) >= expected);
+        assert_eq!(padded.services[119].tick, u64::MAX);
+        let clock_limit = u64::from(u32::MAX) * u64::from(TICK_RATE);
+        assert_eq!(padded.applied(clock_limit), 60);
+        assert!(padded.starts.windows(2).all(|pair| pair[0] < pair[1]));
+    }
 
     #[test]
     fn zero_padding_preserves_legacy_seconds_and_application_ticks() {

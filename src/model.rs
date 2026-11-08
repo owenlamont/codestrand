@@ -227,6 +227,12 @@ impl Simulation {
         let end = options
             .commits
             .map_or(events.len(), |count| (start + count).min(events.len()));
+        let schedule = Schedule::with_padding(
+            &events[start..end],
+            options.seconds_per_day,
+            options.max_idle_seconds,
+            |index| padding_at(start + index),
+        );
         let layout_starts = Schedule::with_padding(
             &events,
             options.seconds_per_day,
@@ -260,7 +266,7 @@ impl Simulation {
         if start > 0 {
             state.layout.plan_time(
                 layout_starts.starts[start.min(layout_starts.starts.len() - 1)]
-                    - LEAD_IN,
+                    - schedule.starts.first().copied().unwrap_or(LEAD_IN),
             );
             state.layout.settle(SETTLE_TICKS, tick_seconds());
             state.avatars.clear();
@@ -270,12 +276,6 @@ impl Simulation {
         let total = events.len();
         events.truncate(end);
         events.drain(..start);
-        let schedule = Schedule::with_padding(
-            &events,
-            options.seconds_per_day,
-            options.max_idle_seconds,
-            |index| padding_at(start + index),
-        );
         Self {
             events,
             offset: start,
