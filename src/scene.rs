@@ -301,6 +301,9 @@ fn app(simulation: Simulation, title: String) -> App {
             labels
                 .after(bevy::camera::CameraUpdateSystems)
                 .after(bevy::transform::TransformSystems::Propagate)
+                .before(
+                    bevy::camera::visibility::VisibilitySystems::VisibilityPropagate,
+                )
                 .before(UiSystems::Prepare),
         );
     app
@@ -1600,10 +1603,7 @@ fn place_labels(
             || rect.min.y < 0.0
             || rect.max.x > viewport.x
             || rect.max.y > viewport.y
-            || (!matches!(
-                label.kind,
-                model::LabelKind::Avatar | model::LabelKind::Repository
-            ) && placed.iter().any(|other| !other.intersect(rect).is_empty()))
+            || placed.iter().any(|other| !other.intersect(rect).is_empty())
         {
             continue;
         }
@@ -2688,7 +2688,7 @@ mod tests {
     }
 
     #[test]
-    fn overlapping_avatar_names_survive_in_far_to_near_order() {
+    fn overlapping_avatar_names_use_separate_lanes_in_far_to_near_order() {
         let point = Vec2::splat(100.0);
         let chosen = place_labels(
             vec![
@@ -2705,6 +2705,34 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["far", "near"]
         );
+        assert!(chosen[0].1.distance(chosen[1].1) >= 20.0);
+    }
+
+    #[test]
+    fn repeated_emphasis_labels_are_unique_and_repository_and_avatar_do_not_overlap() {
+        let point = Vec2::splat(100.0);
+        let chosen = place_labels(
+            vec![
+                projected_label("uv-secure", model::LabelKind::Repository, point, 1.0),
+                projected_label(
+                    "uv-secure",
+                    model::LabelKind::Repository,
+                    point + Vec2::X * 3.0,
+                    1.0,
+                ),
+                projected_label("Owen Lamont", model::LabelKind::Avatar, point, 1.0),
+                projected_label(
+                    "Owen Lamont",
+                    model::LabelKind::Avatar,
+                    point + Vec2::X * 3.0,
+                    1.0,
+                ),
+            ],
+            20.0,
+            Vec2::new(1280.0, 720.0),
+        );
+        assert_eq!(chosen.len(), 2);
+        assert!(chosen[0].1.distance(chosen[1].1) >= 20.0);
     }
 
     #[test]
@@ -2784,7 +2812,10 @@ mod tests {
             projected_label(
                 &index.to_string(),
                 model::LabelKind::Avatar,
-                Vec2::splat(100.0),
+                Vec2::new(
+                    10.0 + f32::from(u16::try_from(index % 16).unwrap()) * 70.0,
+                    100.0 + f32::from(u16::try_from(index / 16).unwrap()) * 30.0,
+                ),
                 1.0,
             )
         }));

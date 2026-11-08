@@ -34,6 +34,31 @@ enum Region {
 }
 
 impl Plan {
+    pub(super) fn repository_sizes(&self) -> Vec<Vec2> {
+        self.parts
+            .iter()
+            .map(|(_, plan)| {
+                let mut low = Vec2::splat(f32::INFINITY);
+                let mut high = Vec2::splat(f32::NEG_INFINITY);
+                for (positions, footprints) in
+                    plan.samples.iter().zip(plan.footprints.iter())
+                {
+                    for (position, footprint) in positions.iter().zip(footprints) {
+                        let centre = super::region_coordinates(*position);
+                        let radius = Vec2::splat(footprint.x + 1.0);
+                        low = low.min(centre - radius);
+                        high = high.max(centre + radius);
+                    }
+                }
+                if low.is_finite() {
+                    high - low
+                } else {
+                    Vec2::splat(4.0)
+                }
+            })
+            .collect()
+    }
+
     pub(super) fn add_part(&mut self, base: usize, plan: Self) {
         self.seconds += plan.seconds;
         self.parts.push((base, plan));
@@ -552,7 +577,7 @@ impl Layout {
                 && (self.repositories.is_empty()
                     || self.repositories[dir.repository].live)
             {
-                points.push((centre, footprint.x));
+                points.push((centre, footprint.x * dir.scale));
             }
         }
         points

@@ -56,6 +56,7 @@ pub(super) enum Presence {
 
 #[derive(Clone, Debug)]
 pub(super) struct File {
+    local_position: Vec2,
     pub path: String,
     pub dir: usize,
     slot: usize,
@@ -72,7 +73,7 @@ pub(super) struct File {
 impl File {
     pub(super) fn visible_presence(&self, dir: &Dir) -> f32 {
         let clearance = dir.radius() - self.position.distance(dir.position);
-        self.presence.min((clearance / 0.27).clamp(0.0, 1.0))
+        self.presence.min((clearance / 0.27).clamp(0.0, 1.0)) * dir.scale
     }
 
     pub(super) fn name(&self) -> &str {
@@ -82,6 +83,8 @@ impl File {
 
 #[derive(Clone, Debug)]
 pub(super) struct Dir {
+    local_position: Vec2,
+    scale: f32,
     pub(super) repository: usize,
     pub path: String,
     pub parent: Option<usize>,
@@ -101,7 +104,7 @@ impl Dir {
     }
 
     pub(super) fn radius(&self) -> f32 {
-        self.core() + 0.4
+        (self.core() + 0.4) * self.scale
     }
 
     pub(super) fn name(&self) -> &str {
@@ -120,7 +123,7 @@ pub(super) struct Layout {
     revision: u64,
     plan: Plan,
     pub repositories: Vec<RepositoryRegion>,
-    offsets: Vec<Vec2>,
+    placed: bool,
 }
 
 impl Layout {
@@ -131,6 +134,8 @@ impl Layout {
 
     fn empty() -> Self {
         let root = Dir {
+            local_position: Vec2::ZERO,
+            scale: 1.0,
             repository: 0,
             path: String::new(),
             parent: None,
@@ -152,7 +157,7 @@ impl Layout {
             revision: 0,
             plan: Plan::default(),
             repositories: Vec::new(),
-            offsets: Vec::new(),
+            placed: false,
         }
     }
 
@@ -253,6 +258,7 @@ impl Layout {
         self.files.insert(
             id,
             File {
+                local_position: Vec2::ZERO,
                 path: path.to_owned(),
                 dir,
                 slot,
@@ -543,6 +549,8 @@ impl Layout {
         self.dirs[parent].children += 1;
         let index = self.dirs.len();
         self.dirs.push(Dir {
+            local_position: Vec2::ZERO,
+            scale: 1.0,
             path: path.to_owned(),
             parent: Some(parent),
             depth: self.dirs[parent].depth + 1,

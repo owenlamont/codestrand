@@ -169,7 +169,6 @@ pub(super) struct Label {
 #[derive(Clone, Debug)]
 struct State {
     tick: u64,
-    history_tick: u64,
     layout: Layout,
     avatars: Vec<Avatar>,
     authors: HashMap<Key, usize>,
@@ -198,6 +197,25 @@ pub(super) struct Simulation {
 }
 
 impl Simulation {
+    pub(super) fn check_repository_plan(
+        events: &[Event],
+        options: &Options,
+        repositories: usize,
+    ) -> anyhow::Result<()> {
+        let starts = Schedule::new(events, options.seconds_per_day, options.max_idle_seconds).starts;
+        let duration = starts.last().copied().unwrap_or(LEAD_IN) + TAIL;
+        let ticks = frames_for(duration, 60)?;
+        anyhow::ensure!(
+            ticks <= 216_000
+                && usize::try_from(ticks)
+                    .ok()
+                    .and_then(|ticks| ticks.checked_mul(repositories))
+                    .is_some_and(|samples| samples <= 2_000_000),
+            "multi-repository planning exceeds 216000 ticks or 2000000 region samples; shorten the history or reduce the playback times"
+        );
+        Ok(())
+    }
+
     #[cfg(test)]
     pub(super) fn scheduled_starts(&self) -> &[f32] {
         &self.schedule.starts
@@ -257,7 +275,6 @@ impl Simulation {
         );
         let mut state = State {
             tick: 0,
-            history_tick: 0,
             layout: Layout::scheduled_repositories(
                 &events,
                 &layout_starts.starts,
@@ -318,37 +335,40 @@ impl Simulation {
             theme: theme.clone(),
         };
         if !repositories.is_empty() {
-            let mut active = prior_active;
-            for (_, file) in simulation.layout().files() {
-                active[simulation.layout().dir(file.dir).repository] = true;
-            }
-            let mut samples = vec![simulation.layout().local_regions(&active)];
-            let ticks = frames_for(
-                simulation.duration(),
-                u16::try_from(TICK_RATE).expect("tick rate fits u16"),
-            )
-            .expect("multi-repository playback fits the supported frame range");
-            for _ in 0..ticks {
-                simulation.tick_layout();
-                for event in &simulation.events[..simulation.state.next_event] {
-                    active[event.repository] = true;
-                }
-                samples.push(simulation.layout().local_regions(&active));
-            }
-            simulation.packing = crate::layout::packing::Packing::build(&samples);
-            simulation.state = simulation.initial.clone();
-            if let Some((_, regions, offsets)) = simulation.packing.sample(0) {
-                simulation.state.layout.place_regions(regions, offsets);
-            }
-            (simulation.state.focus, simulation.state.distance) =
-                simulation.state.fit();
-            simulation.initial = simulation.state.clone();
+            simulation.plan_repositories(prior_active);
         }
         simulation
     }
 
+    fn plan_repositories(&mut self, mut active: Vec<bool>) {
+        for (_, file) in self.layout().files() {
+            active[self.layout().dir(file.dir).repository] = true;
+        }
+        let mut samples = vec![self.layout().local_regions(&active)];
+        let mut sampled_events = 0;
+        let ticks = frames_for(self.duration(), 60)
+            .expect("multi-repository playback fits the supported frame range");
+        for _ in 0..ticks {
+            self.tick_layout();
+            for event in &self.events[sampled_events..self.state.next_event] {
+                active[event.repository] = true;
+            }
+            sampled_events = self.state.next_event;
+            samples.push(self.layout().local_regions(&active));
+        }
+        self.packing = crate::layout::packing::Packing::build(
+            &samples,
+            &self.layout().repository_sizes(),
+        );
+        self.state = self.initial.clone();
+        if let Some((regions, offsets, scales)) = self.packing.sample(0) {
+            self.state.layout.place_regions(regions, offsets, &scales);
+        }
+        (self.state.focus, self.state.distance) = self.state.fit();
+        self.initial = self.state.clone();
+    }
     pub(super) fn duration(&self) -> f32 {
-        self.schedule.duration() + tick_time(self.packing.extra_ticks())
+        self.schedule.duration()
     }
 
     pub(super) fn restart(&mut self) {
@@ -381,43 +401,25 @@ impl Simulation {
     pub(crate) fn tick_layout(&mut self) {
         let canonical = self.state.tick + 1;
         let placement = self.packing.sample(canonical);
-        let local_tick = placement.as_ref().map_or(canonical, |(tick, ..)| *tick);
-        if local_tick == self.state.history_tick {
-            self.state.tick = canonical;
-            self.state
-                .layout
-                .cool_heat(tick_seconds(), self.heat_half_life);
-            if let Some((_, regions, offsets)) = placement {
-                self.state.layout.place_regions(regions, offsets);
-            }
-            return;
-        }
         self.state.layout.remove_offsets();
-        let plan_time = self.schedule.layout_time(tick_time(local_tick));
+        let plan_time = self.schedule.layout_time(tick_time(canonical));
         let state = &mut self.state;
         state.tick = canonical;
-        state.history_tick = local_tick;
+
 
         state.layout.cool_heat(tick_seconds(), self.heat_half_life);
         while let Some(event) = self.events.get(state.next_event) {
-            let Some(start) = self.schedule.start(state.next_event, local_tick) else {
+            let Some(start) = self.schedule.start(state.next_event, canonical) else {
                 break;
             };
-            state.begin(
-                event,
-                if placement.is_some() {
-                    tick_time(canonical)
-                }; else {
-                    start
-                };,
-            );
+            state.begin(event, start);
             state.next_event += 1;
         }
         let dt = tick_seconds();
         state.layout.sample_plan(plan_time, dt);
         state.layout.step(dt);
-        if let Some((_, regions, offsets)) = placement {
-            state.layout.place_regions(regions, offsets);
+        if let Some((regions, offsets, scales)) = placement {
+            state.layout.place_regions(regions, offsets, &scales);
         }
     }
 
@@ -1009,6 +1011,7 @@ impl State {
         points.extend_from_slice(tops);
         for region in self.layout.repositories.iter().filter(|region| region.live) {
             points.extend(region.corners().map(ground));
+            points.extend(region.corners().map(|point| ground(point) + Vec3::Y * 1.1));
         }
         points
     }
@@ -1121,6 +1124,11 @@ impl State {
         let settle = if distance > self.distance { 0.3 } else { 1.5 };
         let ease = 1.0 - (-dt / settle).exp();
         self.focus += (focus - self.focus) * ease;
+        let distance = if self.layout.repositories.is_empty() {
+            distance
+        } else {
+            distance.max(self.distance)
+        };
         self.distance += (distance - self.distance) * ease;
         let tops = self.file_tops();
         let points = self.scene_points(&tops);
@@ -1495,6 +1503,30 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn repository_plan_limits_reject_slow_or_oversized_inputs() {
+        let events = crate::timeline::synthetic();
+        assert!(
+            Simulation::check_repository_plan(&events, &Options::default(), 5).is_ok()
+        );
+        assert!(
+            Simulation::check_repository_plan(&events, &Options::default(), usize::MAX)
+                .is_err()
+        );
+        assert!(
+            Simulation::check_repository_plan(
+                &events,
+                &Options {
+                    seconds_per_day: 86_400.0,
+                    max_idle_seconds: 86_400.0,
+                    ..Options::default()
+                },
+                5
+            )
+            .is_err()
+        );
+    }
     use crate::timeline;
 
     fn simulation() -> Simulation {

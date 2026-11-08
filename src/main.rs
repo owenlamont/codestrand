@@ -279,6 +279,7 @@ impl Source {
         let mut simulation = if names.is_empty() {
             model::Simulation::new(events, &options, &theme::Theme::neon(), &mappings)
         } else {
+            model::Simulation::check_repository_plan(&events, &options, names.len())?;
             model::Simulation::with_repositories(
                 events,
                 &options,

@@ -102,11 +102,17 @@ select from the merged history. Single-repository playback retains first-parent
 order. Contributor mappings apply across all repositories, so a matched contributor
 uses one avatar that moves between regions.
 
-Live repositories occupy separate regions packed towards the 16:9 export frame.
-Regions reserve growth slack and repack when repositories appear or outgrow their
-space. Repacking inserts six seconds into playback: file motion pauses while regions
-move through separate lanes, then resumes. Region movement uses explicit playback
-times, including during export. The camera follows the live regions.
+Repository rows and order are chosen once from whole-history size, largest nearest the
+camera. Regions grow continuously around their evolving contents; neighbours move
+outward with small gaps. New repositories grow into their assigned slots over two
+playback seconds and occupy no space before their first commit. History never pauses
+for layout changes. Region growth and camera easing use canonical playback time, so
+export pacing does not change the layout. The camera follows live regions and only
+zooms outward during growth.
+
+Multi-repository planning supports up to 216,000 simulation ticks and 2,000,000 region
+samples. Shorten the imported history or reduce playback times if either limit is
+exceeded. Single-repository playback is unaffected.
 
 To choose visual treatments, use
 `--repository-boundary none|glass` and `--repository-label-plane files|raised`.

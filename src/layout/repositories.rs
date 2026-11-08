@@ -4,6 +4,10 @@ use super::{Layout, RepositoryRegion};
 use crate::timeline::Event;
 
 impl Layout {
+    pub(crate) fn repository_sizes(&self) -> Vec<Vec2> {
+        self.plan.repository_sizes()
+    }
+
     pub(crate) fn scheduled_repositories(
         events: &[Event],
         starts: &[f32],
@@ -49,7 +53,6 @@ impl Layout {
             }
             combined.plan.add_part(base, layout.plan);
         }
-        combined.offsets = vec![Vec2::ZERO; names.len()];
         combined
     }
 
@@ -98,39 +101,39 @@ impl Layout {
     }
 
     pub(crate) fn remove_offsets(&mut self) {
+        if !self.placed {
+            return;
+        }
         for dir in &mut self.dirs {
-            dir.position -= self
-                .offsets
-                .get(dir.repository)
-                .copied()
-                .unwrap_or_default();
+            dir.position = dir.local_position;
+            dir.scale = 1.0;
         }
         for file in self.files.values_mut() {
-            file.position -= self
-                .offsets
-                .get(self.dirs[file.dir].repository)
-                .copied()
-                .unwrap_or_default();
+            file.position = file.local_position;
         }
-        self.offsets.fill(Vec2::ZERO);
+        self.placed = false;
     }
-
     pub(crate) fn place_regions(
         &mut self,
         regions: Vec<RepositoryRegion>,
         offsets: Vec<Vec2>,
+        scales: &[f32],
     ) {
         self.remove_offsets();
         let offsets: Vec<_> =
             offsets.into_iter().map(super::world_coordinates).collect();
         for dir in &mut self.dirs {
-            dir.position += offsets[dir.repository];
+            dir.local_position = dir.position;
+            dir.scale = scales[dir.repository];
+            dir.position = dir.position * dir.scale + offsets[dir.repository];
         }
         for file in self.files.values_mut() {
-            file.position += offsets[self.dirs[file.dir].repository];
+            file.local_position = file.position;
+            let dir = &self.dirs[file.dir];
+            file.position = file.position * dir.scale + offsets[dir.repository];
         }
         self.repositories = regions;
-        self.offsets = offsets;
+        self.placed = true;
     }
 }
 
@@ -179,6 +182,10 @@ mod tests {
             ],
         );
 
+        assert_eq!(
+            simulation.duration(),
+            simulation.scheduled_starts().last().copied().unwrap() + 2.5
+        );
         let frames = crate::model::frames_for(simulation.duration(), 60).unwrap();
         for frame in 0..frames {
             simulation.tick_layout();
@@ -210,17 +217,23 @@ mod tests {
                 let region = &layout.repositories[layout.dir(file.dir).repository];
                 assert!(
                     crate::layout::region_coordinates(file.position)
-                        .cmpge(region.low)
+                        .cmpge(region.low - Vec2::splat(0.0001))
                         .all(),
-                    "frame {frame}: {}",
-                    file.path
+                    "frame {frame}: {} point={:?} low={:?} high={:?}",
+                    file.path,
+                    crate::layout::region_coordinates(file.position),
+                    region.low,
+                    region.high
                 );
                 assert!(
                     crate::layout::region_coordinates(file.position)
-                        .cmple(region.high)
+                        .cmple(region.high + Vec2::splat(0.0001))
                         .all(),
-                    "frame {frame}: {}",
-                    file.path
+                    "frame {frame}: {} point={:?} low={:?} high={:?}",
+                    file.path,
+                    crate::layout::region_coordinates(file.position),
+                    region.low,
+                    region.high
                 );
             }
             assert!(simulation.avatars().len() <= 1);
