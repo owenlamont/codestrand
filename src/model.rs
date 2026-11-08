@@ -22,6 +22,7 @@ pub(crate) mod quality;
 pub(crate) mod schedule;
 pub(super) use names::rect as label_rect;
 use schedule::Schedule;
+pub(crate) mod treemap;
 
 pub(super) const TICK_RATE: u32 = 60;
 pub(super) const PREVIEW_FPS: u16 = 30;
@@ -362,14 +363,13 @@ impl Simulation {
         }
         self.packing = crate::layout::packing::Packing::build(&samples);
         self.state = self.initial.clone();
-        self.state.region_views = framing::plan(&self.packing, ticks).into();
+        self.state.region_views = framing::plan().into();
         if let Some((regions, offsets, scales)) = self.packing.sample(0) {
             self.state.layout.place_regions(regions, offsets, &scales);
         }
-        (self.state.focus, self.state.distance) = self.state.fit();
         if let Some(view) = self.state.region_views.first() {
             self.state.focus = view.focus;
-            self.state.distance = self.state.distance.max(view.distance);
+            self.state.distance = view.distance;
         }
         self.initial = self.state.clone();
     }
@@ -507,6 +507,9 @@ impl Simulation {
     pub(super) fn view_for_projection(&self, fov: f32, viewport: Vec2) -> (Vec3, f32) {
         let (focus, distance) = self.view();
         if self.layout().repositories.is_empty() {
+            return (focus, distance);
+        }
+        if fov == framing::FOV && viewport == framing::VIEWPORT {
             return (focus, distance);
         }
         let ratio = ((framing::FOV * 0.5).tan() / (fov * 0.5).tan())
@@ -796,8 +799,17 @@ impl State {
     fn avatar_targets(&self, now: f32) -> Vec<Vec3> {
         let right = Vec3::new(view_direction().z, 0.0, -view_direction().x).normalize();
         let unit = 2.0 * self.distance * std::f32::consts::FRAC_PI_8.tan() / 720.0;
-        let mut targets: Vec<_> =
-            self.avatars.iter().map(|avatar| avatar.target).collect();
+        let mut targets: Vec<_> = self
+            .avatars
+            .iter()
+            .map(|avatar| {
+                if self.layout.repositories.is_empty() {
+                    avatar.target
+                } else {
+                    framing::avatar_band(avatar.target)
+                }
+            })
+            .collect();
         let widths: Vec<_> = self
             .avatars
             .iter()
@@ -1181,6 +1193,12 @@ impl State {
                 .distance
                 .max(self.fit_distance(self.focus, &points, &tops));
         }
+        if !self.layout.repositories.is_empty() {
+            for avatar in &mut self.avatars {
+                avatar.position = framing::avatar_band(avatar.position);
+            }
+            return;
+        }
         let tops = self.file_tops();
         let points = self.scene_points(&tops);
         self.distance = self
@@ -1235,7 +1253,7 @@ pub(super) fn view_direction() -> Vec3 {
     Vec3::new(0.4, 0.44, 0.95).normalize()
 }
 
-fn box_corners(low: Vec3, high: Vec3) -> [Vec3; 8] {
+pub(crate) fn box_corners(low: Vec3, high: Vec3) -> [Vec3; 8] {
     [
         low,
         Vec3::new(low.x, low.y, high.z),

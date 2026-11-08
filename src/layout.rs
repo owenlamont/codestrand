@@ -13,6 +13,8 @@ pub(super) struct RepositoryRegion {
     pub low: Vec2,
     pub high: Vec2,
     pub live: bool,
+    pub files: f32,
+    pub tile: Option<packing::Tile>,
 }
 
 pub(super) fn region_coordinates(point: Vec2) -> Vec2 {
@@ -73,7 +75,9 @@ pub(super) struct File {
 impl File {
     pub(super) fn visible_presence(&self, dir: &Dir) -> f32 {
         let clearance = dir.radius() - self.position.distance(dir.position);
-        self.presence.min((clearance / 0.27).clamp(0.0, 1.0)) * dir.scale
+        self.presence
+            .min((clearance / (0.27 * dir.scale).max(f32::EPSILON)).clamp(0.0, 1.0))
+            * dir.scale
     }
 
     pub(super) fn name(&self) -> &str {
@@ -84,7 +88,7 @@ impl File {
 #[derive(Clone, Debug)]
 pub(super) struct Dir {
     local_position: Vec2,
-    scale: f32,
+    pub(super) scale: f32,
     pub(super) repository: usize,
     pub path: String,
     pub parent: Option<usize>,

@@ -1,7 +1,7 @@
 use bevy::math::{Vec2, Vec3};
 
-use super::{ground, tick_seconds, view_direction};
-use crate::layout::{RepositoryRegion, packing::Packing};
+use super::{ground, view_direction};
+use crate::layout::RepositoryRegion;
 
 pub(crate) const FOV: f32 = std::f32::consts::FRAC_PI_4;
 pub(crate) const VIEWPORT: Vec2 = Vec2::new(1280.0, 720.0);
@@ -9,6 +9,60 @@ pub(crate) const GLASS_BOTTOM: f32 = -0.1;
 pub(crate) const GLASS_TOP: f32 = 1.1;
 pub(crate) const LABEL_Y: f32 = 1.6;
 pub(crate) const MARGIN: f32 = 24.0;
+pub(crate) const DISTANCE: f32 = 60.0;
+
+pub(super) fn avatar_band(point: Vec3) -> Vec3 {
+    let local = crate::layout::region_coordinates(Vec2::new(point.x, point.z));
+    let direction = view_direction();
+    let depth =
+        DISTANCE - direction.x.hypot(direction.z) * local.y - direction.y * point.y;
+    let slope = (FOV * 0.5).tan() * VIEWPORT.x / VIEWPORT.y;
+    let screen_x = (local.x / (slope * depth)).clamp(-0.80, 0.80);
+    ground(crate::layout::world_coordinates(unproject_at(
+        Vec2::new(screen_x, 0.60),
+        super::MIN_AVATAR_HEIGHT,
+    ))) + Vec3::Y * super::MIN_AVATAR_HEIGHT
+}
+
+pub(crate) fn unproject(point: Vec2) -> Vec2 {
+    unproject_at(point, 0.0)
+}
+
+pub(crate) fn unproject_at(point: Vec2, height: f32) -> Vec2 {
+    let direction = view_direction();
+    let horizontal = direction.x.hypot(direction.z);
+    let tangent = (FOV * 0.5).tan();
+    let z = (height * (horizontal + point.y * tangent * direction.y)
+        - point.y * tangent * DISTANCE)
+        / (direction.y - point.y * tangent * horizontal);
+    let depth = DISTANCE - horizontal * z - direction.y * height;
+    Vec2::new(point.x * tangent * (VIEWPORT.x / VIEWPORT.y) * depth, z)
+}
+
+pub(crate) fn project_ground(point: Vec2) -> Vec2 {
+    let direction = view_direction();
+    let depth = DISTANCE - direction.x.hypot(direction.z) * point.y;
+    let tangent = (FOV * 0.5).tan();
+    Vec2::new(
+        point.x / (tangent * VIEWPORT.x / VIEWPORT.y),
+        -direction.y * point.y / tangent,
+    ) / depth
+}
+
+pub(crate) fn project_rectangle(low: Vec2, high: Vec2) -> f32 {
+    let points = [
+        low,
+        Vec2::new(high.x, low.y),
+        high,
+        Vec2::new(low.x, high.y),
+    ]
+    .map(project_ground);
+    (0..4)
+        .map(|i| points[i].perp_dot(points[(i + 1) % 4]))
+        .sum::<f32>()
+        .abs()
+        * 0.125
+}
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct View {
@@ -18,6 +72,16 @@ pub(super) struct View {
 }
 
 pub(super) fn label_position(region: &RepositoryRegion) -> Vec3 {
+    if let Some(tile) = region.tile {
+        let limit = crate::layout::packing::Tile::viewport();
+        let padding = Vec2::splat(8.0) * 2.0 / VIEWPORT;
+        let size = label_size(&region.label, 20.0) * 2.0 / VIEWPORT;
+        let anchor = Vec2::new(tile.low.x + padding.x, tile.high.y - padding.y)
+            .clamp(limit.low + Vec2::Y * size.y, limit.high - Vec2::X * size.x);
+        return ground(crate::layout::world_coordinates(unproject_at(
+            anchor, LABEL_Y,
+        ))) + Vec3::Y * LABEL_Y;
+    }
     let point = crate::layout::world_coordinates(Vec2::new(
         region.low.x.midpoint(region.high.x),
         region.high.y - 1.0,
@@ -30,24 +94,6 @@ pub(crate) fn label_size(text: &str, height: f32) -> Vec2 {
         8.0 + 8.6 * f32::from(u16::try_from(text.chars().count()).unwrap_or(u16::MAX)),
         height,
     )
-}
-
-pub(crate) fn centre(regions: &[RepositoryRegion]) -> Vec3 {
-    let mut low = Vec2::splat(f32::INFINITY);
-    let mut high = Vec2::splat(f32::NEG_INFINITY);
-    for corner in regions
-        .iter()
-        .filter(|r| r.live)
-        .flat_map(RepositoryRegion::corners)
-    {
-        low = low.min(corner);
-        high = high.max(corner);
-    }
-    if low.is_finite() {
-        ground((low + high) * 0.5)
-    } else {
-        Vec3::ZERO
-    }
 }
 
 pub(crate) fn distance(
@@ -77,6 +123,18 @@ pub(crate) fn distance(
         }
     };
     for region in regions.iter().filter(|r| r.live) {
+        if let Some(tile) = region.tile {
+            for point in tile.corners() {
+                include(
+                    ground(crate::layout::world_coordinates(unproject_at(
+                        point,
+                        GLASS_BOTTOM,
+                    ))) + Vec3::Y * GLASS_BOTTOM,
+                    -limit,
+                    limit,
+                );
+            }
+        }
         for corner in region.corners() {
             for height in [GLASS_BOTTOM, GLASS_TOP] {
                 include(ground(corner) + Vec3::Y * height, -limit, limit);
@@ -93,44 +151,18 @@ pub(crate) fn distance(
     distance + 0.001
 }
 
-pub(super) fn plan(packing: &Packing, ticks: u32) -> Vec<View> {
-    let mut views = Vec::new();
-    let focus = packing
-        .sample(u64::from(ticks))
-        .map_or(Vec3::ZERO, |(regions, _, _)| centre(&regions));
-    for tick in 0..=ticks {
-        let Some((regions, _, _)) = packing.sample(u64::from(tick)) else {
-            break;
-        };
-        let depth_bound = regions
-            .iter()
-            .filter(|r| r.live)
-            .flat_map(RepositoryRegion::corners)
-            .map(|p| (ground(p) - focus).length() + LABEL_Y)
-            .fold(0.0_f32, f32::max);
-        views.push(View {
-            focus,
-            distance: distance(&regions, focus, FOV, VIEWPORT).max(24.0),
-            depth_bound,
-        });
-    }
-    let weight = (-tick_seconds() / 2.0).exp();
-    for tick in (0..views.len().saturating_sub(1)).rev() {
-        views[tick].distance = views[tick].distance.max(
-            views[tick].distance
-                + (views[tick + 1].distance - views[tick].distance) * weight,
-        );
-    }
-    for tick in 1..views.len() {
-        views[tick].distance = views[tick].distance.max(views[tick - 1].distance);
-    }
-    let depth_bound = views.iter().map(|v| v.depth_bound).fold(0.0_f32, f32::max);
-    for view in &mut views {
-        view.depth_bound = depth_bound;
-    }
-    views
+pub(super) fn plan() -> Vec<View> {
+    let depth_bound = crate::layout::packing::Tile::viewport()
+        .ground()
+        .into_iter()
+        .map(|p| p.length() + LABEL_Y)
+        .fold(0.0_f32, f32::max);
+    vec![View {
+        focus: Vec3::ZERO,
+        distance: DISTANCE,
+        depth_bound,
+    }]
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -158,15 +190,13 @@ mod tests {
             point.cmpge(Vec2::splat(MARGIN - 0.02)).all()
                 && point.cmple(viewport - Vec2::splat(MARGIN - 0.02)).all()
         };
-        let centre = crate::layout::world_coordinates((region.low + region.high) * 0.5);
-        let size = region.high - region.low;
-        let mesh = Transform::from_xyz(centre.x, 0.5, centre.y)
-            .with_scale(Vec3::new(size.x, 1.2, size.y))
-            .with_rotation(Quat::from_rotation_y(
-                view_direction().x.atan2(view_direction().z),
-            ));
-        for corner in super::super::box_corners(-Vec3::splat(0.5), Vec3::splat(0.5)) {
-            let point = screen(mesh.transform_point(corner));
+        let tile = region.tile.unwrap();
+        for corner in tile.corners() {
+            let world = ground(crate::layout::world_coordinates(unproject_at(
+                corner,
+                GLASS_BOTTOM,
+            ))) + Vec3::Y * GLASS_BOTTOM;
+            let point = screen(world);
             assert!(
                 inside(point),
                 "frame {frame} {} {viewport:?}: corner {point:?}",
@@ -181,7 +211,7 @@ mod tests {
         );
     }
     #[test]
-    fn every_frame_contains_live_prisms_and_raised_labels_in_real_projections() {
+    fn every_frame_contains_live_glass_and_raised_labels_in_real_projections() {
         for name in crate::theme::ThemeName::ALL {
             assert_theme_framing(&name.build());
         }

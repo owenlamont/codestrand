@@ -102,31 +102,31 @@ select from the merged history. Single-repository playback retains first-parent
 order. Contributor mappings apply across all repositories, so a matched contributor
 uses one avatar that moves between regions.
 
-Repository rectangles are packed once from whole-history footprints, allowing stacked
-columns beside larger regions. A deterministic search scores screen coverage through the
-automatic camera at 16:9, including glass, raised labels and sampled playback framing.
-The search prefers larger repositories nearer the camera when coverage is tied.
-Regions grow continuously around their evolving contents; neighbours move
-outward with small gaps. New repositories grow into their assigned slots over two
-playback seconds and occupy no space before their first commit. History never pauses
-for layout changes. Region growth and camera easing use canonical playback time, so
-export pacing does not change the layout. The automatic camera keeps the whole-history
-arrangement's centre and viewing direction fixed, dollying outward along that direction
-as live regions grow. Automatic preview and export keep each live glass prism
-and raised repository label inside a 24-pixel viewport margin. Zoom anticipates growth
-and repository births; preview uses the current viewport and field of view. Free-camera
-controls remain independent of automatic framing.
+Live repositories share an ordered treemap inside a 24-pixel margin of the 16:9 export.
+The automatic camera stays fixed. Glass tiles account for perspective and cover the
+whole inset viewport, including while repositories appear or change size. Tile areas
+follow eased current file counts; empty active repositories retain weight one.
+Each repository keeps its local file layout and fits its tile with one uniform scale.
+Different content shapes can still leave space inside a tile.
+
+The split tree is selected once using content-fit scores from sampled history shapes,
+with larger repositories first in near-to-far traversal. Split axes and repository order
+remain fixed. File-count changes and births ease over canonical playback time; new
+repositories occupy no space before their first commit. History never pauses for layout
+changes, and export pacing does not affect the layout. Other preview aspect ratios use
+conservative framing; the screen-filling allocation targets the 16:9 export camera.
+Free-camera controls remain independent.
 
 Multi-repository planning supports up to 30 repositories, 216,000 simulation ticks and
-2,000,000 region samples. The packing search examines at most 300,000 placement nodes;
-all orderings are considered only for five or fewer repositories. Use fewer
+2,000,000 region samples. Balanced ordered splits compare both axes using complete
+content-fit scores; per-tick placement follows the fixed binary tree. Use fewer
 repositories, shorten the imported history or reduce playback times if an input limit
 is exceeded. Single-repository playback is unaffected.
 
 To choose visual treatments, use
 `--repository-boundary none|glass` and `--repository-label-plane files|raised`.
-Defaults are `glass` and `raised`. Glass is a faint, coloured rectangular prism around
-each live region; raised labels stay at a constant height of 1.6 scene units.
+Defaults are `glass` and `raised`. Glass is a faint, coloured ground-plane tile for
+each live repository; raised labels stay at a constant height of 1.6 scene units.
 Both options apply to preview and export and affect multiple repositories only.
 
 ## Range and pacing

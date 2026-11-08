@@ -395,7 +395,7 @@ fn setup(world: &mut World) {
     ));
     let theme = world.resource::<Playback>().0.theme().clone();
     let palette = Palette::new(world, &theme);
-    repository_regions(world, &palette);
+    repository_regions(world);
     world.spawn((
         Mesh3d(palette.glyph_mesh.clone()),
         MeshMaterial3d(palette.floor.clone()),
@@ -456,9 +456,15 @@ fn setup(world: &mut World) {
         ));
     }
     let title = world.resource::<Title>().0.clone();
-    heading(world, camera, "CODESTRAND", 28.0, 28.0, 30.0);
-    heading(world, camera, &title, 28.0, 68.0, 16.0);
-    let caption = heading(world, camera, " ", 28.0, 668.0, 14.0);
+    let caption_y = if repository_labels > 0 {
+        heading(world, camera, "CODESTRAND", 24.0, 0.0, 18.0);
+        698.0
+    } else {
+        heading(world, camera, "CODESTRAND", 28.0, 28.0, 30.0);
+        heading(world, camera, &title, 28.0, 68.0, 16.0);
+        668.0
+    };
+    let caption = heading(world, camera, " ", 28.0, caption_y, 14.0);
     world.entity_mut(caption).insert(Caption);
     world.init_resource::<Assets<Font>>();
     styling::setup(world, &theme);
@@ -490,7 +496,22 @@ fn recolor_repository_regions(world: &mut World, theme: &Theme) {
     }
 }
 
-fn repository_regions(world: &mut World, palette: &Palette) {
+fn glass_positions(region: &crate::layout::RepositoryRegion) -> Vec<[f32; 3]> {
+    let corners = region
+        .tile
+        .map_or([Vec2::ZERO; 4], crate::layout::packing::Tile::corners)
+        .map(|point| {
+            crate::layout::world_coordinates(model::framing::unproject_at(
+                point,
+                model::framing::GLASS_BOTTOM,
+            ))
+        });
+    [0, 1, 2, 0, 2, 3]
+        .map(|i| [corners[i].x, model::framing::GLASS_BOTTOM, corners[i].y])
+        .to_vec()
+}
+
+fn repository_regions(world: &mut World) {
     let simulation = &world.resource::<Playback>().0;
     if !matches!(
         simulation.repository_boundary,
@@ -505,17 +526,19 @@ fn repository_regions(world: &mut World, palette: &Palette) {
         let material = world
             .resource_mut::<Assets<StandardMaterial>>()
             .add(material);
-        let centre = crate::layout::world_coordinates((region.low + region.high) * 0.5);
-        let size = region.high - region.low;
+        let mesh = Mesh::new(
+            bevy::render::render_resource::PrimitiveTopology::TriangleList,
+            RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
+        )
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, glass_positions(region))
+        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0, 1.0, 0.0]; 6]);
+        let mesh = world.resource_mut::<Assets<Mesh>>().add(mesh);
         world.spawn((
             RepositoryGlass(index),
-            Mesh3d(palette.cube.clone()),
+            Mesh3d(mesh),
             MeshMaterial3d(material),
-            Transform::from_xyz(centre.x, 0.5, centre.y)
-                .with_scale(Vec3::new(size.x, 1.2, size.y))
-                .with_rotation(Quat::from_rotation_y(
-                    model::view_direction().x.atan2(model::view_direction().z),
-                )),
+            Transform::IDENTITY,
+            bevy::camera::visibility::NoFrustumCulling,
             if region.live {
                 Visibility::Visible
             } else {
@@ -524,7 +547,6 @@ fn repository_regions(world: &mut World, palette: &Palette) {
         ));
     }
 }
-
 fn heading(
     world: &mut World,
     camera: Entity,
@@ -944,26 +966,26 @@ fn sync_lod(world: &mut World, pools: &mut Pools, simulation: &Simulation) {
 }
 
 fn sync_repository_regions(world: &mut World, simulation: &Simulation) {
-    let mut query =
-        world.query::<(&RepositoryGlass, &mut Transform, &mut Visibility)>();
-    for (RepositoryGlass(index), mut transform, mut visibility) in query.iter_mut(world)
-    {
-        let region = &simulation.layout().repositories[*index];
-        let centre = crate::layout::world_coordinates((region.low + region.high) * 0.5);
-        let size = region.high - region.low;
-        *transform = Transform::from_xyz(centre.x, 0.5, centre.y)
-            .with_scale(Vec3::new(size.x, 1.2, size.y))
-            .with_rotation(Quat::from_rotation_y(
-                model::view_direction().x.atan2(model::view_direction().z),
-            ));
-        *visibility = if region.live {
-            Visibility::Visible
-        } else {
-            Visibility::Hidden
-        };
+    let mut query = world.query::<(&RepositoryGlass, &Mesh3d, &mut Visibility)>();
+    let updates: Vec<_> = query
+        .iter_mut(world)
+        .map(|(RepositoryGlass(index), mesh, mut visibility)| {
+            let region = &simulation.layout().repositories[*index];
+            *visibility = if region.live {
+                Visibility::Visible
+            } else {
+                Visibility::Hidden
+            };
+            (mesh.0.clone(), glass_positions(region))
+        })
+        .collect();
+    let mut meshes = world.resource_mut::<Assets<Mesh>>();
+    for (handle, positions) in updates {
+        if let Some(mut mesh) = meshes.get_mut(&handle) {
+            mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+        }
     }
 }
-
 fn sync_files(
     world: &mut World,
     palette: &Palette,
@@ -1222,12 +1244,12 @@ fn sync_structure(
                 return None;
             }
             let parent = layout.dir(dir.parent?);
+            let width = simulation.theme().directory_edge_width(dir.depth) * dir.scale;
             Some((
                 ground(parent.position) - Vec3::Y * 0.05,
                 ground(dir.position) - Vec3::Y * 0.05,
                 palette.directory(pools.hues.slots[index], dir.depth),
-                simulation.theme().directory_edge_width(dir.depth)
-                    * dir.parent.map_or(1.0, |parent| pools.lod.detail[parent]),
+                width * dir.parent.map_or(1.0, |parent| pools.lod.detail[parent]),
             ))
         })
         .flat_map(|(from, to, material, width)| {
@@ -1277,7 +1299,8 @@ fn sync_structure(
                 Transform::from_translation(ground(dir.position) - Vec3::Y * 0.05)
                     .with_scale(
                         simulation.theme().directory_node_scale
-                            * pools.lod.detail[index],
+                            * pools.lod.detail[index]
+                            * dir.scale,
                     );
         }
         set_visible(world, *entity, pools.lod.detail[index] > 0.0);
@@ -2008,6 +2031,74 @@ mod tests {
             );
         }
         assert_eq!(sizes, std::collections::HashSet::from([14.0_f32.to_bits()]));
+    }
+
+    #[test]
+    fn rendered_glass_vertices_project_to_the_partition_throughout_playback() {
+        use bevy::camera::{CameraProjection, PerspectiveProjection};
+        let histories = (0..3)
+            .map(|index| {
+                let mut events = crate::timeline::synthetic();
+                for event in &mut events {
+                    event.seconds += i64::try_from(index).unwrap() * 86_400 * 4;
+                }
+                crate::repositories::namespace(&mut events, index);
+                events
+            })
+            .collect();
+        let mut simulation = Simulation::with_repositories(
+            crate::repositories::merge(histories),
+            &model::Options {
+                seconds_per_day: 0.05,
+                max_idle_seconds: 0.1,
+                ..default()
+            },
+            &Theme::neon(),
+            &crate::contributors::Mappings::default(),
+            &["One".into(), "Two".into(), "Three".into()],
+        );
+        simulation.repository_boundary = crate::repositories::Boundary::Glass;
+        let mut world = World::new();
+        world.init_resource::<Assets<Mesh>>();
+        world.init_resource::<Assets<StandardMaterial>>();
+        world.insert_resource(Playback(simulation));
+        repository_regions(&mut world);
+        let mut simulation = world.remove_resource::<Playback>().unwrap().0;
+        let projection = PerspectiveProjection {
+            fov: model::framing::FOV,
+            aspect_ratio: 16.0 / 9.0,
+            ..default()
+        };
+        let camera = Transform::from_translation(
+            model::view_direction() * model::framing::DISTANCE,
+        )
+        .looking_at(Vec3::ZERO, Vec3::Y);
+        let clip = projection.get_clip_from_view() * camera.to_matrix().inverse();
+        for frame in
+            (0..model::frames_for(simulation.duration(), 60).unwrap()).step_by(7)
+        {
+            simulation.advance_to(frame, 60);
+            sync_repository_regions(&mut world, &simulation);
+            let mut query = world.query::<(&RepositoryGlass, &Mesh3d, &Visibility)>();
+            for (glass, mesh, visibility) in query.iter(&world) {
+                let region = &simulation.layout().repositories[glass.0];
+                assert_eq!(*visibility == Visibility::Visible, region.live);
+                let Some(tile) = region.tile else {
+                    continue;
+                };
+                let mesh = world.resource::<Assets<Mesh>>().get(&mesh.0).unwrap();
+                let bevy::mesh::VertexAttributeValues::Float32x3(vertices) =
+                    mesh.attribute(Mesh::ATTRIBUTE_POSITION).unwrap()
+                else {
+                    panic!("glass positions");
+                };
+                let expected = tile.corners();
+                for (vertex, index) in vertices.iter().zip([0, 1, 2, 0, 2, 3]) {
+                    let projected = clip.project_point3(Vec3::from_array(*vertex));
+                    assert!((projected.truncate() - expected[index]).length() < 2e-6);
+                }
+            }
+        }
     }
 
     #[test]

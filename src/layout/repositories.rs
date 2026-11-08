@@ -33,6 +33,8 @@ impl Layout {
                 low: Vec2::splat(-2.0),
                 high: Vec2::splat(2.0),
                 live: false,
+                files: 0.0,
+                tile: None,
             };
             combined.repositories.push(region);
             let base = combined.dirs.len();
@@ -59,6 +61,7 @@ impl Layout {
             .map(|(repository, region)| {
                 let mut low = Vec2::splat(f32::INFINITY);
                 let mut high = Vec2::splat(f32::NEG_INFINITY);
+                let mut files = 0_u32;
                 for (_, dir) in self.dirs().filter(|(_, dir)| {
                     dir.repository == repository && (dir.files > 0 || dir.children > 0)
                 }) {
@@ -75,6 +78,9 @@ impl Layout {
                     .files()
                     .filter(|(_, file)| self.dirs[file.dir].repository == repository)
                 {
+                    if file.state != super::Presence::Leaving {
+                        files = files.saturating_add(1);
+                    }
                     low = low.min(
                         crate::layout::region_coordinates(file.position) - Vec2::ONE,
                     );
@@ -91,6 +97,8 @@ impl Layout {
                     low,
                     high,
                     live: active[repository],
+                    files: crate::model::count_u32(files),
+                    tile: None,
                 }
             })
             .collect()

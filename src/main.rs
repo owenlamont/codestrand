@@ -82,6 +82,8 @@ enum Command {
         source: Source,
         /// Write per-tick measurements and a summary as JSON Lines.
         output: PathBuf,
+        #[arg(long)]
+        treemap: bool,
     },
     /// Inspect local history as JSON; merge changes compare against the first parent.
     Inspect {
@@ -336,7 +338,7 @@ fn run() -> anyhow::Result<()> {
         }
     };
     match cli.command {
-        Some(Command::LayoutQuality { source, output }) => {
+        Some(Command::LayoutQuality { source, output, treemap }) => {
             let started = std::time::Instant::now();
             let (mut simulation, _) = source.load()?;
             eprintln!("load_plan_seconds={:.6}", started.elapsed().as_secs_f64());
@@ -355,7 +357,11 @@ fn run() -> anyhow::Result<()> {
                 }),
             )?;
             std::io::Write::write_all(&mut writer, b"\n")?;
-            model::quality::run(&mut simulation, &mut writer)?;
+            if treemap {
+                model::treemap::run(&mut simulation, &mut writer)?;
+            } else {
+                model::quality::run(&mut simulation, &mut writer)?;
+            }
             std::io::Write::flush(&mut writer)?;
             eprintln!(
                 "replay_report_seconds={:.6}",
