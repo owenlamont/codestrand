@@ -103,3 +103,16 @@ simulation and position at every zoom, including export. Directory landmarks ran
 subtree size, with at most four extra top-level labels beyond the usual twenty.
 Labels inside fully collapsed subtrees and overlapping directory labels are omitted
 to keep the overview readable.
+
+In repository playback, changed files show tiny green added lines and red removed
+lines, fading with the commit's activity. They read as texture at the default zoom;
+zoom in with the free camera to read them. Colours follow the selected theme.
+
+Samples come from the actual changed lines: up to three per file and twelve per
+commit, preferring short, non-blank lines with meaningful text. Lines longer than
+72 UTF-8 bytes, invalid UTF-8 and control characters are omitted. Binary files and
+submodules have no text samples. The selection is deterministic; crowded commits
+use path order to spend the sample budget. At most twelve samples appear at once.
+
+The history cache stores these bounded samples. Older cache versions are rebuilt
+automatically from local Git history.

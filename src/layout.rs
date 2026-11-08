@@ -130,6 +130,7 @@ impl Layout {
                     kind: Kind::Added,
                     insertions: 0,
                     removals: 0,
+                    samples: Vec::new(),
                 })
                 .collect(),
         };

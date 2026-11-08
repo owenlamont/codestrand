@@ -16,6 +16,7 @@ mod avatars;
 mod cache;
 mod camera;
 mod contributors;
+mod diff_samples;
 mod encoder;
 mod export;
 mod history;

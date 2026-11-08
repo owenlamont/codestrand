@@ -55,6 +55,9 @@ struct AvatarCamera;
 struct Label;
 
 #[derive(Component)]
+struct DiffSample;
+
+#[derive(Component)]
 struct Caption;
 
 #[derive(Component)]
@@ -424,6 +427,22 @@ fn setup(world: &mut World) {
             Visibility::Hidden,
             UiTargetCamera(camera),
             Label,
+        ));
+    }
+    for _ in 0..crate::diff_samples::PER_COMMIT {
+        world.spawn((
+            Text::new(""),
+            TextFont::from_font_size(4.0),
+            TextColor(theme.diff_added),
+            TextLayout::new(Justify::Left, bevy::text::LineBreak::NoWrap),
+            Node {
+                position_type: PositionType::Absolute,
+                ..default()
+            },
+            ZIndex(-1),
+            Visibility::Hidden,
+            UiTargetCamera(camera),
+            DiffSample,
         ));
     }
     let title = world.resource::<Title>().0.clone();
@@ -1511,6 +1530,7 @@ fn labels(world: &mut World) {
         return;
     };
     let (camera, transform) = (camera.clone(), *transform);
+    diff_samples(world, &camera, &transform);
     let playback = world.resource::<Playback>();
     let mut caption = playback.0.caption();
     caption.push_str("  |  ");
@@ -1596,6 +1616,60 @@ fn labels(world: &mut World) {
         && text.0 != caption
     {
         text.0 = caption;
+    }
+}
+
+fn diff_samples(world: &mut World, camera: &Camera, transform: &GlobalTransform) {
+    let playback = &world.resource::<Playback>().0;
+    let theme = playback.theme();
+    let wanted: Vec<_> = playback
+        .diff_lines()
+        .into_iter()
+        .filter_map(|line| {
+            let point = camera.world_to_viewport(transform, line.position).ok()?;
+            let top = camera
+                .world_to_viewport(transform, line.position + transform.up() * 0.12)
+                .ok()?;
+            let size = point.distance(top).round().clamp(1.0, 28.0);
+            let color = if line.sample.added {
+                theme.diff_added
+            } else {
+                theme.diff_removed
+            };
+            let prefix = if line.sample.added { '+' } else { '-' };
+            let row = f32::from(u8::try_from(line.row).expect("sample row is bounded"));
+            Some((
+                format!("{prefix} {}", line.sample.text),
+                point + Vec2::Y * row * size * 1.2,
+                size,
+                color.with_alpha(line.alpha * 0.8),
+            ))
+        })
+        .collect();
+    let mut wanted = wanted.into_iter();
+    let mut query = world.query_filtered::<(
+        &mut Text,
+        &mut Node,
+        &mut TextFont,
+        &mut TextColor,
+        &mut Visibility,
+    ), With<DiffSample>>();
+    for (mut text, mut node, mut font, mut color, mut visibility) in
+        query.iter_mut(world)
+    {
+        if let Some((value, point, size, ink)) = wanted.next() {
+            text.set_if_neq(Text::new(value));
+            node.left = px(point.x);
+            node.top = px(point.y);
+            let font_size = bevy::text::FontSize::Px(size);
+            if font.font_size != font_size {
+                font.font_size = font_size;
+            }
+            color.set_if_neq(TextColor(ink));
+            visibility.set_if_neq(Visibility::Inherited);
+        } else {
+            visibility.set_if_neq(Visibility::Hidden);
+        }
     }
 }
 
@@ -2534,6 +2608,7 @@ mod tests {
                     },
                     insertions: 0,
                     removals: 0,
+                    samples: Vec::new(),
                 }],
             })
             .collect();
@@ -2705,6 +2780,7 @@ mod tests {
                     kind: Kind::Added,
                     insertions: 1,
                     removals: 0,
+                    samples: Vec::new(),
                 }],
             },
             Event {
@@ -2722,6 +2798,7 @@ mod tests {
                     },
                     insertions: 0,
                     removals: 0,
+                    samples: Vec::new(),
                 }],
             },
         ];

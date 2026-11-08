@@ -84,6 +84,7 @@ pub(super) enum BlobDiff {
         insertions: u32,
         removals: u32,
         hunks: Vec<Hunk>,
+        samples: Vec<crate::diff_samples::Sample>,
     },
     Binary,
     Gitlink,
@@ -380,6 +381,16 @@ fn blob_diff(repo: &gix::Repository, change: &Change) -> anyhow::Result<BlobDiff
         gix::diff::blob::Algorithm::Histogram,
         &input,
     );
+    let mut samples = Vec::new();
+    for hunk in diff.hunks() {
+        for token in &input.before[hunk.before.start as usize..hunk.before.end as usize]
+        {
+            crate::diff_samples::consider(&mut samples, input.interner[*token], false);
+        }
+        for token in &input.after[hunk.after.start as usize..hunk.after.end as usize] {
+            crate::diff_samples::consider(&mut samples, input.interner[*token], true);
+        }
+    }
     let hunks = diff
         .hunks()
         .map(|hunk| Hunk {
@@ -393,5 +404,6 @@ fn blob_diff(repo: &gix::Repository, change: &Change) -> anyhow::Result<BlobDiff
         insertions: diff.count_additions(),
         removals: diff.count_removals(),
         hunks,
+        samples,
     })
 }

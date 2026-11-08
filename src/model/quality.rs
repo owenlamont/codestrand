@@ -426,6 +426,7 @@ mod tests {
                 kind: timeline::Kind::Added,
                 insertions: 1,
                 removals: 0,
+                samples: Vec::new(),
             }],
         }];
         let mut simulation = Simulation::new(

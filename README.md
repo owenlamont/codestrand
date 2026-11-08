@@ -1,5 +1,8 @@
 # Codestrand
 
+Diff samples use Bevy's bundled Fira Mono font (OFL-1.1); see
+[third-party notices](THIRDPARTY.txt).
+
 ![Codestrand logo](https://raw.githubusercontent.com/owenlamont/codestrand/main/assets/codestrand.svg)
 
 A Git history visualiser with persistent file positions, gliding contributors and

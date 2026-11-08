@@ -227,6 +227,120 @@ emails = ["author@example.invalid"]
     }
 
     #[test]
+    #[ignore = "requires CODESTRAND_MEASURE_REPOSITORY and CODESTRAND_MEASURE_OUTPUT"]
+    fn measure_sample_cache_growth() {
+        let repository = std::env::var("CODESTRAND_MEASURE_REPOSITORY").unwrap();
+        let output = PathBuf::from(std::env::var("CODESTRAND_MEASURE_OUTPUT").unwrap());
+        let history = history::import(Path::new(&repository), "origin/main").unwrap();
+        let snapshot = Snapshot {
+            version: timeline::CACHE_VERSION,
+            tip: history.tip.clone(),
+            events: timeline::from_history(&history),
+        };
+        let after = serde_json::to_vec(&snapshot).unwrap();
+        let mut old = serde_json::to_value(&snapshot).unwrap();
+        old["version"] = 3.into();
+        for event in old["events"].as_array_mut().unwrap() {
+            for change in event["changes"].as_array_mut().unwrap() {
+                change.as_object_mut().unwrap().remove("samples");
+            }
+        }
+        let before = serde_json::to_vec(&old).unwrap();
+        fs::write(output.join("cache-v3.json"), &before).unwrap();
+        fs::write(output.join("cache-v4.json"), &after).unwrap();
+        eprintln!(
+            "tip={}, events={}, before_bytes={}, after_bytes={}",
+            snapshot.tip,
+            snapshot.events.len(),
+            before.len(),
+            after.len()
+        );
+        for event in &snapshot.events {
+            assert!(
+                event
+                    .changes
+                    .iter()
+                    .map(|change| change.samples.len())
+                    .sum::<usize>()
+                    <= crate::diff_samples::PER_COMMIT
+            );
+        }
+    }
+
+    #[test]
+    fn version_three_without_samples_reimports_actual_diff_lines() {
+        let repo = fixture();
+        commit(repo.path(), "first\nlet previous = 1;\n");
+        commit(repo.path(), "first\nlet current = 2;\n");
+        let cache = tempfile::tempdir().unwrap();
+        let events = load(repo.path(), "HEAD", Some(cache.path())).unwrap();
+        let samples = &events.last().unwrap().changes[0].samples;
+        assert!(
+            samples
+                .iter()
+                .any(|sample| sample.added && sample.text == "let current = 2;")
+        );
+        assert!(
+            samples
+                .iter()
+                .any(|sample| !sample.added && sample.text == "let previous = 1;")
+        );
+        assert!(samples.iter().all(|sample| sample.text != "first"));
+        let path = entry(cache.path(), repo.path());
+        let mut old: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        old["version"] = 3.into();
+        for event in old["events"].as_array_mut().unwrap() {
+            for change in event["changes"].as_array_mut().unwrap() {
+                change.as_object_mut().unwrap().remove("samples");
+            }
+        }
+        fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
+        assert_eq!(
+            load(repo.path(), "HEAD", Some(cache.path())).unwrap(),
+            events
+        );
+        let rebuilt: serde_json::Value =
+            serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        assert_eq!(rebuilt["version"], timeline::CACHE_VERSION);
+    }
+
+    #[test]
+    fn large_commit_keeps_twelve_short_samples_and_cache_hits_preserve_them() {
+        let repo = fixture();
+        for index in 0..128 {
+            fs::write(
+                repo.path().join(format!("file-{index:03}.rs")),
+                "\n}\nlet alpha = 1;\nlet beta = 2;\nlet gamma = 3;\n",
+            )
+            .unwrap();
+        }
+        git(repo.path(), &["add", "."]);
+        git(repo.path(), &["commit", "-m", "crowded"]);
+        let cache = tempfile::tempdir().unwrap();
+        let events = load(repo.path(), "HEAD", Some(cache.path())).unwrap();
+        let changes = &events.last().unwrap().changes;
+        assert_eq!(changes.len(), 128);
+        assert_eq!(
+            changes
+                .iter()
+                .map(|change| change.samples.len())
+                .sum::<usize>(),
+            crate::diff_samples::PER_COMMIT
+        );
+        assert!(
+            changes
+                .iter()
+                .all(|change| change.samples.len() <= crate::diff_samples::PER_FILE)
+        );
+        remove_blob(repo.path());
+        assert_eq!(
+            load(repo.path(), "HEAD", Some(cache.path())).unwrap(),
+            events
+        );
+    }
+
+    #[test]
     fn mismatched_or_corrupt_entries_regenerate() {
         let repo = fixture();
         let cache = tempfile::tempdir().expect("cache directory is available");

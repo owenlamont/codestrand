@@ -3,7 +3,7 @@ use std::{collections::HashMap, fmt::Write};
 use crate::history::{BlobDiff, ChangeKind, Commit, History};
 
 // Bump when the snapshot format, history import policies or timeline conversion change.
-pub(super) const CACHE_VERSION: u32 = 3;
+pub(super) const CACHE_VERSION: u32 = 4;
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(super) enum Kind {
@@ -19,6 +19,8 @@ pub(super) struct FileChange {
     pub kind: Kind,
     pub insertions: u32,
     pub removals: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub samples: Vec<crate::diff_samples::Sample>,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -66,36 +68,50 @@ pub(super) fn from_history(history: &History) -> Vec<Event> {
             contributor: None,
             commit: commit.id.clone(),
             seconds: commit.author.seconds,
-            changes: commit
-                .changes
-                .iter()
-                .map(|change| {
-                    let (insertions, removals) = match change.diff {
-                        BlobDiff::Text {
-                            insertions,
-                            removals,
-                            ..
-                        } => (insertions, removals),
-                        BlobDiff::Binary | BlobDiff::Gitlink => (1, 1),
-                    };
-                    let kind = match (&change.kind, &change.source_path) {
-                        (ChangeKind::Addition, _) => Kind::Added,
-                        (ChangeKind::Deletion, _) => Kind::Deleted,
-                        (ChangeKind::RenameCandidate, Some(from)) => {
-                            Kind::Moved { from: path(from) }
-                        }
-                        (ChangeKind::Modification | ChangeKind::RenameCandidate, _) => {
-                            Kind::Modified
-                        }
-                    };
-                    FileChange {
-                        path: path(&change.path),
-                        kind,
-                        insertions,
-                        removals,
+            changes: sampled_changes(commit),
+        })
+        .collect()
+}
+
+fn sampled_changes(commit: &Commit) -> Vec<FileChange> {
+    let mut budget = crate::diff_samples::PER_COMMIT;
+    commit
+        .changes
+        .iter()
+        .map(|change| {
+            let (insertions, removals) = match change.diff {
+                BlobDiff::Text {
+                    insertions,
+                    removals,
+                    ..
+                } => (insertions, removals),
+                BlobDiff::Binary | BlobDiff::Gitlink => (1, 1),
+            };
+            let kind = match (&change.kind, &change.source_path) {
+                (ChangeKind::Addition, _) => Kind::Added,
+                (ChangeKind::Deletion, _) => Kind::Deleted,
+                (ChangeKind::RenameCandidate, Some(from)) => {
+                    Kind::Moved { from: path(from) }
+                }
+                (ChangeKind::Modification | ChangeKind::RenameCandidate, _) => {
+                    Kind::Modified
+                }
+            };
+            FileChange {
+                path: path(&change.path),
+                kind,
+                insertions,
+                removals,
+                samples: match &change.diff {
+                    BlobDiff::Text { samples, .. } => {
+                        let chosen: Vec<_> =
+                            samples.iter().take(budget).cloned().collect();
+                        budget -= chosen.len();
+                        chosen
                     }
-                })
-                .collect(),
+                    _ => Vec::new(),
+                },
+            }
         })
         .collect()
 }
@@ -233,6 +249,7 @@ fn change(path: &str, kind: Kind, insertions: u32, removals: u32) -> FileChange 
         kind,
         insertions,
         removals,
+        samples: Vec::new(),
     }
 }
 
