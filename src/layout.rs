@@ -30,6 +30,7 @@ pub(super) struct File {
     pub state: Presence,
     delay: f32,
     pub heat: f32,
+    pub activity: f32,
     pub author: usize,
 }
 
@@ -169,8 +170,8 @@ impl Layout {
             let file = self.files.get_mut(&id).expect("indexed files exist");
             file.state = Presence::Arriving;
             file.delay = delay;
-            file.heat = 1.0;
             file.author = author;
+            file.activity = 1.0;
             return id;
         }
         let dir = self.ensure_dir(parent_path(path));
@@ -190,7 +191,8 @@ impl Layout {
                 presence: 0.0,
                 state: Presence::Arriving,
                 delay,
-                heat: 1.0,
+                heat: 0.0,
+                activity: 1.0,
                 author,
             },
         );
@@ -202,8 +204,8 @@ impl Layout {
         match self.file_index.get(path) {
             Some(&id) => {
                 let file = self.files.get_mut(&id).expect("indexed files exist");
-                file.heat = 1.0;
                 file.author = author;
+                file.activity = 1.0;
                 id
             }
             None => self.add(path, 0.0, author),
@@ -220,8 +222,8 @@ impl Layout {
         let file = self.files.get_mut(&id).expect("indexed files exist");
         file.state = Presence::Leaving;
         file.delay = delay;
-        file.heat = 1.0;
         file.author = author;
+        file.activity = 1.0;
         Some(id)
     }
 
@@ -248,8 +250,8 @@ impl Layout {
         to.clone_into(&mut file.path);
         file.dir = dir;
         file.slot = slot;
-        file.heat = 1.0;
         file.author = author;
+        file.activity = 1.0;
         if file.state == Presence::Leaving {
             file.state = Presence::Arriving;
         }
@@ -272,11 +274,28 @@ impl Layout {
         }
     }
 
+    pub(super) fn heat(&mut self, id: u64, amount: f32) {
+        let file = self.files.get_mut(&id).expect("touched file exists");
+        file.heat = (file.heat + amount).min(1.0);
+    }
+
+    pub(super) fn cool_heat(&mut self, dt: f32, half_life: f32) {
+        let decay = (-dt / half_life).exp2();
+        for file in self.files.values_mut() {
+            file.heat *= decay;
+            if file.heat < 0.001 {
+                file.heat = 0.0;
+            }
+            file.activity *= (-dt / 1.6).exp();
+        }
+    }
+
     /// Completes pending fades and relaxes for `steps` ticks, for history before playback.
     pub(super) fn settle(&mut self, steps: u32, dt: f32) {
         for file in self.files.values_mut() {
             file.delay = 0.0;
             file.heat = 0.0;
+            file.activity = 0.0;
             file.presence = match file.state {
                 Presence::Leaving => 0.0,
                 Presence::Arriving | Presence::Present => 1.0,
@@ -310,7 +329,6 @@ impl Layout {
     fn fade_files(&mut self, dt: f32) {
         let mut gone = Vec::new();
         for (&id, file) in &mut self.files {
-            file.heat *= (-dt / 1.6).exp();
             if file.delay > 0.0 {
                 file.delay -= dt;
                 continue;

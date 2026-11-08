@@ -103,6 +103,9 @@ struct Source {
     /// Maximum canonical timeline seconds between commits, compressing idle gaps.
     #[arg(long, default_value_t = 1.0, value_parser = idle_seconds)]
     max_idle_seconds: f32,
+    /// File heat half-life in canonical playback seconds.
+    #[arg(long, default_value_t = 3.0, value_parser = positive_seconds)]
+    heat_half_life: f32,
 }
 
 impl Source {
@@ -150,6 +153,7 @@ impl Source {
             None => (events, "Synthetic history".to_owned()),
         };
         let options = model::Options {
+            heat_half_life: self.heat_half_life,
             seconds_per_day: self.seconds_per_day,
             max_idle_seconds: self.max_idle_seconds,
             start: self.start,
@@ -247,6 +251,28 @@ fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn heat_half_life_is_shared_by_preview_and_export_and_rejects_invalid_values() {
+        for command in [vec!["preview"], vec!["export", "frames"]] {
+            for value in ["0", "-1", "NaN", "inf", "86401"] {
+                let mut args = vec!["codestrand"];
+                args.extend(command.clone());
+                args.extend(["--heat-half-life", value]);
+                assert!(Cli::try_parse_from(args).is_err());
+            }
+            let mut args = vec!["codestrand"];
+            args.extend(command);
+            args.extend(["--heat-half-life", "2"]);
+            let cli = Cli::try_parse_from(args).unwrap();
+            let (Command::Preview { source, .. } | Command::Export { source, .. }) =
+                cli.command.unwrap()
+            else {
+                panic!("playback command")
+            };
+            assert_eq!(source.heat_half_life, 2.0);
+        }
+    }
 
     #[test]
     fn cli_selects_registered_themes_for_preview_and_export() {
