@@ -12,6 +12,7 @@ use crate::{
     timeline::{Event, Kind},
 };
 
+pub(crate) mod framing;
 #[cfg(test)]
 mod measurement;
 mod names;
@@ -168,6 +169,7 @@ pub(super) struct Label {
 
 #[derive(Clone, Debug)]
 struct State {
+    region_views: std::sync::Arc<[framing::View]>,
     tick: u64,
     layout: Layout,
     avatars: Vec<Avatar>,
@@ -274,6 +276,7 @@ impl Simulation {
             |index| padding_at(index) * u32::from(index >= start),
         );
         let mut state = State {
+            region_views: std::sync::Arc::default(),
             tick: 0,
             layout: Layout::scheduled_repositories(
                 &events,
@@ -361,10 +364,15 @@ impl Simulation {
             &self.layout().repository_sizes(),
         );
         self.state = self.initial.clone();
+        self.state.region_views = framing::plan(&self.packing, ticks).into();
         if let Some((regions, offsets, scales)) = self.packing.sample(0) {
             self.state.layout.place_regions(regions, offsets, &scales);
         }
         (self.state.focus, self.state.distance) = self.state.fit();
+        if let Some(view) = self.state.region_views.first() {
+            self.state.focus = view.focus;
+            self.state.distance = self.state.distance.max(view.distance);
+        }
         self.initial = self.state.clone();
     }
     pub(super) fn duration(&self) -> f32 {
@@ -496,6 +504,35 @@ impl Simulation {
     /// Smoothed camera focus and distance along [`view_direction`].
     pub(super) fn view(&self) -> (Vec3, f32) {
         (self.state.focus, self.state.distance)
+    }
+
+    pub(super) fn view_for_projection(&self, fov: f32, viewport: Vec2) -> (Vec3, f32) {
+        let (focus, distance) = self.view();
+        if self.layout().repositories.is_empty() {
+            return (focus, distance);
+        }
+        let ratio = ((framing::FOV * 0.5).tan() / (fov * 0.5).tan())
+            .max(
+                (framing::FOV * 0.5).tan()
+                    * (framing::VIEWPORT.x / framing::VIEWPORT.y)
+                    / ((fov * 0.5).tan() * viewport.x / viewport.y),
+            )
+            .max(1.0);
+        let depth = self
+            .state
+            .region_views
+            .first()
+            .map_or(0.0, |v| v.depth_bound);
+        let distance = distance * ratio + depth * (ratio - 1.0);
+        (
+            focus,
+            distance.max(framing::distance(
+                &self.layout().repositories,
+                focus,
+                fov,
+                viewport,
+            )),
+        )
     }
 
     pub(super) fn scale(&self) -> f32 {
@@ -702,13 +739,10 @@ impl Simulation {
             })
             .collect();
         for region in layout.repositories.iter().filter(|region| region.live) {
-            let mut position = ground(crate::layout::world_coordinates(Vec2::new(
-                region.low.x.midpoint(region.high.x),
-                region.high.y - 1.0,
-            )));
+            let mut position = framing::label_position(region);
             position.y = match self.repository_label_plane {
                 crate::repositories::LabelPlane::Files => 0.15,
-                crate::repositories::LabelPlane::Raised => MIN_AVATAR_HEIGHT * 0.5,
+                crate::repositories::LabelPlane::Raised => framing::LABEL_Y,
             };
             labels.push(Label {
                 position,
@@ -1010,8 +1044,13 @@ impl State {
             .collect();
         points.extend_from_slice(tops);
         for region in self.layout.repositories.iter().filter(|region| region.live) {
-            points.extend(region.corners().map(ground));
-            points.extend(region.corners().map(|point| ground(point) + Vec3::Y * 1.1));
+            for height in [framing::GLASS_BOTTOM, framing::GLASS_TOP] {
+                points.extend(
+                    region
+                        .corners()
+                        .map(|point| ground(point) + Vec3::Y * height),
+                );
+            }
         }
         points
     }
@@ -1120,16 +1159,34 @@ impl State {
     }
 
     fn place_view(&mut self, dt: f32) {
-        let (focus, distance) = self.fit();
-        let settle = if distance > self.distance { 0.3 } else { 1.5 };
-        let ease = 1.0 - (-dt / settle).exp();
-        self.focus += (focus - self.focus) * ease;
-        let distance = if self.layout.repositories.is_empty() {
-            distance
+        if let Some(view) = self
+            .region_views
+            .get(usize::try_from(self.tick).unwrap_or(usize::MAX))
+        {
+            self.focus = view.focus;
+            let tops = self.file_tops();
+            let points = self.scene_points(&tops);
+            self.distance = self
+                .distance
+                .max(view.distance)
+                .max(self.fit_distance(self.focus, &points, &tops));
         } else {
-            distance.max(self.distance)
-        };
-        self.distance += (distance - self.distance) * ease;
+            let (focus, distance) = self.fit();
+            let settle = if distance > self.distance { 0.3 } else { 1.5 };
+            let ease = 1.0 - (-dt / settle).exp();
+            self.focus += (focus - self.focus) * ease;
+            let distance = if self.layout.repositories.is_empty() {
+                distance
+            } else {
+                distance.max(self.distance)
+            };
+            self.distance += (distance - self.distance) * ease;
+            let tops = self.file_tops();
+            let points = self.scene_points(&tops);
+            self.distance = self
+                .distance
+                .max(self.fit_distance(self.focus, &points, &tops));
+        }
         let tops = self.file_tops();
         let points = self.scene_points(&tops);
         self.distance = self

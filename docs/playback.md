@@ -108,7 +108,10 @@ outward with small gaps. New repositories grow into their assigned slots over tw
 playback seconds and occupy no space before their first commit. History never pauses
 for layout changes. Region growth and camera easing use canonical playback time, so
 export pacing does not change the layout. The camera follows live regions and only
-zooms outward during growth.
+zooms outward during growth. Automatic preview and export keep each live glass prism
+and raised repository label inside a 24-pixel viewport margin. Zoom anticipates growth
+and repository births; preview uses the current viewport and field of view. Free-camera
+controls remain independent of automatic framing.
 
 Multi-repository planning supports up to 216,000 simulation ticks and 2,000,000 region
 samples. Shorten the imported history or reduce playback times if either limit is

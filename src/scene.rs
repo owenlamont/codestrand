@@ -848,8 +848,13 @@ fn preview_camera(world: &mut World, mut drag_from: Local<Option<Vec2>>) {
     }
     let dt = world.resource::<Time<Real>>().delta_secs();
     world.resource_scope(|world, mut camera: Mut<PreviewCamera>| {
+        let projection = camera_projection(world);
         let simulation = &world.resource::<Playback>().0;
-        camera.update(&input, simulation.view(), simulation.avatars(), dt);
+        let view = projection.map_or_else(
+            || simulation.view(),
+            |(fov, viewport)| simulation.view_for_projection(fov, viewport),
+        );
+        camera.update(&input, view, simulation.avatars(), dt);
         let (eye, focus) = camera.pose();
         let mut query = world.query_filtered::<&mut Transform, With<SceneCamera>>();
         if let Ok(mut transform) = query.single_mut(world) {
@@ -1496,13 +1501,26 @@ fn sync_fragments(
 }
 
 fn place_camera(world: &mut World, simulation: &Simulation) {
-    let (focus, distance) = simulation.view();
+    let (focus, distance) = camera_projection(world).map_or_else(
+        || simulation.view(),
+        |(fov, viewport)| simulation.view_for_projection(fov, viewport),
+    );
     let mut query = world.query_filtered::<&mut Transform, With<SceneCamera>>();
     if let Ok(mut transform) = query.single_mut(world) {
         *transform =
             Transform::from_translation(focus + model::view_direction() * distance)
                 .looking_at(focus, Vec3::Y);
     }
+}
+
+fn camera_projection(world: &mut World) -> Option<(f32, Vec2)> {
+    let mut query = world.query_filtered::<(&Camera, &Projection), With<SceneCamera>>();
+    query.single(world).ok().and_then(|(camera, projection)| {
+        let Projection::Perspective(projection) = projection else {
+            return None;
+        };
+        Some((projection.fov, camera.logical_viewport_size()?))
+    })
 }
 
 fn grow<'a>(
