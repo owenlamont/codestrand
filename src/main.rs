@@ -243,8 +243,8 @@ fn main() -> std::process::ExitCode {
     match run() {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
-            if error.is::<clap::Error>() {
-                eprint!("{}", terminal_escape(&format!("{error:#}")));
+            if let Some(usage) = error.downcast_ref::<clap::Error>() {
+                eprint!("{}", terminal_escape(&usage.to_string()));
                 std::process::ExitCode::from(2)
             } else {
                 eprintln!("Error: {}", terminal_escape(&format!("{error:#}")));
