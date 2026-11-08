@@ -1623,9 +1623,26 @@ fn labels(world: &mut World) {
     }
 }
 
+fn place_sample(bounds: Rect, viewport: Vec2, occupied: &mut Vec<Rect>) -> bool {
+    if bounds.min.x < 0.0
+        || bounds.min.y < 0.0
+        || bounds.max.x > viewport.x
+        || bounds.max.y > viewport.y
+        || occupied
+            .iter()
+            .any(|other| !other.intersect(bounds).is_empty())
+    {
+        return false;
+    }
+    occupied.push(bounds);
+    true
+}
+
 fn diff_samples(world: &mut World, camera: &Camera, transform: &GlobalTransform) {
     let playback = &world.resource::<Playback>().0;
     let theme = playback.theme();
+    let viewport = camera.logical_viewport_size().unwrap_or(Vec2::ZERO);
+    let mut occupied: Vec<Rect> = Vec::new();
     let wanted: Vec<_> = playback
         .diff_lines()
         .into_iter()
@@ -1653,9 +1670,17 @@ fn diff_samples(world: &mut World, camera: &Camera, transform: &GlobalTransform)
                 u8::try_from(line.sample.text.len() + 2).expect("bounded ASCII sample"),
             ) * size
                 * 0.6;
+            let origin = point - Vec2::new(width * 0.5, size * 0.6);
+            let bounds = Rect::from_corners(
+                origin,
+                origin + Vec2::new(width + 2.0, size * 1.2 + 2.0),
+            );
+            if !place_sample(bounds, viewport, &mut occupied) {
+                return None;
+            }
             Some((
                 format!("{prefix} {}", line.sample.text),
-                point - Vec2::new(width * 0.5, size * 0.6),
+                origin,
                 size,
                 color.with_alpha(line.alpha * visibility),
                 theme.clear.with_alpha(line.alpha * visibility * 0.94),
@@ -1784,6 +1809,30 @@ mod tests {
         );
         assert_eq!(world.resource::<Palette>().glyph_textures.len(), 2);
         assert_eq!(world.resource::<Playback>().0.seconds(), 0.0);
+    }
+
+    #[test]
+    fn samples_hide_collisions_and_clipping_without_shifting_the_fragment_anchor() {
+        let viewport = Vec2::new(1280.0, 720.0);
+        let mut occupied = Vec::new();
+        let bounds =
+            Rect::from_corners(Vec2::new(100.0, 100.0), Vec2::new(400.0, 120.0));
+        assert!(place_sample(bounds, viewport, &mut occupied));
+        assert!(!place_sample(bounds, viewport, &mut occupied));
+        assert!(!place_sample(
+            Rect::from_corners(Vec2::new(-1.0, 50.0), Vec2::new(300.0, 70.0)),
+            viewport,
+            &mut occupied
+        ));
+        assert!(!place_sample(
+            Rect::from_corners(Vec2::new(1200.0, 50.0), Vec2::new(1500.0, 70.0)),
+            viewport,
+            &mut occupied
+        ));
+        let separate =
+            Rect::from_corners(Vec2::new(100.0, 130.0), Vec2::new(400.0, 150.0));
+        assert!(place_sample(separate, viewport, &mut occupied));
+        assert_eq!(occupied, vec![bounds, separate]);
     }
 
     #[test]
