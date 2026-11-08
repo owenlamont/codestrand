@@ -113,7 +113,13 @@ impl Packing {
         let Some(first) = samples.first() else {
             return Self::default();
         };
-        let initial = pack(first.clone());
+        let mut reserved = first.clone();
+        for region in reserved.iter_mut().filter(|region| region.live) {
+            let slack = (region.high - region.low) * 0.125 + Vec2::ONE;
+            region.low -= slack;
+            region.high += slack;
+        }
+        let initial = pack(reserved);
         let mut current = initial.clone();
         let mut moves = Vec::new();
         let mut pauses = 0;
@@ -455,5 +461,20 @@ mod tests {
             let placement = pack(regions);
             assert_disjoint(&placement.world_regions());
         }
+    }
+
+    #[test]
+    fn settled_initial_regions_have_slack_before_the_first_played_commit() {
+        let region = RepositoryRegion {
+            label: "Existing".to_owned(),
+            low: Vec2::splat(-4.0),
+            high: Vec2::splat(4.0),
+            live: true,
+        };
+        let mut grown = region.clone();
+        grown.high += Vec2::splat(0.1);
+        let packing = Packing::build(&[vec![region], vec![grown]]);
+        assert_eq!(packing.extra_ticks(), 0);
+        assert_eq!(packing.sample(1).unwrap().0, 1);
     }
 }
