@@ -50,6 +50,7 @@ adding pages, wrap Markdown prose at 88 characters and verify CLI examples again
 the current binary's help and behaviour. Stage new files before running prek.
 Prek runs the strict build and lychee link checks; CI runs the same hooks.
 
-Cloudflare Pages builds from `main` using the strict build command above and output
-directory `site`. The Cloudflare project and Git integration require account setup;
-the repository has no deployment credentials or GitHub deployment workflow.
+Cloudflare Pages deploys `main` to <https://codestrand.pages.dev/> through its Git
+integration, so the repository holds no deployment credentials or workflow. The
+Cloudflare build installs the latest Zensical rather than the locked version:
+`pip install zensical && zensical build --clean --strict`, output directory `site`.

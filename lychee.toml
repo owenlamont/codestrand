@@ -5,10 +5,5 @@ timeout = 30
 max_concurrency = 16
 accept = ["200..=299", "429", "503"]
 exclude = [
-  # These README targets land with this PR; relative links check both local files.
-  # Remove after the documentation branch merges into main.
-  '^https://github\.com/owenlamont/codestrand/blob/main/(CONTRIBUTING\.md|docs/index\.md)$',
   '^https?://(localhost|127\.0\.0\.1|0\.0\.0\.0)([:/]|$)',
-  # The initial deployment requires Owen's account; local docs links remain checked.
-  '^https://codestrand-docs\.pages\.dev(/|$)',
 ]

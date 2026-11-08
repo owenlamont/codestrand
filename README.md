@@ -8,9 +8,8 @@ animated diff fragments. Preview a local repository or export numbered PNG frame
 **Status: layout study.** Built-in video encoding is not implemented.
 Licensed MIT OR Apache-2.0.
 
-[User documentation](https://codestrand-docs.pages.dev/) covers installation, Git
-history, playback, export and contributor avatars. Until the first site deployment,
-read the [documentation sources](https://github.com/owenlamont/codestrand/blob/main/docs/index.md).
+[User documentation](https://codestrand.pages.dev/) covers installation, Git
+history, playback, export and contributor avatars.
 
 ## Install
 

@@ -34,6 +34,7 @@ const SETTLE_TICKS: u32 = 1200;
 const DIR_LABELS: usize = 20;
 
 pub(super) struct Options {
+    pub heat_half_life: f32,
     pub seconds_per_day: f32,
     pub max_idle_seconds: f32,
     pub start: usize,
@@ -43,6 +44,7 @@ pub(super) struct Options {
 impl Default for Options {
     fn default() -> Self {
         Self {
+            heat_half_life: 3.0,
             seconds_per_day: 0.5,
             max_idle_seconds: 1.0,
             start: 0,
@@ -125,6 +127,7 @@ pub(super) struct Simulation {
     total: usize,
     starts: Vec<f32>,
     playback_multiplier: f32,
+    heat_half_life: f32,
     initial: State,
     state: State,
     theme: Theme,
@@ -227,6 +230,7 @@ impl Simulation {
             total,
             starts,
             playback_multiplier: 1.0,
+            heat_half_life: options.heat_half_life,
             initial: state.clone(),
             state,
             theme: theme.clone(),
@@ -269,6 +273,7 @@ impl Simulation {
         let state = &mut self.state;
         state.tick += 1;
         let now = tick_time(state.tick);
+        state.layout.cool_heat(tick_seconds(), self.heat_half_life);
         while let Some(event) = self.events.get(state.next_event) {
             let start = self.starts[state.next_event];
             if start > now {
@@ -841,14 +846,21 @@ pub(crate) fn apply(
     change: &crate::timeline::FileChange,
     author: usize,
 ) -> u64 {
-    match &change.kind {
+    let id = match &change.kind {
         Kind::Added => layout.add(&change.path, ADD_DELAY, author),
         Kind::Deleted => layout
             .remove(&change.path, DELETE_DELAY, author)
             .unwrap_or_else(|| layout.touch(&change.path, author)),
         Kind::Modified => layout.touch(&change.path, author),
         Kind::Moved { from } => layout.rename(from, &change.path, author),
+    };
+    let lines = f64::from(change.insertions) + f64::from(change.removals);
+    #[expect(clippy::cast_possible_truncation, reason = "heat is bounded to 0.75")]
+    let heat = (0.12 + 0.08 * lines.ln_1p()).min(0.75) as f32;
+    if !matches!(change.kind, Kind::Deleted) {
+        layout.heat(id, heat);
     }
+    id
 }
 
 pub(super) fn view_direction() -> Vec3 {
@@ -1022,6 +1034,101 @@ mod tests {
             &Theme::neon(),
             &crate::contributors::Mappings::default(),
         )
+    }
+
+    #[test]
+    fn heat_scales_with_both_diff_counts_and_accumulates_to_a_cap() {
+        let mut sim = simulation();
+        let mut change = timeline::FileChange {
+            path: "heat.rs".to_owned(),
+            kind: Kind::Added,
+            insertions: 0,
+            removals: 0,
+        };
+        let id = apply(&mut sim.state.layout, &change, 0);
+        let small = sim.layout().file(id).unwrap().heat;
+        assert!(small > 0.0);
+        let mut insertion = change.clone();
+        insertion.path = "insertions.rs".to_owned();
+        insertion.insertions = 100;
+        let inserted = apply(&mut sim.state.layout, &insertion, 0);
+        assert!(sim.layout().file(inserted).unwrap().heat > small);
+        change.kind = Kind::Modified;
+        change.removals = 100;
+        apply(&mut sim.state.layout, &change, 0);
+        let accumulated = sim.layout().file(id).unwrap().heat;
+        assert!(accumulated > 2.0 * small);
+        assert!(accumulated < 1.0);
+        change.insertions = u32::MAX;
+        change.removals = u32::MAX;
+        apply(&mut sim.state.layout, &change, 0);
+        assert_eq!(sim.layout().file(id).unwrap().heat, 1.0);
+        let mut huge = change.clone();
+        huge.path = "huge.rs".to_owned();
+        huge.kind = Kind::Added;
+        let huge_id = apply(&mut sim.state.layout, &huge, 0);
+        assert_eq!(sim.layout().file(huge_id).unwrap().heat, 0.75);
+        change.kind = Kind::Moved {
+            from: change.path.clone(),
+        };
+        change.path = "moved.rs".to_owned();
+        assert_eq!(apply(&mut sim.state.layout, &change, 0), id);
+        assert_eq!(sim.layout().file(id).unwrap().heat, 1.0);
+    }
+
+    #[test]
+    fn deletion_does_not_add_heat_and_halos_decay_independently() {
+        let mut layout = Layout::planned_paths(&["a.rs"], 0);
+        let mut change = timeline::FileChange {
+            path: "a.rs".to_owned(),
+            kind: Kind::Added,
+            insertions: 0,
+            removals: 0,
+        };
+        let id = apply(&mut layout, &change, 0);
+        let heat = layout.file(id).unwrap().heat;
+        assert_eq!(layout.file(id).unwrap().activity, 1.0);
+        layout.cool_heat(6.0, 86400.0);
+        assert!(layout.file(id).unwrap().activity < 0.03);
+        assert!(layout.file(id).unwrap().heat > heat * 0.99);
+        change.kind = Kind::Deleted;
+        let before = layout.file(id).unwrap().heat;
+        apply(&mut layout, &change, 0);
+        assert_eq!(layout.file(id).unwrap().heat, before);
+        assert_eq!(layout.file(id).unwrap().activity, 1.0);
+        layout.cool_heat(1.0, 0.01);
+        assert_eq!(layout.file(id).unwrap().heat, 0.0);
+        assert!(layout.file(id).unwrap().activity > 0.5);
+        layout.settle(0, 0.0);
+        assert_eq!(layout.file(id).unwrap().activity, 0.0);
+    }
+
+    #[test]
+    fn heat_cools_in_canonical_seconds_and_replays_at_any_frame_rate() {
+        let mut events = timeline::synthetic();
+        events.truncate(1);
+        let mut sim = Simulation::new(
+            events,
+            &Options {
+                heat_half_life: 2.0,
+                ..Options::default()
+            },
+            &Theme::neon(),
+            &Mappings::default(),
+        );
+        sim.advance_to(30, 60);
+        let id = sim.layout().files().next().unwrap().0;
+        let hot = sim.layout().file(id).unwrap().heat;
+        sim.advance_to(150, 60);
+        let cooled = sim.layout().file(id).unwrap().heat;
+        assert!((cooled - hot * 0.5).abs() < 0.000_01);
+        sim.restart();
+        sim.advance_to(75, 30);
+        assert_eq!(sim.layout().file(id).unwrap().heat, cooled);
+        sim.advance_to(30, 60);
+        assert_eq!(sim.layout().file(id).unwrap().heat, hot);
+        sim.set_theme(crate::theme::ThemeName::Phosphor.build());
+        assert_eq!(sim.layout().file(id).unwrap().heat, hot);
     }
 
     #[test]
@@ -1491,6 +1598,7 @@ mod tests {
         assert_eq!(sim.commit(), 8);
         assert!(sim.layout().present_files() > 60);
         assert!(sim.layout().files().all(|(_, file)| file.presence >= 1.0));
+        assert!(sim.layout().files().all(|(_, file)| file.heat == 0.0));
     }
 
     #[test]
