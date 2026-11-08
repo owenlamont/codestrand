@@ -515,8 +515,16 @@ impl Choice<'_> {
                 });
             }
         }
+        let fixed = self.best(docks.iter().copied());
+        if fixed.valid() {
+            return fixed;
+        }
+        docks.extend(self.free_docks());
+        self.best(docks.into_iter())
+    }
+
+    fn best(&self, docks: impl Iterator<Item = Dock>) -> Placement {
         docks
-            .into_iter()
             .enumerate()
             .map(|(id, dock)| {
                 let (p, span) = self.assess(dock);
@@ -525,7 +533,7 @@ impl Choice<'_> {
                     (0, _) => 1,
                     _ => 2,
                 };
-                let cost = (usize::from(!p.half_plane), p.crossings, p.overlaps, rank);
+                let cost = (p.overlaps, usize::from(!p.half_plane), p.crossings, rank);
                 (p, cost, span, id)
             })
             .min_by(|a, b| a.1.cmp(&b.1).then(a.2.total_cmp(&b.2)).then(a.3.cmp(&b.3)))
@@ -533,6 +541,66 @@ impl Choice<'_> {
             .0
     }
 
+    fn free_docks(&self) -> Vec<Dock> {
+        let mut docks = Vec::new();
+        for edge in 0..4 {
+            let axis = usize::from(edge % 2 == 1);
+            let cross = 1 - axis;
+            let origin = Dock {
+                edge,
+                fraction: 0.0,
+            }
+            .point(self.tile, self.gap);
+            if origin[cross].abs() + self.radius > HALF[cross] {
+                continue;
+            }
+            let low = (self.tile.low * HALF)[axis].max(-HALF[axis] + self.radius);
+            let high = (self.tile.high * HALF)[axis].min(HALF[axis] - self.radius);
+            if low > high {
+                continue;
+            }
+            let mut blocked: Vec<_> = self
+                .occupied
+                .iter()
+                .copied()
+                .chain(self.obstacles.iter().map(|(_, r)| r.inflate(-HALO)))
+                .filter(|r| {
+                    origin[cross] + self.radius > r.min[cross]
+                        && origin[cross] - self.radius < r.max[cross]
+                })
+                .map(|r| (r.min[axis] - self.radius, r.max[axis] + self.radius))
+                .collect();
+            blocked.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+            let mut cursor = low;
+            for (start, end) in blocked {
+                if end < cursor || start > high {
+                    continue;
+                }
+                if start >= cursor {
+                    docks.extend(self.interval_docks(edge, cursor, start.min(high)));
+                }
+                cursor = cursor.max(end);
+                if cursor > high {
+                    break;
+                }
+            }
+            if cursor <= high {
+                docks.extend(self.interval_docks(edge, cursor, high));
+            }
+        }
+        docks
+    }
+
+    fn interval_docks(&self, edge: u8, low: f32, high: f32) -> [Dock; 3] {
+        let axis = usize::from(edge % 2 == 1);
+        let origin = (self.tile.low * HALF)[axis];
+        let span = ((self.tile.high - self.tile.low) * HALF)[axis];
+        let inset = ((high - low) * 0.25).min(0.001);
+        [low + inset, low.midpoint(high), high - inset].map(|value| Dock {
+            edge,
+            fraction: (value - origin) / span,
+        })
+    }
     fn name_rect(&self, point: Vec2, label_height: f32) -> Option<Rect> {
         if self.text.is_empty() {
             return None;
@@ -767,6 +835,54 @@ mod tests {
         assert_eq!(fallback.dock, blocked.select(None).dock);
     }
 
+    #[test]
+    fn crowded_fixed_docks_use_free_edge_space() {
+        let mut occupied = Vec::new();
+        for index in 0..40 {
+            let selected = choice(&[], &occupied).select(None);
+            if index == 24 {
+                assert!(
+                    choice(&[], &occupied)
+                        .assess(Dock {
+                            edge: 2,
+                            fraction: 0.1
+                        })
+                        .0
+                        .valid()
+                );
+            }
+            assert!(
+                selected.valid(),
+                "contributor {} at {:?}: {} overlaps",
+                index + 1,
+                selected.point,
+                selected.overlaps
+            );
+            let body = disk(selected.point, 7.5);
+            assert!(occupied.iter().all(|&other| !intersect(body, other)));
+            occupied.push(body);
+        }
+    }
+    #[test]
+    fn free_intervals_keep_exact_body_fits_and_reject_full_reservations() {
+        let occupied = [
+            Rect::from_corners(-HALF, Vec2::new(-7.5, HALF.y)),
+            Rect::from_corners(Vec2::new(7.5, -HALF.y), HALF),
+        ];
+        let exact = choice(&[], &occupied);
+        assert!(
+            exact
+                .free_docks()
+                .into_iter()
+                .any(|dock| exact.assess(dock).0.valid())
+        );
+        let full = [Rect::from_corners(-HALF, HALF)];
+        let blocked = choice(&[], &full);
+        assert_eq!(blocked.free_docks(), Vec::new());
+        let least_bad = blocked.select(None);
+        assert!(!least_bad.valid());
+        assert!(least_bad.overlaps > 0);
+    }
     #[test]
     fn geometric_top_failure_uses_another_edge_before_spreading() {
         let obstacles = [(
