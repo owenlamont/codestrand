@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use bevy::{
     asset::RenderAssetUsages,
-    camera::{Camera3dDepthLoadOp, RenderTarget, visibility::RenderLayers},
+    camera::{Camera3dDepthLoadOp, Hdr, RenderTarget, visibility::RenderLayers},
     image::ImageSampler,
     input::mouse::{AccumulatedMouseScroll, MouseScrollUnit},
     prelude::*,
@@ -31,6 +31,7 @@ const GRID_LINES: i16 = 20;
 const AVATAR_LAYER: usize = 1;
 
 mod lod;
+mod styling;
 
 #[derive(Resource)]
 pub(super) struct Frame {
@@ -98,35 +99,14 @@ impl Palette {
         let mut meshes = world.resource_mut::<Assets<Mesh>>();
         let cube = meshes.add(Cuboid::default());
         let folder = meshes.add(folder_mesh());
-        let sphere = meshes.add(Sphere::new(theme.avatar_radius));
+        let sphere = meshes.add(styling::avatar_mesh(theme));
         let disc = meshes.add(Circle::new(theme.avatar_radius));
         let beam = meshes.add(Cylinder::new(0.035, 1.0));
         let glyph_mesh = meshes.add(Rectangle::default());
-        let membership_mesh = meshes.add(Annulus::new(
-            theme.membership_radii.x,
-            theme.membership_radii.y,
-        ));
-        let activity_mesh =
-            meshes.add(Annulus::new(theme.activity_radii.x, theme.activity_radii.y));
-        let glyph_textures: Vec<_> = crate::theme::ThemeName::ALL
-            .into_iter()
-            .map(|name| {
-                let registered = if name == theme.name {
-                    theme.clone()
-                } else {
-                    name.build()
-                };
-                let textures = registered
-                    .glyphs
-                    .iter()
-                    .map(|glyph| {
-                        let image = themed_glyph_image(glyph.svg, &registered);
-                        world.resource_mut::<Assets<Image>>().add(image)
-                    })
-                    .collect::<Vec<_>>();
-                (name, textures)
-            })
-            .collect();
+        let membership_mesh =
+            meshes.add(styling::ring_mesh(theme, theme.membership_radii));
+        let activity_mesh = meshes.add(styling::ring_mesh(theme, theme.activity_radii));
+        let glyph_textures = Self::preload_glyphs(world, theme);
         let textures = &glyph_textures
             .iter()
             .find(|(name, _)| *name == theme.name)
@@ -196,6 +176,13 @@ impl Palette {
         }
     }
 
+    fn preload_glyphs(
+        world: &mut World,
+        theme: &Theme,
+    ) -> Vec<(crate::theme::ThemeName, Vec<Handle<Image>>)> {
+        vec![(theme.name, raster_glyphs(theme).install(world))]
+    }
+
     fn heat_materials(
         materials: &mut Assets<StandardMaterial>,
         glyphs: &[Handle<StandardMaterial>],
@@ -209,6 +196,7 @@ impl Palette {
                     .map(|bucket| {
                         materials.add(StandardMaterial {
                             base_color: theme.heat_color(f32::from(bucket) / 31.0),
+                            emissive: theme.heat_emissive(f32::from(bucket) / 31.0),
                             ..base.clone()
                         })
                     })
@@ -371,6 +359,7 @@ fn setup(world: &mut World) {
     let camera = world
         .spawn((
             Camera3d::default(),
+            Hdr,
             target.clone(),
             Tonemapping::None,
             DebandDither::Disabled,
@@ -383,6 +372,7 @@ fn setup(world: &mut World) {
             depth_load_op: Camera3dDepthLoadOp::Clear(0.0),
             ..default()
         },
+        Hdr,
         Camera {
             order: 1,
             clear_color: ClearColorConfig::None,
@@ -397,9 +387,12 @@ fn setup(world: &mut World) {
     let theme = world.resource::<Playback>().0.theme().clone();
     let palette = Palette::new(world, &theme);
     world.spawn((
-        Mesh3d(palette.cube.clone()),
+        Mesh3d(palette.glyph_mesh.clone()),
         MeshMaterial3d(palette.floor.clone()),
-        Transform::from_xyz(0.0, -0.2, 0.0).with_scale(Vec3::new(4000.0, 0.1, 4000.0)),
+        Transform::from_xyz(0.0, -0.18, 0.0)
+            .with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2))
+            .with_scale(Vec3::splat(4000.0)),
+        styling::Ground,
     ));
     let grid: Vec<_> = (0..(4 * GRID_LINES + 2))
         .map(|_| {
@@ -419,6 +412,8 @@ fn setup(world: &mut World) {
             Text::new(""),
             TextFont::from_font_size(14.0),
             TextColor(theme.label),
+            BackgroundColor::default(),
+            BorderColor::default(),
             Node {
                 position_type: PositionType::Absolute,
                 padding: UiRect::axes(px(3.0), px(1.0)),
@@ -436,6 +431,8 @@ fn setup(world: &mut World) {
     heading(world, camera, &title, 28.0, 68.0, 16.0);
     let caption = heading(world, camera, " ", 28.0, 668.0, 14.0);
     world.entity_mut(caption).insert(Caption);
+    world.init_resource::<Assets<Font>>();
+    styling::setup(world, &theme);
 }
 
 fn heading(
@@ -510,24 +507,115 @@ fn preview_direction(
     }
 }
 
+#[derive(Resource)]
+struct PendingTheme {
+    name: crate::theme::ThemeName,
+    task: bevy::tasks::Task<(RasterGlyphs, Option<Image>, Option<Image>)>,
+}
+
+struct RasterGlyphs {
+    images: Vec<Image>,
+    indices: Vec<usize>,
+}
+
+impl RasterGlyphs {
+    fn install(self, world: &mut World) -> Vec<Handle<Image>> {
+        let mut assets = world.resource_mut::<Assets<Image>>();
+        let handles: Vec<_> = self
+            .images
+            .into_iter()
+            .map(|image| assets.add(image))
+            .collect();
+        self.indices
+            .into_iter()
+            .map(|index| handles[index].clone())
+            .collect()
+    }
+}
+
+fn raster_glyphs(theme: &Theme) -> RasterGlyphs {
+    let mut shared = HashMap::new();
+    let mut images = Vec::new();
+    let indices = theme
+        .glyphs
+        .iter()
+        .enumerate()
+        .map(|(kind, glyph)| {
+            let svg = theme.glyph_svg(glyph.svg, kind);
+            *shared.entry(svg).or_insert_with_key(|svg| {
+                let index = images.len();
+                images.push(themed_glyph_image(svg, theme));
+                index
+            })
+        })
+        .collect();
+    RasterGlyphs { images, indices }
+}
+
 fn preview_theme(world: &mut World) {
+    if let Some(mut pending) = world.get_resource_mut::<PendingTheme>() {
+        if let Some((glyphs, ground, backdrop)) =
+            bevy::tasks::futures::check_ready(&mut pending.task)
+        {
+            let name = pending.name;
+            let handles = glyphs.install(world);
+            world
+                .resource_mut::<Palette>()
+                .glyph_textures
+                .push((name, handles));
+            styling::install_images(world, name, ground, backdrop);
+            world.remove_resource::<PendingTheme>();
+            switch_theme(world, name);
+        }
+        return;
+    }
     let Some(direction) = preview_direction(world.resource::<ButtonInput<KeyCode>>())
     else {
         return;
     };
     let name = world.resource::<Playback>().0.theme().name.cycle(direction);
+    if world.contains_resource::<PreviewCamera>()
+        && !world
+            .resource::<Palette>()
+            .glyph_textures
+            .iter()
+            .any(|(loaded, _)| *loaded == name)
+    {
+        let task = bevy::tasks::AsyncComputeTaskPool::get().spawn(async move {
+            let theme = name.build();
+            let (ground, backdrop) = styling::raster_images(&theme);
+            (raster_glyphs(&theme), ground, backdrop)
+        });
+        world.insert_resource(PendingTheme { name, task });
+        return;
+    }
     switch_theme(world, name);
+}
+
+fn cache_glyphs(world: &mut World, theme: &Theme) {
+    world.resource_scope(|world, mut palette: Mut<Palette>| {
+        if !palette
+            .glyph_textures
+            .iter()
+            .any(|(name, _)| *name == theme.name)
+        {
+            palette
+                .glyph_textures
+                .extend(Palette::preload_glyphs(world, theme));
+        }
+    });
 }
 
 pub(super) fn switch_theme(world: &mut World, name: crate::theme::ThemeName) {
     let theme = name.build();
+    cache_glyphs(world, &theme);
     world.resource_mut::<Playback>().0.set_theme(theme.clone());
     world.resource_scope(|world, palette: Mut<Palette>| {
         let mut meshes = world.resource_mut::<Assets<Mesh>>();
         *meshes
             .get_mut(&palette.sphere)
             .expect("palette avatar mesh remains allocated") =
-            Sphere::new(theme.avatar_radius).into();
+            styling::avatar_mesh(&theme);
         *meshes
             .get_mut(&palette.disc)
             .expect("palette portrait mesh remains allocated") =
@@ -535,11 +623,11 @@ pub(super) fn switch_theme(world: &mut World, name: crate::theme::ThemeName) {
         *meshes
             .get_mut(&palette.membership_mesh)
             .expect("palette membership mesh remains allocated") =
-            Annulus::new(theme.membership_radii.x, theme.membership_radii.y).into();
+            styling::ring_mesh(&theme, theme.membership_radii);
         *meshes
             .get_mut(&palette.activity_mesh)
             .expect("palette activity mesh remains allocated") =
-            Annulus::new(theme.activity_radii.x, theme.activity_radii.y).into();
+            styling::ring_mesh(&theme, theme.activity_radii);
         let replacements = [
             (&palette.edge, &theme.edge),
             (&palette.floor, &theme.floor),
@@ -582,6 +670,7 @@ pub(super) fn switch_theme(world: &mut World, name: crate::theme::ThemeName) {
                     .get_mut(handle)
                     .expect("heat bucket") = StandardMaterial {
                     base_color: theme.heat_color(f32::from(bucket) / 31.0),
+                    emissive: theme.heat_emissive(f32::from(bucket) / 31.0),
                     base_color_texture: Some(texture.clone()),
                     ..theme.glyph_material.clone()
                 };
@@ -599,6 +688,9 @@ pub(super) fn switch_theme(world: &mut World, name: crate::theme::ThemeName) {
         }
     });
     world.insert_resource(ClearColor(theme.clear));
+    if world.contains_resource::<styling::Styles>() {
+        styling::apply(world, &theme);
+    }
     for mut color in world
         .query_filtered::<&mut TextColor, Without<Label>>()
         .iter_mut(world)
@@ -690,6 +782,9 @@ fn preview_camera(world: &mut World, mut drag_from: Local<Option<Vec2>>) {
         if let Ok(mut transform) = query.single_mut(world) {
             *transform = Transform::from_translation(eye).looking_at(focus, Vec3::Y);
         }
+    });
+    world.resource_scope(|world, playback: Mut<Playback>| {
+        styling::place_ground(world, &playback.0);
     });
 }
 
@@ -818,7 +913,11 @@ fn sync_files(
             membership,
             palette.directory(pools.hues.slots[file.dir], dir.depth),
         );
-        let glowing = file.activity > 0.03;
+        let glowing = if simulation.theme().blackbody {
+            file.heat > 0.3
+        } else {
+            file.activity > 0.03
+        };
         if glowing && current != Some(file.author) {
             world.entity_mut(halo).insert(MeshMaterial3d(
                 palette.glass[file.author % palette.glass.len()].clone(),
@@ -1013,6 +1112,11 @@ fn sync_structure(
                     * dir.parent.map_or(1.0, |parent| pools.lod.detail[parent]),
             ))
         })
+        .flat_map(|(from, to, material, width)| {
+            styling::edge_segments(simulation.theme(), from, to)
+                .into_iter()
+                .map(move |(a, b)| (a, b, material, width))
+        })
         .collect();
     let pool = grow(
         world,
@@ -1086,10 +1190,19 @@ fn sync_structure(
         set_visible(world, entity, true);
     }
     hide_rest(world, pool, glyphs.len());
-    sync_grid(world, pools, simulation);
+    sync_grid(world, palette, pools, simulation);
 }
 
-fn sync_grid(world: &mut World, pools: &Pools, simulation: &Simulation) {
+fn sync_grid(
+    world: &mut World,
+    palette: &Palette,
+    pools: &Pools,
+    simulation: &Simulation,
+) {
+    if world.contains_resource::<styling::Styles>() {
+        styling::ground(world, palette, &pools.hues.slots, simulation);
+    }
+
     let (focus, distance) = simulation.view();
     let extent = distance * 0.5;
     let spacing = 2.0_f32.powf((extent / 4.0).log2().ceil().max(0.0));
@@ -1097,6 +1210,7 @@ fn sync_grid(world: &mut World, pools: &Pools, simulation: &Simulation) {
     let half = spacing * f32::from(GRID_LINES);
     let thickness = 0.012 * spacing.sqrt();
     for (index, &entity) in pools.grid.iter().enumerate() {
+        set_visible(world, entity, !simulation.theme().textured_ground);
         let line = f32::from(
             i16::try_from(index).expect("grid pool is small") % (2 * GRID_LINES + 1)
                 - GRID_LINES,
@@ -1212,6 +1326,7 @@ fn sync_activity(
                 Transform::default(),
                 Visibility::Hidden,
                 RenderLayers::layer(AVATAR_LAYER),
+                PortraitDisc,
             ))
             .id();
         attach_portrait(world, palette, entity, &avatars[index]);
@@ -1228,34 +1343,7 @@ fn sync_activity(
         }
         set_visible(world, entity, presence > 0.0);
     }
-    let beams = simulation.beams();
-    let mut pool = std::mem::take(&mut pools.beams);
-    while pool.len() < beams.len() {
-        pool.push(
-            world
-                .spawn((
-                    Mesh3d(palette.beam.clone()),
-                    MeshMaterial3d(palette.glass[0].clone()),
-                    Transform::default(),
-                    Visibility::Hidden,
-                ))
-                .id(),
-        );
-    }
-    for (entity, beam) in pool.iter().zip(&beams) {
-        world.entity_mut(*entity).insert(MeshMaterial3d(
-            palette.glass[beam.author % palette.glass.len()].clone(),
-        ));
-        place_beam(
-            world,
-            *entity,
-            beam.from,
-            beam.to,
-            beam.width * simulation.scale().sqrt(),
-        );
-    }
-    hide_rest(world, &pool, beams.len());
-    pools.beams = pool;
+    styling::beams(world, palette, pools, simulation);
     let fragments = simulation.fragments();
     let mut pool = std::mem::take(&mut pools.fragments);
     while pool.len() < fragments.len() {
@@ -1451,6 +1539,15 @@ fn labels(world: &mut World) {
             Some((label, point, distance))
         });
     let chosen = place_labels(wanted.collect(), geometry.label_height);
+    let theme = geometry.clone();
+    let points: Vec<_> = chosen.iter().map(|(_, point, _)| *point).collect();
+    let camera_entity = world
+        .query_filtered::<Entity, With<SceneCamera>>()
+        .single(world)
+        .expect("scene camera");
+    if world.contains_resource::<styling::Styles>() {
+        styling::leaders(world, &points, &theme, camera_entity);
+    }
     let mut query = world.query_filtered::<(
         &mut Text,
         &mut Node,
@@ -1458,7 +1555,7 @@ fn labels(world: &mut World) {
         &mut TextColor,
         &mut ZIndex,
     ), With<Label>>();
-    let theme = &world.resource::<Playback>().0.theme();
+    let theme = world.resource::<Playback>().0.theme().clone();
     let (emphasis_color, landmark_color) = (theme.label_emphasis, theme.label_landmark);
     let mut chosen = chosen.into_iter();
     for (index, (mut text, mut node, mut visibility, mut color, mut z_index)) in
@@ -1469,7 +1566,11 @@ fn labels(world: &mut World) {
                 i32::try_from(index).expect("label pool fits in i32"),
             ));
             let emphasis = label.kind != model::LabelKind::Landmark;
-            let label = label.text;
+            let label = if theme.label_style == crate::theme::LabelStyle::SmallCaps {
+                label.text.to_uppercase()
+            } else {
+                label.text
+            };
             if text.0 != label {
                 text.0 = label;
             }
@@ -1534,6 +1635,55 @@ fn face_portraits(world: &mut World) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preview_switch_loads_uncached_art_off_thread_before_applying_theme() {
+        bevy::tasks::AsyncComputeTaskPool::get_or_init(bevy::tasks::TaskPool::new);
+        let simulation = Simulation::new(
+            crate::timeline::synthetic(),
+            &model::Options::default(),
+            &Theme::neon(),
+            &crate::contributors::Mappings::default(),
+        );
+        let camera = PreviewCamera::new(simulation.view());
+        let mut world = World::new();
+        world.insert_resource(Playback(simulation));
+        world.insert_resource(SceneTarget(Handle::<Image>::default().into()));
+        world.insert_resource(Title("test".to_owned()));
+        world.insert_resource(camera);
+        world.init_resource::<Pools>();
+        world.init_resource::<Assets<Mesh>>();
+        world.init_resource::<Assets<Image>>();
+        world.init_resource::<Assets<StandardMaterial>>();
+        world.init_resource::<ButtonInput<KeyCode>>();
+        setup(&mut world);
+        assert_eq!(world.resource::<Palette>().glyph_textures.len(), 1);
+        world
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::Period);
+        preview_theme(&mut world);
+        world.resource_mut::<ButtonInput<KeyCode>>().reset_all();
+        assert!(world.contains_resource::<PendingTheme>());
+        assert_eq!(
+            world.resource::<Playback>().0.theme().name,
+            crate::theme::ThemeName::Neon
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while world.contains_resource::<PendingTheme>() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "theme worker timed out"
+            );
+            preview_theme(&mut world);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(
+            world.resource::<Playback>().0.theme().name,
+            crate::theme::ThemeName::Phosphor
+        );
+        assert_eq!(world.resource::<Palette>().glyph_textures.len(), 2);
+        assert_eq!(world.resource::<Playback>().0.seconds(), 0.0);
+    }
 
     #[test]
     fn preview_loop_preserves_overshoot_across_multiple_cycles() {
@@ -1627,6 +1777,10 @@ mod tests {
             .single(&world)
             .unwrap();
         assert!(
+            world.entity(scene).contains::<Hdr>()
+                && world.entity(overlay).contains::<Hdr>()
+        );
+        assert!(
             world.get::<Camera>(overlay).unwrap().order
                 > world.get::<Camera>(scene).unwrap().order
         );
@@ -1687,6 +1841,12 @@ mod tests {
         face: Entity,
     ) {
         let layer = RenderLayers::layer(AVATAR_LAYER);
+        assert_eq!(world.resource::<Palette>().glyph_textures.len(), 1);
+        let initial = world.resource::<Playback>().0.theme().name;
+        for name in crate::theme::ThemeName::ALL {
+            switch_theme(world, name);
+        }
+        switch_theme(world, initial);
         world.init_resource::<ButtonInput<KeyCode>>();
         let transforms: Vec<_> = world
             .query::<(Entity, &Transform)>()
@@ -1713,12 +1873,13 @@ mod tests {
             .unwrap()
             .base_color_texture
             .clone();
-        for key in [
-            KeyCode::Period,
-            KeyCode::Comma,
-            KeyCode::Comma,
-            KeyCode::Period,
-        ] {
+        for key in
+            std::iter::repeat_n(KeyCode::Period, crate::theme::ThemeName::ALL.len())
+                .chain(std::iter::repeat_n(
+                    KeyCode::Comma,
+                    crate::theme::ThemeName::ALL.len(),
+                ))
+        {
             let asset_counts = (
                 world.resource::<Assets<Mesh>>().len(),
                 world.resource::<Assets<Image>>().len(),
@@ -1957,10 +2118,17 @@ mod tests {
                 ..default()
             };
         labels(world);
+        let expected_name = if world.resource::<Playback>().0.theme().label_style
+            == crate::theme::LabelStyle::SmallCaps
+        {
+            "PORTRAIT"
+        } else {
+            "Portrait"
+        };
         let mut label_query = world
             .query_filtered::<(&Text, &Visibility, &UiTargetCamera), With<Label>>();
         assert!(label_query.iter(world).any(|(text, visibility, _)| {
-            text.0 == "Portrait" && *visibility == Visibility::Inherited
+            text.0 == expected_name && *visibility == Visibility::Inherited
         }));
         for (_, _, target) in label_query.iter(world) {
             assert_eq!(target.0, scene);

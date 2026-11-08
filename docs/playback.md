@@ -23,9 +23,24 @@ the exported camera or timeline.
 
 ## Themes
 
-`--theme neon|phosphor` selects the starting theme for preview and export;
-the default is `neon`. Switching themes in preview changes only colours and icons:
+`--theme` selects the starting theme for preview and export;
+the default is `neon`. Switching themes in preview changes styling:
 layout, playback position and camera stay put.
+
+The seven themes are `neon`, `phosphor`, `outrun`, `blueprint`,
+`bevelled-desktop`, `atlas` and `forge`. Choose one for preview or export:
+
+```sh
+codestrand preview --theme outrun
+codestrand export frames --theme atlas --frames 90 --fps 30
+```
+
+Outrun uses pink tiles, arched beams and a banded sunset. Blueprint uses hatched
+plates and construction lines. Bevelled Desktop uses page icons and static
+black/white dashed beams. Atlas uses survey points, paper contours and tinted
+top-level territories. Forge uses iron plates coloured by file heat.
+Blueprint and Atlas use ink without additive glow. All grounds and dash patterns
+are steady; switching with `,` and `.` preserves playback and file positions.
 
 ## File heat
 
@@ -36,6 +51,11 @@ Neon and Phosphor brighten file icons through 32 shared brightness levels while
 cold icons remain readable. Heat below 0.001 settles to zero. Activity halos pulse
 on every touch and decay independently with a 1.6-second time constant, unaffected
 by diff size or the heat half-life.
+
+Forge maps the same 32 heat buckets from dark iron through red and orange to
+white heat. Only warm plates contribute to thresholded bloom. Blueprint, Atlas
+and Bevelled Desktop keep constant ink brightness; touched files still receive
+activity outlines.
 
 `--heat-half-life 3` sets the cooling half-life in canonical playback seconds for
 preview and export (default `3`, accepted range `0.01` through `86400`). Live speed

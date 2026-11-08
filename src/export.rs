@@ -68,14 +68,14 @@ fn render(
     }
     app.finish();
     app.cleanup();
-    let readiness_started = Instant::now();
+
     loop {
         update(&mut app)?;
+        if started.elapsed() > WAIT_LIMIT {
+            bail!("text and rendering pipelines were not ready within 30 seconds");
+        }
         if ready(&mut app) {
             break;
-        }
-        if readiness_started.elapsed() > WAIT_LIMIT {
-            bail!("text and rendering pipelines were not ready within 30 seconds");
         }
     }
     let started = Instant::now();
@@ -189,7 +189,7 @@ mod tests {
         theme::{Theme, ThemeName},
         timeline,
     };
-    use bevy::prelude::IntoScheduleConfigs;
+    use bevy::{color::ColorToPacked, prelude::IntoScheduleConfigs};
 
     #[test]
     #[ignore = "requires a graphics adapter; writes a live theme-switch sequence"]
@@ -221,30 +221,50 @@ mod tests {
         }
         let simulation = Simulation::new(
             events,
-            &model::Options::default(),
+            &model::Options {
+                start: 4,
+                seconds_per_day: 2.0,
+                max_idle_seconds: 2.0,
+                ..Default::default()
+            },
             &Theme::neon(),
             &contributors::Mappings::default(),
         );
         let (mut app, target) = scene::headless(
             simulation,
             "Live theme switch / portrait fixture".to_owned(),
-            15,
+            5,
         );
         app.add_systems(
             bevy::prelude::Update,
             (|world: &mut bevy::prelude::World| {
                 let index = world.resource::<scene::Frame>().index;
-                let wanted = if (45..90).contains(&index) {
-                    ThemeName::Phosphor
-                } else {
-                    ThemeName::Neon
-                };
+                let wanted = ThemeName::ALL[usize::try_from(index / 10)
+                    .unwrap()
+                    .min(ThemeName::ALL.len() - 1)];
                 if world.resource::<scene::Playback>().0.theme().name != wanted {
                     scene::switch_theme(world, wanted);
                 }
             })
             .before(scene::animate),
         );
-        render(&output, (app, target), 120, 15, 0, None).unwrap();
+        render(&output, (app, target), 70, 5, 0, None).unwrap();
+        for index in 0..70 {
+            let name = ThemeName::ALL[index / 10];
+            let image = image::open(output.join(format!("frame-{index:05}.png")))
+                .unwrap()
+                .to_rgb8();
+            let corner = image.get_pixel(0, 0);
+            let expected = name.build().clear.to_srgba().to_u8_array();
+            assert!(
+                corner
+                    .0
+                    .iter()
+                    .zip(expected)
+                    .all(|(&actual, expected)| actual.abs_diff(expected) <= 3),
+                "{} must replace the previous camera target",
+                name.title()
+            );
+        }
     }
 }

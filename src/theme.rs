@@ -8,13 +8,23 @@ pub(super) struct Geometry {
     pub avatar_label_offset: Vec3,
     pub label_height: f32,
 }
+mod candidates;
+mod ground;
 mod icons;
+pub(crate) use candidates::{
+    AvatarStyle, BeamStyle, FontStyle, GlyphStyle, LabelStyle,
+};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
 pub(super) enum ThemeName {
     #[default]
     Neon,
     Phosphor,
+    Outrun,
+    Blueprint,
+    BevelledDesktop,
+    Atlas,
+    Forge,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,7 +43,15 @@ impl ThemeDirection {
 }
 
 impl ThemeName {
-    pub(super) const ALL: [Self; 2] = [Self::Neon, Self::Phosphor];
+    pub(super) const ALL: [Self; 7] = [
+        Self::Neon,
+        Self::Phosphor,
+        Self::Outrun,
+        Self::Blueprint,
+        Self::BevelledDesktop,
+        Self::Atlas,
+        Self::Forge,
+    ];
 
     pub(super) fn cycle(self, direction: ThemeDirection) -> Self {
         let index = Self::ALL
@@ -47,6 +65,11 @@ impl ThemeName {
         match self {
             Self::Neon => "Neon",
             Self::Phosphor => "Phosphor",
+            Self::Outrun => "Outrun",
+            Self::Blueprint => "Blueprint",
+            Self::BevelledDesktop => "Bevelled Desktop",
+            Self::Atlas => "Atlas",
+            Self::Forge => "Forge",
         }
     }
 
@@ -54,12 +77,26 @@ impl ThemeName {
         match self {
             Self::Neon => Theme::neon(),
             Self::Phosphor => Theme::phosphor(),
+            Self::Outrun
+            | Self::Blueprint
+            | Self::BevelledDesktop
+            | Self::Atlas
+            | Self::Forge => candidates::build(self),
         }
     }
 }
 
 #[derive(Clone)]
 pub(super) struct Theme {
+    pub(crate) glyph_style: GlyphStyle,
+    pub(crate) beam_style: BeamStyle,
+    pub(crate) avatar_style: AvatarStyle,
+    pub(crate) font: FontStyle,
+    pub(crate) blackbody: bool,
+    pub(crate) textured_ground: bool,
+    pub(crate) edge_dash: Option<f32>,
+    pub(crate) label_style: LabelStyle,
+    pub(crate) territories: bool,
     pub(super) name: ThemeName,
     pub(super) glyph_ink: Option<[u8; 3]>,
     pub(super) glyphs: &'static [FileGlyph],
@@ -116,6 +153,22 @@ pub(super) struct FileTile {
 
 impl Theme {
     pub(super) fn heat_color(&self, heat: f32) -> Color {
+        if self.blackbody {
+            let heat = heat.clamp(0.0, 1.0);
+            for pair in candidates::BLACKBODY.windows(2) {
+                let [(low, from), (high, to)] = [pair[0], pair[1]];
+                if heat <= high {
+                    let from = Srgba::from(candidates::color(from));
+                    let to = Srgba::from(candidates::color(to));
+                    let t = (heat - low) / (high - low);
+                    return Color::srgb(
+                        from.red + (to.red - from.red) * t,
+                        from.green + (to.green - from.green) * t,
+                        from.blue + (to.blue - from.blue) * t,
+                    );
+                }
+            }
+        }
         let base = LinearRgba::from(self.glyph_material.base_color);
         let brightness = 1.0 + self.heat_gain * heat.clamp(0.0, 1.0);
         Color::linear_rgba(
@@ -141,6 +194,15 @@ impl Theme {
             ..default()
         };
         Self {
+            glyph_style: GlyphStyle::default(),
+            beam_style: BeamStyle::default(),
+            avatar_style: AvatarStyle::default(),
+            font: FontStyle::default(),
+            blackbody: false,
+            textured_ground: false,
+            edge_dash: None,
+            label_style: LabelStyle::default(),
+            territories: false,
             name: ThemeName::Neon,
             heat_gain: 2.5,
             glyph_ink: None,
@@ -318,8 +380,65 @@ mod tests {
     use super::*;
 
     #[test]
+    fn forge_interpolates_the_approved_ramp_and_clamps() {
+        let theme = ThemeName::Forge.build();
+        for (heat, hex) in candidates::BLACKBODY {
+            let actual = Srgba::from(theme.heat_color(heat));
+            let expected = Srgba::from(candidates::color(hex));
+            assert!((actual.red - expected.red).abs() < 0.000_001);
+            assert!((actual.green - expected.green).abs() < 0.000_001);
+            assert!((actual.blue - expected.blue).abs() < 0.000_001);
+        }
+        assert_eq!(theme.heat_color(-1.0), theme.heat_color(0.0));
+        assert_eq!(theme.heat_color(2.0), theme.heat_color(1.0));
+        let midpoint = Srgba::from(theme.heat_color(0.15));
+        assert!((midpoint.red - 81.0 / 255.0).abs() < 0.000_001);
+        assert!(theme.heat_emissive(0.3).red < 1.0);
+        let threshold = theme.bloom().unwrap().prefilter.threshold;
+        assert!(theme.heat_emissive(0.29).red < threshold);
+        assert!(theme.heat_emissive(0.31).red > threshold);
+        assert!(theme.heat_emissive(0.9).red > 1.0);
+    }
+
+    #[test]
+    fn ink_themes_disable_heat_brightening_and_bloom() {
+        for name in [
+            ThemeName::Blueprint,
+            ThemeName::Atlas,
+            ThemeName::BevelledDesktop,
+        ] {
+            let theme = name.build();
+            assert_eq!(theme.heat_color(0.0), theme.heat_color(1.0));
+            assert!(theme.bloom().is_none());
+            assert_eq!(theme.heat_emissive(1.0), LinearRgba::BLACK);
+        }
+    }
+
+    #[test]
+    fn candidates_have_distinct_valid_art_and_textured_grounds() {
+        let mut glyphs = std::collections::HashSet::new();
+        let mut grounds = std::collections::HashSet::new();
+        for name in ThemeName::ALL.into_iter().skip(2) {
+            let theme = name.build();
+            assert!(theme.textured_ground);
+            let glyph = theme.glyph_svg(theme.glyphs[0].svg, 0);
+            let ground = theme.ground_svg();
+            for svg in [&glyph, &ground] {
+                assert!(
+                    resvg::usvg::Tree::from_str(svg, &resvg::usvg::Options::default())
+                        .is_ok()
+                );
+            }
+            assert!(glyphs.insert(glyph));
+            assert!(grounds.insert(ground));
+        }
+        let desktop = ThemeName::BevelledDesktop.build();
+        assert_ne!(desktop.glyph_svg("", 1), desktop.glyph_svg("", 2));
+    }
+
+    #[test]
     fn heat_brightens_both_themes_without_fading_cold_files() {
-        for name in ThemeName::ALL {
+        for name in [ThemeName::Neon, ThemeName::Phosphor] {
             let theme = name.build();
             let cold = LinearRgba::from(theme.heat_color(0.0));
             let warm = LinearRgba::from(theme.heat_color(0.5));
