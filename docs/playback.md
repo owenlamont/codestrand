@@ -104,10 +104,13 @@ subtree size, with at most four extra top-level labels beyond the usual twenty.
 Labels inside fully collapsed subtrees and overlapping directory labels are omitted
 to keep the overview readable.
 
-In repository playback, changed files show green added lines and red removed lines,
-fading with the commit's activity. Samples are hidden at overview scale, then fade
-in as the camera zooms closer: zero opacity at 12 projected text pixels, full opacity
-at 18. Colours follow the selected theme.
+In repository playback, sampled added lines ride the green fragments descending
+from the contributor; removed lines ride the red fragments rising from the file.
+Camera-facing text follows each piece and fades with the fragment phase. Text renders
+above beams, on a dark inset for contrast. Neon uses vivid green/red; Phosphor uses
+softer green/red. Extra fragments stay plain. Samples are hidden at overview scale,
+then fade in as the camera zooms closer: zero opacity at 12 projected text pixels,
+full opacity at 18. Colours follow the selected theme.
 
 Samples come from actual changed lines: up to three per file and twelve per commit,
 preferring lines of 16–60 bytes. Lines over 72 bytes before trimming, non-ASCII text,

@@ -434,12 +434,16 @@ fn setup(world: &mut World) {
             Text::new(""),
             TextFont::from_font_size(4.0),
             TextColor(theme.diff_added),
+            theme.label_shadow,
             TextLayout::new(Justify::Left, bevy::text::LineBreak::NoWrap),
             Node {
                 position_type: PositionType::Absolute,
+                border: UiRect::all(px(1.0)),
                 ..default()
             },
-            ZIndex(-1),
+            BackgroundColor(theme.clear),
+            BorderColor::all(theme.diff_added),
+            ZIndex(1),
             Visibility::Hidden,
             UiTargetCamera(camera),
             DiffSample,
@@ -1628,7 +1632,10 @@ fn diff_samples(world: &mut World, camera: &Camera, transform: &GlobalTransform)
         .filter_map(|line| {
             let point = camera.world_to_viewport(transform, line.position).ok()?;
             let top = camera
-                .world_to_viewport(transform, line.position + transform.up() * 0.12)
+                .world_to_viewport(
+                    transform,
+                    line.position + transform.up() * (0.12 * line.scale),
+                )
                 .ok()?;
             let projected = point.distance(top);
             let visibility = crate::diff_samples::sample_visibility(projected);
@@ -1642,12 +1649,16 @@ fn diff_samples(world: &mut World, camera: &Camera, transform: &GlobalTransform)
                 theme.diff_removed
             };
             let prefix = if line.sample.added { '+' } else { '-' };
-            let row = f32::from(u8::try_from(line.row).expect("sample row is bounded"));
+            let width = f32::from(
+                u8::try_from(line.sample.text.len() + 2).expect("bounded ASCII sample"),
+            ) * size
+                * 0.6;
             Some((
                 format!("{prefix} {}", line.sample.text),
-                point + Vec2::Y * row * size * 1.2,
+                point - Vec2::new(width * 0.5, size * 0.6),
                 size,
-                color.with_alpha(line.alpha * visibility * 0.8),
+                color.with_alpha(line.alpha * visibility),
+                theme.clear.with_alpha(line.alpha * visibility * 0.94),
             ))
         })
         .collect();
@@ -1657,12 +1668,21 @@ fn diff_samples(world: &mut World, camera: &Camera, transform: &GlobalTransform)
         &mut Node,
         &mut TextFont,
         &mut TextColor,
+        &mut BackgroundColor,
+        &mut BorderColor,
         &mut Visibility,
     ), With<DiffSample>>();
-    for (mut text, mut node, mut font, mut color, mut visibility) in
-        query.iter_mut(world)
+    for (
+        mut text,
+        mut node,
+        mut font,
+        mut color,
+        mut background,
+        mut border,
+        mut visibility,
+    ) in query.iter_mut(world)
     {
-        if let Some((value, point, size, ink)) = wanted.next() {
+        if let Some((value, point, size, ink, fill)) = wanted.next() {
             text.set_if_neq(Text::new(value));
             node.left = px(point.x);
             node.top = px(point.y);
@@ -1671,6 +1691,8 @@ fn diff_samples(world: &mut World, camera: &Camera, transform: &GlobalTransform)
                 font.font_size = font_size;
             }
             color.set_if_neq(TextColor(ink));
+            background.set_if_neq(BackgroundColor(fill));
+            border.set_if_neq(BorderColor::all(ink));
             visibility.set_if_neq(Visibility::Inherited);
         } else {
             visibility.set_if_neq(Visibility::Hidden);

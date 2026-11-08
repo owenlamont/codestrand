@@ -66,12 +66,45 @@ struct Pulse {
     author: usize,
     targets: Vec<(Target, f32, u32, u32)>,
     aggregated: bool,
-    samples: Vec<(u64, usize, crate::diff_samples::Sample)>,
+    samples: Vec<(u64, crate::diff_samples::Sample)>,
+}
+
+impl Pulse {
+    fn samples_for(
+        &self,
+        target: Target,
+        rising: bool,
+    ) -> impl Iterator<Item = &crate::diff_samples::Sample> {
+        self.samples
+            .iter()
+            .filter(move |(id, sample)| {
+                target == Target::File(*id) && sample.added != rising
+            })
+            .map(|(_, sample)| sample)
+    }
+}
+
+fn attach_samples<'a>(
+    fragments: impl Iterator<Item = Fragment>,
+    mut samples: impl Iterator<Item = &'a crate::diff_samples::Sample>,
+    remaining: &mut usize,
+) -> Vec<Fragment> {
+    fragments
+        .map(|mut fragment| {
+            if *remaining > 0
+                && let Some(sample) = samples.next()
+            {
+                fragment.sample = Some(sample.clone());
+                *remaining -= 1;
+            }
+            fragment
+        })
+        .collect()
 }
 
 pub(super) struct DiffLine {
     pub position: Vec3,
-    pub row: usize,
+    pub scale: f32,
     pub sample: crate::diff_samples::Sample,
     pub alpha: f32,
 }
@@ -99,6 +132,7 @@ pub(super) struct Fragment {
     pub position: Vec3,
     pub rising: bool,
     pub scale: f32,
+    pub sample: Option<crate::diff_samples::Sample>,
 }
 
 /// Placement priority, highest first, when labels would overlap on screen.
@@ -413,7 +447,9 @@ impl Simulation {
     pub(super) fn fragments(&self) -> Vec<Fragment> {
         let now = self.seconds();
         let mut fragments = Vec::new();
-        for pulse in &self.state.pulses {
+        let mut newest = BTreeMap::new();
+        let mut remaining = crate::diff_samples::PER_COMMIT;
+        for (pulse_index, pulse) in self.state.pulses.iter().enumerate().rev() {
             let age = now - pulse.start;
             let envelope = envelope(age, pulse.end - pulse.start);
             if envelope <= 0.0 {
@@ -426,43 +462,36 @@ impl Simulation {
                 let Some(to) = self.state.point(target) else {
                     continue;
                 };
-                fragments
-                    .extend(diff_fragments(age, envelope, from, to, insertions, false));
-                fragments
-                    .extend(diff_fragments(age, envelope, from, to, removals, true));
+                let current = match target {
+                    Target::File(id) => {
+                        *newest.entry(id).or_insert(pulse_index) == pulse_index
+                    }
+                    Target::Dir(_) => false,
+                };
+                for (count, rising) in [(insertions, false), (removals, true)] {
+                    fragments.extend(attach_samples(
+                        diff_fragments(age, envelope, from, to, count, rising),
+                        pulse.samples_for(target, rising).filter(|_| current),
+                        &mut remaining,
+                    ));
+                }
             }
         }
         fragments
     }
 
     pub(super) fn diff_lines(&self) -> Vec<DiffLine> {
-        let now = self.seconds();
-        let mut newest = BTreeMap::new();
-        let mut lines = Vec::new();
-        for (pulse_index, pulse) in self.state.pulses.iter().enumerate().rev() {
-            let alpha = envelope(now - pulse.start, pulse.end - pulse.start);
-            if alpha <= 0.0 {
-                continue;
-            }
-            for (id, row, sample) in &pulse.samples {
-                if *newest.entry(*id).or_insert(pulse_index) != pulse_index {
-                    continue;
-                }
-                let Some(position) = self.state.point(Target::File(*id)) else {
-                    continue;
-                };
-                lines.push(DiffLine {
-                    position: position + Vec3::new(0.48, 0.08, 0.0),
-                    row: *row,
-                    sample: sample.clone(),
-                    alpha,
-                });
-                if lines.len() == crate::diff_samples::PER_COMMIT {
-                    return lines;
-                }
-            }
-        }
-        lines
+        self.fragments()
+            .into_iter()
+            .filter_map(|fragment| {
+                Some(DiffLine {
+                    position: fragment.position,
+                    scale: fragment.scale * self.scale().sqrt(),
+                    sample: fragment.sample?,
+                    alpha: fragment.scale,
+                })
+            })
+            .collect()
     }
 
     #[cfg(test)]
@@ -637,14 +666,9 @@ impl State {
         for change in &event.changes {
             let id = apply(&mut self.layout, change, author);
             touched.insert(id, (change.insertions, change.removals));
-            for (row, sample) in change
-                .samples
-                .iter()
-                .take(crate::diff_samples::PER_FILE)
-                .enumerate()
-            {
+            for sample in change.samples.iter().take(crate::diff_samples::PER_FILE) {
                 if samples.len() < crate::diff_samples::PER_COMMIT {
-                    samples.push((id, row, sample.clone()));
+                    samples.push((id, sample.clone()));
                 }
             }
         }
@@ -1015,6 +1039,7 @@ fn diff_fragments(
         Fragment {
             position,
             rising,
+            sample: None,
             scale: envelope * (1.0 - phase.powi(6)),
         }
     })
@@ -1134,6 +1159,54 @@ mod tests {
     }
 
     #[test]
+    fn samples_attach_to_matching_directions_and_leave_extra_pieces_plain() {
+        let mut events = crate::timeline::synthetic();
+        events.truncate(1);
+        events[0].changes.truncate(1);
+        let change = &mut events[0].changes[0];
+        change.insertions = 7;
+        change.removals = 7;
+        change.samples = vec![
+            crate::diff_samples::Sample {
+                added: true,
+                text: "let added = true;".to_owned(),
+            },
+            crate::diff_samples::Sample {
+                added: false,
+                text: "let removed = true;".to_owned(),
+            },
+        ];
+        let mut sim = super::Simulation::new(
+            events,
+            &super::Options::default(),
+            &crate::theme::Theme::neon(),
+            &crate::contributors::Mappings::default(),
+        );
+        sim.advance_to(45, 60);
+        let fragments = sim.fragments();
+        assert_eq!(fragments.len(), 6);
+        assert_eq!(
+            fragments
+                .iter()
+                .filter(|piece| piece.sample.is_none())
+                .count(),
+            4
+        );
+        for fragment in fragments.iter().filter(|piece| piece.sample.is_some()) {
+            assert_ne!(fragment.rising, fragment.sample.as_ref().unwrap().added);
+        }
+        let positions: Vec<_> =
+            sim.diff_lines().iter().map(|line| line.position).collect();
+        sim.advance_to(48, 60);
+        assert!(
+            sim.diff_lines()
+                .iter()
+                .zip(positions)
+                .all(|(line, old)| line.position != old)
+        );
+    }
+
+    #[test]
     fn diff_samples_follow_files_fade_and_rewind_at_explicit_times() {
         let mut events = crate::timeline::synthetic();
         events.truncate(1);
@@ -1149,11 +1222,11 @@ mod tests {
         );
         sim.advance_to(45, 60);
         let line = sim.diff_lines().pop().unwrap();
-        assert_eq!(line.alpha, 1.0);
-        assert_eq!(line.row, 0);
-        assert!(sim.layout().files().any(|(_, file)| {
-            (super::ground(file.position) + bevy::math::Vec3::new(0.48, 0.08, 0.0))
-                == line.position
+        assert!(line.alpha > 0.0 && line.alpha <= 1.0);
+        assert!(sim.fragments().iter().any(|fragment| {
+            !fragment.rising
+                && fragment.position == line.position
+                && fragment.sample.is_some()
         }));
         sim.advance_to(102, 60);
         let faded = sim.diff_lines().pop().unwrap();

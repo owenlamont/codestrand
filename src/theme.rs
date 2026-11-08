@@ -234,8 +234,8 @@ impl Theme {
             clear: Color::srgb(0.012, 0.023, 0.04),
             edge: solid(Color::srgb(0.09, 0.2, 0.28)),
             grid: solid(Color::srgb(0.045, 0.09, 0.13)),
-            descending: solid(developers[0]),
-            rising: solid(developers[1]),
+            descending: solid(Color::srgb(0.25, 0.85, 0.42)),
+            rising: solid(Color::srgb(0.95, 0.28, 0.32)),
             floor: solid(Color::srgb(0.02, 0.036, 0.06)),
             avatars: developers.map(solid),
             glass: developers.map(|color| StandardMaterial {
@@ -286,8 +286,8 @@ impl Theme {
         theme.floor.base_color = Color::BLACK;
         theme.grid.base_color = Color::srgb(0.045, 0.105, 0.055);
         theme.edge.base_color = Color::srgb(0.10, 0.32, 0.16);
-        theme.descending.base_color = green;
-        theme.rising.base_color = Color::srgb(0.65, 1.0, 0.72);
+        theme.descending.base_color = Color::srgb(0.45, 0.92, 0.5);
+        theme.rising.base_color = Color::srgb(0.85, 0.38, 0.3);
         let contributors = [
             Color::hsl(100.0, 0.90, 0.60),
             Color::hsl(112.0, 0.85, 0.46),
