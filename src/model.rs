@@ -18,7 +18,9 @@ mod names;
 #[cfg(test)]
 mod pacing_tests;
 pub(crate) mod quality;
+pub(crate) mod schedule;
 pub(super) use names::rect as label_rect;
+use schedule::Schedule;
 
 pub(super) const TICK_RATE: u32 = 60;
 pub(super) const PREVIEW_FPS: u16 = 30;
@@ -182,7 +184,7 @@ pub(super) struct Simulation {
     events: Vec<Event>,
     offset: usize,
     total: usize,
-    starts: Vec<f32>,
+    schedule: Schedule,
     playback_multiplier: f32,
     heat_half_life: f32,
     initial: State,
@@ -190,51 +192,34 @@ pub(super) struct Simulation {
     theme: Theme,
 }
 
-pub(super) fn event_starts(events: &[Event], rate: f32, idle: f32) -> Vec<f32> {
-    let mut previous = events.first().map_or(0, |event| event.seconds);
-    let mut now = LEAD_IN;
-    events
-        .iter()
-        .enumerate()
-        .map(|(index, event)| {
-            if index > 0 {
-                let seconds =
-                    u64::try_from(event.seconds.saturating_sub(previous)).unwrap_or(0);
-                let days = Duration::from_secs(seconds).as_secs_f32() / 86_400.0;
-                now += (days.max(0.1) * rate).min(idle).max(tick_seconds());
-            }
-            previous = event.seconds;
-            now
-        })
-        .collect()
-}
-
-fn layout_time(time: f32, starts: &[f32]) -> f32 {
-    let next = starts.partition_point(|&start| start <= time);
-    if next == 0 {
-        return time;
-    }
-    let previous = starts[next - 1];
-    // Preserve launch-timeline rounding so existing exports and quality reports stay identical.
-    if next == starts.len() {
-        return previous + time - previous;
-    }
-    let gap = starts[next] - previous;
-    previous + (time - previous) / gap * gap
-}
-
 impl Simulation {
     #[cfg(test)]
     pub(super) fn scheduled_starts(&self) -> &[f32] {
-        &self.starts
+        &self.schedule.starts
     }
 
     pub(super) fn new(
-        mut events: Vec<Event>,
+        events: Vec<Event>,
         options: &Options,
         theme: &Theme,
         mappings: &Mappings,
     ) -> Self {
+        Self::build(events, options, theme, mappings, &[])
+    }
+
+    fn build(
+        mut events: Vec<Event>,
+        options: &Options,
+        theme: &Theme,
+        mappings: &Mappings,
+        padding: &[(usize, u32)],
+    ) -> Self {
+        let padding_at = |index| {
+            padding
+                .iter()
+                .find(|&&(event, _)| event == index)
+                .map_or(0, |&(_, ticks)| ticks)
+        };
         if events.iter().any(|event| event.contributor.is_none()) {
             mappings.apply(&mut events);
         }
@@ -242,11 +227,15 @@ impl Simulation {
         let end = options
             .commits
             .map_or(events.len(), |count| (start + count).min(events.len()));
-        let layout_starts =
-            event_starts(&events, options.seconds_per_day, options.max_idle_seconds);
+        let layout_starts = Schedule::with_padding(
+            &events,
+            options.seconds_per_day,
+            options.max_idle_seconds,
+            |index| padding_at(index) * u32::from(index >= start),
+        );
         let mut state = State {
             tick: 0,
-            layout: Layout::scheduled(&events, &layout_starts),
+            layout: Layout::scheduled(&events, &layout_starts.starts),
             avatars: Vec::new(),
             authors: HashMap::new(),
             next_event: 0,
@@ -269,9 +258,10 @@ impl Simulation {
             }
         }
         if start > 0 {
-            state
-                .layout
-                .plan_time(layout_starts[start.min(layout_starts.len() - 1)] - LEAD_IN);
+            state.layout.plan_time(
+                layout_starts.starts[start.min(layout_starts.starts.len() - 1)]
+                    - LEAD_IN,
+            );
             state.layout.settle(SETTLE_TICKS, tick_seconds());
             state.avatars.clear();
             state.authors.clear();
@@ -280,13 +270,17 @@ impl Simulation {
         let total = events.len();
         events.truncate(end);
         events.drain(..start);
-        let starts =
-            event_starts(&events, options.seconds_per_day, options.max_idle_seconds);
+        let schedule = Schedule::with_padding(
+            &events,
+            options.seconds_per_day,
+            options.max_idle_seconds,
+            |index| padding_at(start + index),
+        );
         Self {
             events,
             offset: start,
             total,
-            starts,
+            schedule,
             playback_multiplier: 1.0,
             heat_half_life: options.heat_half_life,
             initial: state.clone(),
@@ -296,7 +290,7 @@ impl Simulation {
     }
 
     pub(super) fn duration(&self) -> f32 {
-        self.starts.last().copied().unwrap_or(LEAD_IN) + TAIL
+        self.schedule.duration()
     }
 
     pub(super) fn restart(&mut self) {
@@ -317,7 +311,7 @@ impl Simulation {
     }
 
     pub(super) fn advance_to(&mut self, frame: u32, fps: u16) {
-        let target = u64::from(frame) * u64::from(TICK_RATE) / u64::from(fps);
+        let target = Schedule::frame_tick(frame, fps);
         if target < self.state.tick {
             self.state = self.initial.clone();
         }
@@ -327,16 +321,14 @@ impl Simulation {
     }
 
     pub(crate) fn tick_layout(&mut self) {
-        let plan_time = layout_time(tick_time(self.state.tick + 1), &self.starts);
+        let plan_time = self.schedule.layout_time(tick_time(self.state.tick + 1));
         let state = &mut self.state;
         state.tick += 1;
-        let now = tick_time(state.tick);
         state.layout.cool_heat(tick_seconds(), self.heat_half_life);
         while let Some(event) = self.events.get(state.next_event) {
-            let start = self.starts[state.next_event];
-            if start > now {
+            let Some(start) = self.schedule.start(state.next_event, state.tick) else {
                 break;
-            }
+            };
             state.begin(event, start);
             state.next_event += 1;
         }
@@ -424,8 +416,8 @@ impl Simulation {
 
     pub(super) fn caption(&self) -> String {
         let Some(event) = self
-            .state
-            .next_event
+            .schedule
+            .applied(self.state.tick)
             .checked_sub(1)
             .and_then(|index| self.events.get(index))
         else {
@@ -1495,8 +1487,14 @@ mod tests {
         {
             event.seconds = seconds;
         }
-        assert_eq!(event_starts(&events, 2.0, 1.0), [0.5, 1.0, 1.5, 2.5, 3.0]);
-        assert_eq!(event_starts(&events, 1.0, 1.0), [0.5, 0.75, 1.0, 2.0, 2.25]);
+        assert_eq!(
+            Schedule::new(&events, 2.0, 1.0).starts,
+            [0.5, 1.0, 1.5, 2.5, 3.0]
+        );
+        assert_eq!(
+            Schedule::new(&events, 1.0, 1.0).starts,
+            [0.5, 0.75, 1.0, 2.0, 2.25]
+        );
     }
 
     #[test]
@@ -1538,7 +1536,7 @@ mod tests {
             event.seconds = seconds;
         }
         for rate in [0.01, 0.5, 100.0] {
-            let starts = event_starts(&events, rate, 1.0);
+            let starts = Schedule::new(&events, rate, 1.0).starts;
             assert!(starts.windows(2).all(|pair| pair[1] > pair[0]));
             assert!(
                 starts[..5]
@@ -1546,7 +1544,7 @@ mod tests {
                     .all(|pair| pair[1] - pair[0] >= tick_seconds() - 0.0001)
             );
         }
-        assert_eq!(event_starts(&[], 1.0, 1.0), [] as [f32; 0]);
+        assert_eq!(Schedule::new(&[], 1.0, 1.0).starts, [] as [f32; 0]);
     }
 
     #[test]
@@ -1609,14 +1607,17 @@ mod tests {
         assert_eq!(sim.state.next_event, 1);
         assert_eq!(sim.state.avatars[0].position, position);
         assert_eq!(sim.state.pulses[0].end, pulse_end);
-        assert_eq!(sim.starts[0], LEAD_IN);
-        assert_eq!(sim.starts[1], 1.0);
-        assert!(sim.starts.windows(2).all(|pair| pair[1] > pair[0]));
+        assert_eq!(sim.schedule.starts[0], LEAD_IN);
+        assert_eq!(sim.schedule.starts[1], 1.0);
+        assert!(sim.schedule.starts.windows(2).all(|pair| pair[1] > pair[0]));
         sim.change_rate(2.0);
-        assert!((sim.starts[1] - 1.0).abs() < 0.0001);
+        assert!((sim.schedule.starts[1] - 1.0).abs() < 0.0001);
         assert!(sim.caption().contains("1x"));
         sim.restart();
-        assert_eq!(sim.starts, event_starts(&sim.events, 0.5, 1.0));
+        assert_eq!(
+            sim.schedule.starts,
+            Schedule::new(&sim.events, 0.5, 1.0).starts
+        );
         assert_eq!(sim.state.next_event, 0);
     }
 
@@ -1631,19 +1632,22 @@ mod tests {
         {
             event.seconds = seconds;
         }
-        assert_eq!(event_starts(&events, 2.0, 1.0), [0.5, 1.5, 1.7, 2.7, 3.7]);
+        assert_eq!(
+            Schedule::new(&events, 2.0, 1.0).starts,
+            [0.5, 1.5, 1.7, 2.7, 3.7]
+        );
     }
 
     #[test]
     fn rate_controls_stop_at_multiplier_bounds() {
         for (factor, bound) in [(0.5, 0.125), (2.0, 8.0)] {
             let mut sim = simulation();
-            let starts = sim.starts.clone();
+            let starts = sim.schedule.starts.clone();
             for _ in 0..32 {
                 sim.change_rate(factor);
             }
             assert_eq!(sim.playback_multiplier(), bound);
-            assert_eq!(sim.starts, starts);
+            assert_eq!(sim.schedule.starts, starts);
             sim.change_rate(1.0 / factor);
             assert_eq!(sim.playback_multiplier(), bound / factor);
         }
@@ -1922,7 +1926,7 @@ mod tests {
     #[test]
     fn crowded_commit_aggregates_beams() {
         let mut sim = simulation();
-        let crowded = sim.starts[7] + 0.5;
+        let crowded = sim.schedule.starts[7] + 0.5;
         sim.advance_to(frame_at(crowded), 30);
         let beams = sim.beams();
         assert!(!beams.is_empty());
