@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    contributors::{Accounts, Key},
+    contributors::{Accounts, Avatar, Key},
     timeline::Event,
 };
 
@@ -323,11 +323,12 @@ pub(super) fn now() -> u64 {
 }
 
 fn priority(event: &Event) -> u8 {
-    if event
-        .contributor
-        .as_ref()
-        .is_some_and(|contributor| contributor.accounts.github.is_some())
-    {
+    if event.contributor.as_ref().is_some_and(|contributor| {
+        let accounts = &contributor.accounts;
+        accounts.github.is_some()
+            || accounts.gitlab.is_some()
+            || accounts.avatar.is_some()
+    }) {
         0
     } else if noreply(&String::from_utf8_lossy(&event.author.email)).is_some() {
         1
@@ -353,6 +354,21 @@ fn github_image(
     }
     let encoded = login.replace('[', "%5B").replace(']', "%5D");
     format!("https://github.com/{encoded}.png?size=128")
+}
+
+fn gitlab_email_url(email: &str) -> String {
+    let encoded: String = email
+        .bytes()
+        .flat_map(|byte| {
+            const HEX: &[u8; 16] = b"0123456789ABCDEF";
+            [
+                '%',
+                char::from(HEX[usize::from(byte >> 4)]),
+                char::from(HEX[usize::from(byte & 15)]),
+            ]
+        })
+        .collect();
+    format!("https://gitlab.com/api/v4/avatar?email={encoded}&size=128")
 }
 
 pub(super) struct Resolver<N> {
@@ -411,7 +427,9 @@ impl<N: Network> Resolver<N> {
                 .trim()
                 .to_ascii_lowercase();
             let accounts = &contributor.accounts;
-            let key = if accounts.gitlab.is_none()
+            let key = if let Some(Avatar::Remote(url)) = &accounts.avatar {
+                format!("override\n{url}")
+            } else if accounts.gitlab.is_none()
                 && accounts.avatar.is_none()
                 && !self.gitlab_email
             {
@@ -515,10 +533,14 @@ impl<N: Network> Resolver<N> {
         remote: Option<&str>,
         commit: &str,
     ) -> Option<Arc<Portrait>> {
-        if let Some(avatar) = &accounts.avatar
-            && !https_url(avatar)
-        {
-            return local_portrait(Path::new(avatar)).map(Arc::new);
+        if let Some(Avatar::Local(path)) = &accounts.avatar {
+            if let Some(portrait) = local_portrait(path) {
+                return Some(Arc::new(portrait));
+            }
+            eprintln!(
+                "avatars: local override {} unavailable; trying account lookups",
+                path.display()
+            );
         }
         let cached = self.read(key);
         let stale = cached
@@ -534,8 +556,8 @@ impl<N: Network> Resolver<N> {
             return stale;
         }
         let mut complete = true;
-        if let Some(avatar) = &accounts.avatar {
-            return self.remote_override(key, avatar, stale);
+        if let Some(Avatar::Remote(url)) = &accounts.avatar {
+            return self.remote_override(key, url, stale);
         }
         let github = accounts.github.as_deref();
         let mut image =
@@ -568,19 +590,8 @@ impl<N: Network> Resolver<N> {
             image = self.image(&url, &mut complete, stale.is_some());
         }
         if image.is_none() && self.gitlab_email && !email.is_empty() {
-            let encoded: String = email
-                .bytes()
-                .flat_map(|byte| {
-                    const HEX: &[u8; 16] = b"0123456789ABCDEF";
-                    [
-                        '%',
-                        char::from(HEX[usize::from(byte >> 4)]),
-                        char::from(HEX[usize::from(byte & 15)]),
-                    ]
-                })
-                .collect();
             image = self.gitlab(
-                &format!("https://gitlab.com/api/v4/avatar?email={encoded}&size=128"),
+                &gitlab_email_url(email),
                 None,
                 &mut complete,
                 stale.is_some(),
@@ -697,14 +708,19 @@ impl<N: Network> Resolver<N> {
         } else {
             serde_json::from_slice::<Avatar>(&bytes).map(|avatar| avatar.avatar_url)
         };
-        match avatar {
-            Ok(Some(url)) if https_url(&url) => self.image(&url, complete, has_stale),
-            Ok(None) => None,
-            Ok(Some(_)) | Err(_) => {
-                *complete = false;
-                None
-            }
+        let url = avatar.ok().flatten()?;
+        if !https_url(&url) {
+            return None;
         }
+        let host = url
+            .parse::<ureq::http::Uri>()
+            .ok()?
+            .host()?
+            .to_ascii_lowercase();
+        if host == "gravatar.com" || host.ends_with(".gravatar.com") {
+            return None;
+        }
+        self.image(&url, complete, has_stale)
     }
 
     fn account(
@@ -1087,13 +1103,14 @@ mod tests {
         fs::write(&path, png()).unwrap();
         let mut source = event("author@example.invalid", Some("explicit"));
         source.contributor.as_mut().unwrap().accounts.avatar =
-            Some(path.to_string_lossy().into_owned());
+            Some(Avatar::Local(path));
         let mut local = resolver(None, false, vec![]);
         let mut events = [source.clone()];
         local.resolve(&mut events, Some("owner/repo"));
         assert!(visible(&events[0]));
-        source.contributor.as_mut().unwrap().accounts.avatar =
-            Some("https://example.invalid/portrait.png".to_owned());
+        source.contributor.as_mut().unwrap().accounts.avatar = Some(Avatar::Remote(
+            "https://example.invalid/portrait.png".to_owned(),
+        ));
         for response in [Response::Missing, Response::Found(png())] {
             let mut remote = resolver(None, true, vec![response]);
             remote.gitlab_email = true;
@@ -1109,8 +1126,9 @@ mod tests {
     fn remote_override_cache_refresh_retains_failures_and_clears_confirmed_misses() {
         let root = tempfile::tempdir().unwrap();
         let mut source = event("a@example.invalid", None);
-        source.contributor.as_mut().unwrap().accounts.avatar =
-            Some("https://example.invalid/portrait.png".to_owned());
+        source.contributor.as_mut().unwrap().accounts.avatar = Some(Avatar::Remote(
+            "https://example.invalid/portrait.png".to_owned(),
+        ));
         let mut initial = resolver(
             Some(root.path().to_owned()),
             true,
@@ -1118,28 +1136,125 @@ mod tests {
         );
         initial.resolve(&mut [source.clone()], None);
         let mut events = [source];
+        let accounts = &mut events[0].contributor.as_mut().unwrap().accounts;
+        accounts.github = Some("changed".to_owned());
+        accounts.gitlab = Some("changed".to_owned());
+        accounts.gravatar = Some("changed@example.invalid".to_owned());
+        events[0].author.email = b"changed@example.invalid".to_vec();
         let mut offline = resolver(Some(root.path().to_owned()), false, vec![]);
+        offline.gitlab_email = true;
         offline.now += TTL;
-        offline.resolve(&mut events, None);
+        offline.resolve(&mut events, Some("changed/repository"));
         assert!(visible(&events[0]));
         let mut failed = resolver(
             Some(root.path().to_owned()),
             true,
             vec![Response::Unavailable],
         );
+        failed.gitlab_email = true;
         failed.now += TTL;
         failed.resolve(&mut events, None);
         assert!(visible(&events[0]));
         let mut missing =
             resolver(Some(root.path().to_owned()), true, vec![Response::Missing]);
+        missing.gitlab_email = true;
         missing.now += TTL;
         missing.resolve(&mut events, None);
         assert!(!visible(&events[0]));
         let mut cached = resolver(Some(root.path().to_owned()), true, vec![]);
+        cached.gitlab_email = true;
         cached.now += TTL;
         cached.resolve(&mut events, None);
         assert!(!visible(&events[0]));
         assert_eq!(cached.network.calls.len(), 0);
+    }
+
+    #[test]
+    fn gitlab_gravatar_and_invalid_responses_are_cached_misses() {
+        for payload in [
+            br#"{"avatar_url":"https://www.gravatar.com/avatar/md5?d=identicon"}"#
+                .as_slice(),
+            br#"{"avatar_url":"https://GRAVATAR.COM/avatar/md5?d=identicon"}"#,
+            br#"{"avatar_url":"https://secure.gravatar.com/avatar/md5"}"#,
+            br#"{"avatar_url":"http://gitlab.com/avatar.png"}"#,
+            b"invalid",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let mut source = event("commit@example.invalid", None);
+            source.contributor.as_mut().unwrap().accounts.gravatar =
+                Some("configured@example.invalid".to_owned());
+            let mut initial = resolver(
+                Some(root.path().to_owned()),
+                true,
+                vec![Response::Found(payload.to_vec()), Response::Missing],
+            );
+            initial.gitlab_email = true;
+            initial.resolve(&mut [source.clone()], None);
+            assert_eq!(initial.network.calls.len(), 2);
+            assert_eq!(
+                initial.network.calls[1].0,
+                format!(
+                    "https://www.gravatar.com/avatar/{}?s=128&d=404",
+                    hash("configured@example.invalid")
+                )
+            );
+            let mut cached = resolver(Some(root.path().to_owned()), true, vec![]);
+            cached.gitlab_email = true;
+            cached.resolve(&mut [source], None);
+            assert_eq!(cached.network.calls.len(), 0);
+        }
+    }
+
+    #[test]
+    fn missing_and_undecodable_local_overrides_fall_back() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("portrait.png");
+        for bytes in [None, Some(b"invalid".as_slice())] {
+            if let Some(bytes) = bytes {
+                fs::write(&path, bytes).unwrap();
+            }
+            let mut source = event("commit@example.invalid", Some("explicit"));
+            source.contributor.as_mut().unwrap().accounts.avatar =
+                Some(Avatar::Local(path.clone()));
+            let mut resolver = resolver(None, true, vec![Response::Found(png())]);
+            let mut events = [source];
+            resolver.resolve(&mut events, None);
+            assert!(visible(&events[0]));
+            assert_eq!(
+                resolver.network.calls[0].0,
+                "https://github.com/explicit.png?size=128"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn local_override_loads_non_unicode_path_offline() {
+        use std::os::windows::ffi::OsStringExt;
+        let root = tempfile::tempdir().unwrap();
+        let filename = std::ffi::OsString::from_wide(&[0xD800, 0x2E, 0x70, 0x6E, 0x67]);
+        let path = root.path().join(filename);
+        fs::write(&path, png()).unwrap();
+        let mut source = event("commit@example.invalid", None);
+        source.contributor.as_mut().unwrap().accounts.avatar =
+            Some(Avatar::Local(path));
+        let mut resolver = resolver(None, false, vec![]);
+        let mut events = [source];
+        resolver.resolve(&mut events, None);
+        assert!(visible(&events[0]));
+        assert_eq!(resolver.network.calls.len(), 0);
+    }
+
+    #[test]
+    fn explicit_gitlab_and_override_have_first_priority() {
+        let inferred = event("123+inferred@users.noreply.github.com", None);
+        let mut gitlab = event("gitlab@example.invalid", None);
+        gitlab.contributor.as_mut().unwrap().accounts.gitlab = Some("alice".to_owned());
+        let mut avatar = event("avatar@example.invalid", None);
+        avatar.contributor.as_mut().unwrap().accounts.avatar =
+            Some(Avatar::Remote("https://example.invalid/a.png".to_owned()));
+        assert!(priority(&gitlab) < priority(&inferred));
+        assert!(priority(&avatar) < priority(&inferred));
     }
 
     #[test]

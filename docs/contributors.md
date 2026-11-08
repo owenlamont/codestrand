@@ -29,7 +29,8 @@ Account fields accept usernames, never profile URLs or whitespace. GitHub logins
 letters, digits and hyphens (bot logins may end in `[bot]`); GitLab usernames start with
 a letter or digit and may also contain `_`, `-` and `.`. Invalid fields report the file,
 contributor and field. Local avatar paths resolve relative to the TOML file. Local images
-must exist and decode as PNG, JPEG or GIF, at most 4 MiB and 2048 pixels per side.
+must decode as PNG, JPEG or GIF, at most 4 MiB and 2048 pixels per side. Missing or
+undecodable local images produce a warning and fall back to account lookups.
 Remote overrides require an HTTPS URL without credentials.
 
 ## Contributor avatars
@@ -46,8 +47,9 @@ codestrand export frames --repository /path/to/repo --fetch-avatars
 
 Resolution stops at the first usable portrait, in the following order:
 
-1. Explicit `avatar`: local file or cached/fetched HTTPS image. An unavailable override
-   keeps the default glyph (or its previous cached portrait), without account lookups.
+1. Explicit `avatar`: local file or cached/fetched HTTPS image. An unavailable local
+   file warns and continues below. An unavailable HTTPS override keeps the default glyph
+   (or its previous cached portrait), without account lookups.
 2. Explicit `github`, then explicit `gitlab` using the GitLab.com Users API.
 3. GitHub noreply login, then the commit author's GitHub account when a remote points
    to github.com (`origin` preferred). An explicit GitHub login replaces inferred
@@ -87,8 +89,9 @@ codestrand export frames --repository /path/to/repo --fetch-avatars --gitlab-ema
   in a URL query. The returned image host receives the avatar URL.
 
 Identifiers and email hashes are identifying information. GitLab may return an external
-avatar URL, including a Gravatar URL with an email hash or a generated placeholder;
-fetching follows that URL. HTTPS redirects can also contact another image host.
+avatar URL; fetching follows that URL unless the host is `gravatar.com` or a subdomain.
+GitLab Gravatar URLs are treated as misses so the configured Gravatar step decides.
+HTTPS redirects can also contact another image host.
 An explicit avatar URL can itself contain identifying information supplied by the user.
 GitHub credentials are never added to GitLab or image requests. Diagnostics show counts,
 not emails or request URLs. Local avatar overrides do not require either fetch flag.
@@ -97,8 +100,9 @@ not emails or request URLs. Local avatar overrides do not require either fetch f
 
 Portraits and account resolutions live under `codestrand/avatars-v2/` in the platform
 cache directory, keyed by a hash of email, explicit accounts, override, remote and GitLab
-email setting. Existing GitHub/Gravatar-only cache entries remain usable. Changing the
-GitLab email flag selects a separate cache entry; pass `--gitlab-email-avatars` without
+email setting. Remote overrides are keyed only by URL. Existing GitHub/Gravatar-only
+cache entries remain usable. For account lookups, changing the GitLab email flag selects
+a separate cache entry; pass `--gitlab-email-avatars` without
 `--fetch-avatars` to reuse an opted-in portrait offline. The email flag alone never
 enables network requests.
 Portraits are resized to 128-pixel PNG files beside small JSON account records.

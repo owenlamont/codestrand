@@ -91,7 +91,7 @@ struct Source {
     /// Fetch contributor avatars before playback; sends account requests and email hashes.
     #[arg(long)]
     fetch_avatars: bool,
-    /// Allow sending commit emails to GitLab.com when --fetch-avatars is enabled.
+    /// Select opted-in GitLab cache entries offline; allow email lookup with --fetch-avatars.
     #[arg(long)]
     gitlab_email_avatars: bool,
     /// Commits laid out and settled before playback begins.

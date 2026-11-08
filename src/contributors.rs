@@ -27,8 +27,14 @@ pub(super) struct Contributor {
 pub(super) struct Accounts {
     pub github: Option<String>,
     pub gitlab: Option<String>,
-    pub avatar: Option<String>,
+    pub avatar: Option<Avatar>,
     pub gravatar: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum Avatar {
+    Local(PathBuf),
+    Remote(String),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -99,19 +105,18 @@ fn load_path(path: Option<&Path>, required: bool) -> Result<Mappings, Error> {
     Mappings::parse(&text, path)
 }
 
-fn avatar_path(value: &str, config: &Path) -> Result<String, &'static str> {
+fn avatar_path(value: &str, config: &Path) -> Result<Avatar, &'static str> {
     if value.contains("://") {
         return crate::avatars::https_url(value)
-            .then(|| value.to_owned())
+            .then(|| Avatar::Remote(value.to_owned()))
             .ok_or("expected an HTTPS URL or local image path");
     }
-    let image = config.parent().unwrap_or(Path::new(".")).join(value);
-    if value.is_empty() || crate::avatars::local_portrait(&image).is_none() {
-        return Err(
-            "local image must exist and decode (PNG, JPEG or GIF; at most 4 MiB and 2048 pixels per side)",
-        );
+    if value.is_empty() {
+        return Err("expected a nonempty local image path");
     }
-    Ok(image.to_string_lossy().into_owned())
+    Ok(Avatar::Local(
+        config.parent().unwrap_or(Path::new(".")).join(value),
+    ))
 }
 
 impl Mappings {
@@ -292,7 +297,6 @@ gravatar = "avatar@example.invalid"
             ("avatar", "http://example.invalid/avatar.png"),
             ("avatar", "https://"),
             ("avatar", "https://user:password@example.invalid/a.png"),
-            ("avatar", "absent.png"),
             ("avatar", ""),
         ] {
             let text = format!(
@@ -318,8 +322,8 @@ gravatar = "avatar@example.invalid"
             mappings.emails[b"a@example.invalid".as_slice()]
                 .accounts
                 .avatar
-                .as_deref(),
-            Some(image.to_string_lossy().as_ref())
+                .as_ref(),
+            Some(&Avatar::Local(image.clone()))
         );
         fs::write(&image, b"invalid").unwrap();
         assert!(
@@ -327,9 +331,20 @@ gravatar = "avatar@example.invalid"
                 "[[contributor]]\nname = 'Alice'\nemails = []\navatar = 'portrait.png'",
                 &root.path().join("contributors.toml")
             )
-            .is_err()
+            .is_ok()
         );
     }
+    #[cfg(windows)]
+    #[test]
+    fn local_override_preserves_non_unicode_parent() {
+        use std::os::windows::ffi::OsStringExt;
+        let parent = PathBuf::from(std::ffi::OsString::from_wide(&[0xD800]));
+        assert_eq!(
+            avatar_path("portrait.png", &parent.join("contributors.toml")).unwrap(),
+            Avatar::Local(parent.join("portrait.png"))
+        );
+    }
+
     #[test]
     fn two_emails_share_an_avatar_and_colour_identity() {
         let mappings = Mappings::parse(
