@@ -142,6 +142,72 @@ mod tests {
     }
 
     #[test]
+    fn opt_out_clears_samples_on_cache_hits_for_preview_and_export() {
+        use clap::Parser;
+
+        let repo = fixture();
+        let cache = tempfile::tempdir().unwrap();
+        let original = load(repo.path(), "HEAD", Some(cache.path())).unwrap();
+        assert_ne!(original[0].changes[0].samples, []);
+        for command in [vec!["preview"], vec!["export", "frames"]] {
+            let mut args = vec!["codestrand"];
+            args.extend(command);
+            args.extend([
+                "--repository",
+                repo.path().to_str().unwrap(),
+                "--no-diff-samples",
+            ]);
+            let cli = crate::Cli::parse_from(args);
+            let (crate::Command::Preview { source, .. }
+            | crate::Command::Export { source, .. }) = cli.command.unwrap()
+            else {
+                panic!("playback command")
+            };
+            let events = source.events(Some(cache.path())).unwrap();
+            assert!(
+                events
+                    .iter()
+                    .flat_map(|event| &event.changes)
+                    .all(|change| change.samples.is_empty())
+            );
+            assert_eq!(
+                events[0].changes[0].insertions,
+                original[0].changes[0].insertions
+            );
+        }
+        assert_eq!(
+            load(repo.path(), "HEAD", Some(cache.path())).unwrap(),
+            original
+        );
+    }
+
+    #[test]
+    fn sensitive_paths_and_renames_keep_counts_without_samples() {
+        let repo = fixture();
+        for path in [".env.local", "server.pem", "server.key", "id_rsa_backup"] {
+            fs::write(repo.path().join(path), "let ordinary = calculate();\n").unwrap();
+        }
+        git(repo.path(), &["add", "."]);
+        git(repo.path(), &["commit", "-m", "sensitive paths"]);
+        git(repo.path(), &["mv", ".env.local", "ordinary.txt"]);
+        git(repo.path(), &["commit", "-m", "rename"]);
+        let events = load(repo.path(), "HEAD", None).unwrap();
+        assert_eq!(events[1].changes.len(), 4);
+        assert!(
+            events[1]
+                .changes
+                .iter()
+                .all(|change| change.samples.is_empty() && change.insertions == 1)
+        );
+        assert!(
+            events[2]
+                .changes
+                .iter()
+                .all(|change| change.samples.is_empty())
+        );
+    }
+
+    #[test]
     fn hit_returns_identical_events_without_importing_git() {
         let repo = fixture();
         let cache = tempfile::tempdir().expect("cache directory is available");
@@ -247,7 +313,7 @@ emails = ["author@example.invalid"]
         }
         let before = serde_json::to_vec(&old).unwrap();
         fs::write(output.join("cache-v3.json"), &before).unwrap();
-        fs::write(output.join("cache-v4.json"), &after).unwrap();
+        fs::write(output.join("cache-samples.json"), &after).unwrap();
         eprintln!(
             "tip={}, events={}, before_bytes={}, after_bytes={}",
             snapshot.tip,

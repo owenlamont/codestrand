@@ -1630,7 +1630,12 @@ fn diff_samples(world: &mut World, camera: &Camera, transform: &GlobalTransform)
             let top = camera
                 .world_to_viewport(transform, line.position + transform.up() * 0.12)
                 .ok()?;
-            let size = point.distance(top).round().clamp(1.0, 28.0);
+            let projected = point.distance(top);
+            let visibility = crate::diff_samples::sample_visibility(projected);
+            if visibility == 0.0 {
+                return None;
+            }
+            let size = projected.round().clamp(1.0, 28.0);
             let color = if line.sample.added {
                 theme.diff_added
             } else {
@@ -1642,7 +1647,7 @@ fn diff_samples(world: &mut World, camera: &Camera, transform: &GlobalTransform)
                 format!("{prefix} {}", line.sample.text),
                 point + Vec2::Y * row * size * 1.2,
                 size,
-                color.with_alpha(line.alpha * 0.8),
+                color.with_alpha(line.alpha * visibility * 0.8),
             ))
         })
         .collect();
@@ -2853,6 +2858,7 @@ mod tests {
                 kind: crate::timeline::Kind::Added,
                 insertions: 10,
                 removals: 0,
+                ..default()
             })
             .collect();
         let mut simulation = Simulation::new(

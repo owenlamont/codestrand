@@ -1189,6 +1189,7 @@ mod tests {
             kind: Kind::Added,
             insertions: 0,
             removals: 0,
+            ..Default::default()
         };
         let id = apply(&mut sim.state.layout, &change, 0);
         let small = sim.layout().file(id).unwrap().heat;
@@ -1229,6 +1230,7 @@ mod tests {
             kind: Kind::Added,
             insertions: 0,
             removals: 0,
+            ..Default::default()
         };
         let id = apply(&mut layout, &change, 0);
         let heat = layout.file(id).unwrap().heat;

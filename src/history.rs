@@ -382,7 +382,13 @@ fn blob_diff(repo: &gix::Repository, change: &Change) -> anyhow::Result<BlobDiff
         &input,
     );
     let mut samples = Vec::new();
-    for hunk in diff.hunks() {
+    for hunk in diff.hunks().filter(|_| {
+        !crate::diff_samples::sensitive_path(&change.path)
+            && !change
+                .source_path
+                .as_deref()
+                .is_some_and(crate::diff_samples::sensitive_path)
+    }) {
         for token in &input.before[hunk.before.start as usize..hunk.before.end as usize]
         {
             crate::diff_samples::consider(&mut samples, input.interner[*token], false);
