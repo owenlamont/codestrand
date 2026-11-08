@@ -40,6 +40,23 @@ Cargo configuration and toolchain changes must trigger the Rust checks too.
 Markdown prose wraps at 88 characters. CPU tests run without a GPU; changes to the
 renderer also need a local export and visual inspection.
 
+## Priorities
+
+When qualities conflict, earlier wins; a later one still counts in a lesser form.
+
+1. **Security.** A hostile repository, contributors file, cache or network response
+   never executes code, writes outside the cache and the chosen output, follows a
+   symlink out of them, or grows memory or time without bound. Network access needs
+   an explicit opt-in. Analysis that hits a bound stops and reports less.
+2. **Runtime speed.** A speed claim names its baseline, workload and run-to-run
+   variance on a release build; added code must buy more speed than it adds.
+3. **Low peak memory.** When speed wins, report the memory cost.
+4. **Simple, idiomatic code.** Less code and fewer branches wherever the above hold.
+5. **Fast CI and local feedback.**
+
+ryl's [priorities](https://github.com/owenlamont/ryl/blob/main/docs/design/decisions.md#priorities)
+are the fuller model this follows.
+
 ## Design constraints
 
 Preserve file identity and spatial continuity across commits. Treat every commit
