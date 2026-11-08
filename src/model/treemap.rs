@@ -116,7 +116,7 @@ pub(crate) fn run(
     serde_json::to_writer(
         &mut *writer,
         &serde_json::json!({"definitions":
-        "All areas are fractions of the full 1280x720 frame. Glass tiles are disjoint screen rectangles inside the 24 px margin. Largest empty rectangle is the exact maximum axis-aligned rectangle outside their union, including the margin. Content is the projected ground-plane AABB of current directory discs and file positions padded by their rendered size; not glyph ink or opaque pixel occupancy. Content fill divides content-envelope area by tile area; overall fill is area weighted. Empty lead-in is reported separately. Weights are eased live file counts; empty active repositories retain weight one until archived. Samples include every commit boundary and every playback second."}),
+        "All areas are fractions of the full 1280x720 frame. Glass tiles are disjoint screen rectangles inside the 24 px margin. Largest empty rectangle is the exact maximum axis-aligned rectangle outside their union, including the margin. Content is the projected ground-plane AABB of current directory discs and file positions padded by their rendered size; not glyph ink or opaque pixel occupancy. Content fill divides content-envelope area by tile area; overall fill is area weighted. The first repository owns the empty lead-in tile. Weights are eased live file counts; empty active repositories retain weight one until archived. Samples include every commit boundary and every playback second."}),
     )?;
     writeln!(writer)?;
     let frames = super::frames_for(simulation.duration(), 60)?;
@@ -198,10 +198,7 @@ mod tests {
             simulation.advance_to(frame, 60);
             let regions = &simulation.layout().repositories;
             let tiles: Vec<_> = regions.iter().filter_map(|r| r.tile).collect();
-            if tiles.is_empty() {
-                assert_eq!(simulation.commit(), 0);
-                continue;
-            }
+            assert!(!tiles.is_empty(), "blank lead-in at frame {frame}");
             assert!(
                 (tiles.iter().map(|t| t.area()).sum::<f32>() - expected).abs() < 2e-6
             );

@@ -349,6 +349,11 @@ impl Simulation {
         for (_, file) in self.layout().files() {
             active[self.layout().dir(file.dir).repository] = true;
         }
+        if !active.iter().any(|&live| live)
+            && let Some(event) = self.events.first()
+        {
+            active[event.repository] = true;
+        }
         let mut samples = vec![self.layout().local_regions(&active)];
         let mut sampled_events = 0;
         let ticks = frames_for(self.duration(), 60)
