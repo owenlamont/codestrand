@@ -473,7 +473,7 @@ fn territories(
 
 pub(super) fn leaders(
     world: &mut World,
-    points: &[Vec2],
+    points: &[(Vec2, f32)],
     theme: &Theme,
     camera: Entity,
 ) {
@@ -500,10 +500,15 @@ pub(super) fn leaders(
                     .id(),
             );
         }
-        for (&entity, point) in styles.leaders.iter().zip(points).take(count) {
+        for (&entity, (point, opacity)) in styles.leaders.iter().zip(points).take(count)
+        {
             let mut node = world.get_mut::<Node>(entity).expect("leader node");
             node.left = px(point.x - 18.0);
             node.top = px(point.y + 10.0);
+            world
+                .get_mut::<BackgroundColor>(entity)
+                .expect("leader colour")
+                .0 = theme.label.with_alpha(theme.label.alpha() * opacity);
             set_visible(world, entity, true);
         }
         hide_rest(world, &styles.leaders, count);

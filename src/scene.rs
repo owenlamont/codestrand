@@ -1360,7 +1360,9 @@ fn sync_activity(
             (avatar, world.get_mut::<Transform>(entity))
         {
             transform.translation = avatar.position;
-            transform.scale = Vec3::splat((presence * simulation.scale()).max(0.001));
+            transform.scale = Vec3::splat(
+                (presence * simulation.scale() * simulation.avatar_scale()).max(0.001),
+            );
         }
         set_visible(world, entity, presence > 0.0);
     }
@@ -1512,16 +1514,16 @@ fn place_labels(
     mut wanted: Vec<(model::Label, Vec2, f32)>,
     height: f32,
 ) -> Vec<(model::Label, Vec2, f32)> {
-    wanted.sort_by_key(|(label, ..)| label.kind);
+    wanted.retain(|(label, ..)| label.opacity > 0.001);
+    wanted.sort_by(|(a, ..), (b, ..)| {
+        a.kind
+            .cmp(&b.kind)
+            .then_with(|| b.priority.total_cmp(&a.priority))
+    });
     let mut placed: Vec<Rect> = Vec::new();
     let mut chosen = Vec::new();
     for (label, point, distance) in wanted {
-        let width = 8.0
-            + 8.6
-                * f32::from(
-                    u16::try_from(label.text.chars().count()).unwrap_or(u16::MAX),
-                );
-        let rect = Rect::from_corners(point, point + Vec2::new(width, height));
+        let rect = model::label_rect(point, &label.text, label.scale, height);
         if rect.min.x < 0.0
             || rect.min.y < 0.0
             || rect.max.x > 1280.0
@@ -1542,10 +1544,105 @@ fn place_labels(
         let b_avatar = b.kind == model::LabelKind::Avatar;
         a_avatar
             .cmp(&b_avatar)
+            .then_with(|| a.priority.total_cmp(&b.priority))
             .then_with(|| b_distance.total_cmp(a_distance))
     });
     chosen
 }
+fn sync_labels(
+    world: &mut World,
+    chosen: Vec<(model::Label, Vec2, f32)>,
+    theme: &Theme,
+) {
+    let mut query = world.query_filtered::<(
+        &mut Text,
+        &mut Node,
+        &mut Visibility,
+        &mut TextColor,
+        &mut ZIndex,
+        &mut UiTransform,
+        &mut BackgroundColor,
+        &mut BorderColor,
+        &mut TextShadow,
+    ), With<Label>>();
+    let (emphasis_color, landmark_color) = (theme.label_emphasis, theme.label_landmark);
+    let mut chosen = chosen.into_iter();
+    for (
+        index,
+        (
+            mut text,
+            mut node,
+            mut visibility,
+            mut color,
+            mut z_index,
+            mut transform,
+            mut background,
+            mut border,
+            mut shadow,
+        ),
+    ) in query.iter_mut(world).enumerate()
+    {
+        if let Some((label, point, _)) = chosen.next() {
+            z_index.set_if_neq(ZIndex(
+                i32::try_from(index).expect("label pool fits in i32"),
+            ));
+            let opacity = label.opacity;
+            // Bevy retains an atlas per raster size, so ease geometry around the top-left.
+            transform.set_if_neq(UiTransform {
+                scale: Vec2::splat(label.scale),
+                translation: Val2::all(percent(50.0 * (label.scale - 1.0))),
+                ..default()
+            });
+            background.set_if_neq(BackgroundColor(
+                theme
+                    .label_background()
+                    .with_alpha(theme.label_background().alpha() * opacity),
+            ));
+            let mut wanted_border = theme.label_border();
+            for color in [
+                &mut wanted_border.top,
+                &mut wanted_border.right,
+                &mut wanted_border.bottom,
+                &mut wanted_border.left,
+            ] {
+                color.set_alpha(color.alpha() * opacity);
+            }
+            border.set_if_neq(wanted_border);
+            let wanted_shadow = theme
+                .label_shadow
+                .color
+                .with_alpha(theme.label_shadow.color.alpha() * opacity);
+            if shadow.color != wanted_shadow {
+                shadow.color = wanted_shadow;
+            }
+            let emphasis = label.kind != model::LabelKind::Landmark;
+            let label = if theme.label_style == crate::theme::LabelStyle::SmallCaps {
+                label.text.to_uppercase()
+            } else {
+                label.text
+            };
+            if text.0 != label {
+                text.0 = label;
+            }
+            if node.left != px(point.x) || node.top != px(point.y) {
+                node.left = px(point.x);
+                node.top = px(point.y);
+            }
+            let wanted = if emphasis {
+                emphasis_color.with_alpha(emphasis_color.alpha() * opacity)
+            } else {
+                landmark_color.with_alpha(landmark_color.alpha() * opacity)
+            };
+            if color.0 != wanted {
+                color.0 = wanted;
+            }
+            visibility.set_if_neq(Visibility::Inherited);
+        } else {
+            visibility.set_if_neq(Visibility::Hidden);
+        }
+    }
+}
+
 fn labels(world: &mut World) {
     let mut camera_query =
         world.query_filtered::<(&Camera, &GlobalTransform), With<SceneCamera>>();
@@ -1583,7 +1680,10 @@ fn labels(world: &mut World) {
         });
     let chosen = place_labels(wanted.collect(), geometry.label_height);
     let theme = geometry.clone();
-    let points: Vec<_> = chosen.iter().map(|(_, point, _)| *point).collect();
+    let points: Vec<_> = chosen
+        .iter()
+        .map(|(label, point, _)| (*point, label.opacity))
+        .collect();
     let camera_entity = world
         .query_filtered::<Entity, With<SceneCamera>>()
         .single(world)
@@ -1591,49 +1691,7 @@ fn labels(world: &mut World) {
     if world.contains_resource::<styling::Styles>() {
         styling::leaders(world, &points, &theme, camera_entity);
     }
-    let mut query = world.query_filtered::<(
-        &mut Text,
-        &mut Node,
-        &mut Visibility,
-        &mut TextColor,
-        &mut ZIndex,
-    ), With<Label>>();
-    let theme = world.resource::<Playback>().0.theme().clone();
-    let (emphasis_color, landmark_color) = (theme.label_emphasis, theme.label_landmark);
-    let mut chosen = chosen.into_iter();
-    for (index, (mut text, mut node, mut visibility, mut color, mut z_index)) in
-        query.iter_mut(world).enumerate()
-    {
-        if let Some((label, point, _)) = chosen.next() {
-            z_index.set_if_neq(ZIndex(
-                i32::try_from(index).expect("label pool fits in i32"),
-            ));
-            let emphasis = label.kind != model::LabelKind::Landmark;
-            let label = if theme.label_style == crate::theme::LabelStyle::SmallCaps {
-                label.text.to_uppercase()
-            } else {
-                label.text
-            };
-            if text.0 != label {
-                text.0 = label;
-            }
-            if node.left != px(point.x) || node.top != px(point.y) {
-                node.left = px(point.x);
-                node.top = px(point.y);
-            }
-            let wanted = if emphasis {
-                emphasis_color
-            } else {
-                landmark_color
-            };
-            if color.0 != wanted {
-                color.0 = wanted;
-            }
-            visibility.set_if_neq(Visibility::Inherited);
-        } else {
-            visibility.set_if_neq(Visibility::Hidden);
-        }
-    }
+    sync_labels(world, chosen, &theme);
     let mut query = world.query_filtered::<&mut Text, With<Caption>>();
     if let Ok(mut text) = query.single_mut(world)
         && text.0 != caption
@@ -1783,6 +1841,59 @@ mod tests {
         assert_eq!(scale.x, scale.y);
         let width = 90.0 * 24.0 * 0.6 * scale.x;
         assert!((width - pixels * 8.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn changing_crowd_scale_keeps_label_raster_sizes_bounded() {
+        let mut world = World::new();
+        let entity = world
+            .spawn((
+                Text::new(""),
+                TextFont::from_font_size(14.0),
+                Node::default(),
+                TextColor::default(),
+                ZIndex::default(),
+                BackgroundColor::default(),
+                BorderColor::default(),
+                TextShadow::default(),
+                Label,
+            ))
+            .id();
+        let theme = Theme::neon();
+        let mut sizes = std::collections::HashSet::new();
+        for tick in 0_u16..12_000 {
+            let scale = 0.72 + 0.28 * f32::from(tick % 1000) / 999.0;
+            sync_labels(
+                &mut world,
+                vec![(
+                    model::Label {
+                        position: Vec3::ZERO,
+                        text: "Contributor".to_owned(),
+                        kind: model::LabelKind::Avatar,
+                        scale,
+                        opacity: 1.0,
+                        priority: 1.0,
+                    },
+                    Vec2::new(100.0, 200.0),
+                    0.0,
+                )],
+                &theme,
+            );
+            let bevy::text::FontSize::Px(size) =
+                world.get::<TextFont>(entity).unwrap().font_size
+            else {
+                panic!("label raster size must remain in pixels");
+            };
+            sizes.insert(size.to_bits());
+            assert_eq!(size, 14.0);
+            let transform = world.get::<UiTransform>(entity).unwrap();
+            assert_eq!(transform.scale, Vec2::splat(scale));
+            assert_eq!(
+                transform.translation,
+                Val2::all(percent(50.0 * (scale - 1.0)))
+            );
+        }
+        assert_eq!(sizes, std::collections::HashSet::from([14.0_f32.to_bits()]));
     }
 
     #[test]
@@ -2354,7 +2465,8 @@ mod tests {
             .0
             .labels()
             .into_iter()
-            .find(|label| label.text == "Portrait")
+            .filter(|label| label.kind == model::LabelKind::Avatar)
+            .max_by(|a, b| a.opacity.total_cmp(&b.opacity))
             .unwrap();
         *world.get_mut::<GlobalTransform>(scene).unwrap() =
             GlobalTransform::from_translation(portrait_label.position - Vec3::Z * 50.0);
@@ -2371,9 +2483,9 @@ mod tests {
         let expected_name = if world.resource::<Playback>().0.theme().label_style
             == crate::theme::LabelStyle::SmallCaps
         {
-            "PORTRAIT"
+            portrait_label.text.to_uppercase()
         } else {
-            "Portrait"
+            portrait_label.text.clone()
         };
         let mut label_query = world
             .query_filtered::<(&Text, &Visibility, &UiTargetCamera), With<Label>>();
@@ -2392,6 +2504,11 @@ mod tests {
                 Changed<Node>,
                 Changed<Visibility>,
                 Changed<TextColor>,
+                Changed<TextFont>,
+                Changed<UiTransform>,
+                Changed<BackgroundColor>,
+                Changed<BorderColor>,
+                Changed<TextShadow>,
                 Changed<ZIndex>,
                 Changed<UiTargetCamera>,
             )>,
@@ -2482,6 +2599,9 @@ mod tests {
                 text: text.to_owned(),
                 kind,
                 position: Vec3::ZERO,
+                scale: 1.0,
+                opacity: 1.0,
+                priority: 0.0,
             },
             point,
             distance,
