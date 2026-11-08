@@ -16,6 +16,7 @@ mod avatars;
 mod cache;
 mod camera;
 mod contributors;
+mod encoder;
 mod export;
 mod history;
 mod layout;
@@ -58,7 +59,7 @@ enum Command {
         #[command(flatten)]
         source: Source,
     },
-    /// Write numbered PNG frames and a logical-state manifest to a new directory.
+    /// Write PNG frames or stream video, with a manifest in a new directory.
     Export {
         #[arg(long, value_enum, default_value = "neon")]
         theme: theme::ThemeName,
@@ -72,6 +73,8 @@ enum Command {
         fps: u16,
         #[arg(long, default_value_t = 0)]
         frame_delay_ms: u16,
+        #[command(flatten)]
+        encoding: encoder::Options,
     },
 }
 
@@ -230,7 +233,9 @@ fn main() -> anyhow::Result<()> {
             frames,
             fps,
             frame_delay_ms,
+            encoding,
         }) => {
+            let encoder = encoding.start(fps)?;
             export::prepare(&directory)?;
             let (mut simulation, title) = source.load().inspect_err(|_| {
                 let _ = std::fs::remove_dir(&directory);
@@ -241,7 +246,15 @@ fn main() -> anyhow::Result<()> {
                 .inspect_err(|_| {
                     let _ = std::fs::remove_dir(&directory);
                 })?;
-            export::run(&directory, simulation, title, frames, fps, frame_delay_ms)?;
+            export::run(
+                &directory,
+                simulation,
+                title,
+                frames,
+                fps,
+                frame_delay_ms,
+                encoder,
+            )?;
         }
         None => Cli::command().print_help()?,
     }
@@ -251,6 +264,37 @@ fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn video_cli_requires_video_for_encoder_options() {
+        for option in ["--ffmpeg=somewhere", "--ffmpeg-arg=-crf"] {
+            assert!(
+                Cli::try_parse_from(["codestrand", "export", "frames", option])
+                    .is_err()
+            );
+            assert!(
+                Cli::try_parse_from([
+                    "codestrand",
+                    "export",
+                    "frames",
+                    "--video=out.mp4",
+                    option,
+                ])
+                .is_ok()
+            );
+        }
+        assert!(
+            Cli::try_parse_from([
+                "codestrand",
+                "export",
+                "frames",
+                "--video=out.mp4",
+                "--ffmpeg-arg=-c:v",
+                "--ffmpeg-arg=ffv1",
+            ])
+            .is_ok()
+        );
+    }
 
     #[test]
     fn heat_half_life_is_shared_by_preview_and_export_and_rejects_invalid_values() {

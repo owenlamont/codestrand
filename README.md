@@ -5,7 +5,7 @@
 A Git history visualiser with persistent file positions, gliding contributors and
 animated diff fragments. Preview a local repository or export numbered PNG frames.
 
-**Status: layout study.** Built-in video encoding is not implemented.
+**Status: layout study.** Video export uses your installed FFmpeg.
 Licensed MIT OR Apache-2.0.
 
 [User documentation](https://codestrand.pages.dev/) covers installation, Git
