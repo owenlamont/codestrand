@@ -25,6 +25,10 @@ are grouped by author name. A missing default file is fine; an explicit missing 
 unknown key or malformed TOML is an error. Edits take effect on cache hits; original
 authors and repository history remain unchanged.
 
+Configuration is limited to 1 MiB before parsing, 4,096 contributors, 4,096 total email
+aliases, and 4,096 bytes per string. Expanded alias payloads may total at most 16 MiB.
+Files exceeding a limit are rejected with a configuration error before alias expansion.
+
 Account fields accept usernames, never profile URLs or whitespace. GitHub logins use
 letters, digits and hyphens (bot logins may end in `[bot]`); GitLab usernames start with
 a letter or digit and may also contain `_`, `-` and `.`. Invalid fields report the file,
