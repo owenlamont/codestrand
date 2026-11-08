@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
+    ops::Range,
     time::Duration,
 };
 
@@ -45,6 +46,16 @@ pub(super) struct Options {
     pub max_idle_seconds: f32,
     pub start: usize,
     pub commits: Option<usize>,
+}
+
+impl Options {
+    fn selected_range(&self, events: usize) -> Range<usize> {
+        let start = self.start.min(events);
+        let end = self
+            .commits
+            .map_or(events, |count| start.saturating_add(count).min(events));
+        start..end
+    }
 }
 
 impl Default for Options {
@@ -207,15 +218,13 @@ impl Simulation {
         options: &Options,
         repositories: usize,
     ) -> anyhow::Result<()> {
-        let starts = Schedule::with_padding(
-            events,
+        let schedule = Schedule::with_padding(
+            &events[options.selected_range(events.len())],
             options.seconds_per_day,
             options.max_idle_seconds,
             |_| 0,
-        )
-        .starts;
-        let duration = starts.last().copied().unwrap_or(LEAD_IN) + TAIL;
-        let ticks = frames_for(duration, 60)?;
+        );
+        let ticks = frames_for(schedule.duration(), 60)?;
         anyhow::ensure!(
             repositories <= crate::repositories::MAX_REPOSITORIES
                 && ticks <= 216_000
@@ -269,10 +278,7 @@ impl Simulation {
         if events.iter().any(|event| event.contributor.is_none()) {
             mappings.apply(&mut events);
         }
-        let start = options.start.min(events.len());
-        let end = options
-            .commits
-            .map_or(events.len(), |count| (start + count).min(events.len()));
+        let Range { start, end } = options.selected_range(events.len());
         let schedule = Schedule::with_padding(
             &events[start..end],
             options.seconds_per_day,
@@ -1629,6 +1635,42 @@ mod tests {
                 5
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn repository_plan_limits_use_the_selected_playback() {
+        let mut events: Vec<_> = (0..2)
+            .map(|index| {
+                let mut history = timeline::synthetic();
+                history.truncate(1);
+                history[0].seconds = i64::try_from(index).unwrap() * 86_400;
+                crate::repositories::namespace(&mut history, index);
+                history.remove(0)
+            })
+            .collect();
+        let names = ["First".to_owned(), "Second".to_owned()];
+        for (start, commits) in [(0, Some(1)), (1, None), (2, None)] {
+            let options = Options {
+                start,
+                commits,
+                seconds_per_day: 86_400.0,
+                max_idle_seconds: 86_400.0,
+                ..Options::default()
+            };
+            Simulation::check_repository_plan(&events, &options, 2).unwrap();
+            let simulation = Simulation::with_repositories(
+                events.clone(),
+                &options,
+                &Theme::neon(),
+                &Mappings::default(),
+                &names,
+            );
+            assert_eq!(simulation.duration(), 3.0);
+        }
+        events[1].seconds = events[0].seconds;
+        assert!(
+            Simulation::check_repository_plan(&events, &Options::default(), 2).is_ok()
         );
     }
     use crate::timeline;

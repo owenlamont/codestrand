@@ -132,6 +132,8 @@ Multi-repository planning supports up to 30 repositories, 216,000 simulation tic
 reduce playback times if an input limit is exceeded. Single-repository playback is
 unaffected.
 
+Tick and region-sample budgets apply to the playback selected by `--start` and `--commits`.
+
 To choose visual treatments, use
 `--repository-boundary none|glass` and `--repository-label-plane files|raised`.
 Defaults are `glass` and `raised`. Glass is a faint, coloured ground-plane tile for
