@@ -169,7 +169,6 @@ impl Layout {
             let file = self.files.get_mut(&id).expect("indexed files exist");
             file.state = Presence::Arriving;
             file.delay = delay;
-            file.heat = 1.0;
             file.author = author;
             return id;
         }
@@ -190,7 +189,7 @@ impl Layout {
                 presence: 0.0,
                 state: Presence::Arriving,
                 delay,
-                heat: 1.0,
+                heat: 0.0,
                 author,
             },
         );
@@ -202,7 +201,6 @@ impl Layout {
         match self.file_index.get(path) {
             Some(&id) => {
                 let file = self.files.get_mut(&id).expect("indexed files exist");
-                file.heat = 1.0;
                 file.author = author;
                 id
             }
@@ -220,7 +218,6 @@ impl Layout {
         let file = self.files.get_mut(&id).expect("indexed files exist");
         file.state = Presence::Leaving;
         file.delay = delay;
-        file.heat = 1.0;
         file.author = author;
         Some(id)
     }
@@ -248,7 +245,6 @@ impl Layout {
         to.clone_into(&mut file.path);
         file.dir = dir;
         file.slot = slot;
-        file.heat = 1.0;
         file.author = author;
         if file.state == Presence::Leaving {
             file.state = Presence::Arriving;
@@ -269,6 +265,18 @@ impl Layout {
             file.velocity +=
                 (desired - file.velocity).clamp_length_max(MAX_ACCELERATION * dt);
             file.position += file.velocity * dt;
+        }
+    }
+
+    pub(super) fn heat(&mut self, id: u64, amount: f32) {
+        let file = self.files.get_mut(&id).expect("touched file exists");
+        file.heat = (file.heat + amount).min(1.0);
+    }
+
+    pub(super) fn cool_heat(&mut self, dt: f32, half_life: f32) {
+        let decay = (-dt / half_life).exp2();
+        for file in self.files.values_mut() {
+            file.heat *= decay;
         }
     }
 
@@ -310,7 +318,6 @@ impl Layout {
     fn fade_files(&mut self, dt: f32) {
         let mut gone = Vec::new();
         for (&id, file) in &mut self.files {
-            file.heat *= (-dt / 1.6).exp();
             if file.delay > 0.0 {
                 file.delay -= dt;
                 continue;

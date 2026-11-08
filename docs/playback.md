@@ -27,6 +27,21 @@ the exported camera or timeline.
 the default is `neon`. Switching themes in preview changes only colours and icons:
 layout, playback position and camera stay put.
 
+## File heat
+
+Each touch adds heat based on added plus removed lines. Logarithmic damping keeps
+large changes from overwhelming small ones; repeated touches accumulate up to a cap.
+Neon and Phosphor brighten file icons smoothly while cold icons remain readable.
+
+`--heat-half-life 3` sets the cooling half-life in canonical playback seconds for
+preview and export (default `3`, accepted range `0.01` through `86400`). Live speed
+keys speed up cooling along with the rest of playback. Export cooling uses explicit
+frame times. Files settled before `--start` begin cold.
+
+```sh
+codestrand export frames --heat-half-life 3 --frames 90 --fps 30
+```
+
 ## Range and pacing
 
 ```sh

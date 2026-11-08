@@ -59,6 +59,7 @@ struct PortraitDisc;
 
 #[derive(Component)]
 struct FileVisual {
+    heat_material: Handle<StandardMaterial>,
     membership: Entity,
     glyph: Entity,
     glyph_kind: usize,
@@ -655,7 +656,15 @@ fn sync_files(
     pools.files.retain(|id, entity| {
         let keep = layout.file(*id).is_some();
         if !keep {
+            let material = world
+                .get::<FileVisual>(*entity)
+                .expect("file visual")
+                .heat_material
+                .clone();
             world.despawn(*entity);
+            world
+                .resource_mut::<Assets<StandardMaterial>>()
+                .remove(material.id());
         }
         keep
     });
@@ -678,17 +687,25 @@ fn sync_files(
             .expect("file entities are visuals");
         let (halo, current, membership) =
             (visual.halo, visual.author, visual.membership);
+        let heat_material = visual.heat_material.clone();
+        let glyph = visual.glyph;
         let glyph_kind = simulation.theme().glyph_kind(file.name());
         if visual.glyph_kind != glyph_kind {
-            let glyph = visual.glyph;
-            world
-                .entity_mut(glyph)
-                .insert(MeshMaterial3d(palette.glyphs[glyph_kind].clone()));
             world
                 .get_mut::<FileVisual>(entity)
                 .expect("file entities are visuals")
                 .glyph_kind = glyph_kind;
         }
+        let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
+        let mut material = materials
+            .get(&palette.glyphs[glyph_kind])
+            .expect("glyph material")
+            .clone();
+        material.base_color = simulation.theme().heat_color(file.heat);
+        *materials
+            .get_mut(&heat_material)
+            .expect("file heat material") = material;
+        set_material(world, glyph, &heat_material);
         let dir = layout.dir(file.dir);
         set_material(
             world,
@@ -812,6 +829,14 @@ fn spawn_file(
     theme: &Theme,
     glyph_kind: usize,
 ) -> Entity {
+    let material = world
+        .resource::<Assets<StandardMaterial>>()
+        .get(&palette.glyphs[glyph_kind])
+        .expect("glyph material")
+        .clone();
+    let heat_material = world
+        .resource_mut::<Assets<StandardMaterial>>()
+        .add(material);
     let membership = world
         .spawn((
             Mesh3d(palette.membership_mesh.clone()),
@@ -822,7 +847,7 @@ fn spawn_file(
     let glyph = world
         .spawn((
             Mesh3d(palette.glyph_mesh.clone()),
-            MeshMaterial3d(palette.glyphs[glyph_kind].clone()),
+            MeshMaterial3d(heat_material.clone()),
             theme.file_glyph_transform,
         ))
         .id();
@@ -851,6 +876,7 @@ fn spawn_file(
             Transform::default(),
             Visibility::default(),
             FileVisual {
+                heat_material,
                 membership,
                 glyph,
                 glyph_kind,
@@ -1545,17 +1571,17 @@ mod tests {
             .unwrap()
             .base_color_texture
             .clone();
-        let asset_counts = (
-            world.resource::<Assets<Mesh>>().len(),
-            world.resource::<Assets<Image>>().len(),
-            world.resource::<Assets<StandardMaterial>>().len(),
-        );
         for key in [
             KeyCode::Period,
             KeyCode::Comma,
             KeyCode::Comma,
             KeyCode::Period,
         ] {
+            let asset_counts = (
+                world.resource::<Assets<Mesh>>().len(),
+                world.resource::<Assets<Image>>().len(),
+                world.resource::<Assets<StandardMaterial>>().len(),
+            );
             world.resource_mut::<ButtonInput<KeyCode>>().press(key);
             preview_theme(world);
             world.resource_mut::<ButtonInput<KeyCode>>().reset_all();
@@ -1635,7 +1661,15 @@ mod tests {
                 .get(&material.0)
                 .unwrap()
                 .base_color,
-            theme.glyph_material.base_color
+            theme.heat_color(
+                world
+                    .resource::<Playback>()
+                    .0
+                    .layout()
+                    .file(id)
+                    .unwrap()
+                    .heat
+            )
         );
         assert_eq!(
             world.get::<Transform>(visual.glyph),
@@ -2099,7 +2133,7 @@ mod tests {
             sync_structure(&mut world, &palette, &mut pools, &simulation);
             assert_eq!(
                 world.resource::<Assets<StandardMaterial>>().len(),
-                materials
+                materials + pools.files.len()
             );
             for (&entity, (index, dir)) in
                 pools.directories.iter().zip(simulation.layout().dirs())
@@ -2203,7 +2237,7 @@ mod tests {
                     .get::<MeshMaterial3d<StandardMaterial>>(visual.glyph)
                     .expect("palette glyph material remains allocated")
                     .0,
-                palette.glyphs[kind]
+                visual.heat_material
             );
             assert_eq!(
                 world.get::<Transform>(visual.glyph),
@@ -2215,7 +2249,7 @@ mod tests {
             );
             assert_eq!(
                 world.resource::<Assets<StandardMaterial>>().len(),
-                material_count
+                material_count + pools.files.len()
             );
             assert_eq!(world.resource::<Assets<Image>>().len(), image_count);
         }
@@ -2290,11 +2324,11 @@ mod tests {
                     .get::<MeshMaterial3d<StandardMaterial>>(visual.glyph)
                     .expect("file icon material")
                     .0,
-                palette.glyphs[simulation.theme().glyph_kind("a.rs")]
+                visual.heat_material
             );
             assert_eq!(
                 world.resource::<Assets<StandardMaterial>>().len(),
-                materials,
+                materials + pools.files.len(),
             );
         }
     }

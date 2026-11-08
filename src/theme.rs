@@ -114,6 +114,21 @@ pub(super) struct FileTile {
 }
 
 impl Theme {
+    pub(super) fn heat_color(&self, heat: f32) -> Color {
+        let gain = match self.name {
+            ThemeName::Neon => 2.5,
+            ThemeName::Phosphor => 3.5,
+        };
+        let base = LinearRgba::from(self.glyph_material.base_color);
+        let brightness = 1.0 + gain * heat.clamp(0.0, 1.0);
+        Color::linear_rgba(
+            base.red * brightness,
+            base.green * brightness,
+            base.blue * brightness,
+            base.alpha,
+        )
+    }
+
     pub(super) fn neon() -> Self {
         let developers = [
             Color::srgb(0.25, 0.92, 0.95),
@@ -302,6 +317,19 @@ impl Theme {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn heat_brightens_both_themes_without_fading_cold_files() {
+        for name in ThemeName::ALL {
+            let theme = name.build();
+            let cold = LinearRgba::from(theme.heat_color(0.0));
+            let warm = LinearRgba::from(theme.heat_color(0.5));
+            let hot = LinearRgba::from(theme.heat_color(1.0));
+            assert_eq!(cold, LinearRgba::from(theme.glyph_material.base_color));
+            assert!(hot.green > warm.green && warm.green > cold.green);
+            assert_eq!(cold.alpha, hot.alpha);
+        }
+    }
 
     #[test]
     fn directions_use_explicit_registry_indices() {
