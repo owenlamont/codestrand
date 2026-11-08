@@ -2,7 +2,7 @@
 site_name = "Codestrand"
 site_description = "Watch Git history take shape over time"
 site_author = "Owen Lamont"
-site_url = "https://codestrand-docs.pages.dev/"
+site_url = "https://codestrand.pages.dev/"
 repo_url = "https://github.com/owenlamont/codestrand"
 edit_uri = "blob/main/docs/"
 repo_name = "owenlamont/codestrand"
