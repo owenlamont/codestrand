@@ -68,3 +68,9 @@ codestrand preview --repository /path/to/repository --no-cache
 Inspection and repositories with Git replacement objects always import directly.
 Messages, signatures, blob IDs and hunks are not cached. See
 [contributors](contributors.md) for separately cached portraits.
+
+Cache files are read only through real directories, with a 64 MiB byte ceiling before
+JSON parsing. Version, selected tip, commit identifiers, event/change counts, paths,
+author lengths, timestamps, diff counts and sample limits are checked before reuse.
+Only the canonical snapshot encoding is accepted: padded, malformed or invalid snapshots
+are misses and are rebuilt. Cache validation does not authenticate who wrote a snapshot.

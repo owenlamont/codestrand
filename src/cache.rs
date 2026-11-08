@@ -119,6 +119,95 @@ struct Snapshot {
     events: Vec<timeline::Event>,
 }
 
+const MAX_SNAPSHOT_BYTES: u64 = 64 * 1024 * 1024;
+
+struct SnapshotWriter<W> {
+    inner: W,
+    remaining: u64,
+}
+
+impl<W: Write> Write for SnapshotWriter<W> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if bytes.len() as u64 > self.remaining {
+            return Err(io::Error::other("snapshot byte limit reached"));
+        }
+        let written = self.inner.write(bytes)?;
+        self.remaining -= written as u64;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+fn valid_snapshot(snapshot: &Snapshot, tip: &str) -> bool {
+    let oid = |value: &str| {
+        value.len() == 40
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    };
+    if snapshot.version != timeline::CACHE_VERSION
+        || snapshot.tip != tip
+        || !oid(&snapshot.tip)
+        || snapshot.events.len() > 1_000_000
+    {
+        return false;
+    }
+    let mut changes = 0usize;
+    let mut commits = std::collections::HashSet::new();
+    for event in &snapshot.events {
+        if !oid(&event.commit)
+            || !commits.insert(&event.commit)
+            || event.author.name.len() > 4096
+            || event.author.email.len() > 4096
+            || !(-62_135_596_800..=253_402_300_799).contains(&event.seconds)
+        {
+            return false;
+        }
+        changes = changes.saturating_add(event.changes.len());
+        if changes > 2_000_000 || event.changes.is_empty() {
+            return false;
+        }
+        let mut samples = 0usize;
+        let path = |path: &str| {
+            !path.is_empty()
+                && path.len() <= 16_384
+                && !path.starts_with('/')
+                && !path.split('/').any(|part| part == ".." || part.is_empty())
+        };
+        for change in &event.changes {
+            if !path(&change.path)
+                || matches!(&change.kind, timeline::Kind::Moved { from } if !path(from))
+                || change.samples.len() > crate::diff_samples::PER_FILE
+                || u64::from(change.insertions) + u64::from(change.removals)
+                    > 20_000_000
+                || (crate::diff_samples::sensitive_path(change.path.as_bytes())
+                    && !change.samples.is_empty())
+            {
+                return false;
+            }
+            samples += change.samples.len();
+            for sample in &change.samples {
+                let mut checked = Vec::new();
+                crate::diff_samples::consider(
+                    &mut checked,
+                    sample.text.as_bytes(),
+                    sample.added,
+                );
+                if checked.as_slice() != std::slice::from_ref(sample) {
+                    return false;
+                }
+            }
+        }
+        if samples > crate::diff_samples::PER_COMMIT {
+            return false;
+        }
+    }
+    true
+}
+
 pub(super) fn root() -> Option<PathBuf> {
     dirs::cache_dir().map(|path| path.join("codestrand"))
 }
@@ -157,18 +246,30 @@ fn entry_path(root: &Path, repo: &gix::Repository) -> Option<PathBuf> {
 }
 
 fn read(path: &Path, tip: &str) -> Option<Vec<timeline::Event>> {
-    let mut file = ConfinedFile::at(path, false).ok()?.open().ok()?;
+    let file = ConfinedFile::at(path, false).ok()?.open().ok()?;
+    if file.metadata().ok()?.len() > MAX_SNAPSHOT_BYTES {
+        return None;
+    }
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).ok()?;
+    file.take(MAX_SNAPSHOT_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 > MAX_SNAPSHOT_BYTES {
+        return None;
+    }
     let snapshot: Snapshot = serde_json::from_slice(&bytes).ok()?;
-    (snapshot.version == timeline::CACHE_VERSION && snapshot.tip == tip)
+    (valid_snapshot(&snapshot, tip) && serde_json::to_vec(&snapshot).ok()? == bytes)
         .then_some(snapshot.events)
 }
+
 fn store(path: &Path, snapshot: &Snapshot) -> Option<()> {
     ConfinedFile::at(path, true)
         .ok()?
         .write(|file| {
-            let mut writer = BufWriter::new(file);
+            let mut writer = SnapshotWriter {
+                inner: BufWriter::new(file),
+                remaining: MAX_SNAPSHOT_BYTES,
+            };
             serde_json::to_writer(&mut writer, snapshot)?;
             writer.flush()
         })
@@ -235,6 +336,82 @@ mod tests {
             assert!(ConfinedFile::at(&path, false).is_err());
         }
         assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn padded_and_forged_snapshots_are_cache_misses() {
+        let repo = fixture();
+        let root = crate::cache::test_directory().unwrap();
+        let expected = load(repo.path(), "HEAD", Some(root.path())).unwrap();
+        let path = entry(root.path(), repo.path());
+        let original = fs::read(&path).unwrap();
+        let mut forged: serde_json::Value = serde_json::from_slice(&original).unwrap();
+        forged["events"][0]["commit"] = "=FORGED(),extra".into();
+        let mut padded = vec![b' '; 2 * 1024 * 1024];
+        padded.extend(serde_json::to_vec(&forged).unwrap());
+        fs::write(&path, padded).unwrap();
+        assert_eq!(
+            load(repo.path(), "HEAD", Some(root.path())).unwrap(),
+            expected
+        );
+        fs::write(&path, serde_json::to_vec(&forged).unwrap()).unwrap();
+        assert_eq!(
+            load(repo.path(), "HEAD", Some(root.path())).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn oversized_snapshot_is_rebuilt_without_reading_the_padding() {
+        let repo = fixture();
+        let root = crate::cache::test_directory().unwrap();
+        let expected = load(repo.path(), "HEAD", Some(root.path())).unwrap();
+        let path = entry(root.path(), repo.path());
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(MAX_SNAPSHOT_BYTES + 1)
+            .unwrap();
+        assert_eq!(
+            load(repo.path(), "HEAD", Some(root.path())).unwrap(),
+            expected
+        );
+        assert!(fs::metadata(path).unwrap().len() < MAX_SNAPSHOT_BYTES);
+    }
+
+    #[test]
+    fn snapshot_domains_and_lengths_are_validated() {
+        let repo = fixture();
+        let root = crate::cache::test_directory().unwrap();
+        load(repo.path(), "HEAD", Some(root.path())).unwrap();
+        let path = entry(root.path(), repo.path());
+        let bytes = fs::read(path).unwrap();
+        let snapshot: Snapshot = serde_json::from_slice(&bytes).unwrap();
+        let tip = snapshot.tip.clone();
+        assert!(valid_snapshot(&snapshot, &tip));
+        for (pointer, invalid) in [
+            ("/version", serde_json::json!(0)),
+            ("/tip", serde_json::json!("0".repeat(40))),
+            ("/events/0/commit", serde_json::json!("=FORGED(),extra")),
+            ("/events/0/seconds", serde_json::json!(i64::MAX)),
+            ("/events/0/changes/0/path", serde_json::json!("../outside")),
+            (
+                "/events/0/changes/0/insertions",
+                serde_json::json!(u32::MAX),
+            ),
+            (
+                "/events/0/changes/0/path",
+                serde_json::json!("x".repeat(16_385)),
+            ),
+        ] {
+            let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            *value.pointer_mut(pointer).unwrap() = invalid;
+            assert!(
+                !valid_snapshot(&serde_json::from_value(value).unwrap(), &tip),
+                "{pointer}"
+            );
+        }
     }
 
     fn git(path: &Path, args: &[&str]) -> String {
