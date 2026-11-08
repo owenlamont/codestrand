@@ -71,7 +71,7 @@ fn themes_preserve_simulation_during_playback_seek_and_restart() {
         for name in crate::theme::ThemeName::ALL {
             switched.set_theme(name.build());
             assert_eq!(snapshot(&switched), snapshot(&reference));
-            assert_eq!(switched.starts, reference.starts);
+            assert_eq!(switched.schedule.starts, reference.schedule.starts);
             assert_eq!(switched.duration(), reference.duration());
             assert_eq!(
                 switched.playback_multiplier(),
@@ -89,12 +89,12 @@ fn mid_gap_rate_changes_preserve_state_and_schedule() {
     let mut sim = simulation(growth(), &Options::default());
     sim.advance_to(585, 60);
     let before = snapshot(&sim);
-    let starts = sim.starts.clone();
+    let starts = sim.schedule.starts.clone();
     let duration = sim.duration();
     for factor in [0.125, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 0.5] {
         sim.change_rate(factor);
         assert_eq!(snapshot(&sim), before);
-        assert_eq!(sim.starts, starts);
+        assert_eq!(sim.schedule.starts, starts);
         assert_eq!(sim.duration(), duration);
     }
 }
@@ -201,4 +201,93 @@ fn multipliers_preserve_fading_directory_space() {
                 .all(|(_, file)| !file.path.starts_with("a/"))
         );
     }
+}
+
+#[test]
+fn padding_holds_date_and_commit_while_heat_fragments_and_fades_advance() {
+    let events = vec![
+        event(0, changes("a", 1, &Kind::Added)),
+        event(1, changes("a", 1, &Kind::Modified)),
+        event(2, changes("b", 1, &Kind::Added)),
+    ];
+    let mut sim = Simulation::build(
+        events,
+        &Options::default(),
+        &Theme::neon(),
+        &Mappings::default(),
+        &[(1, 360)],
+    );
+    sim.advance_to(60, 60);
+    let caption = sim.caption();
+    let heat = sim.layout().files().next().unwrap().1.heat;
+    assert!(!sim.fragments().is_empty());
+    sim.advance_to(390, 60);
+    assert_eq!(sim.commit(), 1);
+    assert_eq!(sim.caption(), caption);
+    assert!(sim.layout().files().next().unwrap().1.heat < heat);
+    assert!(sim.fragments().is_empty());
+    assert!(sim.state.avatars[0].presence < 1.0);
+    sim.advance_to(420, 60);
+    assert_eq!(sim.commit(), 2);
+    assert!(sim.caption().contains("1970-01-02"));
+}
+
+#[test]
+fn padded_state_replays_identically_at_thirty_and_sixty_fps_and_after_rewind() {
+    for options in [
+        Options::default(),
+        Options {
+            start: 2,
+            commits: Some(4),
+            ..Options::default()
+        },
+    ] {
+        let events = crate::timeline::synthetic();
+        let make = || {
+            Simulation::build(
+                events.clone(),
+                &options,
+                &Theme::neon(),
+                &Mappings::default(),
+                &[(0, 30), (2, 60), (4, 45)],
+            )
+        };
+        let mut thirty = make();
+        let mut sixty = make();
+        for frame in [0, 15, 30, 45, 90, 180, 300, 25, 120, 0, 90] {
+            thirty.advance_to(frame, 30);
+            sixty.advance_to(frame * 2, 60);
+            let mut direct = make();
+            direct.advance_to(frame, 30);
+            assert_eq!(snapshot(&thirty), snapshot(&sixty));
+            assert_eq!(snapshot(&thirty), snapshot(&direct));
+            assert_eq!(thirty.caption(), direct.caption());
+        }
+    }
+}
+
+#[test]
+fn first_selected_padding_aligns_playback_and_full_history_layout() {
+    let events: Vec<_> = (0..5)
+        .map(|day| event(day, changes("a", 1, &Kind::Added)))
+        .collect();
+    let options = Options {
+        start: 2,
+        ..Options::default()
+    };
+    let mut sim = Simulation::build(
+        events,
+        &options,
+        &Theme::neon(),
+        &Mappings::default(),
+        &[(2, 60)],
+    );
+    assert_eq!(sim.schedule.starts[0], 1.5);
+    sim.advance_to(90, 60);
+    assert_eq!(sim.commit(), 3);
+    assert_eq!(sim.layout().planned_time(), 2.5);
+    sim.advance_to(120, 60);
+    assert_eq!(sim.layout().planned_time(), 3.0);
+    sim.advance_to(90, 60);
+    assert_eq!(sim.layout().planned_time(), 2.5);
 }
