@@ -4,6 +4,18 @@
 use std::process::Command;
 
 #[test]
+fn invalid_cli_values_cannot_emit_terminal_controls() {
+    let output = Command::new(env!("CARGO_BIN_EXE_codestrand"))
+        .args(["preview", "--seconds-per-day", "\u{1b}[31m\u{7}"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(!output.stderr.contains(&0x1b));
+    assert!(!output.stderr.contains(&7));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("invalid value"));
+}
+
+#[test]
 fn help_is_available_without_initialising_the_renderer() {
     let output = Command::new(env!("CARGO_BIN_EXE_codestrand"))
         .arg("--help")

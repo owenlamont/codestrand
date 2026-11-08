@@ -26,6 +26,33 @@ mod scene;
 mod theme;
 mod timeline;
 
+fn terminal_escape(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        if character.is_control()
+            || matches!(character, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+        {
+            escaped.extend(character.escape_default());
+        } else {
+            escaped.push(character);
+        }
+    }
+    escaped
+}
+
+#[cfg(test)]
+mod terminal_tests {
+    #[test]
+    fn escapes_paths_and_dependency_error_chains() {
+        let error = anyhow::anyhow!("gix: bad path \u{1b}[31mfile\u{7}")
+            .context("import repository");
+        let diagnostic = super::terminal_escape(&format!("{error:#}"));
+        assert!(!diagnostic.chars().any(char::is_control));
+        assert!(diagnostic.contains("gix: bad path"));
+        assert!(diagnostic.contains("\\u{1b}"));
+    }
+}
+
 use std::path::{Path, PathBuf};
 
 use clap::{CommandFactory, Parser, Subcommand};
@@ -204,8 +231,30 @@ fn idle_seconds(value: &str) -> Result<f32, String> {
     Ok(seconds)
 }
 
-fn main() -> anyhow::Result<()> {
-    match Cli::parse().command {
+fn main() -> std::process::ExitCode {
+    match run() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("Error: {}", terminal_escape(&format!("{error:#}")));
+            if error.is::<clap::Error>() {
+                std::process::ExitCode::from(2)
+            } else {
+                std::process::ExitCode::FAILURE
+            }
+        }
+    }
+}
+
+fn run() -> anyhow::Result<()> {
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) if error.use_stderr() => return Err(error.into()),
+        Err(error) => {
+            print!("{error}");
+            return Ok(());
+        }
+    };
+    match cli.command {
         Some(Command::LayoutQuality { source, output }) => {
             let started = std::time::Instant::now();
             let (mut simulation, _) = source.load()?;

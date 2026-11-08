@@ -539,7 +539,7 @@ impl<N: Network> Resolver<N> {
             }
             eprintln!(
                 "avatars: local override {} unavailable; trying account lookups",
-                path.display()
+                crate::terminal_escape(&path.to_string_lossy())
             );
         }
         let cached = self.read(key);

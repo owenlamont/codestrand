@@ -55,6 +55,10 @@ never fetches portraits. Private GitHub repositories need an API token with acce
 
 ## Report a problem
 
+Terminal diagnostics escape control characters in paths and dependency error chains.
+For example, an escape character is printed as `\u{1b}` rather than changing terminal
+colour or interpreting a terminal command.
+
 Include the version, operating system, exact command and error text in a
 [GitHub issue](https://github.com/owenlamont/codestrand/issues). Remove private
 repository paths, author identities and credentials before sharing logs or JSON.

@@ -122,7 +122,10 @@ fn render(
     if let Some(encoder) = &mut encoder {
         encoder.finish()?;
     }
-    eprintln!("Export complete: {}", directory.display());
+    eprintln!(
+        "Export complete: {}",
+        crate::terminal_escape(&directory.to_string_lossy())
+    );
     Ok(())
 }
 
