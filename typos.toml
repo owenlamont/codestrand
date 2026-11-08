@@ -3,3 +3,6 @@ extend-exclude = ["Cargo.lock", "THIRDPARTY.txt", "assets/material/mapping.json"
 
 [default.extend-identifiers]
 PNGs = "PNGs"
+
+[default.extend-words]
+lod = "lod"

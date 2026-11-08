@@ -30,6 +30,8 @@ const LABELS: usize = 72;
 const GRID_LINES: i16 = 20;
 const AVATAR_LAYER: usize = 1;
 
+mod lod;
+
 #[derive(Resource)]
 pub(super) struct Frame {
     pub index: u32,
@@ -69,6 +71,7 @@ struct FileVisual {
 
 #[derive(Resource)]
 struct Palette {
+    folder: Handle<Mesh>,
     cube: Handle<Mesh>,
     sphere: Handle<Mesh>,
     disc: Handle<Mesh>,
@@ -94,6 +97,7 @@ impl Palette {
     fn new(world: &mut World, theme: &Theme) -> Self {
         let mut meshes = world.resource_mut::<Assets<Mesh>>();
         let cube = meshes.add(Cuboid::default());
+        let folder = meshes.add(folder_mesh());
         let sphere = meshes.add(Sphere::new(theme.avatar_radius));
         let disc = meshes.add(Circle::new(theme.avatar_radius));
         let beam = meshes.add(Cylinder::new(0.035, 1.0));
@@ -169,6 +173,7 @@ impl Palette {
             })
             .collect();
         Self {
+            folder,
             cube,
             sphere,
             disc,
@@ -238,6 +243,17 @@ struct DirectoryHues {
     top_levels: usize,
 }
 
+fn folder_mesh() -> Mesh {
+    let mut folder = Mesh::from(Cuboid::new(1.4, 0.1, 0.9));
+    folder
+        .merge(
+            &Mesh::from(Cuboid::new(0.55, 0.1, 0.3))
+                .translated_by(Vec3::new(-0.425, 0.0, -0.5)),
+        )
+        .expect("folder parts share mesh attributes");
+    folder
+}
+
 impl DirectoryHues {
     fn sync(&mut self, layout: &Layout) {
         // Retired directories count too, so frame sampling cannot shift later hues.
@@ -258,6 +274,8 @@ impl DirectoryHues {
 
 #[derive(Resource, Default)]
 struct Pools {
+    lod: lod::Lod,
+    aggregates: Vec<Entity>,
     files: HashMap<u64, Entity>,
     beams: Vec<Entity>,
     fragments: Vec<Entity>,
@@ -699,6 +717,35 @@ fn sync_files(
     simulation: &Simulation,
 ) {
     let layout = simulation.layout();
+    let (focus, distance) = simulation.view();
+    let (eye, focus) = world.get_resource::<PreviewCamera>().map_or(
+        (focus + model::view_direction() * distance, focus),
+        PreviewCamera::pose,
+    );
+    let height = world
+        .query::<&Window>()
+        .iter(world)
+        .next()
+        .map_or(720.0, |window| model::count_u32(window.physical_height()));
+    let fov = world
+        .query_filtered::<&Projection, With<SceneCamera>>()
+        .iter(world)
+        .next()
+        .and_then(|projection| match projection {
+            Projection::Perspective(perspective) => Some(perspective.fov),
+            _ => None,
+        })
+        .unwrap_or(std::f32::consts::FRAC_PI_4);
+    pools.lod.sample(
+        layout,
+        simulation.seconds(),
+        lod::View {
+            eye,
+            focus,
+            height,
+            fov,
+        },
+    );
     pools.hues.sync(layout);
     pools.files.retain(|id, entity| {
         let keep = layout.file(*id).is_some();
@@ -708,6 +755,13 @@ fn sync_files(
         keep
     });
     for (id, file) in layout.files() {
+        let detail = pools.lod.detail[file.dir];
+        if detail == 0.0 {
+            if let Some(&entity) = pools.files.get(&id) {
+                set_visible(world, entity, false);
+            }
+            continue;
+        }
         let entity = *pools.files.entry(id).or_insert_with(|| {
             spawn_file(
                 world,
@@ -716,10 +770,12 @@ fn sync_files(
                 simulation.theme().glyph_kind(file.name()),
             )
         });
+        set_visible(world, entity, true);
         let position = Vec3::new(file.position.x, 0.0, file.position.y);
         if let Some(mut transform) = world.get_mut::<Transform>(entity) {
             transform.translation = position;
-            transform.scale = Vec3::splat(file.visible_presence(layout.dir(file.dir)));
+            transform.scale =
+                Vec3::splat(file.visible_presence(layout.dir(file.dir)) * detail);
         }
         let visual = world
             .get::<FileVisual>(entity)
@@ -929,12 +985,19 @@ fn sync_structure(
     let edges: Vec<_> = layout
         .dirs()
         .filter_map(|(index, dir)| {
+            if dir
+                .parent
+                .is_some_and(|parent| pools.lod.detail[parent] == 0.0)
+            {
+                return None;
+            }
             let parent = layout.dir(dir.parent?);
             Some((
                 ground(parent.position) - Vec3::Y * 0.05,
                 ground(dir.position) - Vec3::Y * 0.05,
                 palette.directory(pools.hues.slots[index], dir.depth),
-                simulation.theme().directory_edge_width(dir.depth),
+                simulation.theme().directory_edge_width(dir.depth)
+                    * dir.parent.map_or(1.0, |parent| pools.lod.detail[parent]),
             ))
         })
         .collect();
@@ -977,11 +1040,41 @@ fn sync_structure(
         if let Some(mut transform) = world.get_mut::<Transform>(*entity) {
             *transform =
                 Transform::from_translation(ground(dir.position) - Vec3::Y * 0.05)
-                    .with_scale(simulation.theme().directory_node_scale);
+                    .with_scale(
+                        simulation.theme().directory_node_scale
+                            * pools.lod.detail[index],
+                    );
         }
-        set_visible(world, *entity, true);
+        set_visible(world, *entity, pools.lod.detail[index] > 0.0);
     }
     hide_rest(world, pool, dirs.len());
+    let glyphs: Vec<_> = layout
+        .dirs()
+        .filter(|(index, _)| pools.lod.glyph[*index] > 0.0)
+        .collect();
+    let pool = grow(
+        world,
+        &mut pools.aggregates,
+        glyphs.len(),
+        &palette.folder,
+        &palette.edge,
+    );
+    for (&entity, &(index, dir)) in pool.iter().zip(&glyphs) {
+        set_material(
+            world,
+            entity,
+            palette.directory(pools.hues.slots[index], dir.depth),
+        );
+        if let Some(mut transform) = world.get_mut::<Transform>(entity) {
+            *transform = Transform::from_translation(ground(dir.position)).with_scale(
+                Vec3::new(1.0, 0.1, 1.0)
+                    * pools.lod.size[index]
+                    * pools.lod.glyph[index],
+            );
+        }
+        set_visible(world, entity, true);
+    }
+    hide_rest(world, pool, glyphs.len());
     sync_grid(world, pools, simulation);
 }
 
@@ -2307,6 +2400,51 @@ mod tests {
             );
             assert_eq!(world.resource::<Assets<Image>>().len(), image_count);
         }
+    }
+
+    #[test]
+    fn collapsed_files_skip_visuals_then_expand_without_moving_layout() {
+        let events = crate::timeline::synthetic();
+        let mut simulation = Simulation::new(
+            events.clone(),
+            &model::Options {
+                start: events.len(),
+                ..default()
+            },
+            &Theme::neon(),
+            &crate::contributors::Mappings::default(),
+        );
+        let mut world = World::new();
+        world.init_resource::<Assets<Mesh>>();
+        world.init_resource::<Assets<Image>>();
+        world.init_resource::<Assets<StandardMaterial>>();
+        let palette = Palette::new(&mut world, &Theme::neon());
+        let mut pools = Pools::default();
+        world.insert_resource(PreviewCamera::new((Vec3::ZERO, 20000.0)));
+        sync_files(&mut world, &palette, &mut pools, &simulation);
+        assert!(pools.lod.glyph.iter().any(|&weight| weight > 0.0));
+        assert!(pools.files.len() < simulation.layout().files().count());
+        world.insert_resource(PreviewCamera::new((Vec3::ZERO, 1.0)));
+        simulation.advance_to(30, 30);
+        let positions: Vec<_> = simulation
+            .layout()
+            .files()
+            .map(|(_, file)| file.position)
+            .collect();
+        sync_files(&mut world, &palette, &mut pools, &simulation);
+        assert_eq!(pools.files.len(), simulation.layout().files().count());
+        assert_eq!(
+            positions,
+            simulation
+                .layout()
+                .files()
+                .map(|(_, file)| file.position)
+                .collect::<Vec<_>>()
+        );
+        sync_structure(&mut world, &palette, &mut pools, &simulation);
+        assert!(pools.aggregates.iter().all(
+            |&entity| world.get::<Visibility>(entity) == Some(&Visibility::Hidden)
+        ));
     }
 
     #[test]

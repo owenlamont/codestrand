@@ -442,6 +442,7 @@ impl Simulation {
         let mut dirs: Vec<_> = layout.dirs().filter(|(_, dir)| dir.depth > 0).collect();
         dirs.sort_by_key(|&(index, dir)| {
             (
+                dir.depth != 1,
                 std::cmp::Reverse(subtree[index] >> dir.depth.min(16)),
                 dir.depth,
                 index,
