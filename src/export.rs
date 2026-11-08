@@ -68,6 +68,8 @@ fn render(
     }
     app.finish();
     app.cleanup();
+    // Startup rasterises bundled glyphs before asynchronous readiness can be checked.
+    update(&mut app)?;
     let readiness_started = Instant::now();
     loop {
         update(&mut app)?;
@@ -221,30 +223,33 @@ mod tests {
         }
         let simulation = Simulation::new(
             events,
-            &model::Options::default(),
+            &model::Options {
+                start: 4,
+                seconds_per_day: 2.0,
+                max_idle_seconds: 2.0,
+                ..Default::default()
+            },
             &Theme::neon(),
             &contributors::Mappings::default(),
         );
         let (mut app, target) = scene::headless(
             simulation,
             "Live theme switch / portrait fixture".to_owned(),
-            15,
+            5,
         );
         app.add_systems(
             bevy::prelude::Update,
             (|world: &mut bevy::prelude::World| {
                 let index = world.resource::<scene::Frame>().index;
-                let wanted = if (45..90).contains(&index) {
-                    ThemeName::Phosphor
-                } else {
-                    ThemeName::Neon
-                };
+                let wanted = ThemeName::ALL[usize::try_from(index / 10)
+                    .unwrap()
+                    .min(ThemeName::ALL.len() - 1)];
                 if world.resource::<scene::Playback>().0.theme().name != wanted {
                     scene::switch_theme(world, wanted);
                 }
             })
             .before(scene::animate),
         );
-        render(&output, (app, target), 120, 15, 0, None).unwrap();
+        render(&output, (app, target), 70, 5, 0, None).unwrap();
     }
 }
