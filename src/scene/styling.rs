@@ -286,8 +286,22 @@ pub(super) fn apply(world: &mut World, theme: &Theme) {
     }
     world.resource_scope(|world, styles: Mut<Styles>| {
         let font = styles.fonts.iter().find(|(kind, _)| *kind == theme.font).map(|(_, handle)| handle.clone()).unwrap_or_default();
-        for mut text in world.query::<&mut TextFont>().iter_mut(world) {
-            text.font = font.clone().into();
+        let code_style = match theme.font {
+            FontStyle::Serif => FontStyle::Plex,
+            monospace => monospace,
+        };
+        let code_font = styles.fonts.iter()
+            .find(|(kind, _)| *kind == code_style)
+            .map(|(_, handle)| handle.clone())
+            .unwrap_or_default();
+        for (mut text, snippet) in world
+            .query::<(&mut TextFont, Option<&super::DiffSample>)>().iter_mut(world)
+        {
+            text.font = if snippet.is_some() {
+                code_font.clone()
+            } else {
+                font.clone()
+            }.into();
         }
         for (mut node, mut background, mut border) in world.query_filtered::<(&mut Node, &mut BackgroundColor, &mut BorderColor), With<Label>>().iter_mut(world) {
             node.border = UiRect::all(px(if theme.label_style == crate::theme::LabelStyle::Bevelled { 2.0 } else { 0.0 }));
@@ -553,8 +567,134 @@ pub(super) fn beams(
 
 #[cfg(test)]
 mod tests {
+    use super::super::{DiffSample, Playback, Pools, SceneTarget, Title};
     use super::*;
     use crate::theme::ThemeName;
+
+    fn active_code_world() -> World {
+        let mut events = crate::timeline::synthetic();
+        events.truncate(1);
+        events[0].changes.truncate(1);
+        events[0].changes[0].insertions = 7;
+        events[0].changes[0].removals = 7;
+        events[0].changes[0].samples = [true, false]
+            .map(|added| crate::diff_samples::Sample {
+                added,
+                text: "let code = ascii();".to_owned(),
+            })
+            .to_vec();
+        let mut simulation = Simulation::new(
+            events,
+            &crate::model::Options::default(),
+            &Theme::neon(),
+            &crate::contributors::Mappings::default(),
+        );
+        simulation.advance_to(45, 60);
+        let mut world = World::new();
+        world.insert_resource(SceneTarget(Handle::<Image>::default().into()));
+        world.insert_resource(Title("test".to_owned()));
+        world.insert_resource(Playback(simulation));
+        world.init_resource::<Pools>();
+        world.init_resource::<Assets<Mesh>>();
+        world.init_resource::<Assets<Image>>();
+        world.init_resource::<Assets<StandardMaterial>>();
+        super::super::setup(&mut world);
+        world
+    }
+
+    #[test]
+    fn switching_themes_restyles_active_code_without_resetting_fragments() {
+        let mut world = active_code_world();
+        let seconds = world.resource::<Playback>().0.seconds();
+        let lines = world.resource::<Playback>().0.diff_lines();
+        let anchor = lines[0].position;
+        let extent = 0.07 * lines[0].scale * 500.0 / 48.0;
+        let camera = Camera {
+            computed: bevy::camera::ComputedCameraValues {
+                clip_from_view: bevy::math::proj::orthographic(
+                    -extent, extent, -extent, extent, 0.1, 100.0,
+                ),
+                target_info: Some(bevy::camera::RenderTargetInfo {
+                    physical_size: UVec2::splat(1000),
+                    scale_factor: 1.0,
+                }),
+                ..default()
+            },
+            ..default()
+        };
+        for name in ThemeName::ALL.into_iter().chain([ThemeName::Neon]) {
+            super::super::switch_theme(&mut world, name);
+            let theme = name.build();
+            assert_eq!(world.resource::<Playback>().0.seconds(), seconds);
+            assert_eq!(
+                world.resource::<Playback>().0.diff_lines()[0].position,
+                anchor
+            );
+            let mut pools = world.remove_resource::<Pools>().unwrap();
+            pools.lod.detail =
+                vec![1.0; world.resource::<Playback>().0.layout().dir_count()];
+            world.resource_scope(|world, playback: Mut<Playback>| {
+                world.resource_scope(|world, palette: Mut<Palette>| {
+                    super::super::sync_activity(
+                        world,
+                        &palette,
+                        &mut pools,
+                        &playback.0,
+                    );
+                });
+            });
+            world.insert_resource(pools);
+            super::super::diff_samples(
+                &mut world,
+                &camera,
+                &GlobalTransform::from_translation(anchor + Vec3::Z * 10.0),
+            );
+            let kind = if theme.font == FontStyle::Serif {
+                FontStyle::Plex
+            } else {
+                theme.font
+            };
+            let expected = world
+                .resource::<Styles>()
+                .fonts
+                .iter()
+                .find(|(style, _)| *style == kind)
+                .map(|(_, handle)| handle.clone())
+                .unwrap_or_default();
+            let mut visible = 0;
+            for (text, font, color, shadow, visibility, transform) in world
+                .query_filtered::<(
+                    &Text,
+                    &TextFont,
+                    &TextColor,
+                    &TextShadow,
+                    &Visibility,
+                    &UiTransform,
+                ), With<DiffSample>>()
+                .iter(&world)
+            {
+                assert_eq!(font.font, expected.clone().into());
+                if *visibility == Visibility::Hidden {
+                    continue;
+                }
+                visible += 1;
+                let ink = if text.0.starts_with('+') {
+                    theme.diff_added
+                } else {
+                    theme.diff_removed
+                };
+                assert_eq!(color.0.to_srgba().red, ink.to_srgba().red);
+                assert_eq!(transform.scale.x, transform.scale.y);
+                assert!(
+                    (shadow.color.alpha()
+                        - theme.label_shadow.color.alpha() * color.0.alpha())
+                    .abs()
+                        < 0.0001
+                );
+            }
+            assert_eq!(visible, 2, "{}", name.title());
+        }
+    }
 
     #[test]
     fn preview_ground_covers_far_plane_and_backdrop_faces_orbited_camera() {

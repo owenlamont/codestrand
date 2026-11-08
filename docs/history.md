@@ -24,8 +24,9 @@ playback follows the first-parent sequence.
 
 ## Cache
 
-Repository playback saves the latest imported timeline and diff counts under the
-platform user cache directory, inside `codestrand/`. Linked worktrees share a cache
+Repository playback saves the latest imported timeline, diff counts and bounded
+line samples under the platform user cache directory, inside `codestrand/`.
+Linked worktrees share a cache
 namespace based on the canonical common Git directory. A different resolved tip
 replaces the saved timeline after a full import. Changing range or pacing reuses
 the imported timeline. Contributor mapping edits take effect on cache hits.

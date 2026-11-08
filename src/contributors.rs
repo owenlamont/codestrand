@@ -239,6 +239,7 @@ mod tests {
                     kind: timeline::Kind::Modified,
                     insertions: 1,
                     removals: 0,
+                    samples: Vec::new(),
                 }],
             })
             .collect()

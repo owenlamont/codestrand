@@ -21,6 +21,7 @@ fn changes(dir: &str, count: usize, kind: &Kind) -> Vec<FileChange> {
             kind: kind.clone(),
             insertions: 1,
             removals: 0,
+            samples: Vec::new(),
         })
         .collect()
 }
