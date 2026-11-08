@@ -1,4 +1,6 @@
 pub(crate) mod diagnostics;
+mod envelopes;
+pub(super) use envelopes::Snapshots;
 
 use bevy::math::{Rect, Vec2, Vec3};
 use serde::Serialize;
@@ -12,7 +14,7 @@ use crate::layout::packing::Tile;
 const HALF: Vec2 = Vec2::new(640.0, 360.0);
 const HALO: f32 = 2.0;
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(super) struct Envelope {
     low: Vec2,
     high: Vec2,
@@ -43,6 +45,22 @@ impl Envelope {
         }
     }
 
+    fn include_service(&mut self, points: &mut [Vec3], touched: usize, tile: Tile) {
+        let initial_mean = (self.samples == 0)
+            .then(|| touched_mean(&points[..touched], tile))
+            .flatten();
+        for point in points.iter_mut() {
+            point.y += 0.12;
+        }
+        let points: Vec<_> =
+            project(view_direction() * framing::DISTANCE, Vec3::ZERO, points)
+                .flatten()
+                .collect();
+        self.include(&points, tile);
+        if let Some(mean) = initial_mean {
+            self.mean = mean;
+        }
+    }
     fn corners(self, tile: Tile) -> [Vec2; 4] {
         let size = tile.high - tile.low;
         Tile {
@@ -229,45 +247,64 @@ fn short_name(name: &str, scale: f32, width: f32) -> String {
     text.push_str("...");
     text
 }
+fn place_point(point: Vec3, rotated: bool, scale: f32, origin: Vec2) -> Vec3 {
+    let local = Vec2::new(point.x, point.z);
+    let local = if rotated { local.perp() } else { local };
+    ground(local * scale + origin)
+}
 impl Simulation {
-    pub(super) fn plan_avatar_envelopes(&mut self) {
+    pub(super) fn plan_avatar_envelopes(&mut self, snapshots: Option<Snapshots>) {
+        if let Some(snapshots) = snapshots {
+            self.envelopes = snapshots.project(&self.packing, self.events.len());
+            return;
+        }
         let mut envelopes = vec![Envelope::default(); self.events.len()];
         let frames = super::frames_for(self.duration(), 60)
             .expect("validated playback frame bound");
         for _ in 0..frames {
-            self.tick_layout();
+            self.tick_local_layout();
             let now = super::tick_time(self.state.tick);
             self.state.pulses.retain(|p| now < p.end);
+            if self.state.pulses.is_empty() {
+                continue;
+            }
+            let mut needed: Vec<_> =
+                self.state.pulses.iter().map(|p| p.repository).collect();
+            needed.sort_unstable();
+            needed.dedup();
+            let (regions, origins, scales) = self
+                .packing
+                .sample_repositories(self.state.tick, &needed)
+                .expect("planned repository samples");
             for pulse in &self.state.pulses {
-                let Some(tile) = self.state.layout.repositories[pulse.repository].tile
-                else {
+                let Some(tile) = regions[pulse.repository].tile else {
                     continue;
+                };
+                let origin =
+                    crate::layout::world_coordinates(origins[pulse.repository]);
+                let transform = |point| {
+                    place_point(
+                        point,
+                        regions[pulse.repository].rotated,
+                        scales[pulse.repository],
+                        origin,
+                    )
                 };
                 let mut points: Vec<_> = pulse
                     .touched
                     .iter()
                     .filter_map(|&id| self.state.point(Target::File(id)))
+                    .map(transform)
                     .collect();
-                let initial_mean = (envelopes[pulse.commit].samples == 0)
-                    .then(|| touched_mean(&points, tile))
-                    .flatten();
+                let touched = points.len();
                 points.extend(
                     pulse
                         .targets
                         .iter()
-                        .filter_map(|&(target, ..)| self.state.point(target)),
+                        .filter_map(|&(target, ..)| self.state.point(target))
+                        .map(transform),
                 );
-                for point in &mut points {
-                    point.y += 0.12;
-                }
-                let points: Vec<_> =
-                    project(view_direction() * framing::DISTANCE, Vec3::ZERO, &points)
-                        .flatten()
-                        .collect();
-                envelopes[pulse.commit].include(&points, tile);
-                if let Some(mean) = initial_mean {
-                    envelopes[pulse.commit].mean = mean;
-                }
+                envelopes[pulse.commit].include_service(&mut points, touched, tile);
             }
         }
         self.envelopes = envelopes;
@@ -967,6 +1004,58 @@ mod tests {
             }
         }
     }
+    fn reference_avatar_envelopes(sim: &mut Simulation) {
+        let mut envelopes = vec![Envelope::default(); sim.events.len()];
+        let frames = crate::model::frames_for(sim.duration(), 60)
+            .expect("validated playback frame bound");
+        for _ in 0..frames {
+            sim.tick_layout();
+            let now = crate::model::tick_time(sim.state.tick);
+            sim.state.pulses.retain(|p| now < p.end);
+            for pulse in &sim.state.pulses {
+                let Some(tile) = sim.state.layout.repositories[pulse.repository].tile
+                else {
+                    continue;
+                };
+                let mut points: Vec<_> = pulse
+                    .touched
+                    .iter()
+                    .filter_map(|&id| sim.state.point(Target::File(id)))
+                    .collect();
+                let initial_mean = (envelopes[pulse.commit].samples == 0)
+                    .then(|| touched_mean(&points, tile))
+                    .flatten();
+                points.extend(
+                    pulse
+                        .targets
+                        .iter()
+                        .filter_map(|&(target, ..)| sim.state.point(target)),
+                );
+                for point in &mut points {
+                    point.y += 0.12;
+                }
+                let points: Vec<_> =
+                    project(view_direction() * framing::DISTANCE, Vec3::ZERO, &points)
+                        .flatten()
+                        .collect();
+                envelopes[pulse.commit].include(&points, tile);
+                if let Some(mean) = initial_mean {
+                    envelopes[pulse.commit].mean = mean;
+                }
+            }
+        }
+        sim.envelopes = envelopes;
+        sim.state = sim.initial.clone();
+    }
+    #[test]
+    fn selective_envelopes_match_full_scene_replay_exactly() {
+        let mut sim = thirty();
+        let selected = sim.envelopes.clone();
+        sim.plan_avatar_envelopes(None);
+        assert_eq!(selected, sim.envelopes);
+        reference_avatar_envelopes(&mut sim);
+        assert_eq!(selected, sim.envelopes);
+    }
     fn snapshot(sim: &Simulation) -> serde_json::Value {
         serde_json::Value::Array(sim.state.avatars.iter().map(|a| serde_json::json!({
             "commit":a.commit,"repository":a.repository,"position":a.position.to_array(),"velocity":a.velocity.to_array(),
@@ -975,7 +1064,7 @@ mod tests {
         })).collect())
     }
     fn validate(sim: &mut Simulation) {
-        let frames = super::super::frames_for(sim.duration(), 60).unwrap();
+        let frames = crate::model::frames_for(sim.duration(), 60).unwrap();
         let mut moving = diagnostics::MovingBeams::default();
         let mut checkpoints = Vec::new();
         let mut previous_commit = usize::MAX;

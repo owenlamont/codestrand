@@ -523,6 +523,23 @@ impl Packing {
         tick: u64,
         presence: Option<&[f32]>,
     ) -> Option<(Vec<RepositoryRegion>, Vec<Vec2>, Vec<f32>)> {
+        self.sample_filtered(tick, presence, |_| true)
+    }
+
+    pub(crate) fn sample_repositories(
+        &self,
+        tick: u64,
+        repositories: &[usize],
+    ) -> Option<(Vec<RepositoryRegion>, Vec<Vec2>, Vec<f32>)> {
+        self.sample_filtered(tick, None, |index| repositories.contains(&index))
+    }
+
+    fn sample_filtered(
+        &self,
+        tick: u64,
+        presence: Option<&[f32]>,
+        selected: impl Fn(usize) -> bool,
+    ) -> Option<(Vec<RepositoryRegion>, Vec<Vec2>, Vec<f32>)> {
         let tick = usize::try_from(tick)
             .unwrap_or(usize::MAX)
             .min(self.samples.len().checked_sub(1)?);
@@ -552,14 +569,15 @@ impl Packing {
         for (i, r) in regions.iter_mut().enumerate() {
             let turn = |p: Vec2| if self.rotated[i] { p.perp() } else { p };
             let shape: Vec<_> = r.outline.iter().copied().map(turn).collect();
-            let fitted = placement[i].map(|tile| fit::best(tile, &shape, r.height));
+            let tile = placement[i].filter(|_| selected(i));
+            let fitted = tile.map(|tile| fit::best(tile, &shape, r.height));
             let origin = fitted.map_or(Vec2::ZERO, |f| f.origin);
             let scale = fitted.map_or(0.0, |f| f.scale);
             let (low, high) = (turn(r.low), turn(r.high));
             r.low = low.min(high) * scale + origin;
             r.high = low.max(high) * scale + origin;
-            r.live = placement[i].is_some();
-            r.tile = placement[i];
+            r.live = tile.is_some();
+            r.tile = tile;
             r.files = sample.weights[i] * presence[i];
             r.rotated = self.rotated[i];
             r.outline.clear();

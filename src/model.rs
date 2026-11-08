@@ -365,13 +365,14 @@ impl Simulation {
             theme: theme.clone(),
         };
         if !repositories.is_empty() {
-            simulation.plan_repositories(prior_active);
-            simulation.plan_avatar_envelopes();
+            let snapshots = simulation.plan_repositories(prior_active);
+            simulation.plan_avatar_envelopes(snapshots);
         }
         simulation
     }
 
-    fn plan_repositories(&mut self, mut active: Vec<bool>) {
+    fn plan_repositories(&mut self, mut active: Vec<bool>) -> Option<slots::Snapshots> {
+        let mut snapshots = Some(slots::Snapshots::default());
         for (_, file) in self.layout().files() {
             active[self.layout().dir(file.dir).repository] = true;
         }
@@ -392,6 +393,12 @@ impl Simulation {
             }
             sampled_events = self.state.next_event;
             samples.push(self.layout().local_regions(&active, geometry));
+            if snapshots
+                .as_mut()
+                .is_some_and(|cache| !cache.capture(&self.state))
+            {
+                snapshots = None;
+            }
         }
         self.packing = crate::layout::packing::Packing::build(&samples);
         self.state = self.initial.clone();
@@ -402,6 +409,7 @@ impl Simulation {
         self.state.focus = Vec3::ZERO;
         self.state.distance = framing::DISTANCE;
         self.initial = self.state.clone();
+        snapshots
     }
     pub(super) fn duration(&self) -> f32 {
         self.schedule.duration()
@@ -435,8 +443,15 @@ impl Simulation {
     }
 
     pub(crate) fn tick_layout(&mut self) {
+        let placement = self.packing.sample(self.state.tick + 1);
+        self.tick_local_layout();
+        if let Some((regions, offsets, scales)) = placement {
+            self.state.layout.place_regions(regions, offsets, &scales);
+        }
+    }
+
+    fn tick_local_layout(&mut self) {
         let canonical = self.state.tick + 1;
-        let placement = self.packing.sample(canonical);
         self.state.layout.remove_offsets();
         let plan_time = self.schedule.layout_time(tick_time(canonical));
         let state = &mut self.state;
@@ -453,9 +468,6 @@ impl Simulation {
         let dt = tick_seconds();
         state.layout.sample_plan(plan_time, dt);
         state.layout.step(dt);
-        if let Some((regions, offsets, scales)) = placement {
-            state.layout.place_regions(regions, offsets, &scales);
-        }
     }
 
     fn tick(&mut self) {
