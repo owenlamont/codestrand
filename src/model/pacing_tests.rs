@@ -217,6 +217,7 @@ fn padding_holds_date_and_commit_while_heat_fragments_and_fades_advance() {
         &Theme::neon(),
         &Mappings::default(),
         &[(1, 360)],
+        &[],
     );
     sim.advance_to(60, 60);
     let caption = sim.caption();
@@ -251,6 +252,7 @@ fn padded_state_replays_identically_at_thirty_and_sixty_fps_and_after_rewind() {
                 &Theme::neon(),
                 &Mappings::default(),
                 &[(0, 30), (2, 60), (4, 45)],
+                &[],
             )
         };
         let mut thirty = make();
@@ -282,6 +284,7 @@ fn first_selected_padding_aligns_playback_and_full_history_layout() {
         &Theme::neon(),
         &Mappings::default(),
         &[(2, 60)],
+        &[],
     );
     assert_eq!(sim.schedule.starts[0], 1.5);
     sim.advance_to(90, 60);

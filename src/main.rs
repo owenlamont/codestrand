@@ -62,7 +62,7 @@ mod terminal_tests {
     }
 }
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use clap::{CommandFactory, Parser, Subcommand};
 
@@ -338,7 +338,11 @@ fn run() -> anyhow::Result<()> {
         }
     };
     match cli.command {
-        Some(Command::LayoutQuality { source, output, treemap }) => {
+        Some(Command::LayoutQuality {
+            source,
+            output,
+            treemap,
+        }) => {
             let started = std::time::Instant::now();
             let (mut simulation, _) = source.load()?;
             eprintln!("load_plan_seconds={:.6}", started.elapsed().as_secs_f64());

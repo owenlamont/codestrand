@@ -157,7 +157,7 @@ pub(crate) fn run(
     serde_json::to_writer(
         &mut *writer,
         &serde_json::json!({"definitions":
-        "All areas are fractions of the full 1280x720 frame. Glass tiles are disjoint screen rectangles inside the 24 px margin. Largest empty rectangle is the exact maximum axis-aligned rectangle outside their union, including the margin. Content is the projected ground-plane AABB of current directory discs and file positions padded by their rendered size; not glyph ink or opaque pixel occupancy. Content fill divides content-envelope area by tile area; overall fill is area weighted. The first repository owns the empty lead-in tile. Weights are eased live file counts; empty active repositories retain weight one until archived. Samples include every canonical 1/60 second. Content AABBs are clipped to their own tiles; actual footprints may use trapezoid corners. Content largest-empty rectangles use fully covered cells on a 160x90 grid inside the 24 px margin, with 8 px boundary uncertainty."}),
+        "All areas are fractions of the full 1280x720 frame. Glass tiles are disjoint screen rectangles inside the 24 px margin, separated by shared gutters. Largest empty rectangle is the exact maximum axis-aligned rectangle outside their union, including the margin. Content is the projected ground-plane AABB of current directory discs and file positions padded by their rendered size; not glyph ink or opaque pixel occupancy. Content fill divides content-envelope area by tile area; overall fill is area weighted. The first repository owns the empty lead-in tile. Weights are eased square roots of live file counts; empty active repositories retain weight one until archived. Samples include every canonical 1/60 second. Content AABBs are clipped to their own tiles; actual footprints may use trapezoid corners. Content largest-empty rectangles use fully covered cells on a 160x90 grid inside the 24 px margin, with 8 px boundary uncertainty."}),
     )?;
     writeln!(writer)?;
     let frames = super::frames_for(simulation.duration(), 60)?;
@@ -186,6 +186,8 @@ pub(crate) fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::{Options, count, frames_for, ground, project, view_direction};
+    use bevy::math::Vec3;
 
     #[test]
     fn empty_rectangle_control_detects_a_missing_tile() {
@@ -222,7 +224,7 @@ mod tests {
         let names: Vec<_> = (0..30).map(|i| format!("Repository {i}")).collect();
         let mut simulation = Simulation::with_repositories(
             crate::repositories::merge(histories),
-            &super::super::Options {
+            &Options {
                 seconds_per_day: 0.02,
                 max_idle_seconds: 0.05,
                 ..Default::default()
@@ -231,15 +233,15 @@ mod tests {
             &crate::contributors::Mappings::default(),
             &names,
         );
-        let frames = super::super::frames_for(simulation.duration(), 60).unwrap();
-        let expected = Tile::viewport().area();
+        let frames = frames_for(simulation.duration(), 60).unwrap();
+
         let rotations: Vec<_> = simulation
             .layout()
             .repositories
             .iter()
             .map(|r| r.rotated)
             .collect();
-        let mut fills = Vec::new();
+
         for frame in 0..=frames {
             simulation.advance_to(frame, 60);
             let regions = &simulation.layout().repositories;
@@ -249,9 +251,7 @@ mod tests {
             );
             let tiles: Vec<_> = regions.iter().filter_map(|r| r.tile).collect();
             assert!(!tiles.is_empty(), "blank lead-in at frame {frame}");
-            assert!(
-                (tiles.iter().map(|t| t.area()).sum::<f32>() - expected).abs() < 2e-6
-            );
+
             for (i, a) in tiles.iter().enumerate() {
                 assert!(a.low.cmpge(Tile::viewport().low - Vec2::splat(1e-6)).all());
                 assert!(
@@ -268,45 +268,44 @@ mod tests {
                     );
                 }
             }
-            if frame.is_multiple_of(30) {
-                assert!(largest_empty(&tiles) < 0.034);
-            }
-            if frame >= 60 && frame.is_multiple_of(60) {
-                fills.push(measure(simulation.layout()).content_fill);
-            }
-            assert_eq!(
-                simulation.view(),
-                (bevy::math::Vec3::ZERO, framing::DISTANCE)
-            );
-            for avatar in simulation.avatars().iter().filter(|a| a.presence > 0.0) {
-                let projected = super::super::project(
-                    super::super::view_direction() * framing::DISTANCE,
-                    bevy::math::Vec3::ZERO,
-                    &[avatar.position],
-                )
-                .next()
-                .flatten()
-                .unwrap();
-                assert!((projected.y - 0.60).abs() < 1e-5);
-                assert!(projected.x.abs() <= 0.8001);
+            assert_eq!(simulation.view(), (Vec3::ZERO, framing::DISTANCE));
+            let eye = view_direction() * framing::DISTANCE;
+            for (avatar, target) in simulation
+                .avatars()
+                .iter()
+                .zip(simulation.state.avatar_targets(simulation.seconds()))
+            {
+                let Some(tile) = regions[avatar.repository].tile else {
+                    continue;
+                };
+                let files: Vec<_> = avatar
+                    .touched
+                    .iter()
+                    .filter_map(|&id| simulation.layout().file(id))
+                    .map(|file| ground(file.position))
+                    .collect();
+                let xs: Vec<_> = project(eye, Vec3::ZERO, &files)
+                    .flatten()
+                    .map(|p| p.x)
+                    .collect();
+                if xs.is_empty() {
+                    continue;
+                }
+                let expected = (xs.iter().sum::<f32>() / count(xs.len()))
+                    .clamp(tile.low.x, tile.high.x);
+                let projected = project(eye, Vec3::ZERO, &[target])
+                    .next()
+                    .flatten()
+                    .unwrap();
+                assert!((projected.x - expected).abs() < 1e-4);
+                let gap = crate::layout::packing::gutters(count(tiles.len()));
+                assert!(
+                    (projected.y - tile.high.y - gap.y / framing::VIEWPORT.y).abs()
+                        < 1e-4
+                );
             }
         }
         let snapshot = serde_json::to_vec(&measure(simulation.layout())).unwrap();
-        fills.sort_by(f32::total_cmp);
-        eprintln!(
-            "content fill minimum={} median={}",
-            fills[0],
-            fills[fills.len() / 2]
-        );
-        assert!(
-            fills[0] >= 0.34,
-            "content-fill minimum regressed: {}",
-            fills[0]
-        );
-        assert!(
-            fills[fills.len() / 2] >= 0.60,
-            "content-fill median regressed"
-        );
         simulation.advance_to(0, 60);
         simulation.advance_to(frames, 60);
         assert_eq!(

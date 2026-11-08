@@ -2,125 +2,19 @@ use std::sync::Arc;
 
 use bevy::math::{FloatExt, Vec2};
 
-use super::RepositoryRegion;
+use super::{RepositoryRegion, outline};
 use crate::model::framing;
 
-const EASE_SECONDS: f32 = 0.06;
 mod fit;
+
+const BOUND: f32 = 2.5;
+pub(crate) const MINIMUM: Vec2 = Vec2::new(144.0, 64.0);
+const BIRTH_SECONDS: f32 = 0.75;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Tile {
     pub low: Vec2,
     pub high: Vec2,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn region(index: u16, live: bool) -> RepositoryRegion {
-        RepositoryRegion {
-            label: index.to_string(),
-            low: Vec2::new(-15.0, -4.0),
-            high: Vec2::new(15.0, 4.0),
-            live,
-            files: f32::from(index + 1),
-            tile: None,
-            outline: super::super::outline::rectangle(
-                Vec2::new(-15.0, -4.0),
-                Vec2::new(15.0, 4.0),
-            ),
-            height: 0.105,
-            rotated: false,
-        }
-    }
-
-    #[test]
-    fn content_fit_sets_tile_areas_and_uniform_scales_preserve_local_shapes() {
-        let packing = Packing::build(&[vec![region(0, true), region(2, true)]]);
-        let (regions, _, scales) = packing.sample(0).unwrap();
-        let tiles: Vec<_> = regions.iter().map(|r| r.tile.unwrap()).collect();
-        assert!(tiles.iter().all(|t| t.area() > 0.0));
-        assert!(
-            (tiles.iter().map(|t| t.area()).sum::<f32>() - Tile::viewport().area())
-                .abs()
-                < 1e-6
-        );
-        for (r, scale) in regions.iter().zip(scales) {
-            assert!(
-                ((r.high - r.low) / scale
-                    - (if r.rotated {
-                        Vec2::new(8.0, 30.0)
-                    } else {
-                        Vec2::new(30.0, 8.0)
-                    }))
-                .length()
-                    < 1e-4
-            );
-            let tile = r.tile.unwrap();
-            for point in r.corners() {
-                let screen =
-                    framing::project_ground(super::super::region_coordinates(point));
-                assert!(screen.cmpge(tile.low - Vec2::splat(1e-6)).all());
-                assert!(screen.cmple(tile.high + Vec2::splat(1e-6)).all());
-            }
-        }
-    }
-
-    #[test]
-    fn content_shape_changes_the_split_instead_of_always_preferring_square_tiles() {
-        let axis = |size| {
-            let mut regions = vec![region(0, true), region(1, true)];
-            for r in &mut regions {
-                r.low = Vec2::ZERO;
-                r.high = size;
-                r.files = 1.0;
-            }
-            let packing = Packing::build(&[regions]);
-            let Some(Node::Split { axis, .. }) = packing.root else {
-                panic!("two repositories split");
-            };
-            (axis, packing.rotated)
-        };
-        assert_ne!(axis(Vec2::new(100.0, 4.0)), axis(Vec2::new(4.0, 100.0)));
-    }
-
-    #[test]
-    fn births_and_archive_fades_reclaim_the_entire_view_without_changing_slots() {
-        let rows: Vec<_> = (0..240)
-            .map(|tick| vec![region(0, true), region(2, tick >= 60)])
-            .collect();
-        let packing = Packing::build(&rows);
-        assert_eq!(
-            packing.sample(59).unwrap().0[0].tile,
-            Some(Tile::viewport())
-        );
-        assert_eq!(
-            packing.sample(60).unwrap().0[0].tile,
-            Some(Tile::viewport())
-        );
-        let mut previous = packing.sample(60).unwrap().0[0].tile.unwrap();
-        for tick in 61..240 {
-            let (regions, _, _) = packing.sample(tick).unwrap();
-            let now = regions[0].tile.unwrap();
-            assert!(
-                now.low.distance(previous.low) + now.high.distance(previous.high)
-                    < 0.25
-            );
-            assert!(
-                crate::model::treemap::largest_empty(
-                    &regions.iter().filter_map(|r| r.tile).collect::<Vec<_>>()
-                ) < 0.034
-            );
-            previous = now;
-        }
-        let (regions, _, _) = packing
-            .sample_with_presence(239, Some(&[1.0, 0.0]))
-            .unwrap();
-        assert_eq!(regions[0].tile, Some(Tile::viewport()));
-        assert!(!regions[1].live);
-        assert!(Packing::default().sample(0).is_none());
-    }
 }
 
 impl Tile {
@@ -136,13 +30,13 @@ impl Tile {
         (self.high - self.low).element_product() * 0.25
     }
 
-    fn split(self, axis: usize, ratio: f32) -> (Self, Self) {
-        let boundary = self.low[axis] + (self.high[axis] - self.low[axis]) * ratio;
-        let mut first = self;
-        let mut second = self;
-        first.high[axis] = boundary;
-        second.low[axis] = boundary;
-        (first, second)
+    pub(crate) fn pixels(self) -> Vec2 {
+        (self.high - self.low) * framing::VIEWPORT * 0.5
+    }
+
+    pub(crate) fn ground_aspect(self) -> f32 {
+        let size = self.pixels();
+        size.x / size.y * crate::model::view_direction().y
     }
 
     pub(crate) fn corners(self) -> [Vec2; 4] {
@@ -157,325 +51,452 @@ impl Tile {
     pub(crate) fn ground(self) -> [Vec2; 4] {
         self.corners().map(framing::unproject)
     }
-
-    fn fit(self, size: Vec2) -> (Vec2, f32) {
-        let points = super::outline::rectangle(-size * 0.5, size * 0.5);
-        let fitted = fit::best(self, &points, 0.105);
-        (fitted.origin, fitted.scale)
-    }
 }
+
+pub(crate) fn gutters(count: f32) -> Vec2 {
+    let shrink = (12.0 / count.max(1.0)).min(1.0).sqrt().max(0.75);
+    Vec2::new(16.0, 32.0) * shrink
+}
+
 #[derive(Clone, Debug)]
 enum Node {
     Repository(usize),
     Split {
         axis: usize,
-        index: usize,
-        first: Box<Self>,
-        second: Box<Self>,
+        first: usize,
+        second: usize,
     },
 }
 
-impl Node {
-    fn number(&mut self, next: &mut usize) {
-        if let Self::Split {
-            index,
-            first,
-            second,
-            ..
-        } = self
+#[derive(Clone, Default)]
+struct Feasible {
+    sizes: Vec<Vec2>,
+    weight: f32,
+    presence: f32,
+    gap: f32,
+}
+
+fn interval(points: &[Vec2], axis: usize, cross: f32) -> Option<(f32, f32)> {
+    let mut low = f32::INFINITY;
+    let mut high = f32::NEG_INFINITY;
+    let mut before = *points.last()?;
+    for &point in points {
+        let delta = point[1 - axis] - before[1 - axis];
+        if delta.abs() > 1e-5 {
+            let t = (cross - before[1 - axis]) / delta;
+            if (-1e-5..=1.00001).contains(&t) {
+                let value = before[axis].lerp(point[axis], t.clamp(0.0, 1.0));
+                low = low.min(value);
+                high = high.max(value);
+            }
+        } else if (cross - point[1 - axis]).abs() < 0.001 {
+            low = low.min(point[axis]).min(before[axis]);
+            high = high.max(point[axis]).max(before[axis]);
+        }
+        before = point;
+    }
+    (low <= high).then_some((low, high))
+}
+
+// Feasible size polygons retain S1's aspect intervals while accounting for fixed pixel gutters and floors.
+fn combine(a: &[Vec2], b: &[Vec2], axis: usize, gap: f32) -> Vec<Vec2> {
+    let mut coordinates: Vec<_> = a.iter().chain(b).map(|p| p[1 - axis]).collect();
+    coordinates.sort_by(f32::total_cmp);
+    coordinates.dedup_by(|a, b| (*a - *b).abs() < 0.001);
+    let mut low = Vec::new();
+    let mut high = Vec::new();
+    for cross in coordinates {
+        if let Some(((a0, a1), (b0, b1))) =
+            interval(a, axis, cross).zip(interval(b, axis, cross))
         {
-            *index = *next;
-            *next += 1;
-            first.number(next);
-            second.number(next);
+            let mut p = Vec2::splat(cross);
+            p[axis] = a0 + b0 + gap;
+            low.push(p);
+            p[axis] = a1 + b1 + gap;
+            high.push(p);
         }
     }
+    low.extend(high.into_iter().rev());
+    low.dedup_by(|a, b| a.distance_squared(*b) < 1e-6);
+    if low
+        .first()
+        .zip(low.last())
+        .is_some_and(|(a, b)| a.distance_squared(*b) < 1e-6)
+    {
+        low.pop();
+    }
+    let length = low.len();
+    (0..length)
+        .filter_map(|i| {
+            let before = low[(i + length - 1) % length];
+            let point = low[i];
+            let after = low[(i + 1) % length];
+            ((point - before).perp_dot(after - point).abs() > 0.01).then_some(point)
+        })
+        .collect()
+}
 
-    fn presence(&self, weights: &[f32]) -> f32 {
-        match self {
-            Self::Repository(i) => weights[*i],
-            Self::Split { first, second, .. } => {
-                first.presence(weights).max(second.presence(weights))
+fn feasibility(
+    nodes: &[Node],
+    index: usize,
+    weights: &[f32],
+    presence: &[f32],
+    gap: Vec2,
+    result: &mut [Feasible],
+) {
+    if let Node::Split { first, second, .. } = nodes[index] {
+        feasibility(nodes, first, weights, presence, gap, result);
+        feasibility(nodes, second, weights, presence, gap, result);
+    }
+    update(nodes, index, weights, presence, gap, result);
+}
+
+fn update(
+    nodes: &[Node],
+    index: usize,
+    weights: &[f32],
+    presence: &[f32],
+    gap: Vec2,
+    result: &mut [Feasible],
+) {
+    let limit = Tile::viewport().pixels();
+    let state = match nodes[index] {
+        Node::Repository(i) => {
+            let p = presence[i];
+            let mut sizes = outline::rectangle(MINIMUM, limit);
+            let vertical = crate::model::view_direction().y;
+            for normal in [
+                Vec2::new(-1.0, 1.0 / (BOUND * vertical)),
+                Vec2::new(1.0, -BOUND / vertical),
+            ] {
+                sizes = outline::clip(&sizes, normal, 0.0);
+            }
+            Feasible {
+                sizes,
+                weight: weights[i] * p,
+                presence: p,
+                gap: 0.0,
             }
         }
-    }
-
-    fn allocate(
-        &self,
-        tile: Tile,
-        presence: &[f32],
-        ratios: &[f32],
-        output: &mut [Option<Tile>],
-    ) {
-        match self {
-            Self::Repository(i) => {
-                output[*i] = Some(tile);
-            }
-            Self::Split {
-                axis,
-                index,
-                first,
-                second,
-            } => {
-                let a = ratios[*index] * first.presence(presence);
-                let b = (1.0 - ratios[*index]) * second.presence(presence);
-                let (a_tile, b_tile) =
-                    tile.split(*axis, if a + b > 0.0 { a / (a + b) } else { 0.5 });
-                first.allocate(a_tile, presence, ratios, output);
-                second.allocate(b_tile, presence, ratios, output);
-            }
-        }
-    }
-
-    fn cost(
-        &self,
-        tile: Tile,
-        shapes: &[Vec<Vec2>],
-        rows: &[RepositoryRegion],
-        presence: &[f32],
-        weights: &[f32],
-        ratios: &[f32],
-    ) -> f32 {
-        let mut tiles = vec![None; shapes.len()];
-        self.allocate(tile, presence, ratios, &mut tiles);
-        tiles
-            .iter()
-            .enumerate()
-            .filter_map(|(i, t)| {
-                t.filter(|t| presence[i] > 0.001 && t.area() > 1e-9)
-                    .map(|t| {
-                        -fit::best(t, &shapes[i], rows[i].height).fill.max(1e-5).ln()
-                            * weights[i].sqrt()
-                            * presence[i]
-                    })
-            })
-            .sum()
-    }
-
-    fn optimise(
-        &self,
-        tile: Tile,
-        shapes: &[Vec<Vec2>],
-        rows: &[RepositoryRegion],
-        presence: &[f32],
-        weights: &[f32],
-        ratios: &mut [f32],
-    ) {
-        if let Self::Split {
+        Node::Split {
             axis,
-            index,
             first,
             second,
-        } = self
-        {
-            let previous = ratios[*index];
-            let total = first.weight(weights) + second.weight(weights);
-            let weighted = first.weight(weights) / total.max(1e-9);
-            let mut best = (
-                self.cost(tile, shapes, rows, presence, weights, ratios),
-                previous,
-            );
-            for candidate in [0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, weighted] {
-                ratios[*index] = candidate;
-                let cost = self.cost(tile, shapes, rows, presence, weights, ratios);
-                if cost < best.0 - 0.005 {
-                    best = (cost, candidate);
-                }
-            }
-            ratios[*index] = best.1;
-            let a = best.1 * first.presence(presence);
-            let b = (1.0 - best.1) * second.presence(presence);
-            let (near, far) =
-                tile.split(*axis, if a + b > 0.0 { a / (a + b) } else { 0.5 });
-            first.optimise(near, shapes, rows, presence, weights, ratios);
-            second.optimise(far, shapes, rows, presence, weights, ratios);
-        }
-    }
-    fn weight(&self, weights: &[f32]) -> f32 {
-        match self {
-            Self::Repository(index) => weights[*index],
-            Self::Split { first, second, .. } => {
-                first.weight(weights) + second.weight(weights)
+        } => {
+            let a = &result[first];
+            let b = &result[second];
+            let presence = a.presence.max(b.presence);
+            let gutter = gap[axis] * a.presence.min(b.presence) / presence.max(1e-9);
+            let sizes = if a.presence == 0.0 {
+                b.sizes.clone()
+            } else if b.presence == 0.0 {
+                a.sizes.clone()
+            } else {
+                let scaled = |child: &Feasible| {
+                    child
+                        .sizes
+                        .iter()
+                        .map(|&p| {
+                            let mut p = p;
+                            p[axis] *= child.presence / presence;
+                            p
+                        })
+                        .collect::<Vec<_>>()
+                };
+                combine(&scaled(a), &scaled(b), axis, gutter)
+            };
+            Feasible {
+                sizes,
+                weight: a.weight + b.weight,
+                presence: a.presence.max(b.presence),
+                gap: gutter,
             }
         }
-    }
+    };
+    result[index] = state;
+}
 
-    fn place(&self, tile: Tile, weights: &[f32], result: &mut [Option<Tile>]) {
-        match self {
-            Self::Repository(index) => {
-                result[*index] = Some(tile);
+fn allocate(
+    nodes: &[Node],
+    index: usize,
+    tile: Tile,
+    states: &[Feasible],
+    stretch: Vec2,
+    tiles: &mut [Option<Tile>],
+) {
+    if states[index].presence == 0.0 {
+        return;
+    }
+    match nodes[index] {
+        Node::Repository(i) => tiles[i] = Some(tile),
+        Node::Split {
+            axis,
+            first,
+            second,
+        } => {
+            let a = &states[first];
+            let b = &states[second];
+            if a.presence == 0.0 {
+                allocate(nodes, second, tile, states, stretch, tiles);
+                return;
             }
-            Self::Split {
+            if b.presence == 0.0 {
+                allocate(nodes, first, tile, states, stretch, tiles);
+                return;
+            }
+            let size = tile.pixels() / stretch;
+            let pa = a.presence / states[index].presence;
+            let pb = b.presence / states[index].presence;
+            let (a0, a1) =
+                interval(&a.sizes, axis, size[1 - axis]).expect("feasible first child");
+            let (b0, b1) = interval(&b.sizes, axis, size[1 - axis])
+                .expect("feasible second child");
+            let (a0, a1, b0, b1) = (a0 * pa, a1 * pa, b0 * pb, b1 * pb);
+            let available = size[axis] - states[index].gap;
+            let low = a0.max(available - b1);
+            let high = a1.min(available - b0);
+            assert!(low <= high + 0.02, "infeasible split: {low} > {high}");
+            let share = available * a.weight / (a.weight + b.weight).max(1e-9);
+            let extent = share.clamp(low.min(high), high);
+            let mut near = tile;
+            let mut far = tile;
+            near.high[axis] =
+                tile.low[axis] + 2.0 * extent * stretch[axis] / framing::VIEWPORT[axis];
+            far.low[axis] = near.high[axis]
+                + 2.0 * states[index].gap * stretch[axis] / framing::VIEWPORT[axis];
+            let mut sa = stretch;
+            let mut sb = stretch;
+            sa[axis] *= pa;
+            sb[axis] *= pb;
+            allocate(nodes, first, near, states, sa, tiles);
+            allocate(nodes, second, far, states, sb, tiles);
+        }
+    }
+}
+
+fn tiles(
+    nodes: &[Node],
+    weights: &[f32],
+    presence: &[f32],
+    gap: Vec2,
+) -> Option<Vec<Option<Tile>>> {
+    let mut states: Vec<_> = nodes
+        .iter()
+        .map(|_| Feasible {
+            sizes: Vec::new(),
+            weight: 0.0,
+            presence: 0.0,
+            gap: 0.0,
+        })
+        .collect();
+    feasibility(nodes, 0, weights, presence, gap, &mut states);
+    allocated(nodes, weights.len(), &states)
+}
+
+fn allocated(
+    nodes: &[Node],
+    repositories: usize,
+    states: &[Feasible],
+) -> Option<Vec<Option<Tile>>> {
+    let size = Tile::viewport().pixels();
+    let (low, high) = interval(&states[0].sizes, 0, size.y)?;
+    if size.x < low - 0.01 || size.x > high + 0.01 {
+        return None;
+    }
+    let mut output = vec![None; repositories];
+    allocate(nodes, 0, Tile::viewport(), states, Vec2::ONE, &mut output);
+    Some(output)
+}
+
+fn insert(nodes: &mut Vec<Node>, repository: usize, weights: &[f32], aspects: &[f32]) {
+    if nodes.is_empty() {
+        nodes.push(Node::Repository(repository));
+        return;
+    }
+    let mut best = None;
+    let presence: Vec<_> = weights.iter().map(|&w| f32::from(w > 0.0)).collect();
+    let gap = gutters(presence.iter().sum());
+    let mut cached = vec![Feasible::default(); nodes.len()];
+    feasibility(nodes, 0, weights, &presence, gap, &mut cached);
+    let mut leaf = vec![Feasible::default()];
+    update(
+        &[Node::Repository(repository)],
+        0,
+        weights,
+        &presence,
+        gap,
+        &mut leaf,
+    );
+    let mut parents = vec![None; nodes.len()];
+    for (index, node) in nodes.iter().enumerate() {
+        if let Node::Split { first, second, .. } = node {
+            parents[*first] = Some(index);
+            parents[*second] = Some(index);
+        }
+    }
+    for host in 0..nodes.len() {
+        for axis in 0..2 {
+            let mut candidate = nodes.clone();
+            let first = candidate.len();
+            candidate.push(candidate[host].clone());
+            candidate.push(Node::Repository(repository));
+            candidate[host] = Node::Split {
                 axis,
                 first,
-                second,
-                ..
-            } => {
-                let a = first.weight(weights);
-                let b = second.weight(weights);
-                let ratio = if a + b > 0.0 { a / (a + b) } else { 0.5 };
-                let (near, far) = tile.split(*axis, ratio);
-                first.place(near, weights, result);
-                second.place(far, weights, result);
+                second: first + 1,
+            };
+            let mut states = cached.clone();
+            states.push(cached[host].clone());
+            states.push(leaf[0].clone());
+            let mut ancestor = Some(host);
+            while let Some(index) = ancestor {
+                update(&candidate, index, weights, &presence, gap, &mut states);
+                ancestor = parents[index];
+            }
+            let Some(placement) = allocated(&candidate, weights.len(), &states) else {
+                continue;
+            };
+            let total: f32 = weights.iter().sum();
+            let score: f32 = placement
+                .iter()
+                .enumerate()
+                .filter_map(|(i, t)| {
+                    t.map(|t| {
+                        weights[i]
+                            * ((t.area() / Tile::viewport().area() * total
+                                / weights[i])
+                                .ln()
+                                .abs()
+                                + (t.ground_aspect() / aspects[i]).ln().abs())
+                    })
+                })
+                .sum();
+            if best.as_ref().is_none_or(|(cost, _)| score < *cost - 1e-5) {
+                best = Some((score, candidate));
             }
         }
     }
+    *nodes = best
+        .expect("readable insertion fits the supported repository count")
+        .1;
 }
 
-fn tree(order: &[usize], tile: Tile, reference: &[RepositoryRegion]) -> (Node, f32) {
-    if order.len() == 1 {
-        let index = order[0];
-        let size = reference[index].high - reference[index].low;
-        let (centre, scale) = tile.fit(size);
-        let content = framing::project_rectangle(
-            centre - size * (0.5 * scale),
-            centre + size * (0.5 * scale),
-        );
-        let cost =
-            reference[index].files.max(1.0) * (1.0 - content / tile.area().max(1e-12));
-        return (Node::Repository(index), cost);
-    }
-    let split = order.len() / 2;
-    let weight = |indices: &[usize]| {
-        indices
-            .iter()
-            .map(|&i| reference[i].files.max(1.0))
-            .sum::<f32>()
-    };
-    let near_weight = weight(&order[..split]);
-    let ratio = near_weight / (near_weight + weight(&order[split..]));
-    let candidate = |axis| {
-        let (a, b) = tile.split(axis, ratio);
-        let (first, first_cost) = tree(&order[..split], a, reference);
-        let (second, second_cost) = tree(&order[split..], b, reference);
-        (
-            Node::Split {
-                axis,
-                index: 0,
-                first: Box::new(first),
-                second: Box::new(second),
-            },
-            first_cost + second_cost,
-        )
-    };
-    let near_far = candidate(1);
-    let side_by_side = candidate(0);
-    if near_far.1 <= side_by_side.1 {
-        near_far
-    } else {
-        side_by_side
-    }
-}
 #[derive(Clone, Debug)]
-struct Placement {
-    low: Vec2,
-    high: Vec2,
-    origin: Vec2,
-    scale: f32,
-    tile: Option<Tile>,
-    files: f32,
-    shape: Box<[Vec2]>,
-    height: f32,
+struct Sample {
+    weights: Vec<f32>,
+    presence: Vec<f32>,
 }
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Packing {
-    root: Option<Node>,
-    samples: Arc<[Vec<Placement>]>,
-    labels: Vec<String>,
+    nodes: Vec<Node>,
+    regions: Arc<[Vec<RepositoryRegion>]>,
+    samples: Arc<[Sample]>,
     rotated: Vec<bool>,
+}
+
+fn rotations(
+    nodes: &[Node],
+    regions: &[Vec<RepositoryRegion>],
+    samples: &[Sample],
+) -> Vec<bool> {
+    let mut scores = vec![[0.0; 2]; regions[0].len()];
+    for tick in (0..regions.len()).step_by((regions.len() / 16).max(1)) {
+        let sample = &samples[tick];
+        let placement = tiles(
+            nodes,
+            &sample.weights,
+            &sample.presence,
+            gutters(sample.presence.iter().sum()),
+        )
+        .expect("planned tiles remain feasible");
+        for (i, tile) in placement
+            .iter()
+            .enumerate()
+            .filter_map(|(i, t)| t.map(|t| (i, t)))
+        {
+            let r = &regions[tick][i];
+            let turned: Vec<_> = r.outline.iter().map(|p| p.perp()).collect();
+            scores[i][0] += tile.area() * fit::best(tile, &r.outline, r.height).fill;
+            scores[i][1] += tile.area() * fit::best(tile, &turned, r.height).fill;
+        }
+    }
+    scores.into_iter().map(|s| s[1] > s[0] * 1.02).collect()
 }
 
 impl Packing {
     pub(crate) fn build(regions: &[Vec<RepositoryRegion>]) -> Self {
         let started = std::time::Instant::now();
-        let Some(first) = regions.first().filter(|row| !row.is_empty()) else {
+        let Some(first) = regions.first().filter(|r| !r.is_empty()) else {
             return Self::default();
         };
-        let (root, rotated, nodes) = planned_tree(regions, first);
         let births: Vec<_> = (0..first.len())
             .map(|i| regions.iter().position(|r| r[i].live).unwrap_or(usize::MAX))
             .collect();
-        let first_birth = births.iter().copied().min().unwrap_or(0);
-        let alpha = 1.0 - (-crate::model::tick_seconds() / EASE_SECONDS).exp();
-        let mut ratios = vec![0.5; nodes];
-        let mut goals = ratios.clone();
-        let mut anchors = vec![Vec2::splat(0.5); first.len()];
-        let mut samples = Vec::with_capacity(regions.len());
-        let mut previous_shapes = vec![Vec::new(); first.len()];
-        for (tick, row) in regions.iter().enumerate() {
-            let mut presence = vec![0.0; row.len()];
-            let weights: Vec<_> = row.iter().map(|r| r.files.max(1.0)).collect();
-            let shapes: Vec<_> = row
-                .iter()
-                .enumerate()
-                .map(|(i, r)| {
-                    presence[i] = birth_presence(r.live, tick, births[i], first_birth);
-                    anticipated(
-                        regions,
-                        tick,
-                        i,
-                        &previous_shapes[i],
-                        alpha,
-                        rotated[i],
-                    )
-                })
-                .collect();
-            previous_shapes.clone_from(&shapes);
-            if tick.is_multiple_of(6) {
-                root.optimise(
-                    Tile::viewport(),
-                    &shapes,
-                    row,
-                    &presence,
-                    &weights,
-                    &mut goals,
-                );
+        let mut order: Vec<_> = (0..first.len()).collect();
+        order.sort_by_key(|&i| (births[i], i));
+        let mut nodes = Vec::new();
+        let mut born = vec![false; first.len()];
+        for (position, &i) in order.iter().enumerate() {
+            born[i] = true;
+            let begin = births[i].min(regions.len() - 1);
+            let end = order
+                .get(position + 1)
+                .map_or(regions.len(), |&j| births[j].min(regions.len()))
+                .max(begin + 1);
+            let mut weights = vec![0.0; first.len()];
+            let mut aspects = vec![1.0; first.len()];
+            for (j, _) in born.iter().enumerate().filter(|(_, live)| **live) {
+                weights[j] = regions[begin..end]
+                    .iter()
+                    .map(|r| r[j].files.max(1.0).sqrt())
+                    .sum::<f32>()
+                    / crate::model::count_u32(
+                        u32::try_from(end - begin).expect("bounded timeline"),
+                    );
+                let size = regions[end - 1][j].high - regions[end - 1][j].low;
+                aspects[j] = (size.x / size.y.max(0.01)).max(0.01);
             }
-            for (now, &goal) in ratios.iter_mut().zip(&goals) {
-                *now = now.lerp(goal, alpha);
-            }
-            let mut tiles = vec![None; row.len()];
-            root.allocate(Tile::viewport(), &presence, &ratios, &mut tiles);
-            let anchor_alpha = if tick == 0 { 1.0 } else { alpha };
-            let placements = row
-                .iter()
-                .enumerate()
-                .map(|(i, r)| {
-                    let tile = tiles[i].filter(|_| presence[i] > 0.0);
-                    let (origin, scale) = if let Some(tile) = tile {
-                        let target = fit::best(tile, &shapes[i], r.height);
-                        anchors[i] = anchors[i].lerp(target.anchor, anchor_alpha);
-                        let fitted =
-                            fit::anchored(tile, &shapes[i], r.height, anchors[i]);
-                        (fitted.origin, fitted.scale)
-                    } else {
-                        (Vec2::ZERO, 0.0)
-                    };
-                    Placement {
-                        low: if rotated[i] {
-                            Vec2::new(-r.high.y, r.low.x)
-                        } else {
-                            r.low
-                        } * scale
-                            + origin,
-                        high: if rotated[i] {
-                            Vec2::new(-r.low.y, r.high.x)
-                        } else {
-                            r.high
-                        } * scale
-                            + origin,
-                        origin,
-                        scale,
-                        tile,
-                        files: weights[i] * presence[i],
-                        shape: shapes[i].clone().into_boxed_slice(),
-                        height: r.height,
-                    }
-                })
-                .collect();
-            samples.push(placements);
+            insert(&mut nodes, i, &weights, &aspects);
         }
+        let alpha = 1.0 - (-crate::model::tick_seconds() / 0.25).exp();
+        let mut weights = vec![1.0; first.len()];
+        let earliest = births.iter().copied().min().unwrap_or(0);
+        let samples: Vec<_> = regions
+            .iter()
+            .enumerate()
+            .map(|(tick, row)| {
+                for (weight, r) in weights.iter_mut().zip(row) {
+                    *weight = weight.lerp(r.files.max(1.0).sqrt(), alpha);
+                }
+                let mut presence: Vec<_> = row
+                    .iter()
+                    .enumerate()
+                    .map(|(i, r)| {
+                        if !r.live {
+                            return 0.0;
+                        }
+                        if births[i] == earliest {
+                            return 1.0;
+                        }
+                        let u = (crate::model::tick_time(
+                            u64::try_from(tick.saturating_sub(births[i]))
+                                .expect("bounded timeline"),
+                        ) / BIRTH_SECONDS)
+                            .min(1.0);
+                        u * u * (3.0 - 2.0 * u)
+                    })
+                    .collect();
+                if presence.iter().all(|&p| p == 0.0) {
+                    presence[order[0]] = 1.0;
+                }
+                Sample {
+                    weights: weights.clone(),
+                    presence,
+                }
+            })
+            .collect();
+        let rotated = rotations(&nodes, regions, &samples);
         eprintln!(
             "treemap_plan_seconds={:.6} samples={} repositories={}",
             started.elapsed().as_secs_f64(),
@@ -483,42 +504,11 @@ impl Packing {
             first.len()
         );
         Self {
-            root: Some(root),
+            nodes,
+            regions: regions.to_vec().into(),
             samples: samples.into(),
-            labels: first.iter().map(|r| r.label.clone()).collect(),
             rotated,
         }
-    }
-
-    fn placed(
-        &self,
-        tick: u64,
-    ) -> Option<(Vec<RepositoryRegion>, Vec<Vec2>, Vec<f32>)> {
-        let frame = self.samples.get(
-            usize::try_from(tick)
-                .unwrap_or(usize::MAX)
-                .min(self.samples.len().checked_sub(1)?),
-        )?;
-        let regions = frame
-            .iter()
-            .enumerate()
-            .map(|(i, p)| RepositoryRegion {
-                label: self.labels[i].clone(),
-                low: p.low,
-                high: p.high,
-                live: p.tile.is_some(),
-                files: p.files,
-                tile: p.tile,
-                outline: Vec::new(),
-                height: 0.0,
-                rotated: self.rotated[i],
-            })
-            .collect();
-        Some((
-            regions,
-            frame.iter().map(|p| p.origin).collect(),
-            frame.iter().map(|p| p.scale).collect(),
-        ))
     }
 
     pub(crate) fn sample(
@@ -528,181 +518,208 @@ impl Packing {
         self.sample_with_presence(tick, None)
     }
 
-    /// Archive fades release tile area without changing the fixed split tree.
     pub(crate) fn sample_with_presence(
         &self,
         tick: u64,
         presence: Option<&[f32]>,
     ) -> Option<(Vec<RepositoryRegion>, Vec<Vec2>, Vec<f32>)> {
-        let (mut regions, mut origins, mut scales) = self.placed(tick)?;
-        if let Some(presence) = presence {
-            if presence.iter().all(|&p| p >= 1.0) {
-                return Some((regions, origins, scales));
-            }
-            let frame = &self.samples[usize::try_from(tick)
-                .unwrap_or(usize::MAX)
-                .min(self.samples.len() - 1)];
-            let weights: Vec<_> = regions
-                .iter()
-                .enumerate()
-                .map(|(i, r)| {
-                    r.tile.map_or(0.0, Tile::area)
-                        * presence.get(i).copied().unwrap_or(1.0).clamp(0.0, 1.0)
-                })
-                .collect();
-            let mut tiles = vec![None; regions.len()];
-            self.root
-                .as_ref()?
-                .place(Tile::viewport(), &weights, &mut tiles);
-            for (i, r) in regions.iter_mut().enumerate() {
-                let old_scale = scales[i].max(f32::EPSILON);
-                let low = (r.low - origins[i]) / old_scale;
-                let high = (r.high - origins[i]) / old_scale;
-                let tile = tiles[i].filter(|_| weights[i] > 0.0);
-                let fitted =
-                    tile.map(|tile| fit::best(tile, &frame[i].shape, frame[i].height));
-                scales[i] = fitted.map_or(0.0, |f| f.scale);
-                origins[i] = fitted.map_or(Vec2::ZERO, |f| f.origin);
-                r.low = low * scales[i] + origins[i];
-                r.high = high * scales[i] + origins[i];
-                r.tile = tile;
-                r.live = tile.is_some();
-            }
+        let tick = usize::try_from(tick)
+            .unwrap_or(usize::MAX)
+            .min(self.samples.len().checked_sub(1)?);
+        let sample = &self.samples[tick];
+        let presence: Vec<_> = sample
+            .presence
+            .iter()
+            .enumerate()
+            .map(|(i, &p)| {
+                p * presence
+                    .and_then(|v| v.get(i))
+                    .copied()
+                    .unwrap_or(1.0)
+                    .clamp(0.0, 1.0)
+            })
+            .collect();
+        let placement = tiles(
+            &self.nodes,
+            &sample.weights,
+            &presence,
+            gutters(presence.iter().sum()),
+        )
+        .expect("presence-scaled tiles remain feasible");
+        let mut regions = self.regions[tick].clone();
+        let mut origins = Vec::with_capacity(regions.len());
+        let mut scales = Vec::with_capacity(regions.len());
+        for (i, r) in regions.iter_mut().enumerate() {
+            let turn = |p: Vec2| if self.rotated[i] { p.perp() } else { p };
+            let shape: Vec<_> = r.outline.iter().copied().map(turn).collect();
+            let fitted = placement[i].map(|tile| fit::best(tile, &shape, r.height));
+            let origin = fitted.map_or(Vec2::ZERO, |f| f.origin);
+            let scale = fitted.map_or(0.0, |f| f.scale);
+            let (low, high) = (turn(r.low), turn(r.high));
+            r.low = low.min(high) * scale + origin;
+            r.high = low.max(high) * scale + origin;
+            r.live = placement[i].is_some();
+            r.tile = placement[i];
+            r.files = sample.weights[i] * presence[i];
+            r.rotated = self.rotated[i];
+            r.outline.clear();
+            origins.push(origin);
+            scales.push(scale);
         }
         Some((regions, origins, scales))
     }
 }
 
-fn anticipated(
-    regions: &[Vec<RepositoryRegion>],
-    tick: usize,
-    index: usize,
-    previous: &[Vec2],
-    alpha: f32,
-    rotated: bool,
-) -> Vec<Vec2> {
-    let normals = super::outline::NORMALS;
-    let r = &regions[tick][index];
-    let turn = |p: Vec2| if rotated { p.perp() } else { p };
-    let base: [f32; 8] = normals.map(|n| {
-        r.outline
-            .iter()
-            .map(|p| turn(*p).dot(n))
-            .fold(f32::NEG_INFINITY, f32::max)
-    });
-    let mut supports = base;
-    for delta in 1..=9_u16 {
-        let future =
-            &regions[(tick + usize::from(delta)).min(regions.len() - 1)][index];
-        let u = 1.0 - f32::from(delta) / 9.0;
-        let weight = u * u * (3.0 - 2.0 * u);
-        for i in 0..8 {
-            let next = future
-                .outline
-                .iter()
-                .map(|p| turn(*p).dot(normals[i]))
-                .fold(f32::NEG_INFINITY, f32::max);
-            supports[i] = supports[i].max(base[i].lerp(next, weight));
-        }
-    }
-    if !previous.is_empty() {
-        for i in 0..8 {
-            let before = previous
-                .iter()
-                .map(|p| p.dot(normals[i]))
-                .fold(f32::NEG_INFINITY, f32::max);
-            supports[i] = supports[i].max(before.lerp(supports[i], alpha));
-        }
-    }
-    super::outline::from_supports(supports)
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-fn reference_shapes(
-    regions: &[Vec<RepositoryRegion>],
-    first: &[RepositoryRegion],
-) -> Vec<RepositoryRegion> {
-    let mut reference = first.to_vec();
-    for (i, r) in reference.iter_mut().enumerate() {
-        let mut size = Vec2::ZERO;
-        let mut weight = 0.0;
-        for row in regions.iter().step_by((regions.len() / 32).max(1)) {
-            if row[i].live {
-                size += (row[i].high - row[i].low) * row[i].files.max(1.0);
-                weight += row[i].files.max(1.0);
+    fn partition(
+        nodes: &[Node],
+        index: usize,
+        tiles: &[Option<Tile>],
+    ) -> (Option<Tile>, f32) {
+        match nodes[index] {
+            Node::Repository(i) => (tiles[i], 0.0),
+            Node::Split {
+                axis,
+                first,
+                second,
+            } => {
+                let (a, ga) = partition(nodes, first, tiles);
+                let (b, gb) = partition(nodes, second, tiles);
+                match (a, b) {
+                    (Some(a), Some(b)) => {
+                        assert!(a.high[axis] <= b.low[axis] + 1e-5);
+                        assert!((a.low[1 - axis] - b.low[1 - axis]).abs() < 1e-5);
+                        assert!((a.high[1 - axis] - b.high[1 - axis]).abs() < 1e-5);
+                        let gap = (b.low[axis] - a.high[axis])
+                            * (a.high[1 - axis] - a.low[1 - axis])
+                            * 0.25;
+                        (
+                            Some(Tile {
+                                low: a.low.min(b.low),
+                                high: a.high.max(b.high),
+                            }),
+                            ga + gb + gap,
+                        )
+                    }
+                    (a, b) => (a.or(b), ga + gb),
+                }
             }
         }
-        r.files = regions.iter().map(|row| row[i].files).fold(0.0, f32::max);
-        r.low = Vec2::ZERO;
-        r.high = if weight > 0.0 {
-            size / weight
-        } else {
-            Vec2::ONE
-        };
     }
-    reference
-}
 
-fn birth_presence(live: bool, tick: usize, birth: usize, first_birth: usize) -> f32 {
-    if !live {
-        return 0.0;
+    fn fixture() -> Vec<Vec<RepositoryRegion>> {
+        (0..1600_u16)
+            .map(|tick| {
+                (0..30_u16)
+                    .map(|i| {
+                        let size =
+                            Vec2::new(4.0 + f32::from(i % 7), 5.0 + f32::from(i % 5));
+                        RepositoryRegion {
+                            label: format!("Repository {i}"),
+                            low: -size,
+                            high: size,
+                            live: tick >= i * 40,
+                            files: f32::from(1 + (i * 37 + tick / 30) % 200),
+                            tile: None,
+                            outline: outline::rectangle(-size, size),
+                            height: 0.105,
+                            rotated: false,
+                        }
+                    })
+                    .collect()
+            })
+            .collect()
     }
-    if birth == first_birth {
-        return 1.0;
-    }
-    let elapsed = u64::try_from(tick.saturating_sub(birth)).expect("bounded timeline");
-    let u = (crate::model::tick_time(elapsed) / 0.15).min(1.0);
-    u * u * (3.0 - 2.0 * u)
-}
 
-fn rotations(root: &Node, regions: &[Vec<RepositoryRegion>]) -> Vec<bool> {
-    let mut scores = vec![[0.0; 2]; regions[0].len()];
-    for row in regions.iter().step_by((regions.len() / 32).max(1)) {
-        let weights: Vec<_> = row
-            .iter()
-            .map(|r| if r.live { r.files.max(1.0) } else { 0.0 })
-            .collect();
-        let mut tiles = vec![None; row.len()];
-        root.place(Tile::viewport(), &weights, &mut tiles);
-        for (i, r) in row
-            .iter()
-            .enumerate()
-            .filter(|(i, r)| r.live && weights[*i] > 0.0)
-        {
-            let tile = tiles[i].expect("repository slot");
-            if tile.area() <= 0.0 {
-                continue;
+    #[test]
+    fn thirty_tiles_partition_with_gutters_and_remain_readable_and_continuous() {
+        let rows = fixture();
+        let packing = Packing::build(&rows);
+        let mut previous = vec![None; 30];
+        for (tick, sample) in packing.samples.iter().enumerate() {
+            let placement = tiles(
+                &packing.nodes,
+                &sample.weights,
+                &sample.presence,
+                gutters(sample.presence.iter().sum()),
+            )
+            .unwrap();
+            let (root, gaps) = partition(&packing.nodes, 0, &placement);
+            assert_eq!(root, Some(Tile::viewport()));
+            assert!(
+                (placement.iter().flatten().map(|t| t.area()).sum::<f32>() + gaps
+                    - Tile::viewport().area())
+                .abs()
+                    < 2e-6
+            );
+            for (i, tile) in placement
+                .iter()
+                .enumerate()
+                .filter_map(|(i, t)| t.map(|t| (i, t)))
+            {
+                let p = sample.presence[i];
+                assert!(
+                    tile.pixels().cmpge(MINIMUM * p - Vec2::splat(0.02)).all(),
+                    "floor at {tick}/{i}"
+                );
+                assert!(
+                    tile.ground_aspect() >= p / BOUND - 1e-4,
+                    "aspect at {tick}/{i}"
+                );
+                assert!(
+                    tile.ground_aspect() <= BOUND / p + 1e-4,
+                    "aspect at {tick}/{i}"
+                );
+                if let Some(before) = previous[i] {
+                    let before: Tile = before;
+                    assert!(
+                        (tile.low - before.low).abs().max_element() < 0.15,
+                        "low jump at {tick}/{i}"
+                    );
+                    assert!(
+                        (tile.high - before.high).abs().max_element() < 0.15,
+                        "high jump at {tick}/{i}: {before:?} -> {tile:?}"
+                    );
+                }
             }
-            let turned: Vec<_> = r.outline.iter().map(|p| p.perp()).collect();
-            scores[i][0] += tile.area() * fit::best(tile, &r.outline, r.height).fill;
-            scores[i][1] += tile.area() * fit::best(tile, &turned, r.height).fill;
+            previous = placement;
+        }
+        let replay = Packing::build(&rows);
+        for tick in [0, 60, 700, 1599] {
+            let (_, origins, scales) = packing.sample(tick).unwrap();
+            let (_, replay_origins, replay_scales) = replay.sample(tick).unwrap();
+            assert_eq!((origins, scales), (replay_origins, replay_scales));
         }
     }
-    scores.into_iter().map(|s| s[1] > s[0] * 1.02).collect()
-}
 
-fn planned_tree(
-    regions: &[Vec<RepositoryRegion>],
-    first: &[RepositoryRegion],
-) -> (Node, Vec<bool>, usize) {
-    let mut reference = reference_shapes(regions, first);
-    let mut order: Vec<_> = (0..first.len()).collect();
-    order.sort_by(|&a, &b| {
-        reference[b]
-            .files
-            .total_cmp(&reference[a].files)
-            .then(a.cmp(&b))
-    });
-    let initial = tree(&order, Tile::viewport(), &reference).0;
-    let rotated = rotations(&initial, regions);
-    for (r, &rotate) in reference.iter_mut().zip(&rotated) {
-        if rotate {
-            let size = r.high - r.low;
-            r.low = Vec2::ZERO;
-            r.high = Vec2::new(size.y, size.x);
+    #[test]
+    fn archive_presence_scales_clamps_and_returns_the_whole_view_to_a_singleton() {
+        let packing = Packing::build(&fixture());
+        for step in 0..=100_u16 {
+            let p = f32::from(step) / 100.0;
+            let presence: Vec<_> =
+                (0..30).map(|i| if i == 0 { 1.0 } else { p }).collect();
+            let (regions, _, _) =
+                packing.sample_with_presence(1599, Some(&presence)).unwrap();
+            let placement: Vec<_> = regions.iter().map(|r| r.tile).collect();
+            let (_, gaps) = partition(&packing.nodes, 0, &placement);
+            assert!(
+                (placement.iter().flatten().map(|t| t.area()).sum::<f32>() + gaps
+                    - Tile::viewport().area())
+                .abs()
+                    < 2e-6
+            );
+            if step == 0 {
+                assert_eq!(regions[0].tile, Some(Tile::viewport()));
+            }
         }
+        let (regions, _, _) = packing
+            .sample_with_presence(1599, Some(&[0.0; 30]))
+            .unwrap();
+        assert!(regions.iter().all(|r| !r.live));
+        assert!(Packing::default().sample(0).is_none());
     }
-    let mut root = tree(&order, Tile::viewport(), &reference).0;
-    let mut nodes = 0;
-    root.number(&mut nodes);
-    (root, rotated, nodes)
 }

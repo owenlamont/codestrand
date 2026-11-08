@@ -127,6 +127,8 @@ pub(super) struct Avatar {
     pub position: Vec3,
     velocity: Vec3,
     target: Vec3,
+    repository: usize,
+    touched: Vec<u64>,
     last_active: f32,
     pub presence: f32,
     height_band: f32,
@@ -170,7 +172,7 @@ pub(super) struct Label {
 
 #[derive(Clone, Debug)]
 struct State {
-    region_views: std::sync::Arc<[framing::View]>,
+    region_depth: f32,
     tick: u64,
     layout: Layout,
     avatars: Vec<Avatar>,
@@ -205,7 +207,13 @@ impl Simulation {
         options: &Options,
         repositories: usize,
     ) -> anyhow::Result<()> {
-        let starts = Schedule::new(events, options.seconds_per_day, options.max_idle_seconds).starts;
+        let starts = Schedule::with_padding(
+            events,
+            options.seconds_per_day,
+            options.max_idle_seconds,
+            |_| 0,
+        )
+        .starts;
         let duration = starts.last().copied().unwrap_or(LEAD_IN) + TAIL;
         let ticks = frames_for(duration, 60)?;
         anyhow::ensure!(
@@ -235,7 +243,7 @@ impl Simulation {
     }
 
     pub(super) fn with_repositories(
-        mut events: Vec<Event>,
+        events: Vec<Event>,
         options: &Options,
         theme: &Theme,
         mappings: &Mappings,
@@ -278,7 +286,7 @@ impl Simulation {
             |index| padding_at(index) * u32::from(index >= start),
         );
         let mut state = State {
-            region_views: std::sync::Arc::default(),
+            region_depth: 0.0,
             tick: 0,
             layout: Layout::scheduled_repositories(
                 &events,
@@ -369,14 +377,12 @@ impl Simulation {
         }
         self.packing = crate::layout::packing::Packing::build(&samples);
         self.state = self.initial.clone();
-        self.state.region_views = framing::plan().into();
+        self.state.region_depth = framing::depth_bound();
         if let Some((regions, offsets, scales)) = self.packing.sample(0) {
             self.state.layout.place_regions(regions, offsets, &scales);
         }
-        if let Some(view) = self.state.region_views.first() {
-            self.state.focus = view.focus;
-            self.state.distance = view.distance;
-        }
+        self.state.focus = Vec3::ZERO;
+        self.state.distance = framing::DISTANCE;
         self.initial = self.state.clone();
     }
     pub(super) fn duration(&self) -> f32 {
@@ -418,7 +424,6 @@ impl Simulation {
         let state = &mut self.state;
         state.tick = canonical;
 
-
         state.layout.cool_heat(tick_seconds(), self.heat_half_life);
         while let Some(event) = self.events.get(state.next_event) {
             let Some(start) = self.schedule.start(state.next_event, canonical) else {
@@ -441,27 +446,21 @@ impl Simulation {
         let now = tick_time(state.tick);
         let dt = tick_seconds();
         state.pulses.retain(|pulse| now < pulse.end);
-        if !state.layout.repositories.is_empty() {
-            for pulse in &state.pulses {
-                let (sum, count) = pulse
-                    .targets
-                    .iter()
-                    .filter_map(|(target, ..)| state.destination(*target))
-                    .fold((Vec2::ZERO, 0_u16), |(sum, count), point| {
-                        (sum + point, count + 1)
-                    });
-                if count > 0 {
-                    state.avatars[pulse.author].target = ground(sum / f32::from(count));
-                }
-            }
-        }
         let targets = state.avatar_targets(now);
         let active = state
             .avatars
             .iter()
             .filter(|avatar| now - avatar.last_active < AVATAR_IDLE)
             .count();
-        let scale = names::scale(active);
+        let scale = if state.layout.repositories.is_empty() {
+            names::scale(active)
+        } else {
+            names::scale(active).min(
+                crate::layout::packing::gutters(count(state.layout.repositories.len()))
+                    .y
+                    / 32.0,
+            )
+        };
         state.avatar_scale += (scale - state.avatar_scale) * (1.0 - (-dt / 0.6).exp());
         for (avatar, target) in state.avatars.iter_mut().zip(targets) {
             avatar.activity *= (-dt / 3.0).exp();
@@ -525,11 +524,7 @@ impl Simulation {
                     / ((fov * 0.5).tan() * viewport.x / viewport.y),
             )
             .max(1.0);
-        let depth = self
-            .state
-            .region_views
-            .first()
-            .map_or(0.0, |v| v.depth_bound);
+        let depth = self.state.region_depth;
         let distance = distance * ratio + depth * (ratio - 1.0);
         (
             focus,
@@ -691,6 +686,29 @@ impl Simulation {
         self.labels_for_detail(|_| true)
     }
 
+    fn repository_labels(&self) -> impl Iterator<Item = Label> {
+        self.state
+            .layout
+            .repositories
+            .iter()
+            .filter(|region| region.live)
+            .map(|region| {
+                let mut position = framing::label_position(region);
+                position.y = match self.repository_label_plane {
+                    crate::repositories::LabelPlane::Files => 0.15,
+                    crate::repositories::LabelPlane::Raised => framing::LABEL_Y,
+                };
+                Label {
+                    position,
+                    text: region.label.clone(),
+                    kind: LabelKind::Repository,
+                    scale: 1.0,
+                    opacity: 1.0,
+                    priority: 0.0,
+                }
+            })
+    }
+
     pub(super) fn labels_for_detail(
         &self,
         visible: impl Fn(usize) -> bool,
@@ -745,21 +763,7 @@ impl Simulation {
                 priority: 0.0,
             })
             .collect();
-        for region in layout.repositories.iter().filter(|region| region.live) {
-            let mut position = framing::label_position(region);
-            position.y = match self.repository_label_plane {
-                crate::repositories::LabelPlane::Files => 0.15,
-                crate::repositories::LabelPlane::Raised => framing::LABEL_Y,
-            };
-            labels.push(Label {
-                position,
-                text: region.label.clone(),
-                kind: LabelKind::Repository,
-                scale: 1.0,
-                opacity: 1.0,
-                priority: 0.0,
-            });
-        }
+        labels.extend(self.repository_labels());
         for pulse in &self.state.pulses {
             if pulse.targets.len() > 8 && !pulse.aggregated {
                 continue;
@@ -803,19 +807,51 @@ impl Simulation {
 
 impl State {
     fn avatar_targets(&self, now: f32) -> Vec<Vec3> {
+        if !self.layout.repositories.is_empty() {
+            return self
+                .avatars
+                .iter()
+                .map(|avatar| {
+                    let Some(tile) = self
+                        .layout
+                        .repositories
+                        .get(avatar.repository)
+                        .and_then(|r| r.tile)
+                    else {
+                        return avatar.position;
+                    };
+                    let (sum, files) = avatar
+                        .touched
+                        .iter()
+                        .filter_map(|&id| self.layout.file(id))
+                        .map(|file| {
+                            framing::project_ground(crate::layout::region_coordinates(
+                                file.position,
+                            ))
+                            .x
+                        })
+                        .fold((0.0, 0.0), |(sum, count), x| (sum + x, count + 1.0));
+                    let x = if files > 0.0 {
+                        sum / files
+                    } else {
+                        tile.low.x.midpoint(tile.high.x)
+                    }
+                    .clamp(tile.low.x, tile.high.x);
+                    let gap = crate::layout::packing::gutters(count(
+                        self.layout.repositories.iter().filter(|r| r.live).count(),
+                    ));
+                    let point = Vec2::new(x, tile.high.y + gap.y / framing::VIEWPORT.y);
+                    ground(crate::layout::world_coordinates(framing::unproject_at(
+                        point,
+                        MIN_AVATAR_HEIGHT,
+                    ))) + Vec3::Y * MIN_AVATAR_HEIGHT
+                })
+                .collect();
+        }
         let right = Vec3::new(view_direction().z, 0.0, -view_direction().x).normalize();
         let unit = 2.0 * self.distance * std::f32::consts::FRAC_PI_8.tan() / 720.0;
-        let mut targets: Vec<_> = self
-            .avatars
-            .iter()
-            .map(|avatar| {
-                if self.layout.repositories.is_empty() {
-                    avatar.target
-                } else {
-                    framing::avatar_band(avatar.target)
-                }
-            })
-            .collect();
+        let mut targets: Vec<_> =
+            self.avatars.iter().map(|avatar| avatar.target).collect();
         let widths: Vec<_> = self
             .avatars
             .iter()
@@ -876,6 +912,8 @@ impl State {
             position: self.focus() + Vec3::Y * MIN_AVATAR_HEIGHT,
             velocity: Vec3::ZERO,
             target: self.focus(),
+            repository: 0,
+            touched: Vec::new(),
             last_active: now,
             presence: 0.0,
             height_band: names::height_band(&contributor.key),
@@ -921,6 +959,10 @@ impl State {
             .fold((Vec2::ZERO, 0.0), |(sum, n), point| (sum + point, n + 1.0));
 
         let avatar = &mut self.avatars[author];
+        avatar.repository = event.repository;
+        if !self.layout.repositories.is_empty() {
+            avatar.touched = touched.into_keys().collect();
+        }
         if centroid.1 > 0.0 {
             avatar.target = ground(centroid.0 / centroid.1);
         }
@@ -1175,36 +1217,16 @@ impl State {
     }
 
     fn place_view(&mut self, dt: f32) {
-        if let Some(view) = self
-            .region_views
-            .get(usize::try_from(self.tick).unwrap_or(usize::MAX))
-            .or_else(|| self.region_views.last())
-        {
-            self.focus = view.focus;
-            self.distance = self.distance.max(view.distance);
-        } else {
-            let (focus, distance) = self.fit();
-            let settle = if distance > self.distance { 0.3 } else { 1.5 };
-            let ease = 1.0 - (-dt / settle).exp();
-            self.focus += (focus - self.focus) * ease;
-            let distance = if self.layout.repositories.is_empty() {
-                distance
-            } else {
-                distance.max(self.distance)
-            };
-            self.distance += (distance - self.distance) * ease;
-            let tops = self.file_tops();
-            let points = self.scene_points(&tops);
-            self.distance = self
-                .distance
-                .max(self.fit_distance(self.focus, &points, &tops));
-        }
         if !self.layout.repositories.is_empty() {
-            for avatar in &mut self.avatars {
-                avatar.position = framing::avatar_band(avatar.position);
-            }
+            self.focus = Vec3::ZERO;
+            self.distance = framing::DISTANCE;
             return;
         }
+        let (focus, distance) = self.fit();
+        let settle = if distance > self.distance { 0.3 } else { 1.5 };
+        let ease = 1.0 - (-dt / settle).exp();
+        self.focus += (focus - self.focus) * ease;
+        self.distance += (distance - self.distance) * ease;
         let tops = self.file_tops();
         let points = self.scene_points(&tops);
         self.distance = self

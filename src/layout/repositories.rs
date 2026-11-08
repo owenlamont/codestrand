@@ -295,7 +295,7 @@ mod tests {
     #[test]
     fn same_paths_and_rename_identity_are_independent_per_repository() {
         let events = crate::repositories::merge(vec![history(0), history(1)]);
-        let starts = crate::model::event_starts(&events, 0.5, 1.0);
+        let starts = crate::model::schedule::Schedule::new(&events, 0.5, 1.0).starts;
         let mut layout = Layout::scheduled_repositories(
             &events,
             &starts,

@@ -11,19 +11,6 @@ pub(crate) const LABEL_Y: f32 = 1.6;
 pub(crate) const MARGIN: f32 = 24.0;
 pub(crate) const DISTANCE: f32 = 60.0;
 
-pub(super) fn avatar_band(point: Vec3) -> Vec3 {
-    let local = crate::layout::region_coordinates(Vec2::new(point.x, point.z));
-    let direction = view_direction();
-    let depth =
-        DISTANCE - direction.x.hypot(direction.z) * local.y - direction.y * point.y;
-    let slope = (FOV * 0.5).tan() * VIEWPORT.x / VIEWPORT.y;
-    let screen_x = (local.x / (slope * depth)).clamp(-0.80, 0.80);
-    ground(crate::layout::world_coordinates(unproject_at(
-        Vec2::new(screen_x, 0.60),
-        super::MIN_AVATAR_HEIGHT,
-    ))) + Vec3::Y * super::MIN_AVATAR_HEIGHT
-}
-
 pub(crate) fn unproject(point: Vec2) -> Vec2 {
     unproject_at(point, 0.0)
 }
@@ -47,28 +34,6 @@ pub(crate) fn project_ground(point: Vec2) -> Vec2 {
         point.x / (tangent * VIEWPORT.x / VIEWPORT.y),
         -direction.y * point.y / tangent,
     ) / depth
-}
-
-pub(crate) fn project_rectangle(low: Vec2, high: Vec2) -> f32 {
-    let points = [
-        low,
-        Vec2::new(high.x, low.y),
-        high,
-        Vec2::new(low.x, high.y),
-    ]
-    .map(project_ground);
-    (0..4)
-        .map(|i| points[i].perp_dot(points[(i + 1) % 4]))
-        .sum::<f32>()
-        .abs()
-        * 0.125
-}
-
-#[derive(Clone, Copy, Debug)]
-pub(super) struct View {
-    pub focus: Vec3,
-    pub distance: f32,
-    pub depth_bound: f32,
 }
 
 pub(super) fn label_position(region: &RepositoryRegion) -> Vec3 {
@@ -151,17 +116,12 @@ pub(crate) fn distance(
     distance + 0.001
 }
 
-pub(super) fn plan() -> Vec<View> {
-    let depth_bound = crate::layout::packing::Tile::viewport()
+pub(super) fn depth_bound() -> f32 {
+    crate::layout::packing::Tile::viewport()
         .ground()
         .into_iter()
         .map(|p| p.length() + LABEL_Y)
-        .fold(0.0_f32, f32::max);
-    vec![View {
-        focus: Vec3::ZERO,
-        distance: DISTANCE,
-        depth_bound,
-    }]
+        .fold(0.0_f32, f32::max)
 }
 #[cfg(test)]
 mod tests {

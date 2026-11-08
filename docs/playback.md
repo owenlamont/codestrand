@@ -102,29 +102,30 @@ select from the merged history. Single-repository playback retains first-parent
 order. Contributor mappings apply across all repositories, so a matched contributor
 uses one avatar that moves between regions.
 
-Live repositories share an ordered treemap inside a 24-pixel margin of the 16:9 export.
-The automatic camera stays fixed. Glass tiles account for perspective and cover the
-whole inset viewport, including while repositories appear or change size. Split ratios
-favour current content fit, with file counts providing priority rather than exact area
-weights; empty active repositories retain weight one. Each repository keeps its local
-file layout and fits its ground tile with one uniform scale. A fixed quarter-turn may
-be selected for a repository's whole history. Different content shapes can still leave
-space inside a tile.
+Live repositories share the inset viewport inside a 24-pixel frame margin. The
+16:9 export camera stays fixed. Shared gutters separate neighbouring tiles, with no
+contributor band. Tile weights follow eased square roots of live file counts;
+empty active repositories retain weight one. Each repository keeps file identity,
+local layout and one uniform scale, with a fixed quarter-turn chosen for its history.
 
-The split tree is selected once using content-fit scores from sampled history shapes,
-with larger repositories first in near-to-far traversal. Split axes and repository order
-remain fixed. Shared short transitions coordinate neighbouring tiles and content scales;
-growth reserves last only 0.15 playback seconds. New
-repositories occupy no space before their first commit. History never pauses for layout
-changes, and export pacing does not affect the layout. Other preview aspect ratios use
-conservative framing; the screen-filling allocation targets the 16:9 export camera.
-Free-camera controls remain independent.
+A newcomer splits one existing tile or subtree. Other repositories retain their
+relative order. Splits clamp to a ground-aspect range of 1:2.5 to 2.5:1 and a
+144-by-64-pixel readable floor at 1280 by 720. Births ease over 0.75 playback seconds;
+aspect and size clamps scale with presence during the transition. Tiles and shared
+gutters partition the whole inset field. Gutters start at 32 pixels between stacked
+tiles and 16 pixels between side-by-side tiles, shrinking above twelve repositories.
+Different content shapes can leave space inside a uniformly fitted tile.
+
+Active contributors follow a slot above their current repository, aligned with the
+mean of touched files. Travel can temporarily cross tiles; gutter routing is planned
+separately. Header and caption remain in the outer frame. Export pacing does not
+change layout. Other preview aspect ratios use conservative framing; free-camera
+controls remain independent.
 
 Multi-repository planning supports up to 30 repositories, 216,000 simulation ticks and
-2,000,000 region samples. Balanced ordered splits compare both axes using complete
-content-fit scores; per-tick placement follows the fixed binary tree. Use fewer
-repositories, shorten the imported history or reduce playback times if an input limit
-is exceeded. Single-repository playback is unaffected.
+2,000,000 region samples. Use fewer repositories, shorten the imported history or
+reduce playback times if an input limit is exceeded. Single-repository playback is
+unaffected.
 
 To choose visual treatments, use
 `--repository-boundary none|glass` and `--repository-label-plane files|raised`.

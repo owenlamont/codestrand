@@ -282,6 +282,17 @@ struct Pools {
 
 fn app(simulation: Simulation, title: String) -> App {
     let mut app = App::new();
+    let multiple_repositories = !simulation.layout().repositories.is_empty();
+    let label_system = labels
+        .after(bevy::camera::CameraUpdateSystems)
+        .after(bevy::transform::TransformSystems::Propagate)
+        .before(UiSystems::Prepare);
+    let label_system = if multiple_repositories {
+        label_system
+            .before(bevy::camera::visibility::VisibilitySystems::VisibilityPropagate)
+    } else {
+        label_system
+    };
     let theme = simulation.theme().clone();
     app.insert_resource(ClearColor(theme.clear))
         .insert_resource(Playback(simulation))
@@ -296,16 +307,7 @@ fn app(simulation: Simulation, title: String) -> App {
                 .before(bevy::camera::CameraUpdateSystems)
                 .before(bevy::transform::TransformSystems::Propagate),
         )
-        .add_systems(
-            PostUpdate,
-            labels
-                .after(bevy::camera::CameraUpdateSystems)
-                .after(bevy::transform::TransformSystems::Propagate)
-                .before(
-                    bevy::camera::visibility::VisibilitySystems::VisibilityPropagate,
-                )
-                .before(UiSystems::Prepare),
-        );
+        .add_systems(PostUpdate, label_system);
     app
 }
 
@@ -455,6 +457,12 @@ fn setup(world: &mut World) {
             DiffSample,
         ));
     }
+    setup_caption(world, camera, repository_labels);
+    world.init_resource::<Assets<Font>>();
+    styling::setup(world, &theme);
+}
+
+fn setup_caption(world: &mut World, camera: Entity, repository_labels: usize) {
     let title = world.resource::<Title>().0.clone();
     let caption_y = if repository_labels > 0 {
         heading(world, camera, "CODESTRAND", 24.0, 0.0, 18.0);
@@ -466,8 +474,6 @@ fn setup(world: &mut World) {
     };
     let caption = heading(world, camera, " ", 28.0, caption_y, 14.0);
     world.entity_mut(caption).insert(Caption);
-    world.init_resource::<Assets<Font>>();
-    styling::setup(world, &theme);
 }
 
 fn repository_glass_material(theme: &Theme, index: usize) -> StandardMaterial {
@@ -1659,6 +1665,11 @@ fn place_labels(
     height: f32,
     viewport: Vec2,
 ) -> Vec<(model::Label, Vec2, f32)> {
+    let capacity = LABELS
+        + wanted
+            .iter()
+            .filter(|(label, ..)| label.kind == model::LabelKind::Repository)
+            .count();
     wanted.retain(|(label, ..)| label.opacity > 0.001);
     wanted.sort_by(|(a, ..), (b, ..)| {
         a.kind
@@ -1673,7 +1684,8 @@ fn place_labels(
             || rect.min.y < 0.0
             || rect.max.x > viewport.x
             || rect.max.y > viewport.y
-            || placed.iter().any(|other| !other.intersect(rect).is_empty())
+            || (label.kind != model::LabelKind::Avatar
+                && placed.iter().any(|other| !other.intersect(rect).is_empty()))
         {
             continue;
         }
@@ -2868,7 +2880,7 @@ mod tests {
     }
 
     #[test]
-    fn overlapping_avatar_names_use_separate_lanes_in_far_to_near_order() {
+    fn overlapping_avatar_names_survive_in_far_to_near_order() {
         let point = Vec2::splat(100.0);
         let chosen = place_labels(
             vec![
@@ -2885,34 +2897,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["far", "near"]
         );
-        assert!(chosen[0].1.distance(chosen[1].1) >= 20.0);
-    }
-
-    #[test]
-    fn repeated_emphasis_labels_are_unique_and_repository_and_avatar_do_not_overlap() {
-        let point = Vec2::splat(100.0);
-        let chosen = place_labels(
-            vec![
-                projected_label("uv-secure", model::LabelKind::Repository, point, 1.0),
-                projected_label(
-                    "uv-secure",
-                    model::LabelKind::Repository,
-                    point + Vec2::X * 3.0,
-                    1.0,
-                ),
-                projected_label("Owen Lamont", model::LabelKind::Avatar, point, 1.0),
-                projected_label(
-                    "Owen Lamont",
-                    model::LabelKind::Avatar,
-                    point + Vec2::X * 3.0,
-                    1.0,
-                ),
-            ],
-            20.0,
-            Vec2::new(1280.0, 720.0),
-        );
-        assert_eq!(chosen.len(), 2);
-        assert!(chosen[0].1.distance(chosen[1].1) >= 20.0);
+        assert_eq!(chosen[0].1, chosen[1].1);
     }
 
     #[test]

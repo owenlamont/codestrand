@@ -516,7 +516,9 @@ mod tests {
             else {
                 panic!("playback command")
             };
-            let events = source.events(Some(cache.path())).unwrap();
+            let repositories =
+                crate::repositories::inputs(&source.repository, None).unwrap();
+            let events = source.events(Some(cache.path()), &repositories).unwrap();
             assert!(
                 events
                     .iter()

@@ -8,7 +8,6 @@ pub(super) struct Fit {
     pub origin: Vec2,
     pub scale: f32,
     pub fill: f32,
-    pub anchor: Vec2,
 }
 
 fn planes(tile: Tile, points: &[Vec2], height: f32) -> [(Vec3, f32); 4] {
@@ -55,14 +54,10 @@ fn finish(tile: Tile, points: &[Vec2], origin: Vec2, scale: f32) -> Fit {
         .iter()
         .map(|p| framing::project_ground(*p * scale + origin))
         .collect();
-    let (low, high) = outline::bounds(points);
-    let centre = framing::project_ground((low + high) * (0.5 * scale) + origin);
     Fit {
         origin,
         scale,
         fill: outline::area(&projected) * 0.25 / tile.area().max(1e-12),
-        anchor: ((centre - tile.low) / (tile.high - tile.low).max(Vec2::splat(1e-9)))
-            .clamp(Vec2::ZERO, Vec2::ONE),
     }
 }
 
