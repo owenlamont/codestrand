@@ -91,6 +91,9 @@ struct Source {
     /// Fetch contributor avatars before playback; sends account requests and email hashes.
     #[arg(long)]
     fetch_avatars: bool,
+    /// Select opted-in GitLab cache entries offline; allow email lookup with --fetch-avatars.
+    #[arg(long)]
+    gitlab_email_avatars: bool,
     /// Commits laid out and settled before playback begins.
     #[arg(long, default_value_t = 0)]
     start: usize,
@@ -133,6 +136,7 @@ impl Source {
             fetch,
             avatars::now(),
         );
+        resolver.gitlab_email = self.gitlab_email_avatars;
         let start = self.start.min(events.len());
         let end = self.commits.map_or(events.len(), |count| {
             start.saturating_add(count).min(events.len())
@@ -271,6 +275,28 @@ mod tests {
                 panic!("playback command")
             };
             assert_eq!(source.heat_half_life, 2.0);
+        }
+    }
+
+    #[test]
+    fn gitlab_email_permission_is_separate_from_fetching() {
+        for (flags, fetch, email) in [
+            (vec![], false, false),
+            (vec!["--fetch-avatars"], true, false),
+            (vec!["--gitlab-email-avatars"], false, true),
+            (
+                vec!["--fetch-avatars", "--gitlab-email-avatars"],
+                true,
+                true,
+            ),
+        ] {
+            let args = [vec!["codestrand", "preview"], flags].concat();
+            let cli = Cli::try_parse_from(args).unwrap();
+            let Some(Command::Preview { source, .. }) = cli.command else {
+                panic!("preview command parsed")
+            };
+            assert_eq!(source.fetch_avatars, fetch);
+            assert_eq!(source.gitlab_email_avatars, email);
         }
     }
 
