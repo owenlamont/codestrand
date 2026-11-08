@@ -8,6 +8,9 @@ animated diff fragments. Preview a local repository or export numbered PNG frame
 **Status: layout study.** Video export uses your installed FFmpeg.
 Licensed MIT OR Apache-2.0.
 
+Diff samples use Bevy's bundled Fira Mono font (OFL-1.1); see
+[third-party notices](THIRDPARTY.txt).
+
 [User documentation](https://codestrand.pages.dev/) covers installation, Git
 history, playback, export and contributor avatars.
 

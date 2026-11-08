@@ -103,3 +103,35 @@ simulation and position at every zoom, including export. Directory landmarks ran
 subtree size, with at most four extra top-level labels beyond the usual twenty.
 Labels inside fully collapsed subtrees and overlapping directory labels are omitted
 to keep the overview readable.
+
+In repository playback, sampled added lines descend from the contributor; removed
+lines rise from the file and smoothly fade to transparent. The camera-facing snippet
+is the fragment, following the same path, phase and scale envelope above beams, with
+a text shadow for contrast. Text and plain prisms crossfade; fully visible snippets
+replace their prisms. Extra fragments stay plain. Every theme supplies added/removed
+colours; Atlas uses dark ink on its light ground. Snippets use alpha blending and the
+theme's monospace font, with IBM Plex Mono for Atlas code beside its serif labels.
+Theme switching restyles active snippets without restarting their motion or fade.
+
+Snippet text keeps the font's natural proportions with equal X and Y scaling.
+Lines are cut at 88 characters; the fixed uniform size fits 88 characters plus the
+direction prefix within eight beam diameters, before the fragment scale envelope. Text
+never grows to a minimum screen size: samples smoothly appear between 24 and 40
+projected beam-diameter pixels, requiring the camera to be very close to the fragment.
+Overlapping snippets may overlap freely without collision or viewport-edge hiding.
+Files inside collapsed subtrees show no sample text; LOD keeps its fragment behaviour.
+
+Samples come from actual changed lines: up to three per file and twelve per commit,
+preferring lines of 16–60 bytes. Lines over 72 bytes before trimming, non-ASCII text,
+controls and trivial lines are omitted. Binary files and submodules have no samples.
+Selection is deterministic; crowded commits use path order to spend the budget.
+At most twelve samples appear at once.
+
+**Source lines can contain secrets or personal information.** Review exports before
+sharing. Sensitive paths (`.env*`, `*.pem`, `*.key`, `id_rsa*`) and common credential
+patterns are skipped, but filtering cannot guarantee redaction. Use
+`--no-diff-samples` for preview or export to hide all sampled source lines. The
+opt-out controls playback; bounded samples may still exist in the history cache.
+
+The history cache stores these bounded samples. Older cache versions are rebuilt
+automatically from local Git history.

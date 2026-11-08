@@ -609,6 +609,7 @@ mod tests {
                     kind: kind.clone(),
                     insertions: 1,
                     removals: 0,
+                    samples: Vec::new(),
                 })
                 .collect(),
         }
@@ -626,6 +627,7 @@ mod tests {
                 kind: Kind::Added,
                 insertions: 1,
                 removals: 0,
+                samples: Vec::new(),
             })
             .collect();
         events.push(growth);
@@ -645,6 +647,7 @@ mod tests {
                 kind: Kind::Deleted,
                 insertions: 0,
                 removals: 1,
+                samples: Vec::new(),
             })
             .collect();
         events.push(deletion);
@@ -943,6 +946,7 @@ mod tests {
                             kind: Kind::Added,
                             insertions: 1,
                             removals: 0,
+                            samples: Vec::new(),
                         }
                     })
                     .collect();
@@ -989,6 +993,7 @@ mod probes {
                     kind,
                     insertions: 1,
                     removals: 0,
+                    samples: Vec::new(),
                 })
                 .collect(),
         }
@@ -1175,6 +1180,7 @@ mod rate_probe {
                         kind: Kind::Added,
                         insertions: 1,
                         removals: 0,
+                        samples: Vec::new(),
                     })
                     .collect(),
             };

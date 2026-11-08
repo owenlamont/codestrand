@@ -66,6 +66,51 @@ struct Pulse {
     author: usize,
     targets: Vec<(Target, f32, u32, u32)>,
     aggregated: bool,
+    samples: Vec<(u64, crate::diff_samples::Sample)>,
+}
+
+impl Pulse {
+    fn samples_for(
+        &self,
+        target: Target,
+        rising: bool,
+    ) -> impl Iterator<Item = &crate::diff_samples::Sample> {
+        self.samples
+            .iter()
+            .filter(move |(id, sample)| {
+                target == Target::File(*id) && sample.added != rising
+            })
+            .map(|(_, sample)| sample)
+    }
+}
+
+fn attach_samples<'a>(
+    fragments: impl Iterator<Item = Fragment>,
+    mut samples: impl Iterator<Item = &'a crate::diff_samples::Sample>,
+    remaining: &mut usize,
+    detail: f32,
+) -> Vec<Fragment> {
+    fragments
+        .map(|mut fragment| {
+            if *remaining > 0
+                && let Some(sample) = samples.next()
+            {
+                fragment.sample = Some(sample.clone());
+                fragment.sample_detail = detail;
+                *remaining -= 1;
+            }
+            fragment
+        })
+        .collect()
+}
+
+pub(super) struct DiffLine {
+    pub fragment: usize,
+    pub detail: f32,
+    pub position: Vec3,
+    pub scale: f32,
+    pub sample: crate::diff_samples::Sample,
+    pub alpha: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -90,7 +135,10 @@ pub(super) struct Beam {
 pub(super) struct Fragment {
     pub position: Vec3,
     pub rising: bool,
+    pub sample_detail: f32,
+    pub alpha: f32,
     pub scale: f32,
+    pub sample: Option<crate::diff_samples::Sample>,
 }
 
 /// Placement priority, highest first, when labels would overlap on screen.
@@ -402,10 +450,20 @@ impl Simulation {
         beams
     }
 
+    #[cfg(test)]
     pub(super) fn fragments(&self) -> Vec<Fragment> {
+        self.fragments_for_detail(|_| 1.0)
+    }
+
+    pub(super) fn fragments_for_detail(
+        &self,
+        detail: impl Fn(usize) -> f32,
+    ) -> Vec<Fragment> {
         let now = self.seconds();
         let mut fragments = Vec::new();
-        for pulse in &self.state.pulses {
+        let mut newest = BTreeMap::new();
+        let mut remaining = crate::diff_samples::PER_COMMIT;
+        for (pulse_index, pulse) in self.state.pulses.iter().enumerate().rev() {
             let age = now - pulse.start;
             let envelope = envelope(age, pulse.end - pulse.start);
             if envelope <= 0.0 {
@@ -418,13 +476,55 @@ impl Simulation {
                 let Some(to) = self.state.point(target) else {
                     continue;
                 };
-                fragments
-                    .extend(diff_fragments(age, envelope, from, to, insertions, false));
-                fragments
-                    .extend(diff_fragments(age, envelope, from, to, removals, true));
+                let sample_detail = match target {
+                    Target::File(id) => {
+                        self.layout().file(id).map_or(0.0, |file| detail(file.dir))
+                    }
+                    Target::Dir(_) => 0.0,
+                };
+                let current = match target {
+                    Target::File(id) => {
+                        *newest.entry(id).or_insert(pulse_index) == pulse_index
+                            && sample_detail > 0.0
+                    }
+                    Target::Dir(_) => false,
+                };
+                for (count, rising) in [(insertions, false), (removals, true)] {
+                    fragments.extend(attach_samples(
+                        diff_fragments(age, envelope, from, to, count, rising),
+                        pulse.samples_for(target, rising).filter(|_| current),
+                        &mut remaining,
+                        sample_detail,
+                    ));
+                }
             }
         }
         fragments
+    }
+
+    #[cfg(test)]
+    pub(super) fn diff_lines(&self) -> Vec<DiffLine> {
+        self.diff_lines_for_detail(|_| 1.0)
+    }
+
+    pub(super) fn diff_lines_for_detail(
+        &self,
+        detail: impl Fn(usize) -> f32,
+    ) -> Vec<DiffLine> {
+        self.fragments_for_detail(detail)
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, fragment)| {
+                Some(DiffLine {
+                    fragment: index,
+                    detail: fragment.sample_detail,
+                    position: fragment.position,
+                    scale: fragment.scale * self.scale().sqrt(),
+                    sample: fragment.sample?,
+                    alpha: fragment.alpha,
+                })
+            })
+            .collect()
     }
 
     #[cfg(test)]
@@ -595,9 +695,15 @@ impl State {
             start,
         );
         let mut touched = BTreeMap::new();
+        let mut samples = Vec::new();
         for change in &event.changes {
             let id = apply(&mut self.layout, change, author);
             touched.insert(id, (change.insertions, change.removals));
+            for sample in change.samples.iter().take(crate::diff_samples::PER_FILE) {
+                if samples.len() < crate::diff_samples::PER_COMMIT {
+                    samples.push((id, sample.clone()));
+                }
+            }
         }
         let mut targets: Vec<_> = touched
             .iter()
@@ -639,6 +745,7 @@ impl State {
             author,
             targets,
             aggregated,
+            samples,
         });
     }
 
@@ -965,6 +1072,14 @@ fn diff_fragments(
         Fragment {
             position,
             rising,
+            sample_detail: 1.0,
+            alpha: if rising {
+                let birth = (phase / 0.08).min(1.0);
+                envelope * birth * birth * (3.0 - 2.0 * birth) * (1.0 - phase).powi(2)
+            } else {
+                envelope * (1.0 - phase.powi(6))
+            },
+            sample: None,
             scale: envelope * (1.0 - phase.powi(6)),
         }
     })
@@ -1051,6 +1166,159 @@ pub(super) fn preview_frame(elapsed: Duration, fps: u16) -> u32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn overlapping_commits_show_only_the_latest_samples_for_each_file() {
+        let mut events = crate::timeline::synthetic();
+        events.truncate(2);
+        events[1].changes = events[0].changes.clone();
+        events[1].seconds = events[0].seconds;
+        for (index, event) in events.iter_mut().enumerate() {
+            for change in &mut event.changes {
+                change.samples = (0..3)
+                    .map(|row| crate::diff_samples::Sample {
+                        added: true,
+                        text: format!("commit {index} row {row}"),
+                    })
+                    .collect();
+            }
+        }
+        let mut sim = super::Simulation::new(
+            events,
+            &super::Options::default(),
+            &crate::theme::Theme::neon(),
+            &crate::contributors::Mappings::default(),
+        );
+        sim.advance_to(40, 60);
+        let lines = sim.diff_lines();
+        assert_eq!(lines.len(), 9);
+        assert!(
+            lines
+                .iter()
+                .all(|line| line.sample.text.starts_with("commit 1"))
+        );
+    }
+
+    #[test]
+    fn rising_fragments_fade_continuously_across_the_phase_wrap() {
+        let samples: Vec<_> = (0_u16..=2000)
+            .map(|step| {
+                super::diff_fragments(
+                    f32::from(step) / 1100.0,
+                    1.0,
+                    super::Vec3::Y * 4.0,
+                    super::Vec3::ZERO,
+                    1,
+                    true,
+                )
+                .next()
+                .unwrap()
+            })
+            .collect();
+        assert_eq!(samples[0].alpha, 0.0);
+        assert!(samples[500].position.y > samples[100].position.y);
+        assert!(samples[500].alpha < samples[100].alpha);
+        assert!(samples[999].alpha < 0.00001);
+        assert!(samples[1000].alpha < 0.00001);
+        assert!(
+            samples
+                .windows(2)
+                .all(|pair| { (pair[1].alpha - pair[0].alpha).abs() < 0.025 })
+        );
+    }
+
+    #[test]
+    fn samples_attach_to_matching_directions_and_leave_extra_pieces_plain() {
+        let mut events = crate::timeline::synthetic();
+        events.truncate(1);
+        events[0].changes.truncate(1);
+        let change = &mut events[0].changes[0];
+        change.insertions = 7;
+        change.removals = 7;
+        change.samples = vec![
+            crate::diff_samples::Sample {
+                added: true,
+                text: "let added = true;".to_owned(),
+            },
+            crate::diff_samples::Sample {
+                added: false,
+                text: "let removed = true;".to_owned(),
+            },
+        ];
+        let mut sim = super::Simulation::new(
+            events,
+            &super::Options::default(),
+            &crate::theme::Theme::neon(),
+            &crate::contributors::Mappings::default(),
+        );
+        sim.advance_to(45, 60);
+        let fragments = sim.fragments();
+        assert_eq!(fragments.len(), 6);
+        assert_eq!(
+            fragments
+                .iter()
+                .filter(|piece| piece.sample.is_none())
+                .count(),
+            4
+        );
+        for fragment in fragments.iter().filter(|piece| piece.sample.is_some()) {
+            assert_ne!(fragment.rising, fragment.sample.as_ref().unwrap().added);
+        }
+        let positions: Vec<_> =
+            sim.diff_lines().iter().map(|line| line.position).collect();
+        sim.advance_to(48, 60);
+        assert!(
+            sim.diff_lines()
+                .iter()
+                .zip(positions)
+                .all(|(line, old)| line.position != old)
+        );
+    }
+
+    #[test]
+    fn diff_samples_follow_files_fade_and_rewind_at_explicit_times() {
+        let mut events = crate::timeline::synthetic();
+        events.truncate(1);
+        events[0].changes[0].samples = vec![crate::diff_samples::Sample {
+            added: true,
+            text: "let sample = 1;".to_owned(),
+        }];
+        let mut sim = super::Simulation::new(
+            events,
+            &super::Options::default(),
+            &crate::theme::Theme::neon(),
+            &crate::contributors::Mappings::default(),
+        );
+        sim.advance_to(45, 60);
+        let hidden_dir = sim.layout().files().next().unwrap().1.dir;
+        assert!(
+            sim.diff_lines_for_detail(|dir| if dir == hidden_dir { 0.0 } else { 1.0 })
+                .is_empty()
+        );
+        assert_eq!(sim.diff_lines_for_detail(|_| 1.0).len(), 1);
+        let plain = sim.fragments_for_detail(|_| 0.0);
+        assert!(!plain.is_empty());
+        assert!(plain.iter().all(|fragment| fragment.sample.is_none()));
+        let line = sim.diff_lines().pop().unwrap();
+        assert!(line.alpha > 0.0 && line.alpha <= 1.0);
+        assert!(sim.fragments().iter().any(|fragment| {
+            !fragment.rising
+                && fragment.position == line.position
+                && fragment.sample.is_some()
+        }));
+        sim.advance_to(102, 60);
+        let faded = sim.diff_lines().pop().unwrap();
+        assert!(faded.alpha > 0.0 && faded.alpha < line.alpha);
+        sim.advance_to(120, 60);
+        assert!(sim.diff_lines().is_empty());
+        sim.advance_to(45, 60);
+        let replayed = sim.diff_lines().pop().unwrap();
+        assert_eq!(replayed.position, line.position);
+        assert_eq!(replayed.sample, line.sample);
+        assert_eq!(replayed.alpha, line.alpha);
+        sim.advance_to(0, 60);
+        assert!(sim.diff_lines().is_empty());
+    }
+
     use super::*;
     use crate::timeline;
 
@@ -1071,6 +1339,7 @@ mod tests {
             kind: Kind::Added,
             insertions: 0,
             removals: 0,
+            ..Default::default()
         };
         let id = apply(&mut sim.state.layout, &change, 0);
         let small = sim.layout().file(id).unwrap().heat;
@@ -1111,6 +1380,7 @@ mod tests {
             kind: Kind::Added,
             insertions: 0,
             removals: 0,
+            ..Default::default()
         };
         let id = apply(&mut layout, &change, 0);
         let heat = layout.file(id).unwrap().heat;
@@ -1376,6 +1646,7 @@ mod tests {
                     kind: Kind::Added,
                     insertions: 1,
                     removals: 0,
+                    samples: Vec::new(),
                 }],
             })
             .collect();
@@ -1475,6 +1746,7 @@ mod tests {
                 kind: Kind::Added,
                 insertions: 1,
                 removals: 0,
+                samples: Vec::new(),
             }));
         let mut sim = Simulation::new(
             events,

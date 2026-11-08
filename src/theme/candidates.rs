@@ -143,6 +143,16 @@ pub(super) fn build(name: ThemeName) -> Theme {
         ThemeName::Neon | ThemeName::Phosphor => unreachable!("candidate theme"),
     };
     apply_palette(&mut t, ground, ink, accent, fragment, hues);
+    let (added, removed) = match name {
+        ThemeName::Outrun => (0x0066_ffaa, 0x00ff_709e),
+        ThemeName::Blueprint => (0x008e_ffca, 0x00ff_b4a6),
+        ThemeName::BevelledDesktop => (0x00d8_ffdf, 0x00ff_efef),
+        ThemeName::Atlas => (0x001c_643b, 0x00a1_292d),
+        ThemeName::Forge => (0x008c_e8aa, 0x00ff_8a78),
+        ThemeName::Neon | ThemeName::Phosphor => unreachable!("candidate theme"),
+    };
+    t.diff_added = color(added);
+    t.diff_removed = color(removed);
     t
 }
 

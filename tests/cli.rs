@@ -25,6 +25,7 @@ fn playback_help_describes_calendar_controls_and_rejects_old_flag() {
             .expect("CLI can start");
         assert!(output.status.success());
         let help = String::from_utf8(output.stdout).expect("help is UTF-8");
+        assert!(help.contains("--no-diff-samples"));
         assert!(help.contains("--seconds-per-day"));
         assert!(help.contains("--max-idle-seconds"));
         assert!(!help.contains("--commit-seconds"));

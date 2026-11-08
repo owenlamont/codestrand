@@ -16,6 +16,7 @@ mod avatars;
 mod cache;
 mod camera;
 mod contributors;
+mod diff_samples;
 mod encoder;
 mod export;
 mod history;
@@ -79,6 +80,10 @@ enum Command {
 }
 
 #[derive(clap::Args, serde::Serialize)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each bool is an independent clap switch"
+)]
 struct Source {
     /// Local repository to play; a built-in synthetic history plays when omitted.
     #[arg(long)]
@@ -88,6 +93,9 @@ struct Source {
     /// Skip history and avatar cache reads and writes.
     #[arg(long)]
     no_cache: bool,
+    /// Hide changed source lines in preview and exported frames.
+    #[arg(long)]
+    no_diff_samples: bool,
     /// Contributor TOML file; defaults to the Codestrand user configuration directory.
     #[arg(long)]
     contributors: Option<PathBuf>,
@@ -119,12 +127,18 @@ impl Source {
         &self,
         cache_root: Option<&Path>,
     ) -> Result<Vec<timeline::Event>, history::Error> {
-        match &self.repository {
+        let mut events = match &self.repository {
             Some(path) => {
                 cache::load(path, &self.revision, cache_root.filter(|_| !self.no_cache))
             }
             None => Ok(timeline::synthetic()),
+        }?;
+        if self.no_diff_samples {
+            for change in events.iter_mut().flat_map(|event| &mut event.changes) {
+                change.samples.clear();
+            }
         }
+        Ok(events)
     }
 
     fn load(&self) -> anyhow::Result<(model::Simulation, String)> {
