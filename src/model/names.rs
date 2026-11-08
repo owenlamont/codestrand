@@ -2,6 +2,10 @@ use bevy::math::{Rect, Vec2};
 
 use crate::contributors::Key;
 
+pub(super) fn priority(activity: f32, visible: bool) -> f32 {
+    activity * if visible { 1.25 } else { 1.0 }
+}
+
 pub(super) fn scale(active: usize) -> f32 {
     (1.0 / (1.0 + super::count(active.saturating_sub(3)) * 0.035).sqrt()).max(0.72)
 }
@@ -50,6 +54,10 @@ impl Visibility {
 
 impl super::State {
     pub(super) fn place_names(&mut self, dt: f32) {
+        if !self.layout.repositories.is_empty() {
+            self.place_slot_names(dt);
+            return;
+        }
         let positions: Vec<_> = self
             .avatars
             .iter()
@@ -74,12 +82,7 @@ impl super::State {
                 (
                     index,
                     bounds,
-                    avatar.activity
-                        * if avatar.name_visibility.visible {
-                            1.25
-                        } else {
-                            1.0
-                        },
+                    priority(avatar.activity, avatar.name_visibility.visible),
                 )
             })
             .collect();

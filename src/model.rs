@@ -21,6 +21,7 @@ mod names;
 mod pacing_tests;
 pub(crate) mod quality;
 pub(crate) mod schedule;
+mod slots;
 pub(super) use names::rect as label_rect;
 use schedule::Schedule;
 pub(crate) mod treemap;
@@ -78,6 +79,9 @@ pub(super) enum Target {
 
 #[derive(Clone, Debug)]
 struct Pulse {
+    commit: usize,
+    repository: usize,
+    touched: Vec<u64>,
     start: f32,
     end: f32,
     author: usize,
@@ -142,9 +146,12 @@ pub(super) struct Avatar {
     touched: Vec<u64>,
     last_active: f32,
     pub presence: f32,
+    pub projection_scale: f32,
     height_band: f32,
     activity: f32,
     name_visibility: names::Visibility,
+    commit: usize,
+    slot: Option<slots::Placement>,
 }
 
 pub(super) struct Beam {
@@ -194,11 +201,13 @@ struct State {
     distance: f32,
     geometry: Geometry,
     avatar_scale: f32,
+    slot_records: BTreeMap<usize, slots::Record>,
 }
 
 /// Deterministic playback stepped at a fixed tick rate, independent of output frame rate.
 pub(super) struct Simulation {
     packing: crate::layout::packing::Packing,
+    envelopes: Vec<slots::Envelope>,
     pub repository_boundary: crate::repositories::Boundary,
     pub repository_label_plane: crate::repositories::LabelPlane,
     events: Vec<Event>,
@@ -307,6 +316,7 @@ impl Simulation {
             distance: 12.0,
             geometry: theme.geometry(),
             avatar_scale: 1.0,
+            slot_records: BTreeMap::new(),
         };
         for event in &events[..start] {
             let author = state.author(
@@ -341,6 +351,7 @@ impl Simulation {
         events.drain(..start);
         let mut simulation = Self {
             packing: crate::layout::packing::Packing::default(),
+            envelopes: Vec::new(),
             repository_boundary: crate::repositories::Boundary::default(),
             repository_label_plane: crate::repositories::LabelPlane::default(),
             events,
@@ -355,6 +366,7 @@ impl Simulation {
         };
         if !repositories.is_empty() {
             simulation.plan_repositories(prior_active);
+            simulation.plan_avatar_envelopes();
         }
         simulation
     }
@@ -452,7 +464,11 @@ impl Simulation {
         let now = tick_time(state.tick);
         let dt = tick_seconds();
         state.pulses.retain(|pulse| now < pulse.end);
-        let targets = state.avatar_targets(now);
+        let singleton_targets = state
+            .layout
+            .repositories
+            .is_empty()
+            .then(|| state.avatar_targets(now));
         let active = state
             .avatars
             .iter()
@@ -468,6 +484,10 @@ impl Simulation {
             )
         };
         state.avatar_scale += (scale - state.avatar_scale) * (1.0 - (-dt / 0.6).exp());
+        if !state.layout.repositories.is_empty() {
+            state.place_slots(&self.envelopes, now);
+        }
+        let targets = singleton_targets.unwrap_or_else(|| state.avatar_targets(now));
         for (avatar, target) in state.avatars.iter_mut().zip(targets) {
             avatar.activity *= (-dt / 3.0).exp();
             let omega = 3.0;
@@ -476,6 +496,11 @@ impl Simulation {
             avatar.velocity += acceleration * dt;
             avatar.velocity.y = 0.0;
             avatar.position += avatar.velocity * dt;
+            avatar.projection_scale = if state.layout.repositories.is_empty() {
+                1.0
+            } else {
+                slots::projection_scale(avatar.position)
+            };
             let visible = now - avatar.last_active < AVATAR_IDLE;
             let fade = if visible { dt / 0.4 } else { -dt / 1.2 };
             avatar.presence = (avatar.presence + fade).clamp(0.0, 1.0);
@@ -797,14 +822,7 @@ impl Simulation {
         }
         for avatar in &self.state.avatars {
             if avatar.presence > 0.0 {
-                labels.push(Label {
-                    position: avatar.position + self.state.geometry.avatar_label_offset,
-                    text: avatar.name.clone(),
-                    kind: LabelKind::Avatar,
-                    scale: self.state.avatar_scale,
-                    opacity: avatar.name_visibility.opacity * avatar.presence,
-                    priority: avatar.activity,
-                });
+                labels.push(self.state.avatar_label(avatar));
             }
         }
         labels
@@ -818,39 +836,10 @@ impl State {
                 .avatars
                 .iter()
                 .map(|avatar| {
-                    let Some(tile) = self
-                        .layout
-                        .repositories
-                        .get(avatar.repository)
-                        .and_then(|r| r.tile)
-                    else {
-                        return avatar.position;
-                    };
-                    let (sum, files) = avatar
-                        .touched
-                        .iter()
-                        .filter_map(|&id| self.layout.file(id))
-                        .map(|file| {
-                            framing::project_ground(crate::layout::region_coordinates(
-                                file.position,
-                            ))
-                            .x
-                        })
-                        .fold((0.0, 0.0), |(sum, count), x| (sum + x, count + 1.0));
-                    let x = if files > 0.0 {
-                        sum / files
-                    } else {
-                        tile.low.x.midpoint(tile.high.x)
-                    }
-                    .clamp(tile.low.x, tile.high.x);
-                    let gap = crate::layout::packing::gutters(count(
-                        self.layout.repositories.iter().filter(|r| r.live).count(),
-                    ));
-                    let point = Vec2::new(x, tile.high.y + gap.y / framing::VIEWPORT.y);
-                    ground(crate::layout::world_coordinates(framing::unproject_at(
-                        point,
-                        MIN_AVATAR_HEIGHT,
-                    ))) + Vec3::Y * MIN_AVATAR_HEIGHT
+                    avatar
+                        .slot
+                        .as_ref()
+                        .map_or(avatar.position, slots::Placement::world)
                 })
                 .collect();
         }
@@ -922,9 +911,12 @@ impl State {
             touched: Vec::new(),
             last_active: now,
             presence: 0.0,
+            projection_scale: 1.0,
             height_band: names::height_band(&contributor.key),
             activity: 0.0,
             name_visibility: names::Visibility::default(),
+            commit: 0,
+            slot: None,
         });
         self.authors.insert(contributor.key.clone(), index);
         index
@@ -965,7 +957,11 @@ impl State {
             .fold((Vec2::ZERO, 0.0), |(sum, n), point| (sum + point, n + 1.0));
 
         let avatar = &mut self.avatars[author];
+        if avatar.repository != event.repository {
+            avatar.slot = None;
+        }
         avatar.repository = event.repository;
+        avatar.commit = self.next_event;
         if !self.layout.repositories.is_empty() {
             avatar.touched = touched.into_keys().collect();
         }
@@ -989,6 +985,9 @@ impl State {
             keep
         });
         self.pulses.push_back(Pulse {
+            commit: self.next_event,
+            repository: event.repository,
+            touched: self.avatars[author].touched.clone(),
             start,
             end: start + PULSE_SECONDS,
             author,

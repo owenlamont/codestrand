@@ -166,8 +166,10 @@ pub(crate) fn run(
     let elapsed = started.elapsed().as_secs_f64();
     std::hint::black_box(placement);
     eprintln!("treemap_single_sample_seconds={elapsed:.9}");
+    let mut moving_beams = super::slots::diagnostics::MovingBeams::default();
     for frame in 0..=frames {
         simulation.advance_to(frame, 60);
+        moving_beams.observe(simulation);
         serde_json::to_writer(
             &mut *writer,
             &serde_json::json!({
@@ -180,13 +182,18 @@ pub(crate) fn run(
             eprintln!("treemap frame={frame}/{frames}");
         }
     }
+    serde_json::to_writer(
+        &mut *writer,
+        &serde_json::json!({"moving_beams": moving_beams, "avatar_slots": super::slots::report(&simulation.state)}),
+    )?;
+    writeln!(writer)?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Options, count, frames_for, ground, project, view_direction};
+    use crate::model::{Options, frames_for};
     use bevy::math::Vec3;
 
     #[test]
@@ -269,42 +276,8 @@ mod tests {
                 }
             }
             assert_eq!(simulation.view(), (Vec3::ZERO, framing::DISTANCE));
-            let eye = view_direction() * framing::DISTANCE;
-            for (avatar, target) in simulation
-                .avatars()
-                .iter()
-                .zip(simulation.state.avatar_targets(simulation.seconds()))
-            {
-                let Some(tile) = regions[avatar.repository].tile else {
-                    continue;
-                };
-                let files: Vec<_> = avatar
-                    .touched
-                    .iter()
-                    .filter_map(|&id| simulation.layout().file(id))
-                    .map(|file| ground(file.position))
-                    .collect();
-                let xs: Vec<_> = project(eye, Vec3::ZERO, &files)
-                    .flatten()
-                    .map(|p| p.x)
-                    .collect();
-                if xs.is_empty() {
-                    continue;
-                }
-                let expected = (xs.iter().sum::<f32>() / count(xs.len()))
-                    .clamp(tile.low.x, tile.high.x);
-                let projected = project(eye, Vec3::ZERO, &[target])
-                    .next()
-                    .flatten()
-                    .unwrap();
-                assert!((projected.x - expected).abs() < 1e-4);
-                let gap = crate::layout::packing::gutters(count(tiles.len()));
-                assert!(
-                    (projected.y - tile.high.y - gap.y / framing::VIEWPORT.y).abs()
-                        < 1e-4
-                );
-            }
         }
+        assert_eq!(simulation.state.slot_records.len(), simulation.events.len());
         let snapshot = serde_json::to_vec(&measure(simulation.layout())).unwrap();
         simulation.advance_to(0, 60);
         simulation.advance_to(frames, 60);

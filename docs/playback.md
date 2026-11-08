@@ -121,11 +121,19 @@ gutters partition the whole inset field. Gutters start at 32 pixels between stac
 tiles and 16 pixels between side-by-side tiles, shrinking above twelve repositories.
 Different content shapes can leave space inside a uniformly fitted tile.
 
-Active contributors follow a slot above their current repository, aligned with the
-mean of touched files. Travel can temporarily cross tiles; gutter routing is planned
-separately. Header and caption remain in the outer frame. Export pacing does not
-change layout. Other preview aspect ratios use conservative framing; free-camera
-controls remain independent.
+Contributors prefer a gutter slot above their current repository, aligned with the
+projected mean of touched files. A valid slot survives consecutive commits to the same
+repository. Placement checks the touched files throughout service, including additions
+and deletions, for an open half-plane and beams crossing another repository or its label.
+Other edges provide fallback docks. Avatars spread along edges; short names occupy clear
+lanes and yield when no safe name placement fits. Portrait size accounts for perspective.
+
+The CPU `layout-quality` report records fallback and least-bad commits. Missing birth
+tiles and infeasible docks are reported without failing export. Beam safety currently
+covers parked slots. The spring follower can cross tiles during movement; gutter routes,
+travel-time padding and beams off during travel remain subsequent work. Header and
+caption remain in the outer frame. Other preview aspect ratios use conservative framing;
+free-camera controls remain independent.
 
 Multi-repository planning supports up to 30 repositories, 216,000 simulation ticks and
 2,000,000 region samples. Use fewer repositories, shorten the imported history or

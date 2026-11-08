@@ -1498,7 +1498,11 @@ fn sync_activity(
         {
             transform.translation = avatar.position;
             transform.scale = Vec3::splat(
-                (presence * simulation.scale() * simulation.avatar_scale()).max(0.001),
+                (presence
+                    * simulation.scale()
+                    * simulation.avatar_scale()
+                    * avatar.projection_scale)
+                    .max(0.001),
             );
         }
         set_visible(world, entity, presence > 0.0);
