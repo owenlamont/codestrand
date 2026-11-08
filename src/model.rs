@@ -442,15 +442,20 @@ impl Simulation {
         let mut dirs: Vec<_> = layout.dirs().filter(|(_, dir)| dir.depth > 0).collect();
         dirs.sort_by_key(|&(index, dir)| {
             (
-                dir.depth != 1,
                 std::cmp::Reverse(subtree[index] >> dir.depth.min(16)),
                 dir.depth,
                 index,
             )
         });
+        let mut dirs: Vec<_> = dirs
+            .into_iter()
+            .enumerate()
+            .filter(|(rank, (_, dir))| *rank < DIR_LABELS || dir.depth == 1)
+            .map(|(_, dir)| dir)
+            .collect();
+        dirs.sort_by_key(|(_, dir)| dir.depth != 1);
         let mut labels: Vec<Label> = dirs
             .into_iter()
-            .take(DIR_LABELS)
             .map(|(index, dir)| Label {
                 position: ground(centroids[index] / count(subtree[index].max(1))),
                 text: format!("{}/", dir.name()),
@@ -1564,6 +1569,33 @@ mod tests {
                 .iter()
                 .any(|label| label.text.ends_with("fixtures/"))
         );
+    }
+
+    #[test]
+    fn top_level_labels_do_not_displace_large_nested_landmarks() {
+        let mut sim = simulation();
+        let paths: Vec<_> = (0..30)
+            .flat_map(|dir| (0..8).map(move |file| format!("big/d{dir}/f{file}.rs")))
+            .chain(std::iter::once("small/one.rs".to_owned()))
+            .collect();
+        sim.state.layout = Layout::planned_paths(
+            &paths.iter().map(String::as_str).collect::<Vec<_>>(),
+            0,
+        );
+        for path in &paths {
+            sim.state.layout.add(path, 0.0, 0);
+        }
+        let labels = sim.labels();
+        assert!(labels.iter().any(|label| label.text == "small/"));
+        assert!(
+            labels
+                .iter()
+                .filter(|label| label.text.starts_with('d'))
+                .count()
+                >= DIR_LABELS - 1
+        );
+        assert_eq!(labels[0].text, "big/");
+        assert_eq!(labels[1].text, "small/");
     }
 
     #[test]
