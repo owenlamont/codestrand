@@ -4,10 +4,6 @@ use super::{Layout, RepositoryRegion};
 use crate::timeline::Event;
 
 impl Layout {
-    pub(crate) fn repository_sizes(&self) -> Vec<Vec2> {
-        self.plan.repository_sizes()
-    }
-
     pub(crate) fn scheduled_repositories(
         events: &[Event],
         starts: &[f32],

@@ -208,12 +208,13 @@ impl Simulation {
         let duration = starts.last().copied().unwrap_or(LEAD_IN) + TAIL;
         let ticks = frames_for(duration, 60)?;
         anyhow::ensure!(
-            ticks <= 216_000
+            repositories <= 30
+                && ticks <= 216_000
                 && usize::try_from(ticks)
                     .ok()
                     .and_then(|ticks| ticks.checked_mul(repositories))
                     .is_some_and(|samples| samples <= 2_000_000),
-            "multi-repository planning exceeds 216000 ticks or 2000000 region samples; shorten the history or reduce the playback times"
+            "multi-repository planning exceeds 30 repositories, 216000 ticks or 2000000 region samples; use fewer repositories, shorten the history or reduce the playback times"
         );
         Ok(())
     }
@@ -359,10 +360,7 @@ impl Simulation {
             sampled_events = self.state.next_event;
             samples.push(self.layout().local_regions(&active));
         }
-        self.packing = crate::layout::packing::Packing::build(
-            &samples,
-            &self.layout().repository_sizes(),
-        );
+        self.packing = crate::layout::packing::Packing::build(&samples);
         self.state = self.initial.clone();
         self.state.region_views = framing::plan(&self.packing, ticks).into();
         if let Some((regions, offsets, scales)) = self.packing.sample(0) {
@@ -1562,6 +1560,13 @@ mod tests {
         let events = crate::timeline::synthetic();
         assert!(
             Simulation::check_repository_plan(&events, &Options::default(), 5).is_ok()
+        );
+        assert!(
+            Simulation::check_repository_plan(&events, &Options::default(), 30).is_ok()
+        );
+        assert!(
+            Simulation::check_repository_plan(&events, &Options::default(), 31)
+                .is_err()
         );
         assert!(
             Simulation::check_repository_plan(&events, &Options::default(), usize::MAX)

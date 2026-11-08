@@ -102,9 +102,10 @@ select from the merged history. Single-repository playback retains first-parent
 order. Contributor mappings apply across all repositories, so a matched contributor
 uses one avatar that moves between regions.
 
-Repository rows and order are chosen once from whole-history size, largest nearest the
-camera. The row search minimises the distance needed to fit the whole-history regions
-through the automatic camera's perspective at 16:9, including glass and raised labels.
+Repository rectangles are packed once from whole-history footprints, allowing stacked
+columns beside larger regions. A deterministic search scores screen coverage through the
+automatic camera at 16:9, including glass, raised labels and sampled playback framing.
+The search prefers larger repositories nearer the camera when coverage is tied.
 Regions grow continuously around their evolving contents; neighbours move
 outward with small gaps. New repositories grow into their assigned slots over two
 playback seconds and occupy no space before their first commit. History never pauses
@@ -116,9 +117,11 @@ and raised repository label inside a 24-pixel viewport margin. Zoom anticipates 
 and repository births; preview uses the current viewport and field of view. Free-camera
 controls remain independent of automatic framing.
 
-Multi-repository planning supports up to 216,000 simulation ticks and 2,000,000 region
-samples. Shorten the imported history or reduce playback times if either limit is
-exceeded. Single-repository playback is unaffected.
+Multi-repository planning supports up to 30 repositories, 216,000 simulation ticks and
+2,000,000 region samples. The packing search examines at most 300,000 placement nodes;
+all orderings are considered only for five or fewer repositories. Use fewer
+repositories, shorten the imported history or reduce playback times if an input limit
+is exceeded. Single-repository playback is unaffected.
 
 To choose visual treatments, use
 `--repository-boundary none|glass` and `--repository-label-plane files|raised`.

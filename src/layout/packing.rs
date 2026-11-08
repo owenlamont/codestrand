@@ -1,12 +1,272 @@
 use std::sync::Arc;
 
-use bevy::math::Vec2;
+use bevy::math::{Vec2, Vec3};
 
 use super::RepositoryRegion;
 use crate::model::framing;
 
 const GAP: f32 = 1.0;
 const GROW_SECONDS: f32 = 2.0;
+const SEARCH_NODES: usize = 300_000;
+
+fn permutations(order: &mut [usize], start: usize, result: &mut Vec<Vec<usize>>) {
+    if start == order.len() {
+        if !result.iter().any(|entry| entry == order) {
+            result.push(order.to_vec());
+        }
+        return;
+    }
+    for index in start..order.len() {
+        order.swap(start, index);
+        permutations(order, start + 1, result);
+        order.swap(start, index);
+    }
+}
+
+fn orders(sizes: &[Vec2]) -> Vec<Vec<usize>> {
+    let mut result = Vec::new();
+    for axis in 0..4 {
+        let mut order: Vec<_> = (0..sizes.len()).collect();
+        let key = |index: usize| match axis {
+            0 => sizes[index].element_product(),
+            1 => sizes[index].x,
+            2 => sizes[index].y,
+            _ => sizes[index].max_element(),
+        };
+        order.sort_by(|&a, &b| key(b).total_cmp(&key(a)).then(a.cmp(&b)));
+        if !result.contains(&order) {
+            result.push(order);
+        }
+    }
+    if sizes.len() <= 5 {
+        permutations(&mut (0..sizes.len()).collect::<Vec<_>>(), 0, &mut result);
+    }
+    result
+}
+
+fn next_position(
+    index: usize,
+    sizes: &[Vec2],
+    positions: &[Vec2],
+    done: &[usize],
+    limit: f32,
+    nodes: &mut usize,
+) -> Option<Vec2> {
+    let mut choice = Vec2::splat(f32::INFINITY);
+    for edge in 0..=done.len() {
+        if *nodes == SEARCH_NODES {
+            return None;
+        }
+        *nodes += 1;
+        let x = if edge == 0 {
+            0.0
+        } else {
+            let before = done[edge - 1];
+            positions[before].x + sizes[before].x + GAP
+        };
+        if x + sizes[index].x > limit + 0.0001 {
+            continue;
+        }
+        let mut y = 0.0_f32;
+        loop {
+            let next = done
+                .iter()
+                .filter(|&&before| {
+                    x < positions[before].x + sizes[before].x + GAP - 0.0001
+                        && x + sizes[index].x + GAP > positions[before].x + 0.0001
+                        && y < positions[before].y + sizes[before].y + GAP - 0.0001
+                        && y + sizes[index].y + GAP > positions[before].y + 0.0001
+                })
+                .map(|&before| positions[before].y + sizes[before].y + GAP)
+                .fold(y, f32::max);
+            if next <= y {
+                break;
+            }
+            y = next;
+        }
+        if y.total_cmp(&choice.y).then(x.total_cmp(&choice.x)).is_lt() {
+            choice = Vec2::new(x, y);
+        }
+    }
+    Some(choice)
+}
+
+fn bottom_left(
+    sizes: &[Vec2],
+    order: &[usize],
+    limit: f32,
+    nodes: &mut usize,
+) -> Option<Vec<Vec2>> {
+    let mut positions = vec![Vec2::ZERO; sizes.len()];
+    let mut done = Vec::with_capacity(sizes.len());
+    for &index in order {
+        positions[index] =
+            next_position(index, sizes, &positions, &done, limit, nodes)?;
+        done.push(index);
+    }
+    Some(positions)
+}
+
+#[cfg(test)]
+fn coverage(regions: &[RepositoryRegion]) -> f32 {
+    let focus = framing::centre(regions);
+    let distance = framing::distance(regions, focus, framing::FOV, framing::VIEWPORT);
+    coverage_at(regions, focus, distance)
+}
+
+fn coverage_at(regions: &[RepositoryRegion], focus: Vec3, distance: f32) -> f32 {
+    let forward = -crate::model::view_direction();
+    let right = forward.cross(Vec3::Y).normalize();
+    let up = right.cross(forward);
+    let tangent = (framing::FOV * 0.5).tan();
+    regions
+        .iter()
+        .filter(|region| region.live)
+        .map(|region| {
+            let corners = [
+                region.low,
+                Vec2::new(region.high.x, region.low.y),
+                region.high,
+                Vec2::new(region.low.x, region.high.y),
+            ];
+            let points = corners.map(|corner| {
+                let world = super::world_coordinates(corner);
+                let offset = Vec3::new(world.x, 0.0, world.y) - focus;
+                Vec2::new(
+                    offset.dot(right) / (framing::VIEWPORT.x / framing::VIEWPORT.y),
+                    offset.dot(up),
+                ) / (tangent * (distance + offset.dot(forward)))
+            });
+            (0..4)
+                .map(|i| points[i].perp_dot(points[(i + 1) % 4]))
+                .sum::<f32>()
+                .abs()
+                * 0.125
+        })
+        .sum()
+}
+
+#[derive(Clone, Debug, Default)]
+struct Constraints {
+    axes: [Vec<usize>; 2],
+    predecessors: [Vec<Vec<usize>>; 2],
+}
+
+impl Constraints {
+    fn new(sizes: &[Vec2], positions: &[Vec2]) -> Self {
+        let axes = std::array::from_fn(|axis| {
+            let mut order: Vec<_> = (0..sizes.len()).collect();
+            order.sort_by(|&a, &b| {
+                positions[a][axis]
+                    .total_cmp(&positions[b][axis])
+                    .then(a.cmp(&b))
+            });
+            order
+        });
+        let mut predecessors =
+            [vec![Vec::new(); sizes.len()], vec![Vec::new(); sizes.len()]];
+        for a in 0..sizes.len() {
+            for b in a + 1..sizes.len() {
+                let (dimension, before, after) = if positions[a].x + sizes[a].x + GAP
+                    <= positions[b].x + 0.0001
+                {
+                    (0, a, b)
+                } else if positions[b].x + sizes[b].x + GAP <= positions[a].x + 0.0001 {
+                    (0, b, a)
+                } else if positions[a].y < positions[b].y {
+                    (1, a, b)
+                } else {
+                    (1, b, a)
+                };
+                predecessors[dimension][after].push(before);
+            }
+        }
+        Self { axes, predecessors }
+    }
+
+    fn positions(&self, extents: &[Vec2]) -> Vec<Vec2> {
+        let mut positions = vec![Vec2::ZERO; extents.len()];
+        for (dimension, order) in self.axes.iter().enumerate() {
+            for &index in order {
+                positions[index][dimension] = self.predecessors[dimension][index]
+                    .iter()
+                    .map(|&before| {
+                        positions[before][dimension] + extents[before][dimension]
+                    })
+                    .fold(0.0_f32, f32::max);
+            }
+        }
+        positions
+    }
+}
+
+fn search(
+    sizes: &[Vec2],
+    labels: &[RepositoryRegion],
+    mut evaluate: impl FnMut(&Constraints, &[RepositoryRegion]) -> f32,
+) -> (Vec<Vec2>, usize) {
+    let mut best = vec![Vec2::ZERO; sizes.len()];
+    let mut x = 0.0;
+    for (position, size) in best.iter_mut().zip(sizes) {
+        position.x = x;
+        x += size.x + GAP;
+    }
+    let mut score = f32::NEG_INFINITY;
+    let mut priority = f32::INFINITY;
+    let mut nodes = 0;
+    let mut placed = labels.to_vec();
+    for order in orders(sizes) {
+        for transpose in [false, true] {
+            let shapes: Vec<_> = sizes
+                .iter()
+                .map(|s| if transpose { Vec2::new(s.y, s.x) } else { *s })
+                .collect();
+            let minimum = shapes.iter().map(|s| s.x).fold(0.0_f32, f32::max);
+            let maximum = shapes.iter().map(|s| s.x + GAP).sum::<f32>();
+            for trial in 0..=32_u16 {
+                let limit = minimum + (maximum - minimum) * f32::from(trial) / 32.0;
+                let Some(mut positions) =
+                    bottom_left(&shapes, &order, limit, &mut nodes)
+                else {
+                    return (best, nodes);
+                };
+                if transpose {
+                    positions =
+                        positions.into_iter().map(|p| Vec2::new(p.y, p.x)).collect();
+                }
+                let constraints = Constraints::new(sizes, &positions);
+                positions = constraints.positions(
+                    &sizes
+                        .iter()
+                        .map(|s| *s + Vec2::splat(GAP))
+                        .collect::<Vec<_>>(),
+                );
+                for (index, region) in placed.iter_mut().enumerate() {
+                    region.high = Vec2::new(
+                        positions[index].x + sizes[index].x,
+                        -positions[index].y,
+                    );
+                    region.low = region.high - sizes[index];
+                    region.live = true;
+                }
+                let candidate = evaluate(&constraints, &placed);
+                let front = positions
+                    .iter()
+                    .zip(sizes)
+                    .map(|(p, s)| p.y * s.element_product())
+                    .sum::<f32>();
+                if candidate > score + 0.000_001
+                    || ((candidate - score).abs() <= 0.000_001 && front < priority)
+                {
+                    score = candidate;
+                    priority = front;
+                    best = positions;
+                }
+            }
+        }
+    }
+    (best, nodes)
+}
 
 #[derive(Clone, Debug)]
 struct Sample {
@@ -17,14 +277,14 @@ struct Sample {
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Packing {
-    rows: Vec<Vec<usize>>,
+    constraints: Constraints,
     samples: Arc<[Sample]>,
     labels: Vec<String>,
     births: Vec<usize>,
 }
 
 impl Packing {
-    pub(crate) fn build(regions: &[Vec<RepositoryRegion>], sizes: &[Vec2]) -> Self {
+    pub(crate) fn build(regions: &[Vec<RepositoryRegion>]) -> Self {
         let Some(first) = regions.first() else {
             return Self::default();
         };
@@ -65,13 +325,6 @@ impl Packing {
                 now.high[index] = now.high[index].max(previous.high[index]);
             }
         }
-        let mut order: Vec<_> = (0..first.len()).collect();
-        order.sort_by(|&a, &b| {
-            sizes[b]
-                .element_product()
-                .total_cmp(&sizes[a].element_product())
-                .then(a.cmp(&b))
-        });
         let reservations = samples.last().expect("nonempty region history");
         let sizes: Vec<_> = reservations
             .high
@@ -79,48 +332,46 @@ impl Packing {
             .zip(&reservations.low)
             .map(|(high, low)| high - low)
             .collect();
-        let minimum = sizes.iter().map(|size| size.x).fold(0.0_f32, f32::max);
-        let maximum = sizes.iter().map(|size| size.x + GAP).sum::<f32>();
-        let mut best = Vec::new();
-        let mut score = f32::INFINITY;
-        let mut placed = first.clone();
-        for region in &mut placed {
-            region.live = true;
-        }
-        for trial in 0..=32_u16 {
-            let limit = minimum + (maximum - minimum) * f32::from(trial) / 32.0;
-            let mut rows = vec![Vec::new()];
-            let (mut height, mut x, mut row_height) = (0.0_f32, 0.0_f32, 0.0_f32);
-            for &index in &order {
-                if x > 0.0 && x + sizes[index].x > limit {
-                    height += row_height + GAP;
-                    x = 0.0;
-                    row_height = 0.0;
-                    rows.push(Vec::new());
-                }
-                rows.last_mut().expect("front row exists").push(index);
-                placed[index].low = Vec2::new(x, -height - sizes[index].y);
-                placed[index].high = Vec2::new(x + sizes[index].x, -height);
-                x += sizes[index].x + GAP;
-                row_height = row_height.max(sizes[index].y);
-            }
-            let candidate = framing::distance(
-                &placed,
-                framing::centre(&placed),
-                framing::FOV,
-                framing::VIEWPORT,
-            );
-            if candidate < score {
-                score = candidate;
-                best = rows;
+        let last = samples.len() - 1;
+        let mut ticks: Vec<_> = (0..=32).map(|part| last * part / 32).collect();
+        for &birth in &births {
+            if birth <= last {
+                ticks.push(birth.saturating_sub(1));
+                ticks.push((birth + 120).min(last));
             }
         }
-        Self {
-            rows: best,
+        ticks.sort_unstable();
+        ticks.dedup();
+        let mut packing = Self {
+            constraints: Constraints::default(),
             samples: samples.into(),
             labels: first.iter().map(|r| r.label.clone()).collect(),
             births,
-        }
+        };
+        let positions = search(&sizes, first, |constraints, _| {
+            packing.constraints = constraints.clone();
+            let final_regions = packing
+                .sample(u64::try_from(last).expect("history index fits tick range"))
+                .expect("nonempty history")
+                .0;
+            let focus = framing::centre(&final_regions);
+            let distance = ticks
+                .iter()
+                .map(|&tick| {
+                    let regions = packing
+                        .sample(
+                            u64::try_from(tick).expect("history index fits tick range"),
+                        )
+                        .expect("nonempty history")
+                        .0;
+                    framing::distance(&regions, focus, framing::FOV, framing::VIEWPORT)
+                })
+                .fold(24.0_f32, f32::max);
+            coverage_at(&final_regions, focus, distance)
+        })
+        .0;
+        packing.constraints = Constraints::new(&sizes, &positions);
+        packing
     }
 
     pub(crate) fn sample(
@@ -172,22 +423,23 @@ impl Packing {
             })
             .collect();
         let mut offsets = vec![Vec2::ZERO; regions.len()];
-        let mut y = 0.0;
-        for row in &self.rows {
-            let (mut x, mut height) = (0.0_f32, 0.0_f32);
-            for &index in row {
-                let region = &mut regions[index];
-                let size = region.high - region.low;
-                offsets[index] =
-                    Vec2::new(x, y) - Vec2::new(region.low.x, region.high.y);
-                region.low += offsets[index];
-                region.high += offsets[index];
+        let extents: Vec<_> = regions
+            .iter()
+            .enumerate()
+            .map(|(index, region)| {
                 if region.live {
-                    x += size.x + GAP * scales[index];
-                    height = height.max(size.y + GAP * scales[index]);
+                    region.high - region.low + Vec2::splat(GAP * scales[index])
+                } else {
+                    Vec2::ZERO
                 }
-            }
-            y -= height;
+            })
+            .collect();
+        let positions = self.constraints.positions(&extents);
+        for (index, region) in regions.iter_mut().enumerate() {
+            offsets[index] = Vec2::new(positions[index].x, -positions[index].y)
+                - Vec2::new(region.low.x, region.high.y);
+            region.low += offsets[index];
+            region.high += offsets[index];
         }
         Some((regions, offsets, scales))
     }
@@ -198,15 +450,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn perspective_fit_prefers_two_rows_for_a_dominant_tall_repository() {
+    fn stacks_rectangles_beside_a_tall_repository() {
         let sizes = [
-            Vec2::new(27.0, 22.0),
-            Vec2::new(61.0, 86.0),
-            Vec2::new(19.0, 18.0),
-            Vec2::new(37.0, 26.0),
-            Vec2::new(30.0, 26.0),
+            Vec2::new(30.0, 60.0),
+            Vec2::new(30.0, 29.0),
+            Vec2::new(30.0, 30.0),
         ];
-        let regions = sizes
+        let regions: Vec<_> = sizes
             .iter()
             .enumerate()
             .map(|(index, &size)| RepositoryRegion {
@@ -216,26 +466,63 @@ mod tests {
                 live: true,
             })
             .collect();
-        let history = [regions];
-        let packing = Packing::build(&history, &sizes);
-        assert_eq!(packing.rows, [vec![1, 3], vec![4, 0, 2]]);
-        assert_eq!(packing.rows, Packing::build(&history, &sizes).rows);
-        let fit = |packing: &Packing| {
-            let regions = packing.sample(0).unwrap().0;
-            framing::distance(
-                &regions,
-                framing::centre(&regions),
-                framing::FOV,
-                framing::VIEWPORT,
+        let packing = Packing::build(&[regions]);
+        let result = packing.sample(0).unwrap().0;
+        let low = result.iter().map(|r| r.low).reduce(Vec2::min).unwrap();
+        let high = result.iter().map(|r| r.high).reduce(Vec2::max).unwrap();
+        assert!((high - low).element_product() < 4000.0);
+        assert!(
+            (result[1].low.x - result[2].low.x).abs() < 0.0001
+                || (result[1].high.y - result[2].high.y).abs() < 0.0001
+        );
+    }
+
+    #[test]
+    fn thirty_repositories_are_deterministic_nonoverlapping_and_budgeted() {
+        let sizes: Vec<_> = (0..30_u16)
+            .map(|i| {
+                Vec2::new(3.0 + f32::from(i * 17 % 47), 4.0 + f32::from(i * 23 % 61))
+            })
+            .collect();
+        let regions: Vec<_> = sizes
+            .iter()
+            .enumerate()
+            .map(|(i, &size)| RepositoryRegion {
+                label: i.to_string(),
+                low: Vec2::ZERO,
+                high: size,
+                live: true,
+            })
+            .collect();
+        let evaluate =
+            |_: &Constraints, regions: &[RepositoryRegion]| coverage(regions);
+        let (positions, nodes) = search(&sizes, &regions, evaluate);
+        assert!(nodes <= SEARCH_NODES);
+        assert_eq!(
+            (positions.clone(), nodes),
+            search(&sizes, &regions, evaluate)
+        );
+        let mut exhausted = SEARCH_NODES - 1;
+        assert!(
+            bottom_left(
+                &sizes,
+                &(0..sizes.len()).collect::<Vec<_>>(),
+                200.0,
+                &mut exhausted
             )
-        };
-        for rows in [
-            vec![vec![1, 3, 4, 0, 2]],
-            vec![vec![1], vec![3, 4], vec![0, 2]],
-        ] {
-            let mut alternative = packing.clone();
-            alternative.rows = rows;
-            assert!(fit(&packing) < fit(&alternative));
+            .is_none()
+        );
+        assert_eq!(exhausted, SEARCH_NODES);
+        for (a, position) in positions.iter().enumerate() {
+            assert!(position.is_finite());
+            for b in a + 1..sizes.len() {
+                assert!(
+                    position.x + sizes[a].x <= positions[b].x
+                        || positions[b].x + sizes[b].x <= position.x
+                        || position.y + sizes[a].y <= positions[b].y
+                        || positions[b].y + sizes[b].y <= position.y
+                );
+            }
         }
     }
 
@@ -243,7 +530,7 @@ mod tests {
     fn growth_and_births_never_overlap_reorder_or_move_inward() {
         let samples: Vec<_> = (0..600_u16)
             .map(|tick| {
-                (0..12_u16)
+                (0..30_u16)
                     .map(|index| {
                         let size = 2.0 + f32::from(index) + f32::from(tick) / 100.0;
                         RepositoryRegion {
@@ -256,15 +543,7 @@ mod tests {
                     .collect()
             })
             .collect();
-        let packing = Packing::build(
-            &samples,
-            &samples
-                .last()
-                .unwrap()
-                .iter()
-                .map(|r| r.high - r.low)
-                .collect::<Vec<_>>(),
-        );
+        let packing = Packing::build(&samples);
         let mut previous: Option<Vec<RepositoryRegion>> = None;
         for tick in 0..600 {
             let (regions, _, _) = packing.sample(tick).unwrap();
@@ -287,7 +566,7 @@ mod tests {
             previous = Some(regions);
         }
         let (regions, _, _) = packing.sample(599).unwrap();
-        let largest = &regions[11];
+        let largest = &regions[29];
         assert!(regions.iter().all(|r| r.high.y <= largest.high.y));
     }
 
@@ -301,14 +580,11 @@ mod tests {
         };
         let mut absent = region.clone();
         absent.live = false;
-        let packing = Packing::build(
-            &[
-                vec![absent.clone(), region.clone()],
-                vec![region.clone(), region.clone()],
-                vec![absent, region],
-            ],
-            &[Vec2::splat(5.0); 2],
-        );
+        let packing = Packing::build(&[
+            vec![absent.clone(), region.clone()],
+            vec![region.clone(), region.clone()],
+            vec![absent, region],
+        ]);
         let (before, _, _) = packing.sample(0).unwrap();
         let (after, _, _) = packing.sample(2).unwrap();
         assert_eq!(before[1].low, after[1].low);
@@ -325,7 +601,7 @@ mod tests {
                 live: true,
             })
             .collect();
-        let packing = Packing::build(&[regions], &[Vec2::splat(5.0); 2]);
+        let packing = Packing::build(&[regions]);
         let mut previous = packing
             .sample_with_presence(0, Some(&[1.0, 1.0]))
             .unwrap()
