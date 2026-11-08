@@ -14,8 +14,10 @@ pub(super) const RELEASE_RADIUS: f32 = 0.05;
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct Plan {
+    pub(super) parts: Vec<(usize, Plan)>,
     samples: Arc<[Vec<Vec2>]>,
     footprints: Arc<[Vec<Vec2>]>,
+    radii: Arc<[f32]>,
     pub(super) time: f32,
     origin: f32,
     step: f32,
@@ -33,6 +35,10 @@ enum Region {
 }
 
 impl Plan {
+    pub(super) fn add_part(&mut self, base: usize, plan: Self) {
+        self.seconds += plan.seconds;
+        self.parts.push((base, plan));
+    }
     fn new(layout: &mut Layout, events: &[Event], starts: &[f32]) -> Self {
         for event in events {
             for change in &event.changes {
@@ -86,8 +92,10 @@ impl Plan {
             })
             .collect::<Vec<_>>();
         Self {
+            parts: Vec::new(),
             samples: samples.into(),
             footprints: footprints.into(),
+            radii: peak.into(),
             time: 0.0,
             origin: 0.0,
             step,
@@ -96,8 +104,48 @@ impl Plan {
     }
 
     pub(super) fn position(&self, dir: usize) -> Option<Vec2> {
+        if !self.parts.is_empty() {
+            let (offset, plan) =
+                self.parts.iter().rev().find(|(offset, _)| *offset <= dir)?;
+            return plan.at(dir - offset, self.time);
+        }
+        self.at(dir, self.time)
+    }
+
+    fn at(&self, dir: usize, time: f32) -> Option<Vec2> {
         let row = self.samples.get(dir)?;
-        Some(interpolate(row, self.time, self.step))
+        Some(interpolate(row, time, self.step))
+    }
+
+    fn footprint(&self, dir: usize, time: f32) -> Vec2 {
+        if let Some((offset, plan)) =
+            self.parts.iter().rev().find(|(offset, _)| *offset <= dir)
+        {
+            return plan.footprint(dir - offset, time);
+        }
+        interpolate(&self.footprints[dir], time, self.step)
+    }
+
+    pub(super) fn translate(&mut self, offset: Vec2) {
+        for row in Arc::make_mut(&mut self.samples) {
+            for position in row {
+                *position += offset;
+            }
+        }
+    }
+
+    pub(super) fn envelope(&self) -> (Vec2, Vec2) {
+        self.samples.iter().zip(self.radii.iter()).fold(
+            (Vec2::splat(f32::INFINITY), Vec2::splat(f32::NEG_INFINITY)),
+            |(mut low, mut high), (row, &radius)| {
+                let radius = radius + 3.0;
+                for &point in row {
+                    low = low.min(point - Vec2::splat(radius));
+                    high = high.max(point + Vec2::splat(radius));
+                }
+                (low, high)
+            },
+        )
     }
 }
 
@@ -517,8 +565,8 @@ impl Layout {
     pub(crate) fn forecast(&self) -> Vec<(Vec2, f32)> {
         let mut centres = vec![Vec2::ZERO; self.dirs.len()];
         let mut points = Vec::new();
-        for (index, row) in self.plan.footprints.iter().enumerate() {
-            let footprint = interpolate(row, self.plan.time, self.plan.step);
+        for index in 0..self.dirs.len() {
+            let footprint = self.plan.footprint(index, self.plan.time);
             let dir = &self.dirs[index];
             let centre = dir.parent.map_or(dir.position, |parent| {
                 centres[parent].lerp(dir.position, footprint.y.clamp(0.0, 1.0))

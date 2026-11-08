@@ -151,6 +151,7 @@ pub(super) struct Fragment {
 /// Placement priority, highest first, when labels would overlap on screen.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum LabelKind {
+    Repository,
     Avatar,
     Landmark,
     Activity,
@@ -181,6 +182,8 @@ struct State {
 
 /// Deterministic playback stepped at a fixed tick rate, independent of output frame rate.
 pub(super) struct Simulation {
+    pub repository_boundary: crate::repositories::Boundary,
+    pub repository_label_plane: crate::repositories::LabelPlane,
     events: Vec<Event>,
     offset: usize,
     total: usize,
@@ -204,7 +207,17 @@ impl Simulation {
         theme: &Theme,
         mappings: &Mappings,
     ) -> Self {
-        Self::build(events, options, theme, mappings, &[])
+        Self::with_repositories(events, options, theme, mappings, &[])
+    }
+
+    pub(super) fn with_repositories(
+        mut events: Vec<Event>,
+        options: &Options,
+        theme: &Theme,
+        mappings: &Mappings,
+        repositories: &[String],
+    ) -> Self {
+        Self::build(events, options, theme, mappings, &[], repositories)
     }
 
     fn build(
@@ -213,6 +226,7 @@ impl Simulation {
         theme: &Theme,
         mappings: &Mappings,
         padding: &[(usize, u32)],
+        repositories: &[String],
     ) -> Self {
         let padding_at = |index| {
             padding
@@ -241,7 +255,11 @@ impl Simulation {
         );
         let mut state = State {
             tick: 0,
-            layout: Layout::scheduled(&events, &layout_starts.starts),
+            layout: Layout::scheduled_repositories(
+                &events,
+                &layout_starts.starts,
+                repositories,
+            ),
             avatars: Vec::new(),
             authors: HashMap::new(),
             next_event: 0,
@@ -277,6 +295,8 @@ impl Simulation {
         events.truncate(end);
         events.drain(..start);
         Self {
+            repository_boundary: crate::repositories::Boundary::default(),
+            repository_label_plane: crate::repositories::LabelPlane::default(),
             events,
             offset: start,
             total,
@@ -601,6 +621,32 @@ impl Simulation {
                 priority: 0.0,
             })
             .collect();
+        let avatar_height = self
+            .state
+            .avatars
+            .iter()
+            .filter(|avatar| avatar.presence > 0.05)
+            .map(|avatar| avatar.position.y)
+            .reduce(f32::min)
+            .unwrap_or(MIN_AVATAR_HEIGHT);
+        for region in &layout.repositories {
+            let mut position = ground(Vec2::new(
+                region.low.x.midpoint(region.high.x),
+                region.high.y - 1.0,
+            ));
+            position.y = match self.repository_label_plane {
+                crate::repositories::LabelPlane::Files => 0.15,
+                crate::repositories::LabelPlane::Raised => avatar_height * 0.5,
+            };
+            labels.push(Label {
+                position,
+                text: region.label.clone(),
+                kind: LabelKind::Repository,
+                scale: 1.0,
+                opacity: 1.0,
+                priority: 0.0,
+            });
+        }
         for pulse in &self.state.pulses {
             if pulse.targets.len() > 8 && !pulse.aggregated {
                 continue;
@@ -610,7 +656,9 @@ impl Simulation {
                     Target::File(id) => {
                         layout.file(id).map(|file| file.name().to_owned())
                     }
-                    Target::Dir(index) => Some(format!("{}/", layout.dir(index).path)),
+                    Target::Dir(index) => {
+                        Some(format!("{}/", layout.directory_label(index)))
+                    }
                 };
                 if let (Some(text), Some(position)) = (text, self.state.point(target)) {
                     labels.push(Label {
@@ -885,6 +933,17 @@ impl State {
             })
             .collect();
         points.extend_from_slice(tops);
+        for region in &self.layout.repositories {
+            points.extend(
+                [
+                    region.low,
+                    region.high,
+                    Vec2::new(region.low.x, region.high.y),
+                    Vec2::new(region.high.x, region.low.y),
+                ]
+                .map(ground),
+            );
+        }
         points
     }
 

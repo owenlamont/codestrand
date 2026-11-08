@@ -251,7 +251,7 @@ impl DirectoryHues {
         for index in self.slots.len()..layout.dir_count() {
             let slot = match layout.dir(index).parent {
                 None => 0,
-                Some(0) => {
+                Some(parent) if layout.dir(parent).parent.is_none() => {
                     let slot = self.top_levels;
                     self.top_levels += 1;
                     slot
@@ -389,6 +389,7 @@ fn setup(world: &mut World) {
     ));
     let theme = world.resource::<Playback>().0.theme().clone();
     let palette = Palette::new(world, &theme);
+    repository_regions(world, &palette);
     world.spawn((
         Mesh3d(palette.glyph_mesh.clone()),
         MeshMaterial3d(palette.floor.clone()),
@@ -410,7 +411,8 @@ fn setup(world: &mut World) {
         .collect();
     world.resource_mut::<Pools>().grid = grid;
     world.insert_resource(palette);
-    for _ in 0..LABELS {
+    let repository_labels = world.resource::<Playback>().0.layout().repositories.len();
+    for _ in 0..LABELS + repository_labels {
         world.spawn((
             Text::new(""),
             TextFont::from_font_size(14.0),
@@ -454,6 +456,40 @@ fn setup(world: &mut World) {
     world.entity_mut(caption).insert(Caption);
     world.init_resource::<Assets<Font>>();
     styling::setup(world, &theme);
+}
+
+fn repository_regions(world: &mut World, palette: &Palette) {
+    let simulation = &world.resource::<Playback>().0;
+    if !matches!(
+        simulation.repository_boundary,
+        crate::repositories::Boundary::Glass
+    ) {
+        return;
+    }
+    let regions = simulation.layout().repositories.clone();
+    for (index, region) in regions.iter().enumerate() {
+        let hue =
+            f32::from(u16::try_from(index % 12).expect("bounded hue")) * 30.0 + 180.0;
+        let color = Color::hsla(hue, 0.65, 0.55, 0.055);
+        let material =
+            world
+                .resource_mut::<Assets<StandardMaterial>>()
+                .add(StandardMaterial {
+                    base_color: color,
+                    alpha_mode: AlphaMode::Blend,
+                    unlit: true,
+                    cull_mode: None,
+                    ..default()
+                });
+        let centre = (region.low + region.high) * 0.5;
+        let size = region.high - region.low;
+        world.spawn((
+            Mesh3d(palette.cube.clone()),
+            MeshMaterial3d(material),
+            Transform::from_xyz(centre.x, 0.5, centre.y)
+                .with_scale(Vec3::new(size.x, 1.2, size.y)),
+        ));
+    }
 }
 
 fn heading(
@@ -1528,14 +1564,16 @@ fn place_labels(
             || rect.min.y < 0.0
             || rect.max.x > 1280.0
             || rect.max.y > 720.0
-            || (label.kind != model::LabelKind::Avatar
-                && placed.iter().any(|other| !other.intersect(rect).is_empty()))
+            || (!matches!(
+                label.kind,
+                model::LabelKind::Avatar | model::LabelKind::Repository
+            ) && placed.iter().any(|other| !other.intersect(rect).is_empty()))
         {
             continue;
         }
         placed.push(rect);
         chosen.push((label, point, distance));
-        if chosen.len() == LABELS {
+        if chosen.len() == capacity {
             break;
         }
     }

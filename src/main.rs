@@ -22,6 +22,7 @@ mod export;
 mod history;
 mod layout;
 mod model;
+mod repositories;
 mod scene;
 mod theme;
 mod timeline;
@@ -120,9 +121,18 @@ enum Command {
     reason = "each bool is an independent clap switch"
 )]
 struct Source {
-    /// Local repository to play; a built-in synthetic history plays when omitted.
+    /// Local repository to play; repeat for a shared timeline; synthetic when omitted.
     #[arg(long)]
-    repository: Option<PathBuf>,
+    repository: Vec<PathBuf>,
+    /// TOML repository list; relative paths resolve beside the TOML file.
+    #[arg(long)]
+    repositories_file: Option<PathBuf>,
+    /// Repository boundary treatment for multiple repositories.
+    #[arg(long, value_enum, default_value = "none")]
+    repository_boundary: repositories::Boundary,
+    /// Permanent repository labels at file level or between files and avatars.
+    #[arg(long, value_enum, default_value = "files")]
+    repository_label_plane: repositories::LabelPlane,
     #[arg(long, default_value = "HEAD")]
     revision: String,
     /// Skip history and avatar cache reads and writes.
@@ -160,28 +170,49 @@ struct Source {
 impl Source {
     fn events(
         &self,
-        cache_root: Option<&Path>,
-    ) -> Result<Vec<timeline::Event>, history::Error> {
-        let mut events = match &self.repository {
-            Some(path) => {
-                cache::load(path, &self.revision, cache_root.filter(|_| !self.no_cache))
+        cache_root: Option<&std::path::Path>,
+    ) -> anyhow::Result<Vec<timeline::Event>> {
+        let repositories =
+            repositories::inputs(&self.repository, self.repositories_file.as_deref())?;
+        let mut histories = Vec::new();
+        for (index, repository) in repositories.iter().enumerate() {
+            let started = std::time::Instant::now();
+            let mut events = cache::load(
+                &repository.path,
+                &self.revision,
+                cache_root.filter(|_| !self.no_cache),
+            )?;
+            eprintln!(
+                "repository={} import_seconds={:.6} events={}",
+                terminal_escape(&repository.name()),
+                started.elapsed().as_secs_f64(),
+                events.len()
+            );
+            if repositories.len() > 1 {
+                repositories::namespace(&mut events, index);
             }
-            None => Ok(timeline::synthetic()),
-        }?;
-        if self.no_diff_samples {
-            for change in events.iter_mut().flat_map(|event| &mut event.changes) {
-                change.samples.clear();
+            if self.no_diff_samples {
+                for change in events.iter_mut().flat_map(|event| &mut event.changes) {
+                    change.samples.clear();
+                }
             }
+            histories.push(events);
         }
-        Ok(events)
+        Ok(if repositories.is_empty() {
+            timeline::synthetic()
+        } else if repositories.len() == 1 {
+            histories.pop().expect("one repository")
+        } else {
+            repositories::merge(histories)
+        })
     }
 
-    fn load(&self) -> anyhow::Result<(model::Simulation, String)> {
-        let mappings = contributors::load(self.contributors.as_deref())?;
-        let mut events = self.events(cache::root().as_deref())?;
-        mappings.apply(&mut events);
-        let remote = self.repository.as_deref().and_then(avatars::repository);
-        let fetch = self.fetch_avatars && self.repository.is_some();
+    fn resolve_avatars(
+        &self,
+        events: &mut [timeline::Event],
+        repositories: &[repositories::Repository],
+    ) {
+        let fetch = self.fetch_avatars && !repositories.is_empty();
         let mut resolver = avatars::Resolver::new(
             fetch.then(avatars::Http::new),
             cache::root().filter(|_| !self.no_cache),
@@ -193,20 +224,48 @@ impl Source {
         let end = self.commits.map_or(events.len(), |count| {
             start.saturating_add(count).min(events.len())
         });
-        resolver.resolve(&mut events[start..end], remote.as_deref());
-        let (events, title) = match &self.repository {
-            Some(path) => {
-                let name = path
-                    .canonicalize()
-                    .ok()
-                    .and_then(|path| {
-                        path.file_name()
-                            .map(|name| name.to_string_lossy().into_owned())
-                    })
-                    .unwrap_or_else(|| path.display().to_string());
-                (events, name)
+        if repositories.is_empty() {
+            resolver.resolve(&mut events[start..end], None);
+        }
+        for (index, repository) in repositories.iter().enumerate() {
+            let remote = avatars::repository(&repository.path);
+            if repositories.len() == 1 {
+                resolver.resolve(&mut events[start..end], remote.as_deref());
+                return;
             }
-            None => (events, "Synthetic history".to_owned()),
+            let prefix = repositories::prefix(index);
+            let indices: Vec<_> = (start..end)
+                .filter(|&at| {
+                    events[at]
+                        .changes
+                        .first()
+                        .is_some_and(|change| change.path.starts_with(&prefix))
+                })
+                .collect();
+            let mut selected: Vec<_> =
+                indices.iter().map(|&at| events[at].clone()).collect();
+            resolver.resolve(&mut selected, remote.as_deref());
+            for (at, event) in indices.into_iter().zip(selected) {
+                events[at] = event;
+            }
+        }
+    }
+
+    fn load(&self) -> anyhow::Result<(model::Simulation, String)> {
+        let repositories =
+            repositories::inputs(&self.repository, self.repositories_file.as_deref())?;
+        let mappings = contributors::load(self.contributors.as_deref())?;
+        let mut events = self.events(cache::root().as_deref())?;
+        mappings.apply(&mut events);
+        self.resolve_avatars(&mut events, &repositories);
+        let title = if repositories.is_empty() {
+            "Synthetic history".to_owned()
+        } else {
+            repositories
+                .iter()
+                .map(repositories::Repository::name)
+                .collect::<Vec<_>>()
+                .join(" | ")
         };
         let options = model::Options {
             heat_half_life: self.heat_half_life,
@@ -215,10 +274,28 @@ impl Source {
             start: self.start,
             commits: self.commits,
         };
-        Ok((
-            model::Simulation::new(events, &options, &theme::Theme::neon(), &mappings),
-            title,
-        ))
+        let names = if repositories.len() > 1 {
+            repositories
+                .iter()
+                .map(repositories::Repository::name)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let mut simulation = if names.is_empty() {
+            model::Simulation::new(events, &options, &theme::Theme::neon(), &mappings)
+        } else {
+            model::Simulation::with_repositories(
+                events,
+                &options,
+                &theme::Theme::neon(),
+                &mappings,
+                &names,
+            )
+        };
+        simulation.repository_boundary = self.repository_boundary;
+        simulation.repository_label_plane = self.repository_label_plane;
+        Ok((simulation, title))
     }
 }
 
@@ -414,6 +491,41 @@ mod tests {
             assert_eq!(source.fetch_avatars, fetch);
             assert_eq!(source.gitlab_email_avatars, email);
         }
+    }
+
+    #[test]
+    fn cli_combines_repeated_repositories_and_a_manifest() {
+        let cli = Cli::try_parse_from([
+            "codestrand",
+            "preview",
+            "--repository",
+            "first",
+            "--repository",
+            "second",
+            "--repositories-file",
+            "repos.toml",
+            "--repository-boundary",
+            "glass",
+            "--repository-label-plane",
+            "raised",
+        ])
+        .unwrap();
+        let Some(Command::Preview { source, .. }) = cli.command else {
+            panic!("preview")
+        };
+        assert_eq!(
+            source.repository,
+            [PathBuf::from("first"), PathBuf::from("second")]
+        );
+        assert_eq!(source.repositories_file, Some(PathBuf::from("repos.toml")));
+        assert!(matches!(
+            source.repository_boundary,
+            repositories::Boundary::Glass
+        ));
+        assert!(matches!(
+            source.repository_label_plane,
+            repositories::LabelPlane::Raised
+        ));
     }
 
     #[test]

@@ -70,6 +70,44 @@ frame times. Files settled before `--start` begin cold.
 codestrand export frames --heat-half-life 3 --frames 90 --fps 30
 ```
 
+## Multiple repositories
+
+Repeat `--repository` to play local repositories on one author-time timeline:
+
+```sh
+codestrand preview --repository /path/to/first --repository /path/to/second
+```
+
+Alternatively, pass `--repositories-file repositories.toml` to preview or export:
+
+```toml
+[[repositories]]
+path = "/path/to/first"
+label = "First project"
+
+[[repositories]]
+path = "../second"
+```
+
+Paths in the TOML file resolve relative to the file. Labels default to the repository
+directory name. Repeated flags and a file can be combined; flag entries come first.
+Duplicate repositories are rejected. Each entry is a table so future repository
+metadata can be added; archive dates are not supported yet.
+
+Events merge by author timestamp, with ties retaining repository input order and
+history order. `--revision` applies to every repository; `--start` and `--commits`
+select from the merged history. Single-repository playback retains first-parent
+order. Contributor mappings apply across all repositories, so a matched contributor
+uses one avatar that moves between regions.
+
+Each repository has a permanent label and a separate region, reserved across the
+whole history. To compare experimental visual treatments, use
+`--repository-boundary none|glass` and `--repository-label-plane files|raised`.
+Defaults are `none` and `files`. Glass is a faint, coloured rectangular prism around
+each region; raised labels sit halfway to the lowest visible avatar, with a minimum
+height fallback before any avatar appears.
+Both options apply to preview and export and affect multiple repositories only.
+
 ## Range and pacing
 
 ```sh

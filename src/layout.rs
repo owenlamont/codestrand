@@ -4,6 +4,14 @@ use bevy::math::Vec2;
 use planner::Plan;
 
 mod planner;
+mod repositories;
+
+#[derive(Clone, Debug)]
+pub(super) struct RepositoryRegion {
+    pub label: String,
+    pub low: Vec2,
+    pub high: Vec2,
+}
 
 const SPACING: f32 = 0.62;
 const GOLDEN_ANGLE: f32 = 2.399_963_2;
@@ -47,6 +55,7 @@ impl File {
 
 #[derive(Clone, Debug)]
 pub(super) struct Dir {
+    pub(super) repository: usize,
     pub path: String,
     pub parent: Option<usize>,
     pub depth: u16,
@@ -83,6 +92,7 @@ pub(super) struct Layout {
     next_id: u64,
     revision: u64,
     plan: Plan,
+    pub repositories: Vec<RepositoryRegion>,
 }
 
 impl Layout {
@@ -93,6 +103,7 @@ impl Layout {
 
     fn empty() -> Self {
         let root = Dir {
+            repository: 0,
             path: String::new(),
             parent: None,
             depth: 0,
@@ -112,6 +123,7 @@ impl Layout {
             next_id: 0,
             revision: 0,
             plan: Plan::default(),
+            repositories: Vec::new(),
         }
     }
 
@@ -164,6 +176,17 @@ impl Layout {
 
     pub(super) fn dir(&self, index: usize) -> &Dir {
         &self.dirs[index]
+    }
+
+    pub(super) fn directory_label(&self, index: usize) -> &str {
+        let dir = &self.dirs[index];
+        if self.repositories.is_empty() {
+            return &dir.path;
+        }
+        dir.path.split_once('/').map_or_else(
+            || self.repositories[dir.repository].label.as_str(),
+            |(_, path)| path,
+        )
     }
 
     pub(super) fn present_files(&self) -> usize {
@@ -294,6 +317,12 @@ impl Layout {
             file.velocity +=
                 (desired - file.velocity).clamp_length_max(MAX_ACCELERATION * dt);
             file.position += file.velocity * dt;
+            if !self.repositories.is_empty() {
+                let region = &self.repositories[self.dirs[file.dir].repository];
+                file.position = file
+                    .position
+                    .clamp(region.low + Vec2::ONE, region.high - Vec2::ONE);
+            }
         }
     }
 
@@ -342,8 +371,14 @@ impl Layout {
         }
     }
 
-    /// Bounds of live directories on the ground plane, as minimum and maximum corners.
+    /// Ground-plane bounds, reserving whole-history regions for multiple repositories.
     pub(super) fn bounds(&self) -> (Vec2, Vec2) {
+        if !self.repositories.is_empty() {
+            return self.repositories.iter().fold(
+                (Vec2::splat(f32::INFINITY), Vec2::splat(f32::NEG_INFINITY)),
+                |(low, high), region| (low.min(region.low), high.max(region.high)),
+            );
+        }
         self.dirs().fold(
             (Vec2::splat(-2.0), Vec2::splat(2.0)),
             |(low, high), (_, dir)| {
@@ -438,9 +473,9 @@ impl Layout {
             && self.dirs[dir].reserve < planner::RELEASE_RADIUS
         {
             self.dirs[dir].live = false;
-            let parent = self.dirs[dir]
-                .parent
-                .expect("non-root directories have parents");
+            let Some(parent) = self.dirs[dir].parent else {
+                break;
+            };
             self.dirs[parent].children -= 1;
             dir = parent;
         }
@@ -459,8 +494,10 @@ impl Layout {
     fn ensure_dir(&mut self, path: &str) -> usize {
         if let Some(&index) = self.dir_index.get(path) {
             if !self.dirs[index].live {
-                let parent = self.ensure_dir(parent_path(path));
-                self.dirs[parent].children += 1;
+                if self.dirs[index].parent.is_some() {
+                    let parent = self.ensure_dir(parent_path(path));
+                    self.dirs[parent].children += 1;
+                }
                 let position = self
                     .plan
                     .position(index)
@@ -485,6 +522,7 @@ impl Layout {
             live: true,
             touch_age: f32::INFINITY,
             reserve: 0.4,
+            repository: self.dirs[parent].repository,
         });
         self.dir_index.insert(path.to_owned(), index);
         index
