@@ -1518,7 +1518,7 @@ fn sync_labels(
         &mut Visibility,
         &mut TextColor,
         &mut ZIndex,
-        &mut TextFont,
+        &mut UiTransform,
         &mut BackgroundColor,
         &mut BorderColor,
         &mut TextShadow,
@@ -1533,7 +1533,7 @@ fn sync_labels(
             mut visibility,
             mut color,
             mut z_index,
-            mut font,
+            mut transform,
             mut background,
             mut border,
             mut shadow,
@@ -1545,9 +1545,12 @@ fn sync_labels(
                 i32::try_from(index).expect("label pool fits in i32"),
             ));
             let opacity = label.opacity;
-            if font.font_size != bevy::text::FontSize::Px(14.0 * label.scale) {
-                font.font_size = bevy::text::FontSize::Px(14.0 * label.scale);
-            }
+            // Bevy retains an atlas per raster size, so ease geometry around the top-left.
+            transform.set_if_neq(UiTransform {
+                scale: Vec2::splat(label.scale),
+                translation: Val2::all(percent(50.0 * (label.scale - 1.0))),
+                ..default()
+            });
             background.set_if_neq(BackgroundColor(
                 theme
                     .label_background()
@@ -1690,6 +1693,59 @@ fn face_portraits(world: &mut World) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn changing_crowd_scale_keeps_label_raster_sizes_bounded() {
+        let mut world = World::new();
+        let entity = world
+            .spawn((
+                Text::new(""),
+                TextFont::from_font_size(14.0),
+                Node::default(),
+                TextColor::default(),
+                ZIndex::default(),
+                BackgroundColor::default(),
+                BorderColor::default(),
+                TextShadow::default(),
+                Label,
+            ))
+            .id();
+        let theme = Theme::neon();
+        let mut sizes = std::collections::HashSet::new();
+        for tick in 0_u16..12_000 {
+            let scale = 0.72 + 0.28 * f32::from(tick % 1000) / 999.0;
+            sync_labels(
+                &mut world,
+                vec![(
+                    model::Label {
+                        position: Vec3::ZERO,
+                        text: "Contributor".to_owned(),
+                        kind: model::LabelKind::Avatar,
+                        scale,
+                        opacity: 1.0,
+                        priority: 1.0,
+                    },
+                    Vec2::new(100.0, 200.0),
+                    0.0,
+                )],
+                &theme,
+            );
+            let bevy::text::FontSize::Px(size) =
+                world.get::<TextFont>(entity).unwrap().font_size
+            else {
+                panic!("label raster size must remain in pixels");
+            };
+            sizes.insert(size.to_bits());
+            assert_eq!(size, 14.0);
+            let transform = world.get::<UiTransform>(entity).unwrap();
+            assert_eq!(transform.scale, Vec2::splat(scale));
+            assert_eq!(
+                transform.translation,
+                Val2::all(percent(50.0 * (scale - 1.0)))
+            );
+        }
+        assert_eq!(sizes, std::collections::HashSet::from([14.0_f32.to_bits()]));
+    }
 
     #[test]
     fn preview_switch_loads_uncached_art_off_thread_before_applying_theme() {
@@ -2199,6 +2255,7 @@ mod tests {
                 Changed<Visibility>,
                 Changed<TextColor>,
                 Changed<TextFont>,
+                Changed<UiTransform>,
                 Changed<BackgroundColor>,
                 Changed<BorderColor>,
                 Changed<TextShadow>,
