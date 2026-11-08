@@ -54,8 +54,8 @@ impl Tile {
 }
 
 pub(crate) fn gutters(count: f32) -> Vec2 {
-    let shrink = (12.0 / count.max(1.0)).min(1.0).sqrt().max(0.75);
-    Vec2::new(16.0, 32.0) * shrink
+    let shrink = ((count - 12.0) / 18.0).clamp(0.0, 1.0);
+    Vec2::new(16.0, 32.0).lerp(Vec2::new(12.0, 16.0), shrink)
 }
 
 #[derive(Clone, Debug)]
@@ -709,6 +709,15 @@ mod tests {
                     .collect()
             })
             .collect()
+    }
+
+    #[test]
+    fn gutter_budget_shrinks_continuously_above_twelve_repositories() {
+        assert_eq!(gutters(5.0), Vec2::new(16.0, 32.0));
+        assert_eq!(gutters(12.0), Vec2::new(16.0, 32.0));
+        assert_eq!(gutters(21.0), Vec2::new(14.0, 24.0));
+        assert_eq!(gutters(30.0), Vec2::new(12.0, 16.0));
+        assert_eq!(gutters(31.0), gutters(30.0));
     }
 
     #[test]

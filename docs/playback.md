@@ -119,7 +119,10 @@ relative order. Splits clamp to a ground-aspect range of 1:2.5 to 2.5:1 and a
 before their first commit; births near the lead-in use the available lead-in time.
 Aspect and size clamps scale with presence during the transition. Tiles and shared
 gutters partition the whole inset field. Gutters start at 32 pixels between stacked
-tiles and 16 pixels between side-by-side tiles, shrinking above twelve repositories.
+tiles and 16 pixels between side-by-side tiles. Above twelve live repositories,
+gutters shrink continuously to 16 and 12 pixels respectively at thirty repositories.
+Avatar bodies and names shrink with the gutter budget. Names may overlay their own
+tile, but avoid foreign tiles, repository labels and other contributors.
 Different content shapes can leave space inside a uniformly fitted tile.
 
 Contributors first appear in a gutter slot above their repository, aligned with the
@@ -137,7 +140,9 @@ reference pixels/second (default `480`, minimum `1`), with a 0.2-second accelera
 Trips reserve clearance in commit order against timed positions. Disjoint routes can
 run concurrently; crossing routes can wait at a clear node. Moving gutters are sampled
 with explicit speed and acceleration checks. Beams end when their author
-departs or changes repository. Idle contributors stay parked and fade as before.
+departs or changes repository. After five inactive playback seconds, contributors
+remain parked at their last slot while fading over 1.2 seconds. Faded contributors
+release their lane and reappear directly at their next slot, without a screen-wide trip.
 
 `--travel-cap` limits extra waiting per human trip (default `0.4` seconds; range `0`
 through `3600`). Available gaps between commits also count toward travel. If a trip
@@ -146,6 +151,11 @@ and fades in at the destination. Blocked routes and contributors whose names con
 `[bot]` fade across. Zero disables extra waiting. Single-repository motion is unchanged.
 The caption holds the last applied date during waiting; heat, fragments and fades
 continue in presentation seconds.
+
+```sh
+codestrand export frames --repositories-file repositories.toml \
+  --travel-cap 0.4 --avatar-max-speed 480 --frames 90 --fps 30
+```
 
 Planning starts from the first tick after the contributor's previous service, so gaps
 between that contributor's commits absorb travel before padding is needed. Padding is

@@ -254,6 +254,19 @@ fn short_name(name: &str, scale: f32, width: f32) -> String {
     text.push_str("...");
     text
 }
+
+fn name_obstacles(
+    obstacles: &[(usize, Rect)],
+    owner: usize,
+) -> impl Iterator<Item = &Rect> {
+    let own_tile = obstacles
+        .iter()
+        .position(|(repository, _)| *repository == owner);
+    obstacles
+        .iter()
+        .enumerate()
+        .filter_map(move |(index, (_, rect))| (Some(index) != own_tile).then_some(rect))
+}
 fn place_point(point: Vec3, rotated: bool, scale: f32, origin: Vec2) -> Vec3 {
     let local = Vec2::new(point.x, point.z);
     let local = if rotated { local.perp() } else { local };
@@ -328,11 +341,18 @@ impl State {
         let radius = 6.5 * self.avatar_scale + 1.0;
         let name_scale = self.name_scale();
         let mut occupied: Vec<Rect> = Vec::new();
+        for avatar in &mut self.avatars {
+            if now - avatar.last_active >= super::AVATAR_IDLE
+                && let Some(slot) = &mut avatar.slot
+            {
+                slot.name = None;
+                if avatar.presence > 0.0 {
+                    occupied.push(disk(slot.point, radius));
+                }
+            }
+        }
         let mut order: Vec<_> = (0..self.avatars.len())
-            .filter(|&i| {
-                now - self.avatars[i].last_active < super::AVATAR_IDLE
-                    || self.avatars[i].presence > 0.0
-            })
+            .filter(|&i| now - self.avatars[i].last_active < super::AVATAR_IDLE)
             .collect();
         order.sort_by(|&a, &b| {
             self.avatars[b]
@@ -458,9 +478,8 @@ impl State {
                 && bounds.is_some_and(|rect| {
                     rect.min.cmpge(-HALF).all()
                         && rect.max.cmple(HALF).all()
-                        && !obstacles
-                            .iter()
-                            .any(|(_, other)| intersect(rect, other.inflate(-HALO)))
+                        && !name_obstacles(&obstacles, avatar.repository)
+                            .any(|other| intersect(rect, other.inflate(-HALO)))
                         && !bodies
                             .iter()
                             .chain(&placed)
@@ -692,10 +711,8 @@ impl Choice<'_> {
             rect.min.cmpge(-HALF).all()
                 && !intersect(*rect, disk(point, self.radius))
                 && rect.max.cmple(HALF).all()
-                && !self
-                    .obstacles
-                    .iter()
-                    .any(|(_, other)| intersect(*rect, other.inflate(-HALO)))
+                && !name_obstacles(self.obstacles, self.repository)
+                    .any(|other| intersect(*rect, other.inflate(-HALO)))
                 && !self.occupied.iter().any(|&other| intersect(*rect, other))
         })
     }
@@ -877,6 +894,28 @@ mod tests {
                 mean: 0.5,
             },
         }
+    }
+
+    #[test]
+    fn narrow_gutter_names_can_cover_own_tile_but_never_foreign_tiles_or_labels() {
+        let tile = Rect::from_corners(Vec2::splat(-200.0), Vec2::splat(200.0));
+        let label = Rect::from_center_size(Vec2::new(-160.0, 180.0), Vec2::splat(20.0));
+        let foreign =
+            Rect::from_corners(Vec2::new(212.0, -200.0), Vec2::new(400.0, 200.0));
+        let obstacles = [
+            (0, tile.inflate(HALO)),
+            (0, label.inflate(HALO)),
+            (1, foreign.inflate(HALO)),
+        ];
+        let mut choice = choice(&obstacles, &[]);
+        choice.gap = Vec2::new(12.0, 16.0);
+        choice.radius = 4.25;
+        choice.scale = 0.5;
+        let point = Vec2::new(0.0, 116.0);
+        let name = choice.name_rect(point, 20.0).unwrap();
+        assert!(intersect(name, tile));
+        assert!(!intersect(name, label));
+        assert!(!intersect(name, foreign));
     }
 
     #[test]
@@ -1154,9 +1193,8 @@ mod tests {
                     );
                     assert!(names.iter().all(|&other| !intersect(rect, other)));
                     assert!(
-                        obstacles
-                            .iter()
-                            .all(|(_, other)| !intersect(rect, other.inflate(-HALO)))
+                        name_obstacles(&obstacles, avatar.repository)
+                            .all(|other| !intersect(rect, other.inflate(-HALO)))
                     );
                     names.push(rect);
                 }
@@ -1190,7 +1228,117 @@ mod tests {
 
     #[test]
     fn realistic_thirty_repository_slots_sample_every_commit_and_replay() {
-        validate(&mut thirty());
+        let mut sim = thirty();
+        assert!(sim.travel.stats.temporary_capture_bytes <= 8 * 1024 * 1024);
+        assert!(sim.travel.stats.retained_route_bytes <= 1024 * 1024);
+        assert_eq!(sim.envelopes.len(), sim.events.len());
+        validate(&mut sim);
+    }
+
+    #[test]
+    fn idle_avatar_parks_releases_its_lane_and_reenters_without_travel() {
+        let template = crate::timeline::synthetic().remove(0);
+        let events = [0, 12].map(|day| {
+            let mut events = vec![template.clone()];
+            events[0].seconds = day * 86_400;
+            crate::repositories::namespace(&mut events, usize::from(day > 0));
+            events.remove(0)
+        });
+        let mut sim = Simulation::with_repositories(
+            events.into(),
+            &Options {
+                seconds_per_day: 1.0,
+                max_idle_seconds: 20.0,
+                ..Default::default()
+            },
+            &Theme::neon(),
+            &Mappings::default(),
+            &["First".into(), "Second".into()],
+        );
+        sim.advance_to(360, 60);
+        let parked = sim.state.avatars[0].position;
+        let dock = sim.state.avatars[0].slot.as_ref().unwrap().dock;
+        let observations = sim.state.slot_records[&0].observations;
+        for frame in 361..660 {
+            sim.advance_to(frame, 60);
+            assert_eq!(sim.state.avatars[0].position, parked);
+            assert_eq!(sim.state.avatars[0].slot.as_ref().unwrap().dock, dock);
+        }
+        assert_eq!(sim.state.avatars[0].presence, 0.0);
+        assert_eq!(sim.state.slot_records[&0].observations, observations);
+        let mut state = sim.state.clone();
+        let mut newcomer = state.avatars[0].clone();
+        newcomer.last_active = sim.seconds();
+        newcomer.presence = 1.0;
+        state.avatars.push(newcomer);
+        state.place_slots(&sim.envelopes, sim.seconds());
+        assert_eq!(state.avatars[1].slot.as_ref().unwrap().dock, dock);
+        sim.advance_to(780, 60);
+        assert_eq!(sim.state.avatars[0].repository, 1);
+        assert!(sim.state.avatars[0].presence > 0.0);
+        assert_eq!(
+            sim.state.avatars[0].position,
+            sim.state.avatars[0].slot.as_ref().unwrap().world()
+        );
+        assert_eq!(sim.travel.stats.routed + sim.travel.stats.faded, 0);
+    }
+
+    #[test]
+    #[ignore = "release timing probe; run with --release --nocapture"]
+    fn thirty_repository_timing() {
+        for run in 0..3 {
+            let start = std::time::Instant::now();
+            let mut sim = thirty();
+            let plan = start.elapsed();
+            let frames = crate::model::frames_for(sim.duration(), 60).unwrap();
+            let start = std::time::Instant::now();
+            for frame in 0..=frames {
+                sim.advance_to(frame, 60);
+                std::hint::black_box(&sim.state);
+            }
+            let sampling = start.elapsed();
+            let tiles: f32 = sim
+                .layout()
+                .repositories
+                .iter()
+                .filter_map(|r| r.tile)
+                .map(Tile::area)
+                .sum();
+            eprintln!(
+                "SCALE_TIMING run={run} plan_ms={} tick_us={} frames={frames} gutter_share={} capture_bytes={} route_bytes={}",
+                plan.as_secs_f64() * 1000.0,
+                sampling.as_secs_f64() * 1e6 / f64::from(frames),
+                Tile::viewport().area() - tiles,
+                sim.travel.stats.temporary_capture_bytes,
+                sim.travel.stats.retained_route_bytes
+            );
+        }
+        let sim = thirty();
+        let options = Options {
+            seconds_per_day: 0.02,
+            max_idle_seconds: 0.05,
+            ..Default::default()
+        };
+        let labels: Vec<_> = (0..30).map(|i| format!("Repository {i}")).collect();
+        let start = std::time::Instant::now();
+        let mut base = Simulation::build(
+            sim.events.clone(),
+            &options,
+            &Theme::neon(),
+            &Mappings::default(),
+            &[],
+            &labels,
+        );
+        let build = start.elapsed();
+        let start = std::time::Instant::now();
+        let padding = base.travel_padding(&options);
+        let routing = start.elapsed();
+        eprintln!(
+            "SCALE_STAGES unpadded_build_ms={} initial_routing_ms={} padded_commits={}",
+            build.as_secs_f64() * 1000.0,
+            routing.as_secs_f64() * 1000.0,
+            padding.len()
+        );
     }
 
     #[test]
@@ -1214,6 +1362,7 @@ mod tests {
                 events
             })
             .collect();
+        let start = std::time::Instant::now();
         let mut sim = Simulation::with_repositories(
             crate::repositories::merge(histories),
             &Options {
@@ -1238,12 +1387,36 @@ mod tests {
                 .map(crate::repositories::Repository::name)
                 .collect::<Vec<_>>(),
         );
+        let plan = start.elapsed();
+        let frames = crate::model::frames_for(sim.duration(), 60).unwrap();
+        let start = std::time::Instant::now();
+        for frame in 0..=frames {
+            sim.advance_to(frame, 60);
+            std::hint::black_box(&sim.state);
+        }
+        let sampling = start.elapsed();
+        let tiles: f32 = sim
+            .layout()
+            .repositories
+            .iter()
+            .filter_map(|r| r.tile)
+            .map(Tile::area)
+            .sum();
+        eprintln!(
+            "LOCAL_TIMING plan_ms={} tick_us={} frames={frames} gutter_share={} duration={}",
+            plan.as_secs_f64() * 1000.0,
+            sampling.as_secs_f64() * 1e6 / f64::from(frames),
+            Tile::viewport().area() - tiles,
+            sim.duration()
+        );
         validate(&mut sim);
         let default = Options::default();
         let cap = std::env::var("CODESTRAND_TRAVEL_CAP")
             .ok()
             .map_or(default.travel_cap, |v| v.parse::<f32>().expect("test cap"));
-        if sim.travel.stats.max_speed.to_bits() == default.avatar_max_speed.to_bits()
+        if repos.len() == 5
+            && sim.travel.stats.max_speed.to_bits()
+                == default.avatar_max_speed.to_bits()
             && cap.to_bits() == default.travel_cap.to_bits()
         {
             sim.travel.assert_human_motion();

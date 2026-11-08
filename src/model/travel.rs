@@ -543,7 +543,6 @@ pub(super) fn seconds_ticks(seconds: f32, round_up: bool) -> u32 {
 #[derive(Default)]
 struct Router {
     tiles: Vec<Rect>,
-    axes: [Vec<f32>; 2],
     epochs: usize,
 }
 
@@ -587,8 +586,6 @@ impl Router {
             });
         if changed || self.epochs == 0 {
             self.tiles = obstacles.to_vec();
-            self.axes = [vec![-632.0, 632.0], vec![-352.0, 352.0]];
-            add_axes(&mut self.axes, &self.tiles);
             self.epochs += 1;
         }
         let mut axes = [vec![-634.2, 634.2], vec![-354.2, 354.2]];
