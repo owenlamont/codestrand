@@ -11,6 +11,225 @@ use std::{
 
 type Delta = (String, String, String, String);
 
+fn tag_fixture() -> (tempfile::TempDir, gix::Repository, gix::ObjectId) {
+    let root = tempfile::tempdir().unwrap();
+    let repo = gix::init_bare(root.path()).unwrap();
+    let tree = repo
+        .write_object(&gix::objs::Tree {
+            entries: Vec::new(),
+        })
+        .unwrap()
+        .detach();
+    let author = gix::actor::Signature {
+        name: "Author".into(),
+        email: "a@b".into(),
+        time: gix::date::Time {
+            seconds: 1_700_000_000,
+            offset: 0,
+        },
+    };
+    let tip = repo
+        .write_object(&gix::objs::Commit {
+            tree,
+            parents: std::iter::empty().collect(),
+            author: author.clone(),
+            committer: author,
+            encoding: None,
+            message: "control".into(),
+            extra_headers: Vec::new(),
+        })
+        .unwrap()
+        .detach();
+    (root, repo, tip)
+}
+
+fn tag(
+    repo: &gix::Repository,
+    target: gix::ObjectId,
+    kind: gix::objs::Kind,
+) -> gix::ObjectId {
+    repo.write_object(&gix::objs::Tag {
+        target,
+        target_kind: kind,
+        name: "control".into(),
+        tagger: None,
+        message: "tag".into(),
+        signature: None,
+    })
+    .unwrap()
+    .detach()
+}
+
+fn cyclic_tag(root: &Path, repo: &gix::Repository) -> gix::ObjectId {
+    let fake =
+        gix::ObjectId::from_hex(b"1111111111111111111111111111111111111111").unwrap();
+    let actual = tag(repo, fake, gix::objs::Kind::Tag).to_string();
+    let destination = root.join("objects/11/11111111111111111111111111111111111111");
+    fs::create_dir_all(destination.parent().unwrap()).unwrap();
+    fs::copy(
+        root.join("objects").join(&actual[..2]).join(&actual[2..]),
+        destination,
+    )
+    .unwrap();
+    fake
+}
+
+fn bounded_inspect(path: &Path, revision: &str) -> std::process::Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_codestrand"));
+    for (key, _) in
+        std::env::vars_os().filter(|(key, _)| key.to_string_lossy().starts_with("GIT_"))
+    {
+        command.env_remove(key);
+    }
+    let mut child = command
+        .arg("inspect")
+        .arg(path)
+        .args(["--revision", revision])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
+    while child.try_wait().unwrap().is_none() {
+        if std::time::Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("revision {revision} did not terminate within four seconds");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    child.wait_with_output().unwrap()
+}
+
+#[test]
+fn annotated_tag_control_resolves() {
+    let (root, repo, tip) = tag_fixture();
+    let id = tag(&repo, tip, gix::objs::Kind::Commit);
+    let output = bounded_inspect(root.path(), &id.to_string());
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let history: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(history["tip"], tip.to_string());
+}
+
+#[test]
+fn self_referencing_tag_is_rejected() {
+    let (root, repo, _) = tag_fixture();
+    let fake = cyclic_tag(root.path(), &repo);
+    let output = bounded_inspect(root.path(), &fake.to_string());
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("cycle"));
+    let named = root.path().join("refs/tags/cycle");
+    fs::create_dir_all(named.parent().unwrap()).unwrap();
+    fs::write(named, format!("{fake}\n")).unwrap();
+    for revision in ["cycle", "cycle^{}", "cycle^{commit}"] {
+        let output = bounded_inspect(root.path(), revision);
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("cycle"));
+    }
+    fs::write(root.path().join("HEAD"), format!("{fake}\n")).unwrap();
+    let output = bounded_inspect(root.path(), "HEAD");
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("cycle"));
+}
+
+#[test]
+fn excessive_tag_chain_is_rejected() {
+    let (root, repo, tip) = tag_fixture();
+    let mut id = tag(&repo, tip, gix::objs::Kind::Commit);
+    for _ in 0..64 {
+        id = tag(&repo, id, gix::objs::Kind::Tag);
+    }
+    let output = bounded_inspect(root.path(), &id.to_string());
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("64"));
+}
+
+#[test]
+fn diff_setup_rejects_cyclic_head_even_for_another_revision() {
+    let (root, repo, tip) = tag_fixture();
+    let fake = cyclic_tag(root.path(), &repo);
+    fs::write(root.path().join("HEAD"), format!("{fake}\n")).unwrap();
+    let output = bounded_inspect(root.path(), &tip.to_string());
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("cycle"));
+}
+
+#[test]
+fn symbolic_reference_chains_are_bounded() {
+    let (root, _repo, tip) = tag_fixture();
+    let refs = root.path().join("refs/heads");
+    fs::create_dir_all(&refs).unwrap();
+    fs::write(refs.join("control"), format!("{tip}\n")).unwrap();
+    fs::write(refs.join("alias"), "ref: refs/heads/control\n").unwrap();
+    assert!(bounded_inspect(root.path(), "alias").status.success());
+    fs::write(refs.join("cycle"), "ref: refs/heads/cycle\n").unwrap();
+    assert!(!bounded_inspect(root.path(), "cycle").status.success());
+    for index in 0..65 {
+        fs::write(
+            refs.join(format!("long{index}")),
+            format!("ref: refs/heads/long{}\n", index + 1),
+        )
+        .unwrap();
+    }
+    fs::write(refs.join("long65"), format!("{tip}\n")).unwrap();
+    let output = bounded_inspect(root.path(), "long0");
+    assert!(!output.status.success());
+    fs::write(root.path().join("HEAD"), "ref: refs/heads/cycle\n").unwrap();
+    assert!(
+        !bounded_inspect(root.path(), &tip.to_string())
+            .status
+            .success()
+    );
+}
+
+#[test]
+fn bounded_revision_selectors_keep_normal_parent_navigation() {
+    let (root, repo, tip) = tag_fixture();
+    let author = gix::actor::Signature {
+        name: "Author".into(),
+        email: "a@b".into(),
+        time: gix::date::Time {
+            seconds: 1_700_000_001,
+            offset: 0,
+        },
+    };
+    let next = repo
+        .write_object(&gix::objs::Commit {
+            tree: repo.empty_tree().id,
+            parents: [tip].into_iter().collect(),
+            author: author.clone(),
+            committer: author,
+            encoding: None,
+            message: "next".into(),
+            extra_headers: Vec::new(),
+        })
+        .unwrap()
+        .detach();
+    let id = tag(&repo, next, gix::objs::Kind::Commit);
+    fs::write(root.path().join("HEAD"), format!("{id}\n")).unwrap();
+    for revision in ["HEAD^", "HEAD~1", "HEAD^1^0", "HEAD^{commit}~1", "@^{}^1"] {
+        let output = bounded_inspect(root.path(), revision);
+        assert!(
+            output.status.success(),
+            "{revision}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let history: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(history["tip"], tip.to_string());
+    }
+    let output = bounded_inspect(root.path(), &tip.to_string()[..12]);
+    assert!(output.status.success());
+    assert!(
+        !bounded_inspect(root.path(), "HEAD~1000001")
+            .status
+            .success()
+    );
+}
+
 fn git(path: &Path, args: &[&str]) -> Vec<u8> {
     let output = Command::new("git")
         .arg("-C")

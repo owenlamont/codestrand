@@ -15,7 +15,7 @@ pub(super) enum Error {
     #[error("resolve revision {revision:?} to a commit")]
     Revision {
         revision: String,
-        source: gix::Error,
+        source: anyhow::Error,
     },
     #[error("import reachable history at {tip}")]
     History {
@@ -259,27 +259,10 @@ pub(super) fn resolve(
         source,
     })?;
     repo.object_cache_size(64 * 1024 * 1024);
-    let tip = repo
-        .rev_parse_single(revision)
-        .and_then(|id| {
-            let header = match id.header() {
-                Ok(header) => header,
-                Err(error) if error.is_resource_exhausted() => return Ok(id.detach()),
-                Err(error) => return Err(error),
-            };
-            if header.kind() == gix::objs::Kind::Commit
-                || header.size() > Limits::default().object_bytes
-            {
-                return Ok(id.detach());
-            }
-            id.object()
-                .and_then(gix::Object::peel_to_commit)
-                .map(|commit| commit.id)
-        })
-        .map_err(|source| Error::Revision {
-            revision: revision.to_owned(),
-            source,
-        })?;
+    let tip = bounded_revision(&repo, revision).map_err(|source| Error::Revision {
+        revision: revision.to_owned(),
+        source,
+    })?;
     Ok((repo, tip))
 }
 
@@ -288,6 +271,145 @@ pub(super) fn import_resolved(
     tip: gix::ObjectId,
 ) -> Result<History, Error> {
     load(repo, tip).map_err(|source| Error::History { tip, source })
+}
+
+const MAX_REFERENCE_HOPS: usize = 64;
+
+fn reference_id(
+    repo: &gix::Repository,
+    name: &str,
+) -> anyhow::Result<Option<gix::ObjectId>> {
+    let Some(mut reference) = repo.try_find_reference(name)? else {
+        return Ok(None);
+    };
+    let mut seen = BTreeSet::new();
+    for _ in 0..MAX_REFERENCE_HOPS {
+        if !seen.insert(reference.name().to_owned()) {
+            bail!("symbolic reference cycle");
+        }
+        match reference.target() {
+            gix::refs::TargetRef::Object(id) => return Ok(Some(id.to_owned())),
+            gix::refs::TargetRef::Symbolic(name) => {
+                let Some(next) = repo.try_find_reference(name)? else {
+                    return Ok(None);
+                };
+                reference = next;
+            }
+        }
+    }
+    bail!("symbolic reference chain exceeds 64 hops")
+}
+
+fn peel_commit(
+    repo: &gix::Repository,
+    mut id: gix::ObjectId,
+    budget: &mut Budget,
+) -> anyhow::Result<gix::ObjectId> {
+    let mut seen = BTreeSet::new();
+    for hop in 0..=MAX_REFERENCE_HOPS {
+        if !seen.insert(id) {
+            bail!("tag object cycle");
+        }
+        let header = match repo.find_header(id) {
+            Ok(header) => header,
+            Err(error) if error.is_resource_exhausted() => return Ok(id),
+            Err(error) => return Err(error.into()),
+        };
+        if header.size() > budget.limits.object_bytes {
+            return Ok(id);
+        }
+        budget.object(repo, id)?;
+        match header.kind() {
+            gix::objs::Kind::Commit => return Ok(id),
+            gix::objs::Kind::Tag => {
+                if hop == MAX_REFERENCE_HOPS {
+                    bail!("tag chain exceeds 64 hops");
+                }
+                id = repo.find_tag(id)?.target_id()?.detach();
+            }
+            _ => bail!("revision target is not a commit or annotated tag"),
+        }
+    }
+    unreachable!("the last hop returns an error")
+}
+
+fn revision_anchor(
+    repo: &gix::Repository,
+    name: &str,
+) -> anyhow::Result<gix::ObjectId> {
+    if name.len() == 40
+        && let Ok(id) = gix::ObjectId::from_hex(name.as_bytes())
+    {
+        return Ok(id);
+    }
+    if let Some(id) = reference_id(repo, if name == "@" { "HEAD" } else { name })? {
+        return Ok(id);
+    }
+    let prefix = gix::hash::Prefix::from_hex(name)?;
+    match repo.objects.lookup_prefix(prefix, None)? {
+        Some(Ok(id)) => Ok(id),
+        Some(Err(())) => bail!("ambiguous object prefix"),
+        None => bail!("revision reference or object does not exist"),
+    }
+}
+
+fn bounded_revision(
+    repo: &gix::Repository,
+    revision: &str,
+) -> anyhow::Result<gix::ObjectId> {
+    if revision.is_empty() || revision.len() > 4096 {
+        bail!("revision must contain 1–4096 bytes");
+    }
+    let split = revision.find(['^', '~']).unwrap_or(revision.len());
+    let mut budget = Budget::new(Limits::default());
+    let mut id = peel_commit(
+        repo,
+        revision_anchor(repo, &revision[..split])?,
+        &mut budget,
+    )?;
+    let mut suffix = &revision[split..];
+    let mut steps = 0usize;
+    while !suffix.is_empty() {
+        if let Some(rest) = suffix
+            .strip_prefix("^{}")
+            .or_else(|| suffix.strip_prefix("^{commit}"))
+        {
+            suffix = rest;
+            continue;
+        }
+        let operator = suffix.as_bytes()[0];
+        if !matches!(operator, b'^' | b'~') {
+            bail!("unsupported revision expression; use a ref, object ID, ^N or ~N");
+        }
+        suffix = &suffix[1..];
+        let digits = suffix.bytes().take_while(u8::is_ascii_digit).count();
+        let count = if digits == 0 {
+            1
+        } else {
+            suffix[..digits].parse::<usize>()?
+        };
+        suffix = &suffix[digits..];
+        steps = steps.saturating_add(count.max(1));
+        if steps > budget.limits.commits {
+            bail!("revision traversal exceeds 1000000 steps");
+        }
+        for _ in 0..if operator == b'~' {
+            count
+        } else {
+            usize::from(count != 0)
+        } {
+            budget.object(repo, id)?;
+            let commit = repo.find_commit(id)?;
+            let index = if operator == b'^' { count - 1 } else { 0 };
+            let parent = commit
+                .parent_ids()
+                .nth(index)
+                .context("revision parent does not exist")?
+                .detach();
+            id = peel_commit(repo, parent, &mut budget)?;
+        }
+    }
+    Ok(id)
 }
 
 fn load(repo: &gix::Repository, tip: gix::ObjectId) -> anyhow::Result<History> {
@@ -478,13 +600,34 @@ fn bounded_resources(
     repo: &gix::Repository,
     budget: &mut Budget,
 ) -> anyhow::Result<gix::diff::blob::Platform> {
-    if let Ok(head) = repo.head_id() {
-        budget.object(repo, head.detach())?;
-        let tree = repo.find_commit(head.detach())?.tree_id()?.detach();
+    let tree = if let Some(head) = reference_id(repo, "HEAD")? {
+        let head = peel_commit(repo, head, budget)?;
+        budget.object(repo, head)?;
+        let tree = repo.find_commit(head)?.tree_id()?.detach();
         budget.tree(repo, tree, 0)?;
-    }
-    Ok(repo.diff_resource_cache(
+        Some(tree)
+    } else {
+        None
+    };
+    let index: gix::worktree::IndexPersistedOrInMemory = match repo.try_index()? {
+        Some(index) => index.into(),
+        None => match tree {
+            Some(tree) => repo.index_from_tree(&tree)?.into(),
+            None => gix::index::File::from_state(
+                gix::index::State::new(repo.object_hash()),
+                repo.index_path(),
+            )
+            .into(),
+        },
+    };
+    Ok(gix::diff::resource_cache(
+        repo,
         gix::diff::blob::pipeline::Mode::ToGit,
+        repo.attributes_only(
+            &index,
+            gix::worktree::stack::state::attributes::Source::IdMapping,
+        )?
+        .detach(),
         gix::diff::blob::pipeline::WorktreeRoots::default(),
     )?)
 }

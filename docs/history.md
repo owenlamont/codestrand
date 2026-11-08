@@ -22,6 +22,16 @@ defaults to `HEAD`. Codestrand does not clone or fetch a remote repository: obta
 a complete local repository first. Inspection includes reachable commits, while
 playback follows the first-parent sequence.
 
+Revisions accept reference names, full or unambiguous abbreviated object IDs, and
+`HEAD` (also `@`). Parent selectors `^N` and first-parent ancestor selectors `~N` can
+be combined; `^{}` and `^{commit}` are accepted. Other Git revision expressions,
+including reflog and message searches, are rejected rather than delegated to unbounded
+reference traversal. Revision strings are limited to 4,096 bytes and navigation to
+1,000,000 steps, with the existing object-size and work budgets applied before loading.
+Annotated tags and symbolic references have a 64-hop limit and cycle detection.
+Cyclic or excessive chains produce an error, including when encountered through HEAD
+during diff setup. Import uses no wall-clock deadline.
+
 ## Analysis limits
 
 Import stops at fixed safety limits and prints `analysis truncated: history resource
