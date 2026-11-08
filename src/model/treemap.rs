@@ -184,7 +184,7 @@ pub(crate) fn run(
     }
     serde_json::to_writer(
         &mut *writer,
-        &serde_json::json!({"moving_beams": moving_beams, "avatar_slots": super::slots::report(&simulation.state)}),
+        &serde_json::json!({"moving_beams": moving_beams, "avatar_slots": super::slots::report(&simulation.state), "travel": simulation.travel.report()}),
     )?;
     writeln!(writer)?;
     Ok(())

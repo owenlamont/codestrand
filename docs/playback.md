@@ -115,8 +115,9 @@ local layout and one uniform scale, with a fixed quarter-turn chosen for its his
 
 A newcomer splits one existing tile or subtree. Other repositories retain their
 relative order. Splits clamp to a ground-aspect range of 1:2.5 to 2.5:1 and a
-144-by-64-pixel readable floor at 1280 by 720. Births ease over 0.75 playback seconds;
-aspect and size clamps scale with presence during the transition. Tiles and shared
+144-by-64-pixel readable floor at 1280 by 720. Births ease for up to 0.75 playback seconds
+before their first commit; births near the lead-in use the available lead-in time.
+Aspect and size clamps scale with presence during the transition. Tiles and shared
 gutters partition the whole inset field. Gutters start at 32 pixels between stacked
 tiles and 16 pixels between side-by-side tiles, shrinking above twelve repositories.
 Different content shapes can leave space inside a uniformly fitted tile.
@@ -128,15 +129,30 @@ and deletions, for an open half-plane and beams crossing another repository or i
 Other edges provide fallback docks. Avatars spread along edges; short names occupy clear
 lanes and yield when no safe name placement fits. Portrait size accounts for perspective.
 
-The CPU `layout-quality` report records fallback and least-bad commits. Missing birth
-tiles and infeasible docks are reported without failing export. Beam safety currently
-covers parked slots. The spring follower can cross tiles during movement; gutter routes,
-travel-time padding and beams off during travel remain subsequent work. Header and
-caption remain in the outer frame. Other preview aspect ratios use conservative framing;
+Multi-repository avatars travel through gutters and the frame margin. Routes avoid
+the full avatar disc, stop at corners and accelerate to at most `--avatar-max-speed`
+reference pixels/second (default `240`, minimum `1`). Crossing trips take turns in
+commit order; parked contributors also reserve clearance. Beams end when their author
+departs or changes repository. Idle contributors stay parked and fade as before.
+
+`--travel-cap` limits extra waiting per human trip (default `0.4` seconds; range `0`
+through `3600`). Available gaps between commits also count toward travel. If a trip
+cannot finish in time, the avatar moves along the safe route, fades out at the deadline
+and fades in at the destination. Blocked routes and contributors whose names contain
+`[bot]` fade across. Zero disables extra waiting. Single-repository motion is unchanged.
+The caption holds the last applied date during waiting; heat, fragments and fades
+continue in presentation seconds.
+
+The CPU `layout-quality --treemap` report records fallback and least-bad slots,
+live beam crossings, travelling disc intersections, route points and travel padding.
+Header and caption remain in the outer frame. Other preview aspect ratios use conservative
+framing;
 free-camera controls remain independent.
 
-Multi-repository planning supports up to 30 repositories, 216,000 simulation ticks and
-2,000,000 region samples. Use fewer repositories, shorten the imported history or
+Multi-repository planning supports up to 30 repositories, 216,000 simulation ticks,
+2,000,000 region samples and 4,000,000 temporary avatar poses. The preflight includes
+worst-case travel padding. Route searches stop at 10,000 nodes and fade across when
+the search cannot fit the bound. Use fewer repositories, shorten the imported history or
 reduce playback times if an input limit is exceeded. Single-repository playback is
 unaffected.
 

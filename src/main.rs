@@ -165,6 +165,12 @@ struct Source {
     /// Maximum canonical timeline seconds between commits, compressing idle gaps.
     #[arg(long, default_value_t = 1.0, value_parser = idle_seconds)]
     max_idle_seconds: f32,
+    /// Maximum extra seconds per human trip; zero fades across without waiting.
+    #[arg(long, default_value_t = 0.4, value_parser = travel_seconds)]
+    travel_cap: f32,
+    /// Maximum avatar travel speed in pixels/second at the 1280x720 reference size.
+    #[arg(long, default_value_t = 240.0, value_parser = avatar_speed)]
+    avatar_max_speed: f32,
     /// File heat half-life in canonical playback seconds.
     #[arg(long, default_value_t = 3.0, value_parser = positive_seconds)]
     heat_half_life: f32,
@@ -275,6 +281,8 @@ impl Source {
             max_idle_seconds: self.max_idle_seconds,
             start: self.start,
             commits: self.commits,
+            travel_cap: self.travel_cap,
+            avatar_max_speed: self.avatar_max_speed,
         };
         let names = if repositories.len() > 1 {
             repositories
@@ -317,6 +325,24 @@ fn idle_seconds(value: &str) -> Result<f32, String> {
         );
     }
     Ok(seconds)
+}
+
+fn travel_seconds(value: &str) -> Result<f32, String> {
+    let seconds = value.parse::<f32>().map_err(|e| e.to_string())?;
+    if seconds.is_finite() && (0.0..=3600.0).contains(&seconds) {
+        Ok(seconds)
+    } else {
+        Err("travel cap must be finite and between 0 and 3600 seconds".to_owned())
+    }
+}
+
+fn avatar_speed(value: &str) -> Result<f32, String> {
+    let speed = positive_seconds(value)?;
+    if speed >= 1.0 {
+        Ok(speed)
+    } else {
+        Err("avatar speed must be at least one reference pixel/second".to_owned())
+    }
 }
 
 fn main() -> std::process::ExitCode {

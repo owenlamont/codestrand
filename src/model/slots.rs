@@ -1141,11 +1141,12 @@ mod tests {
         }
         sim.advance_to(frames, 60);
         assert_eq!(first, report(&sim.state));
-        let summary = serde_json::json!({"avatar_slots":first,"moving_beams":moving});
+        let summary = serde_json::json!({"avatar_slots":first,"moving_beams":moving,"travel":sim.travel.report(),"duration":sim.duration()});
         if let Ok(path) = std::env::var("CODESTRAND_SLOT_DIAGNOSTIC") {
             std::fs::write(path, serde_json::to_vec_pretty(&summary).unwrap()).unwrap();
         }
         eprintln!("SLOT_SUMMARY {summary}");
+        moving.assert_clear(240.0);
     }
 
     #[test]

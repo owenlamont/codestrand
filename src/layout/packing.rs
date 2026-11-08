@@ -247,10 +247,30 @@ fn allocate(
             let size = tile.pixels() / stretch;
             let pa = a.presence / states[index].presence;
             let pb = b.presence / states[index].presence;
-            let (a0, a1) =
-                interval(&a.sizes, axis, size[1 - axis]).expect("feasible first child");
-            let (b0, b1) = interval(&b.sizes, axis, size[1 - axis])
-                .expect("feasible second child");
+            let child_interval = |child: &Feasible| {
+                let cross = size[1 - axis];
+                interval(&child.sizes, axis, cross)
+                    .or_else(|| {
+                        let low = child
+                            .sizes
+                            .iter()
+                            .map(|p| p[1 - axis])
+                            .fold(f32::INFINITY, f32::min);
+                        let high = child
+                            .sizes
+                            .iter()
+                            .map(|p| p[1 - axis])
+                            .fold(f32::NEG_INFINITY, f32::max);
+                        let clamped = cross.clamp(low, high);
+                        // Inverting a subpixel birth sliver amplifies cancellation in its tile edges.
+                        ((cross - clamped).abs() * stretch[1 - axis] < 0.001)
+                            .then(|| interval(&child.sizes, axis, clamped))
+                            .flatten()
+                    })
+                    .expect("feasible child cross-section")
+            };
+            let (a0, a1) = child_interval(a);
+            let (b0, b1) = child_interval(b);
             let (a0, a1, b0, b1) = (a0 * pa, a1 * pa, b0 * pb, b1 * pb);
             let available = size[axis] - states[index].gap;
             let low = a0.max(available - b1);
@@ -425,7 +445,16 @@ fn rotations(
 }
 
 impl Packing {
+    #[cfg(test)]
     pub(crate) fn build(regions: &[Vec<RepositoryRegion>]) -> Self {
+        Self::build_births(regions, false)
+    }
+
+    pub(crate) fn before_service(regions: &[Vec<RepositoryRegion>]) -> Self {
+        Self::build_births(regions, true)
+    }
+
+    fn build_births(regions: &[Vec<RepositoryRegion>], before_service: bool) -> Self {
         let started = std::time::Instant::now();
         let Some(first) = regions.first().filter(|r| !r.is_empty()) else {
             return Self::default();
@@ -472,18 +501,32 @@ impl Packing {
                 let mut presence: Vec<_> = row
                     .iter()
                     .enumerate()
-                    .map(|(i, r)| {
-                        if !r.live {
+                    .map(|(i, _)| {
+                        let birth = births[i];
+                        let begin = if before_service {
+                            birth.saturating_sub(45)
+                        } else {
+                            birth
+                        };
+                        if tick < begin || birth == usize::MAX {
                             return 0.0;
                         }
                         if births[i] == earliest {
                             return 1.0;
                         }
-                        let u = (crate::model::tick_time(
-                            u64::try_from(tick.saturating_sub(births[i]))
+                        let elapsed = crate::model::tick_time(
+                            u64::try_from(tick.saturating_sub(begin))
                                 .expect("bounded timeline"),
-                        ) / BIRTH_SECONDS)
-                            .min(1.0);
+                        );
+                        let transition = if before_service {
+                            crate::model::tick_time(
+                                u64::try_from(birth - begin).expect("bounded birth"),
+                            )
+                            .max(crate::model::tick_seconds())
+                        } else {
+                            BIRTH_SECONDS
+                        };
+                        let u = (elapsed / transition).min(1.0);
                         u * u * (3.0 - 2.0 * u)
                     })
                     .collect();
@@ -591,6 +634,22 @@ impl Packing {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn births_finish_by_service_including_a_short_lead_in() {
+        let regions = fixture();
+        let packing = Packing::before_service(&regions);
+        for repository in 0..30 {
+            let birth = regions.iter().position(|r| r[repository].live).unwrap();
+            assert!((packing.samples[birth].presence[repository] - 1.0).abs() < 1e-6);
+            assert!(
+                packing.sample(u64::try_from(birth).unwrap()).unwrap().0[repository]
+                    .tile
+                    .is_some()
+            );
+        }
+        assert!(packing.samples[1].presence[1] > 0.0);
+    }
 
     fn partition(
         nodes: &[Node],
