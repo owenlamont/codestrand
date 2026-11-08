@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use bevy::{
     asset::RenderAssetUsages,
-    camera::{Camera3dDepthLoadOp, RenderTarget, visibility::RenderLayers},
+    camera::{Camera3dDepthLoadOp, Hdr, RenderTarget, visibility::RenderLayers},
     image::ImageSampler,
     input::mouse::{AccumulatedMouseScroll, MouseScrollUnit},
     prelude::*,
@@ -386,6 +386,7 @@ fn setup(world: &mut World) {
     let camera = world
         .spawn((
             Camera3d::default(),
+            Hdr,
             target.clone(),
             Tonemapping::None,
             DebandDither::Disabled,
@@ -398,6 +399,7 @@ fn setup(world: &mut World) {
             depth_load_op: Camera3dDepthLoadOp::Clear(0.0),
             ..default()
         },
+        Hdr,
         Camera {
             order: 1,
             clear_color: ClearColorConfig::None,
@@ -1658,6 +1660,10 @@ mod tests {
             .query_filtered::<Entity, With<AvatarCamera>>()
             .single(&world)
             .unwrap();
+        assert!(
+            world.entity(scene).contains::<Hdr>()
+                && world.entity(overlay).contains::<Hdr>()
+        );
         assert!(
             world.get::<Camera>(overlay).unwrap().order
                 > world.get::<Camera>(scene).unwrap().order
