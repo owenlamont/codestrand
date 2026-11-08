@@ -73,6 +73,10 @@ impl Options {
 }
 
 fn command(path: &Path) -> Command {
+    #[cfg_attr(
+        not(windows),
+        expect(unused_mut, reason = "only Windows sets creation flags")
+    )]
     let mut command = Command::new(path);
     #[cfg(windows)]
     {
