@@ -94,6 +94,9 @@ directory name. Repeated flags and a file can be combined; flag entries come fir
 Duplicate repositories and labels are rejected. Each entry is a table so future repository
 metadata can be added; archive dates are not supported yet.
 
+Repository manifests must be regular files no larger than 1 MiB, with at most 4,096
+entries. Repository paths are limited to 4,096 bytes before filesystem resolution.
+
 Events merge by comparing the next commit from each repository by author timestamp,
 breaking ties by repository input order. Each repository retains its first-parent
 order, including children authored before their parents. One `--revision` applies

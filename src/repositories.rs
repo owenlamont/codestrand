@@ -1,9 +1,16 @@
-use std::path::{Path, PathBuf};
+use std::{
+    io::Read,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, bail};
 use serde::Deserialize;
 
 use crate::timeline::{Event, Kind};
+
+const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
+const MAX_MANIFEST_ENTRIES: usize = 4096;
+const MAX_PATH_BYTES: usize = 4096;
 
 #[derive(Clone, Copy, Debug, Default, clap::ValueEnum, serde::Serialize)]
 pub(super) enum Boundary {
@@ -43,6 +50,29 @@ struct Document {
     repositories: Vec<Repository>,
 }
 
+fn read_document(path: &Path) -> anyhow::Result<Document> {
+    let file = std::fs::File::open(path)?;
+    let metadata = file.metadata()?;
+    anyhow::ensure!(
+        metadata.is_file() && metadata.len() <= MAX_MANIFEST_BYTES,
+        "repositories file exceeds 1 MiB or is not a regular file"
+    );
+    let mut text = String::new();
+    file.take(MAX_MANIFEST_BYTES + 1)
+        .read_to_string(&mut text)?;
+    anyhow::ensure!(
+        u64::try_from(text.len())? <= MAX_MANIFEST_BYTES,
+        "repositories file exceeds 1 MiB"
+    );
+    let document: Document =
+        toml::from_str(&text).context("parse repositories file")?;
+    anyhow::ensure!(
+        document.repositories.len() <= MAX_MANIFEST_ENTRIES,
+        "repositories file exceeds 4096 entries"
+    );
+    Ok(document)
+}
+
 pub(super) fn inputs(
     paths: &[PathBuf],
     file: Option<&Path>,
@@ -55,10 +85,8 @@ pub(super) fn inputs(
         })
         .collect();
     if let Some(file) = file {
-        let text = std::fs::read_to_string(file)
+        let document = read_document(file)
             .with_context(|| format!("read repositories file {}", file.display()))?;
-        let document: Document =
-            toml::from_str(&text).context("parse repositories file")?;
         if document.repositories.is_empty() {
             bail!("repositories file must list at least one repository");
         }
@@ -71,6 +99,10 @@ pub(super) fn inputs(
     let mut seen = std::collections::HashSet::new();
     let mut labels = std::collections::HashSet::new();
     for repository in &mut repositories {
+        anyhow::ensure!(
+            repository.path.as_os_str().len() <= MAX_PATH_BYTES,
+            "repository path exceeds 4096 bytes"
+        );
         let path = repository.path.canonicalize().with_context(|| {
             format!("resolve repository {}", repository.path.display())
         })?;
@@ -146,6 +178,62 @@ pub(super) fn merge(histories: Vec<Vec<Event>>) -> Vec<Event> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn manifest_limits_reject_a_four_mib_comment() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temp.path().join("repo")).unwrap();
+        let file = temp.path().join("repos.toml");
+        let document = format!(
+            "[[repositories]]\npath='repo'\n#{}\n",
+            "x".repeat(4 * 1024 * 1024)
+        );
+        std::fs::write(&file, document).unwrap();
+        assert!(
+            format!("{:#}", inputs(&[], Some(&file)).unwrap_err())
+                .contains("exceeds 1 MiB")
+        );
+    }
+
+    #[test]
+    fn manifest_limits_reject_excess_entries_before_resolving_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("repos.toml");
+        std::fs::write(&file, "[[repositories]]\npath='missing'\n".repeat(4097))
+            .unwrap();
+        assert!(
+            format!("{:#}", inputs(&[], Some(&file)).unwrap_err())
+                .contains("4096 entries")
+        );
+    }
+
+    #[test]
+    fn manifest_limits_reject_oversized_paths_before_resolving_them() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("repos.toml");
+        std::fs::write(
+            &file,
+            format!("[[repositories]]\npath='{}'\n", "x".repeat(4097)),
+        )
+        .unwrap();
+        assert!(
+            inputs(&[], Some(&file))
+                .unwrap_err()
+                .to_string()
+                .contains("path exceeds 4096 bytes")
+        );
+    }
+
+    #[test]
+    fn manifest_limits_allow_a_document_at_the_byte_cap() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temp.path().join("repo")).unwrap();
+        let file = temp.path().join("repos.toml");
+        let mut document = "[[repositories]]\npath='repo'\n#".to_owned();
+        document.push_str(&"x".repeat(1024 * 1024 - document.len()));
+        std::fs::write(&file, document).unwrap();
+        assert_eq!(inputs(&[], Some(&file)).unwrap().len(), 1);
+    }
 
     #[test]
     fn file_paths_are_relative_to_manifest_and_duplicate_clones_are_rejected() {
