@@ -180,34 +180,7 @@ impl Palette {
         world: &mut World,
         theme: &Theme,
     ) -> Vec<(crate::theme::ThemeName, Vec<Handle<Image>>)> {
-        let glyph_textures: Vec<_> = crate::theme::ThemeName::ALL
-            .into_iter()
-            .map(|name| {
-                let registered = if name == theme.name {
-                    theme.clone()
-                } else {
-                    name.build()
-                };
-                let mut shared = HashMap::new();
-                let textures = registered
-                    .glyphs
-                    .iter()
-                    .enumerate()
-                    .map(|(kind, glyph)| {
-                        let svg = registered.glyph_svg(glyph.svg, kind);
-                        shared
-                            .entry(svg)
-                            .or_insert_with_key(|svg| {
-                                let image = themed_glyph_image(svg, &registered);
-                                world.resource_mut::<Assets<Image>>().add(image)
-                            })
-                            .clone()
-                    })
-                    .collect::<Vec<_>>();
-                (name, textures)
-            })
-            .collect();
-        glyph_textures
+        vec![(theme.name, raster_glyphs(theme).install(world))]
     }
 
     fn heat_materials(
@@ -534,17 +507,108 @@ fn preview_direction(
     }
 }
 
+#[derive(Resource)]
+struct PendingTheme {
+    name: crate::theme::ThemeName,
+    task: bevy::tasks::Task<(RasterGlyphs, Option<Image>, Option<Image>)>,
+}
+
+struct RasterGlyphs {
+    images: Vec<Image>,
+    indices: Vec<usize>,
+}
+
+impl RasterGlyphs {
+    fn install(self, world: &mut World) -> Vec<Handle<Image>> {
+        let mut assets = world.resource_mut::<Assets<Image>>();
+        let handles: Vec<_> = self
+            .images
+            .into_iter()
+            .map(|image| assets.add(image))
+            .collect();
+        self.indices
+            .into_iter()
+            .map(|index| handles[index].clone())
+            .collect()
+    }
+}
+
+fn raster_glyphs(theme: &Theme) -> RasterGlyphs {
+    let mut shared = HashMap::new();
+    let mut images = Vec::new();
+    let indices = theme
+        .glyphs
+        .iter()
+        .enumerate()
+        .map(|(kind, glyph)| {
+            let svg = theme.glyph_svg(glyph.svg, kind);
+            *shared.entry(svg).or_insert_with_key(|svg| {
+                let index = images.len();
+                images.push(themed_glyph_image(svg, theme));
+                index
+            })
+        })
+        .collect();
+    RasterGlyphs { images, indices }
+}
+
 fn preview_theme(world: &mut World) {
+    if let Some(mut pending) = world.get_resource_mut::<PendingTheme>() {
+        if let Some((glyphs, ground, backdrop)) =
+            bevy::tasks::futures::check_ready(&mut pending.task)
+        {
+            let name = pending.name;
+            let handles = glyphs.install(world);
+            world
+                .resource_mut::<Palette>()
+                .glyph_textures
+                .push((name, handles));
+            styling::install_images(world, name, ground, backdrop);
+            world.remove_resource::<PendingTheme>();
+            switch_theme(world, name);
+        }
+        return;
+    }
     let Some(direction) = preview_direction(world.resource::<ButtonInput<KeyCode>>())
     else {
         return;
     };
     let name = world.resource::<Playback>().0.theme().name.cycle(direction);
+    if world.contains_resource::<PreviewCamera>()
+        && !world
+            .resource::<Palette>()
+            .glyph_textures
+            .iter()
+            .any(|(loaded, _)| *loaded == name)
+    {
+        let task = bevy::tasks::AsyncComputeTaskPool::get().spawn(async move {
+            let theme = name.build();
+            let (ground, backdrop) = styling::raster_images(&theme);
+            (raster_glyphs(&theme), ground, backdrop)
+        });
+        world.insert_resource(PendingTheme { name, task });
+        return;
+    }
     switch_theme(world, name);
+}
+
+fn cache_glyphs(world: &mut World, theme: &Theme) {
+    world.resource_scope(|world, mut palette: Mut<Palette>| {
+        if !palette
+            .glyph_textures
+            .iter()
+            .any(|(name, _)| *name == theme.name)
+        {
+            palette
+                .glyph_textures
+                .extend(Palette::preload_glyphs(world, theme));
+        }
+    });
 }
 
 pub(super) fn switch_theme(world: &mut World, name: crate::theme::ThemeName) {
     let theme = name.build();
+    cache_glyphs(world, &theme);
     world.resource_mut::<Playback>().0.set_theme(theme.clone());
     world.resource_scope(|world, palette: Mut<Palette>| {
         let mut meshes = world.resource_mut::<Assets<Mesh>>();
@@ -718,6 +782,9 @@ fn preview_camera(world: &mut World, mut drag_from: Local<Option<Vec2>>) {
         if let Ok(mut transform) = query.single_mut(world) {
             *transform = Transform::from_translation(eye).looking_at(focus, Vec3::Y);
         }
+    });
+    world.resource_scope(|world, playback: Mut<Playback>| {
+        styling::place_ground(world, &playback.0);
     });
 }
 
@@ -1570,6 +1637,55 @@ mod tests {
     use super::*;
 
     #[test]
+    fn preview_switch_loads_uncached_art_off_thread_before_applying_theme() {
+        bevy::tasks::AsyncComputeTaskPool::get_or_init(bevy::tasks::TaskPool::new);
+        let simulation = Simulation::new(
+            crate::timeline::synthetic(),
+            &model::Options::default(),
+            &Theme::neon(),
+            &crate::contributors::Mappings::default(),
+        );
+        let camera = PreviewCamera::new(simulation.view());
+        let mut world = World::new();
+        world.insert_resource(Playback(simulation));
+        world.insert_resource(SceneTarget(Handle::<Image>::default().into()));
+        world.insert_resource(Title("test".to_owned()));
+        world.insert_resource(camera);
+        world.init_resource::<Pools>();
+        world.init_resource::<Assets<Mesh>>();
+        world.init_resource::<Assets<Image>>();
+        world.init_resource::<Assets<StandardMaterial>>();
+        world.init_resource::<ButtonInput<KeyCode>>();
+        setup(&mut world);
+        assert_eq!(world.resource::<Palette>().glyph_textures.len(), 1);
+        world
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::Period);
+        preview_theme(&mut world);
+        world.resource_mut::<ButtonInput<KeyCode>>().reset_all();
+        assert!(world.contains_resource::<PendingTheme>());
+        assert_eq!(
+            world.resource::<Playback>().0.theme().name,
+            crate::theme::ThemeName::Neon
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while world.contains_resource::<PendingTheme>() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "theme worker timed out"
+            );
+            preview_theme(&mut world);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(
+            world.resource::<Playback>().0.theme().name,
+            crate::theme::ThemeName::Phosphor
+        );
+        assert_eq!(world.resource::<Palette>().glyph_textures.len(), 2);
+        assert_eq!(world.resource::<Playback>().0.seconds(), 0.0);
+    }
+
+    #[test]
     fn preview_loop_preserves_overshoot_across_multiple_cycles() {
         let mut simulation = Simulation::new(
             crate::timeline::synthetic().into_iter().take(1).collect(),
@@ -1725,6 +1841,12 @@ mod tests {
         face: Entity,
     ) {
         let layer = RenderLayers::layer(AVATAR_LAYER);
+        assert_eq!(world.resource::<Palette>().glyph_textures.len(), 1);
+        let initial = world.resource::<Playback>().0.theme().name;
+        for name in crate::theme::ThemeName::ALL {
+            switch_theme(world, name);
+        }
+        switch_theme(world, initial);
         world.init_resource::<ButtonInput<KeyCode>>();
         let transforms: Vec<_> = world
             .query::<(Entity, &Transform)>()

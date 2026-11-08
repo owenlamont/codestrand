@@ -68,16 +68,14 @@ fn render(
     }
     app.finish();
     app.cleanup();
-    // Startup rasterises bundled glyphs before asynchronous readiness can be checked.
-    update(&mut app)?;
-    let readiness_started = Instant::now();
+
     loop {
         update(&mut app)?;
+        if started.elapsed() > WAIT_LIMIT {
+            bail!("text and rendering pipelines were not ready within 30 seconds");
+        }
         if ready(&mut app) {
             break;
-        }
-        if readiness_started.elapsed() > WAIT_LIMIT {
-            bail!("text and rendering pipelines were not ready within 30 seconds");
         }
     }
     let started = Instant::now();

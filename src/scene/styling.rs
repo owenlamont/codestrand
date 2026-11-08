@@ -23,10 +23,11 @@ impl Territories {
         if self.revision == Some(layout.revision()) {
             return;
         }
+        let first = self.owners.len().max(1);
         self.owners.resize(layout.dir_count(), 0);
         self.radii.clear();
         self.radii.resize(layout.dir_count(), 1.0);
-        for index in 1..layout.dir_count() {
+        for index in first..layout.dir_count() {
             let parent = layout.dir(index).parent.expect("non-root directory");
             self.owners[index] = if parent == 0 {
                 index
@@ -103,17 +104,7 @@ pub(super) fn setup(world: &mut World, theme: &Theme) {
         theme.avatar_radius * 0.99,
         theme.avatar_radius,
     ));
-    let backdrops = crate::theme::ThemeName::ALL
-        .into_iter()
-        .filter_map(|name| {
-            name.build().backdrop_svg().map(|svg| {
-                (
-                    name,
-                    world.resource_mut::<Assets<Image>>().add(svg_image(svg)),
-                )
-            })
-        })
-        .collect();
+    let backdrops = Vec::new();
     let backdrop_material =
         world
             .resource_mut::<Assets<StandardMaterial>>()
@@ -131,16 +122,7 @@ pub(super) fn setup(world: &mut World, theme: &Theme) {
             Visibility::Hidden,
         ))
         .id();
-    let grounds = crate::theme::ThemeName::ALL
-        .into_iter()
-        .filter_map(|name| {
-            let theme = name.build();
-            theme.textured_ground.then(|| {
-                let image = svg_image(&theme.ground_svg());
-                (name, world.resource_mut::<Assets<Image>>().add(image))
-            })
-        })
-        .collect();
+    let grounds = Vec::new();
     let fonts = [
         (
             FontStyle::Tech,
@@ -252,7 +234,43 @@ pub(super) fn ring_mesh(theme: &Theme, radii: Vec2) -> Mesh {
     mesh
 }
 
+pub(super) fn raster_images(theme: &Theme) -> (Option<Image>, Option<Image>) {
+    (
+        theme
+            .textured_ground
+            .then(|| svg_image(&theme.ground_svg())),
+        theme.backdrop_svg().map(svg_image),
+    )
+}
+
+pub(super) fn install_images(
+    world: &mut World,
+    name: crate::theme::ThemeName,
+    ground: Option<Image>,
+    backdrop: Option<Image>,
+) {
+    let ground = ground.map(|image| world.resource_mut::<Assets<Image>>().add(image));
+    let backdrop =
+        backdrop.map(|image| world.resource_mut::<Assets<Image>>().add(image));
+    let mut styles = world.resource_mut::<Styles>();
+    if let Some(image) = ground {
+        styles.grounds.push((name, image));
+    }
+    if let Some(image) = backdrop {
+        styles.backdrops.push((name, image));
+    }
+}
+
 pub(super) fn apply(world: &mut World, theme: &Theme) {
+    let styles = world.resource::<Styles>();
+    if (theme.textured_ground
+        && !styles.grounds.iter().any(|(name, _)| *name == theme.name))
+        || (theme.backdrop_svg().is_some()
+            && !styles.backdrops.iter().any(|(name, _)| *name == theme.name))
+    {
+        let (ground, backdrop) = raster_images(theme);
+        install_images(world, theme.name, ground, backdrop);
+    }
     let cameras: Vec<_> = world
         .query_filtered::<Entity, With<SceneCamera>>()
         .iter(world)
@@ -330,6 +348,14 @@ pub(super) fn ground(
     hues: &[usize],
     simulation: &Simulation,
 ) {
+    place_ground(world, simulation);
+    let theme = simulation.theme();
+    world.resource_scope(|world, mut styles: Mut<Styles>| {
+        territories(world, palette, hues, simulation, &mut styles, theme);
+    });
+}
+
+pub(super) fn place_ground(world: &mut World, simulation: &Simulation) {
     let theme = simulation.theme();
     let (focus, distance) = simulation.view();
     let (eye, focus) = world.get_resource::<crate::camera::PreviewCamera>().map_or(
@@ -343,11 +369,10 @@ pub(super) fn ground(
             let far = world
                 .query_filtered::<&Projection, With<SceneCamera>>()
                 .iter(world)
-                .filter_map(|projection| match projection {
+                .find_map(|projection| match projection {
                     Projection::Perspective(p) => Some(p.far),
                     _ => None,
                 })
-                .next()
                 .unwrap_or(1000.0);
             (eye, far * 4.0)
         } else {
@@ -361,7 +386,7 @@ pub(super) fn ground(
             .with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2))
             .with_scale(Vec3::splat(coverage));
     }
-    world.resource_scope(|world, mut styles: Mut<Styles>| {
+    world.resource_scope(|world, styles: Mut<Styles>| {
         let backdrop_visible = theme.backdrop_svg().is_some();
         let horizontal = Vec3::new(direction.x, 0.0, direction.z).normalize();
         let position = focus - horizontal * distance * 0.8 + Vec3::Y * distance * 0.12;
@@ -371,57 +396,65 @@ pub(super) fn ground(
             .looking_to(position - eye, Vec3::Y)
             .with_scale(Vec3::splat(distance * 0.6));
         set_visible(world, styles.backdrop, backdrop_visible);
-        let mut used = 0;
-        if theme.territories {
-            styles.territory_layout.update(simulation.layout());
-            let mesh = palette.disc.clone();
-            let material = styles.territories[0].clone();
-            let dirs: Vec<_> = simulation
-                .layout()
-                .dirs()
-                .filter(|(_, dir)| dir.parent == Some(0))
-                .collect();
-            grow(
-                world,
-                &mut styles.territory_pool,
-                dirs.len() * 3,
-                &mesh,
-                &material,
-            );
-            for (index, dir) in dirs {
-                let slot = hues[index] % 12;
-                let radius = styles.territory_layout.radii[index] + 0.5;
-                for ring in 0..3 {
-                    let entity = styles.territory_pool[used];
-                    used += 1;
-                    set_material(world, entity, &styles.territories[slot * 3 + ring]);
-                    let meshes =
-                        [&mesh, &styles.territory_mesh, &styles.territory_mesh];
-                    world
-                        .entity_mut(entity)
-                        .insert(Mesh3d(meshes[ring].clone()));
-                    *world
-                        .get_mut::<Transform>(entity)
-                        .expect("territory transform") = Transform::from_translation(
-                        super::ground(dir.position)
-                            - Vec3::Y
-                                * (0.14
-                                    + f32::from(u16::try_from(ring).expect("3 rings"))
-                                        * 0.005),
-                    )
-                    .with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2))
-                    .with_scale(Vec3::splat(
-                        radius / theme.avatar_radius
-                            * (1.0
+    });
+}
+
+fn territories(
+    world: &mut World,
+    palette: &Palette,
+    hues: &[usize],
+    simulation: &Simulation,
+    styles: &mut Styles,
+    theme: &Theme,
+) {
+    let mut used = 0;
+    if theme.territories {
+        styles.territory_layout.update(simulation.layout());
+        let mesh = palette.disc.clone();
+        let material = styles.territories[0].clone();
+        let dirs: Vec<_> = simulation
+            .layout()
+            .dirs()
+            .filter(|(_, dir)| dir.parent == Some(0))
+            .collect();
+        grow(
+            world,
+            &mut styles.territory_pool,
+            dirs.len() * 3,
+            &mesh,
+            &material,
+        );
+        for (index, dir) in dirs {
+            let slot = hues[index] % 12;
+            let radius = styles.territory_layout.radii[index] + 0.5;
+            for ring in 0..3 {
+                let entity = styles.territory_pool[used];
+                used += 1;
+                set_material(world, entity, &styles.territories[slot * 3 + ring]);
+                let meshes = [&mesh, &styles.territory_mesh, &styles.territory_mesh];
+                world
+                    .entity_mut(entity)
+                    .insert(Mesh3d(meshes[ring].clone()));
+                *world
+                    .get_mut::<Transform>(entity)
+                    .expect("territory transform") = Transform::from_translation(
+                    super::ground(dir.position)
+                        - Vec3::Y
+                            * (0.14
                                 + f32::from(u16::try_from(ring).expect("3 rings"))
-                                    * 0.07),
-                    ));
-                    set_visible(world, entity, true);
-                }
+                                    * 0.005),
+                )
+                .with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2))
+                .with_scale(Vec3::splat(
+                    radius / theme.avatar_radius
+                        * (1.0
+                            + f32::from(u16::try_from(ring).expect("3 rings")) * 0.07),
+                ));
+                set_visible(world, entity, true);
             }
         }
-        hide_rest(world, &styles.territory_pool, used);
-    });
+    }
+    hide_rest(world, &styles.territory_pool, used);
 }
 
 pub(super) fn leaders(
@@ -517,6 +550,104 @@ pub(super) fn beams(
 mod tests {
     use super::*;
     use crate::theme::ThemeName;
+
+    #[test]
+    fn preview_ground_covers_far_plane_and_backdrop_faces_orbited_camera() {
+        let simulation = Simulation::new(
+            crate::timeline::synthetic(),
+            &crate::model::Options::default(),
+            &ThemeName::Outrun.build(),
+            &crate::contributors::Mappings::default(),
+        );
+        let mut world = World::new();
+        world.insert_resource(super::super::SceneTarget(
+            Handle::<Image>::default().into(),
+        ));
+        world.insert_resource(super::super::Title("test".to_owned()));
+        world.insert_resource(super::super::Playback(simulation));
+        world.init_resource::<super::super::Pools>();
+        world.init_resource::<Assets<Mesh>>();
+        world.init_resource::<Assets<Image>>();
+        world.init_resource::<Assets<StandardMaterial>>();
+        super::super::setup(&mut world);
+        let view = world.resource::<super::super::Playback>().0.view();
+        let mut camera = crate::camera::PreviewCamera::new(view);
+        camera.update(
+            &crate::camera::Input {
+                pan: Vec2::new(200.0, -100.0),
+                orbit: Vec2::new(1.0, -0.3),
+                zoom: -4.0,
+                ..default()
+            },
+            view,
+            &[],
+            1.0,
+        );
+        let (eye, _) = camera.pose();
+        world.insert_resource(camera);
+        world.resource_scope(|world, playback: Mut<super::super::Playback>| {
+            place_ground(world, &playback.0);
+        });
+        let ground = world
+            .query_filtered::<&Transform, With<Ground>>()
+            .single(&world)
+            .unwrap();
+        assert_eq!(ground.translation.x, eye.x);
+        assert_eq!(ground.translation.z, eye.z);
+        assert!(ground.scale.x >= 4000.0);
+        let backdrop = world
+            .get::<Transform>(world.resource::<Styles>().backdrop)
+            .unwrap();
+        assert!(
+            backdrop
+                .local_z()
+                .dot((eye - backdrop.translation).normalize())
+                > 0.999
+        );
+        assert_ne!(eye, view.0 + crate::model::view_direction() * view.1);
+    }
+
+    fn reference_owner(layout: &crate::layout::Layout, mut owner: usize) -> usize {
+        while let Some(parent) = layout.dir(owner).parent.filter(|&parent| parent != 0)
+        {
+            owner = parent;
+        }
+        owner
+    }
+
+    #[test]
+    fn territory_cache_tracks_nested_moves_and_reuses_unchanged_layouts() {
+        let mut layout = crate::layout::Layout::planned_paths(
+            &["a/deep/one.rs", "b/two.rs", "root.rs"],
+            0,
+        );
+        for path in ["a/deep/one.rs", "b/two.rs", "root.rs"] {
+            layout.add(path, 0.0, 0);
+        }
+        layout.settle(10, 1.0 / 60.0);
+        let mut cache = Territories::default();
+        for moved in [false, true] {
+            if moved {
+                layout.rename("a/deep/one.rs", "b/one.rs", 0);
+                layout.settle(10, 1.0 / 60.0);
+            }
+            cache.update(&layout);
+            for (index, dir) in layout.dirs().filter(|(_, d)| d.parent == Some(0)) {
+                let expected = layout
+                    .files()
+                    .filter(|(_, f)| {
+                        let owner = reference_owner(&layout, f.dir);
+                        owner == index
+                    })
+                    .map(|(_, f)| f.position.distance(dir.position))
+                    .fold(1.0_f32, f32::max);
+                assert_eq!(cache.radii[index], expected);
+            }
+            cache.radii[0] = 123.0;
+            cache.update(&layout);
+            assert_eq!(cache.radii[0], 123.0);
+        }
+    }
 
     #[test]
     fn styled_beams_keep_endpoints_and_static_dash_positions() {
