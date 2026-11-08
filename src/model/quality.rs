@@ -418,6 +418,7 @@ mod tests {
                 name: b"Ada".to_vec(),
                 email: Vec::new(),
             },
+            repository: 0,
             contributor: None,
             commit: String::new(),
             seconds: 0,

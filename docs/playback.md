@@ -91,21 +91,27 @@ path = "../second"
 
 Paths in the TOML file resolve relative to the file. Labels default to the repository
 directory name. Repeated flags and a file can be combined; flag entries come first.
-Duplicate repositories are rejected. Each entry is a table so future repository
+Duplicate repositories and labels are rejected. Each entry is a table so future repository
 metadata can be added; archive dates are not supported yet.
 
-Events merge by author timestamp, with ties retaining repository input order and
-history order. `--revision` applies to every repository; `--start` and `--commits`
+Events merge by comparing the next commit from each repository by author timestamp,
+breaking ties by repository input order. Each repository retains its first-parent
+order, including children authored before their parents. One `--revision` applies
+to every repository; `--start` and `--commits`
 select from the merged history. Single-repository playback retains first-parent
 order. Contributor mappings apply across all repositories, so a matched contributor
 uses one avatar that moves between regions.
 
-Each repository has a permanent label and a separate region, reserved across the
-whole history. To compare experimental visual treatments, use
+Live repositories occupy separate regions packed towards the 16:9 export frame.
+Regions reserve growth slack and repack when repositories appear or outgrow their
+space. Repacking inserts six seconds into playback: file motion pauses while regions
+move through separate lanes, then resumes. Region movement uses explicit playback
+times, including during export. The camera follows the live regions.
+
+To choose visual treatments, use
 `--repository-boundary none|glass` and `--repository-label-plane files|raised`.
-Defaults are `none` and `files`. Glass is a faint, coloured rectangular prism around
-each region; raised labels sit halfway to the lowest visible avatar, with a minimum
-height fallback before any avatar appears.
+Defaults are `glass` and `raised`. Glass is a faint, coloured rectangular prism around
+each live region; raised labels stay at a constant height of 1.6 scene units.
 Both options apply to preview and export and affect multiple repositories only.
 
 ## Range and pacing

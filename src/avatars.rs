@@ -956,6 +956,7 @@ mod tests {
                 name: b"Author".to_vec(),
                 email: email.as_bytes().to_vec(),
             },
+            repository: 0,
             contributor: Some(Contributor {
                 key: Key::Email(email.as_bytes().to_vec()),
                 name: "Author".to_owned(),

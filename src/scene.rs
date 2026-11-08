@@ -64,6 +64,9 @@ struct Caption;
 struct PortraitDisc;
 
 #[derive(Component)]
+struct RepositoryGlass(usize);
+
+#[derive(Component)]
 struct FileVisual {
     heat_material: Handle<StandardMaterial>,
     membership: Entity,
@@ -468,8 +471,9 @@ fn repository_regions(world: &mut World, palette: &Palette) {
     }
     let regions = simulation.layout().repositories.clone();
     for (index, region) in regions.iter().enumerate() {
-        let hue =
-            f32::from(u16::try_from(index % 12).expect("bounded hue")) * 30.0 + 180.0;
+        let hue = (f32::from(u16::try_from(index % 12).expect("bounded hue")) * 30.0
+            + 180.0)
+            % 360.0;
         let color = Color::hsla(hue, 0.65, 0.55, 0.055);
         let material =
             world
@@ -481,13 +485,22 @@ fn repository_regions(world: &mut World, palette: &Palette) {
                     cull_mode: None,
                     ..default()
                 });
-        let centre = (region.low + region.high) * 0.5;
+        let centre = crate::layout::world_coordinates((region.low + region.high) * 0.5);
         let size = region.high - region.low;
         world.spawn((
+            RepositoryGlass(index),
             Mesh3d(palette.cube.clone()),
             MeshMaterial3d(material),
             Transform::from_xyz(centre.x, 0.5, centre.y)
-                .with_scale(Vec3::new(size.x, 1.2, size.y)),
+                .with_scale(Vec3::new(size.x, 1.2, size.y))
+                .with_rotation(Quat::from_rotation_y(
+                    model::view_direction().x.atan2(model::view_direction().z),
+                )),
+            if region.live {
+                Visibility::Visible
+            } else {
+                Visibility::Hidden
+            },
         ));
     }
 }
@@ -856,6 +869,7 @@ pub(super) fn animate(world: &mut World) {
                 sync_files(world, &palette, &mut pools, simulation);
                 sync_structure(world, &palette, &mut pools, simulation);
                 sync_activity(world, &palette, &mut pools, simulation);
+                sync_repository_regions(world, simulation);
                 place_camera(world, simulation);
             });
         });
@@ -901,6 +915,27 @@ fn sync_lod(world: &mut World, pools: &mut Pools, simulation: &Simulation) {
             fov,
         },
     );
+}
+
+fn sync_repository_regions(world: &mut World, simulation: &Simulation) {
+    let mut query =
+        world.query::<(&RepositoryGlass, &mut Transform, &mut Visibility)>();
+    for (RepositoryGlass(index), mut transform, mut visibility) in query.iter_mut(world)
+    {
+        let region = &simulation.layout().repositories[*index];
+        let centre = crate::layout::world_coordinates((region.low + region.high) * 0.5);
+        let size = region.high - region.low;
+        *transform = Transform::from_xyz(centre.x, 0.5, centre.y)
+            .with_scale(Vec3::new(size.x, 1.2, size.y))
+            .with_rotation(Quat::from_rotation_y(
+                model::view_direction().x.atan2(model::view_direction().z),
+            ));
+        *visibility = if region.live {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+    }
 }
 
 fn sync_files(
@@ -1549,6 +1584,7 @@ fn ground(point: Vec2) -> Vec3 {
 fn place_labels(
     mut wanted: Vec<(model::Label, Vec2, f32)>,
     height: f32,
+    viewport: Vec2,
 ) -> Vec<(model::Label, Vec2, f32)> {
     wanted.retain(|(label, ..)| label.opacity > 0.001);
     wanted.sort_by(|(a, ..), (b, ..)| {
@@ -1562,8 +1598,8 @@ fn place_labels(
         let rect = model::label_rect(point, &label.text, label.scale, height);
         if rect.min.x < 0.0
             || rect.min.y < 0.0
-            || rect.max.x > 1280.0
-            || rect.max.y > 720.0
+            || rect.max.x > viewport.x
+            || rect.max.y > viewport.y
             || (!matches!(
                 label.kind,
                 model::LabelKind::Avatar | model::LabelKind::Repository
@@ -1716,7 +1752,11 @@ fn labels(world: &mut World) {
             let distance = transform.translation().distance_squared(anchor);
             Some((label, point, distance))
         });
-    let chosen = place_labels(wanted.collect(), geometry.label_height);
+    let chosen = place_labels(
+        wanted.collect(),
+        geometry.label_height,
+        camera.logical_viewport_size().unwrap_or_default(),
+    );
     let theme = geometry.clone();
     let points: Vec<_> = chosen
         .iter()
@@ -2656,6 +2696,7 @@ mod tests {
                 projected_label("far", model::LabelKind::Avatar, point, 25.0),
             ],
             20.0,
+            Vec2::new(1280.0, 720.0),
         );
         assert_eq!(
             chosen
@@ -2664,6 +2705,31 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["far", "near"]
         );
+    }
+
+    #[test]
+    fn repository_labels_use_viewport_bounds_and_hide_offscreen_anchors() {
+        let chosen = place_labels(
+            vec![
+                projected_label(
+                    "outside",
+                    model::LabelKind::Repository,
+                    Vec2::new(-10.0, 100.0),
+                    1.0,
+                ),
+                projected_label(
+                    "inside",
+                    model::LabelKind::Repository,
+                    Vec2::new(1400.0, 800.0),
+                    1.0,
+                ),
+            ],
+            20.0,
+            Vec2::new(1920.0, 1080.0),
+        );
+        assert_eq!(chosen.len(), 1);
+        assert_eq!(chosen[0].0.text, "inside");
+        assert_eq!(chosen[0].1, Vec2::new(1400.0, 800.0));
     }
 
     #[test]
@@ -2695,6 +2761,7 @@ mod tests {
                 ),
             ],
             20.0,
+            Vec2::new(1280.0, 720.0),
         );
         assert_eq!(
             chosen
@@ -2721,7 +2788,7 @@ mod tests {
                 1.0,
             )
         }));
-        let chosen = place_labels(wanted, 20.0);
+        let chosen = place_labels(wanted, 20.0, Vec2::new(1280.0, 720.0));
         assert_eq!(chosen.len(), LABELS);
         assert_eq!(chosen[0].0.text, "0");
         assert_eq!(chosen[LABELS - 1].0.text, (LABELS - 1).to_string());
@@ -2929,6 +2996,7 @@ mod tests {
                     name: b"Ada".to_vec(),
                     email: b"ada@example.invalid".to_vec(),
                 },
+                repository: 0,
                 contributor: None,
                 commit: String::new(),
                 seconds: 86_400 * i64::try_from(index).expect("small fixture"),
@@ -3107,6 +3175,7 @@ mod tests {
                     name: b"Ada".to_vec(),
                     email: b"ada@example.invalid".to_vec(),
                 },
+                repository: 0,
                 contributor: None,
                 commit: String::new(),
                 seconds: 0,
@@ -3123,6 +3192,7 @@ mod tests {
                     name: b"Ada".to_vec(),
                     email: b"ada@example.invalid".to_vec(),
                 },
+                repository: 0,
                 contributor: None,
                 commit: String::new(),
                 seconds: 86_400,

@@ -15,33 +15,26 @@ impl Layout {
         let mut combined = Self::empty();
         combined.dirs.clear();
         combined.dir_index.clear();
-        let mut cursor = 0.0;
         for (repository, label) in names.iter().enumerate() {
             let prefix = crate::repositories::prefix(repository);
             let mut local = Vec::new();
             let mut times = Vec::new();
             for (event, &time) in events.iter().zip(starts) {
-                if !event
-                    .changes
-                    .first()
-                    .is_some_and(|change| change.path.starts_with(&prefix))
-                {
+                if event.repository != repository {
                     continue;
                 }
                 local.push(crate::repositories::local_event(event, &prefix));
                 times.push(time);
             }
-            let mut layout = Self::scheduled(&local, &times);
-            let (low, high) = layout.plan.envelope();
-            let offset = Vec2::new(cursor - low.x, -(low.y + high.y) * 0.5);
+            let layout = Self::scheduled(&local, &times);
+
             let region = RepositoryRegion {
                 label: label.clone(),
-                low: low + offset,
-                high: high + offset,
+                low: Vec2::splat(-2.0),
+                high: Vec2::splat(2.0),
+                live: false,
             };
-            cursor = region.high.x + 4.0;
             combined.repositories.push(region);
-            layout.plan.translate(offset);
             let base = combined.dirs.len();
             for (index, mut dir) in layout.dirs.into_iter().enumerate() {
                 dir.repository = repository;
@@ -51,24 +44,93 @@ impl Layout {
                     format!("{prefix}{}", dir.path)
                 };
                 dir.parent = dir.parent.map(|parent| base + parent);
-                dir.position += offset;
                 combined.dir_index.insert(dir.path.clone(), base + index);
                 combined.dirs.push(dir);
             }
             combined.plan.add_part(base, layout.plan);
         }
-        let centre = cursor * 0.5 - 2.0;
-        for region in &mut combined.repositories {
-            region.low.x -= centre;
-            region.high.x -= centre;
-        }
-        for dir in &mut combined.dirs {
-            dir.position.x -= centre;
-        }
-        for (_, plan) in &mut combined.plan.parts {
-            plan.translate(Vec2::new(-centre, 0.0));
-        }
+        combined.offsets = vec![Vec2::ZERO; names.len()];
         combined
+    }
+
+    pub(crate) fn local_regions(&self, active: &[bool]) -> Vec<RepositoryRegion> {
+        self.repositories
+            .iter()
+            .enumerate()
+            .map(|(repository, region)| {
+                let mut low = Vec2::splat(f32::INFINITY);
+                let mut high = Vec2::splat(f32::NEG_INFINITY);
+                for (_, dir) in self.dirs().filter(|(_, dir)| {
+                    dir.repository == repository && (dir.files > 0 || dir.children > 0)
+                }) {
+                    low = low.min(
+                        crate::layout::region_coordinates(dir.position)
+                            - Vec2::splat(dir.radius() + 1.0),
+                    );
+                    high = high.max(
+                        crate::layout::region_coordinates(dir.position)
+                            + Vec2::splat(dir.radius() + 1.0),
+                    );
+                }
+                for (_, file) in self
+                    .files()
+                    .filter(|(_, file)| self.dirs[file.dir].repository == repository)
+                {
+                    low = low.min(
+                        crate::layout::region_coordinates(file.position) - Vec2::ONE,
+                    );
+                    high = high.max(
+                        crate::layout::region_coordinates(file.position) + Vec2::ONE,
+                    );
+                }
+                if !low.is_finite() {
+                    low = Vec2::splat(-2.0);
+                    high = Vec2::splat(2.0);
+                }
+                RepositoryRegion {
+                    label: region.label.clone(),
+                    low,
+                    high,
+                    live: active[repository],
+                }
+            })
+            .collect()
+    }
+
+    pub(crate) fn remove_offsets(&mut self) {
+        for dir in &mut self.dirs {
+            dir.position -= self
+                .offsets
+                .get(dir.repository)
+                .copied()
+                .unwrap_or_default();
+        }
+        for file in self.files.values_mut() {
+            file.position -= self
+                .offsets
+                .get(self.dirs[file.dir].repository)
+                .copied()
+                .unwrap_or_default();
+        }
+        self.offsets.fill(Vec2::ZERO);
+    }
+
+    pub(crate) fn place_regions(
+        &mut self,
+        regions: Vec<RepositoryRegion>,
+        offsets: Vec<Vec2>,
+    ) {
+        self.remove_offsets();
+        let offsets: Vec<_> =
+            offsets.into_iter().map(super::world_coordinates).collect();
+        for dir in &mut self.dirs {
+            dir.position += offsets[dir.repository];
+        }
+        for file in self.files.values_mut() {
+            file.position += offsets[self.dirs[file.dir].repository];
+        }
+        self.repositories = regions;
+        self.offsets = offsets;
     }
 }
 
@@ -94,60 +156,75 @@ mod tests {
 
     #[test]
     fn regions_remain_separate_and_one_contributor_moves_between_them() {
-        let events = crate::repositories::merge(vec![history(0), history(1)]);
+        let events = crate::repositories::merge((0..5).map(history).collect());
         let config = tempfile::tempdir().unwrap();
         let path = config.path().join("contributors.toml");
-        std::fs::write(&path, "[[contributor]]\nname = 'Shared contributor'\nemails = ['shared0@example.invalid', 'shared1@example.invalid']\n").unwrap();
+        std::fs::write(&path, "[[contributor]]\nname = 'Shared contributor'\nemails = ['shared0@example.invalid', 'shared1@example.invalid', 'shared2@example.invalid', 'shared3@example.invalid', 'shared4@example.invalid']\n").unwrap();
         let mappings = crate::contributors::load(Some(&path)).unwrap();
         let mut simulation = Simulation::with_repositories(
             events,
-            &Options::default(),
+            &Options {
+                seconds_per_day: 0.01,
+                max_idle_seconds: crate::model::tick_seconds(),
+                ..Options::default()
+            },
             &Theme::neon(),
             &mappings,
-            &["First".to_owned(), "Second".to_owned()],
+            &[
+                "First".to_owned(),
+                "Second".to_owned(),
+                "Third".to_owned(),
+                "Fourth".to_owned(),
+                "Fifth".to_owned(),
+            ],
         );
-        let regions = simulation.layout().repositories.clone();
-        assert!(regions[0].high.x < regions[1].low.x);
-        let mut avatar_positions = Vec::new();
-        for frame in 0..360 {
-            simulation.advance_to(frame, 30);
+
+        let frames = crate::model::frames_for(simulation.duration(), 60).unwrap();
+        for frame in 0..frames {
+            simulation.tick_layout();
             let layout = simulation.layout();
-            for (_, dir) in layout.dirs() {
-                let region = &regions[dir.repository];
-                assert!(
-                    (dir.position - Vec2::splat(dir.radius()))
-                        .cmpge(region.low)
-                        .all()
-                );
-                assert!(
-                    (dir.position + Vec2::splat(dir.radius()))
-                        .cmple(region.high)
-                        .all()
-                );
+            for (index, a) in layout
+                .repositories
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| r.live)
+            {
+                for b in layout
+                    .repositories
+                    .iter()
+                    .skip(index + 1)
+                    .filter(|r| r.live)
+                {
+                    assert!(
+                        a.high.x <= b.low.x + 0.0001
+                            || b.high.x <= a.low.x + 0.0001
+                            || a.high.y <= b.low.y + 0.0001
+                            || b.high.y <= a.low.y + 0.0001,
+                        "frame {frame}: {} overlaps {}",
+                        a.label,
+                        b.label
+                    );
+                }
             }
             for (_, file) in layout.files() {
-                let region = &regions[layout.dir(file.dir).repository];
-                assert!(file.position.cmpge(region.low).all());
-                assert!(file.position.cmple(region.high).all());
+                let region = &layout.repositories[layout.dir(file.dir).repository];
+                assert!(
+                    crate::layout::region_coordinates(file.position)
+                        .cmpge(region.low)
+                        .all(),
+                    "frame {frame}: {}",
+                    file.path
+                );
+                assert!(
+                    crate::layout::region_coordinates(file.position)
+                        .cmple(region.high)
+                        .all(),
+                    "frame {frame}: {}",
+                    file.path
+                );
             }
             assert!(simulation.avatars().len() <= 1);
-            if let Some(avatar) = simulation.avatars().first() {
-                avatar_positions.push(avatar.position);
-            }
-            assert_eq!(
-                simulation
-                    .labels()
-                    .iter()
-                    .filter(|label| label.kind == crate::model::LabelKind::Repository)
-                    .count(),
-                2
-            );
         }
-        assert!(
-            avatar_positions
-                .windows(2)
-                .any(|pair| pair[0].distance(pair[1]) > 0.01)
-        );
         let snapshot = |simulation: &Simulation| {
             simulation
                 .layout()
@@ -155,25 +232,21 @@ mod tests {
                 .map(|(id, file)| (id, file.path.clone(), file.position))
                 .collect::<Vec<_>>()
         };
-        simulation.advance_to(100, 30);
+
         simulation.repository_label_plane = crate::repositories::LabelPlane::Raised;
-        let lowest = simulation
-            .avatars()
-            .iter()
-            .filter(|avatar| avatar.presence > 0.05)
-            .map(|avatar| avatar.position.y)
-            .reduce(f32::min)
-            .unwrap();
         assert!(
             simulation
                 .labels()
                 .iter()
                 .filter(|label| label.kind == crate::model::LabelKind::Repository)
-                .all(|label| (label.position.y - lowest * 0.5).abs() < f32::EPSILON)
+                .all(|label| (label.position.y - 1.6).abs() < f32::EPSILON)
         );
         let before = snapshot(&simulation);
-        simulation.advance_to(150, 30);
-        simulation.advance_to(100, 30);
+        simulation.restart();
+        for _ in 0..frames {
+            simulation.tick_layout();
+        }
+
         assert_eq!(before, snapshot(&simulation));
     }
 

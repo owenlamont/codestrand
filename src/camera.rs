@@ -205,6 +205,7 @@ mod tests {
                     name: name.as_bytes().to_vec(),
                     email: email.as_bytes().to_vec(),
                 },
+                repository: 0,
                 contributor: None,
                 commit: String::new(),
                 seconds: 0,

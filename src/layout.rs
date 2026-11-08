@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, HashMap};
 use bevy::math::Vec2;
 use planner::Plan;
 
+pub(crate) mod packing;
 mod planner;
 mod repositories;
 
@@ -11,6 +12,32 @@ pub(super) struct RepositoryRegion {
     pub label: String,
     pub low: Vec2,
     pub high: Vec2,
+    pub live: bool,
+}
+
+pub(super) fn region_coordinates(point: Vec2) -> Vec2 {
+    let direction = crate::model::view_direction();
+    let right = Vec2::new(direction.z, -direction.x).normalize();
+    let back = Vec2::new(direction.x, direction.z).normalize();
+    Vec2::new(point.dot(right), point.dot(back))
+}
+
+pub(super) fn world_coordinates(point: Vec2) -> Vec2 {
+    let direction = crate::model::view_direction();
+    Vec2::new(direction.z, -direction.x).normalize() * point.x
+        + Vec2::new(direction.x, direction.z).normalize() * point.y
+}
+
+impl RepositoryRegion {
+    pub(super) fn corners(&self) -> [Vec2; 4] {
+        [
+            self.low,
+            self.high,
+            Vec2::new(self.low.x, self.high.y),
+            Vec2::new(self.high.x, self.low.y),
+        ]
+        .map(world_coordinates)
+    }
 }
 
 const SPACING: f32 = 0.62;
@@ -93,6 +120,7 @@ pub(super) struct Layout {
     revision: u64,
     plan: Plan,
     pub repositories: Vec<RepositoryRegion>,
+    offsets: Vec<Vec2>,
 }
 
 impl Layout {
@@ -124,6 +152,7 @@ impl Layout {
             revision: 0,
             plan: Plan::default(),
             repositories: Vec::new(),
+            offsets: Vec::new(),
         }
     }
 
@@ -136,6 +165,7 @@ impl Layout {
                 name: Vec::new(),
                 email: Vec::new(),
             },
+            repository: 0,
             contributor: None,
             commit: String::new(),
             changes: paths
@@ -317,12 +347,6 @@ impl Layout {
             file.velocity +=
                 (desired - file.velocity).clamp_length_max(MAX_ACCELERATION * dt);
             file.position += file.velocity * dt;
-            if !self.repositories.is_empty() {
-                let region = &self.repositories[self.dirs[file.dir].repository];
-                file.position = file
-                    .position
-                    .clamp(region.low + Vec2::ONE, region.high - Vec2::ONE);
-            }
         }
     }
 
@@ -371,12 +395,19 @@ impl Layout {
         }
     }
 
-    /// Ground-plane bounds, reserving whole-history regions for multiple repositories.
+    /// Ground-plane bounds of the live scene.
     pub(super) fn bounds(&self) -> (Vec2, Vec2) {
         if !self.repositories.is_empty() {
-            return self.repositories.iter().fold(
-                (Vec2::splat(f32::INFINITY), Vec2::splat(f32::NEG_INFINITY)),
-                |(low, high), region| (low.min(region.low), high.max(region.high)),
+            return self.repositories.iter().filter(|region| region.live).fold(
+                (Vec2::splat(-2.0), Vec2::splat(2.0)),
+                |(low, high), region| {
+                    region
+                        .corners()
+                        .into_iter()
+                        .fold((low, high), |(low, high), point| {
+                            (low.min(point), high.max(point))
+                        })
+                },
             );
         }
         self.dirs().fold(

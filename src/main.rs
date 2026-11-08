@@ -128,11 +128,12 @@ struct Source {
     #[arg(long)]
     repositories_file: Option<PathBuf>,
     /// Repository boundary treatment for multiple repositories.
-    #[arg(long, value_enum, default_value = "none")]
+    #[arg(long, value_enum, default_value = "glass")]
     repository_boundary: repositories::Boundary,
     /// Permanent repository labels at file level or between files and avatars.
-    #[arg(long, value_enum, default_value = "files")]
+    #[arg(long, value_enum, default_value = "raised")]
     repository_label_plane: repositories::LabelPlane,
+    /// Revision resolved independently in every repository.
     #[arg(long, default_value = "HEAD")]
     revision: String,
     /// Skip history and avatar cache reads and writes.
@@ -171,9 +172,8 @@ impl Source {
     fn events(
         &self,
         cache_root: Option<&std::path::Path>,
+        repositories: &[repositories::Repository],
     ) -> anyhow::Result<Vec<timeline::Event>> {
-        let repositories =
-            repositories::inputs(&self.repository, self.repositories_file.as_deref())?;
         let mut histories = Vec::new();
         for (index, repository) in repositories.iter().enumerate() {
             let started = std::time::Instant::now();
@@ -233,14 +233,8 @@ impl Source {
                 resolver.resolve(&mut events[start..end], remote.as_deref());
                 return;
             }
-            let prefix = repositories::prefix(index);
             let indices: Vec<_> = (start..end)
-                .filter(|&at| {
-                    events[at]
-                        .changes
-                        .first()
-                        .is_some_and(|change| change.path.starts_with(&prefix))
-                })
+                .filter(|&at| events[at].repository == index)
                 .collect();
             let mut selected: Vec<_> =
                 indices.iter().map(|&at| events[at].clone()).collect();
@@ -255,7 +249,7 @@ impl Source {
         let repositories =
             repositories::inputs(&self.repository, self.repositories_file.as_deref())?;
         let mappings = contributors::load(self.contributors.as_deref())?;
-        let mut events = self.events(cache::root().as_deref())?;
+        let mut events = self.events(cache::root().as_deref(), &repositories)?;
         mappings.apply(&mut events);
         self.resolve_avatars(&mut events, &repositories);
         let title = if repositories.is_empty() {

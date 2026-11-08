@@ -169,6 +169,7 @@ pub(super) struct Label {
 #[derive(Clone, Debug)]
 struct State {
     tick: u64,
+    history_tick: u64,
     layout: Layout,
     avatars: Vec<Avatar>,
     authors: HashMap<Key, usize>,
@@ -182,6 +183,7 @@ struct State {
 
 /// Deterministic playback stepped at a fixed tick rate, independent of output frame rate.
 pub(super) struct Simulation {
+    packing: crate::layout::packing::Packing,
     pub repository_boundary: crate::repositories::Boundary,
     pub repository_label_plane: crate::repositories::LabelPlane,
     events: Vec<Event>,
@@ -255,6 +257,7 @@ impl Simulation {
         );
         let mut state = State {
             tick: 0,
+            history_tick: 0,
             layout: Layout::scheduled_repositories(
                 &events,
                 &layout_starts.starts,
@@ -292,9 +295,16 @@ impl Simulation {
         }
         (state.focus, state.distance) = state.fit();
         let total = events.len();
+        let mut prior_active = vec![false; repositories.len()];
+        for event in &events[..start] {
+            if let Some(active) = prior_active.get_mut(event.repository) {
+                *active = true;
+            }
+        }
         events.truncate(end);
         events.drain(..start);
-        Self {
+        let mut simulation = Self {
+            packing: crate::layout::packing::Packing::default(),
             repository_boundary: crate::repositories::Boundary::default(),
             repository_label_plane: crate::repositories::LabelPlane::default(),
             events,
@@ -306,11 +316,39 @@ impl Simulation {
             initial: state.clone(),
             state,
             theme: theme.clone(),
+        };
+        if !repositories.is_empty() {
+            let mut active = prior_active;
+            for (_, file) in simulation.layout().files() {
+                active[simulation.layout().dir(file.dir).repository] = true;
+            }
+            let mut samples = vec![simulation.layout().local_regions(&active)];
+            let ticks = frames_for(
+                simulation.duration(),
+                u16::try_from(TICK_RATE).expect("tick rate fits u16"),
+            )
+            .expect("multi-repository playback fits the supported frame range");
+            for _ in 0..ticks {
+                simulation.tick_layout();
+                for event in &simulation.events[..simulation.state.next_event] {
+                    active[event.repository] = true;
+                }
+                samples.push(simulation.layout().local_regions(&active));
+            }
+            simulation.packing = crate::layout::packing::Packing::build(&samples);
+            simulation.state = simulation.initial.clone();
+            if let Some((_, regions, offsets)) = simulation.packing.sample(0) {
+                simulation.state.layout.place_regions(regions, offsets);
+            }
+            (simulation.state.focus, simulation.state.distance) =
+                simulation.state.fit();
+            simulation.initial = simulation.state.clone();
         }
+        simulation
     }
 
     pub(super) fn duration(&self) -> f32 {
-        self.schedule.duration()
+        self.schedule.duration() + tick_time(self.packing.extra_ticks())
     }
 
     pub(super) fn restart(&mut self) {
@@ -341,20 +379,46 @@ impl Simulation {
     }
 
     pub(crate) fn tick_layout(&mut self) {
-        let plan_time = self.schedule.layout_time(tick_time(self.state.tick + 1));
+        let canonical = self.state.tick + 1;
+        let placement = self.packing.sample(canonical);
+        let local_tick = placement.as_ref().map_or(canonical, |(tick, ..)| *tick);
+        if local_tick == self.state.history_tick {
+            self.state.tick = canonical;
+            self.state
+                .layout
+                .cool_heat(tick_seconds(), self.heat_half_life);
+            if let Some((_, regions, offsets)) = placement {
+                self.state.layout.place_regions(regions, offsets);
+            }
+            return;
+        }
+        self.state.layout.remove_offsets();
+        let plan_time = self.schedule.layout_time(tick_time(local_tick));
         let state = &mut self.state;
-        state.tick += 1;
+        state.tick = canonical;
+        state.history_tick = local_tick;
+
         state.layout.cool_heat(tick_seconds(), self.heat_half_life);
         while let Some(event) = self.events.get(state.next_event) {
-            let Some(start) = self.schedule.start(state.next_event, state.tick) else {
+            let Some(start) = self.schedule.start(state.next_event, local_tick) else {
                 break;
             };
-            state.begin(event, start);
+            state.begin(
+                event,
+                if placement.is_some() {
+                    tick_time(canonical)
+                }; else {
+                    start
+                };,
+            );
             state.next_event += 1;
         }
         let dt = tick_seconds();
         state.layout.sample_plan(plan_time, dt);
         state.layout.step(dt);
+        if let Some((_, regions, offsets)) = placement {
+            state.layout.place_regions(regions, offsets);
+        }
     }
 
     fn tick(&mut self) {
@@ -363,6 +427,20 @@ impl Simulation {
         let now = tick_time(state.tick);
         let dt = tick_seconds();
         state.pulses.retain(|pulse| now < pulse.end);
+        if !state.layout.repositories.is_empty() {
+            for pulse in &state.pulses {
+                let (sum, count) = pulse
+                    .targets
+                    .iter()
+                    .filter_map(|(target, ..)| state.destination(*target))
+                    .fold((Vec2::ZERO, 0_u16), |(sum, count), point| {
+                        (sum + point, count + 1)
+                    });
+                if count > 0 {
+                    state.avatars[pulse.author].target = ground(sum / f32::from(count));
+                }
+            }
+        }
         let targets = state.avatar_targets(now);
         let active = state
             .avatars
@@ -621,22 +699,14 @@ impl Simulation {
                 priority: 0.0,
             })
             .collect();
-        let avatar_height = self
-            .state
-            .avatars
-            .iter()
-            .filter(|avatar| avatar.presence > 0.05)
-            .map(|avatar| avatar.position.y)
-            .reduce(f32::min)
-            .unwrap_or(MIN_AVATAR_HEIGHT);
-        for region in &layout.repositories {
-            let mut position = ground(Vec2::new(
+        for region in layout.repositories.iter().filter(|region| region.live) {
+            let mut position = ground(crate::layout::world_coordinates(Vec2::new(
                 region.low.x.midpoint(region.high.x),
                 region.high.y - 1.0,
-            ));
+            )));
             position.y = match self.repository_label_plane {
                 crate::repositories::LabelPlane::Files => 0.15,
-                crate::repositories::LabelPlane::Raised => avatar_height * 0.5,
+                crate::repositories::LabelPlane::Raised => MIN_AVATAR_HEIGHT * 0.5,
             };
             labels.push(Label {
                 position,
@@ -925,6 +995,10 @@ impl State {
         let mut points: Vec<Vec3> = self
             .layout
             .dirs()
+            .filter(|(_, dir)| {
+                self.layout.repositories.is_empty()
+                    || self.layout.repositories[dir.repository].live
+            })
             .flat_map(|(_, dir)| {
                 let centre = ground(dir.position);
                 let radius = dir.radius();
@@ -933,16 +1007,8 @@ impl State {
             })
             .collect();
         points.extend_from_slice(tops);
-        for region in &self.layout.repositories {
-            points.extend(
-                [
-                    region.low,
-                    region.high,
-                    Vec2::new(region.low.x, region.high.y),
-                    Vec2::new(region.high.x, region.low.y),
-                ]
-                .map(ground),
-            );
+        for region in self.layout.repositories.iter().filter(|region| region.live) {
+            points.extend(region.corners().map(ground));
         }
         points
     }
@@ -1759,6 +1825,7 @@ mod tests {
                     name: name.as_bytes().to_vec(),
                     email: name.as_bytes().to_vec(),
                 },
+                repository: 0,
                 contributor: None,
                 commit: String::new(),
                 seconds: 0,

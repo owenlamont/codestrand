@@ -610,7 +610,16 @@ emails = ["author@example.invalid"]
             fs::write(&config, text).unwrap();
             let mappings =
                 crate::contributors::load(source.contributors.as_deref()).unwrap();
-            let events = source.events(Some(cache.path())).unwrap();
+            let events = source
+                .events(
+                    Some(cache.path()),
+                    &crate::repositories::inputs(
+                        &source.repository,
+                        source.repositories_file.as_deref(),
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
             assert_eq!(events[0].author.name, b"Author");
             assert_eq!(events[0].author.email, b"author@example.invalid");
             assert!(events[0].contributor.is_none());
@@ -852,14 +861,30 @@ emails = ["author@example.invalid"]
         let Some(crate::Command::Preview { source, .. }) = cli.command else {
             panic!("preview command parsed")
         };
-        let events = source.events(Some(cache.path())).expect("bypass imports");
+        let events = source
+            .events(
+                Some(cache.path()),
+                &crate::repositories::inputs(
+                    &source.repository,
+                    source.repositories_file.as_deref(),
+                )
+                .unwrap(),
+            )
+            .expect("bypass imports");
         assert!(!entry(cache.path(), repo.path()).exists());
         load(repo.path(), "HEAD", Some(cache.path())).expect("seed cache");
         let before =
             fs::read(entry(cache.path(), repo.path())).expect("snapshot exists");
         assert_eq!(
             source
-                .events(Some(cache.path()))
+                .events(
+                    Some(cache.path()),
+                    &crate::repositories::inputs(
+                        &source.repository,
+                        source.repositories_file.as_deref()
+                    )
+                    .unwrap()
+                )
                 .expect("bypass imports again"),
             events
         );
@@ -868,6 +893,17 @@ emails = ["author@example.invalid"]
             before
         );
         remove_blob(repo.path());
-        assert!(source.events(Some(cache.path())).is_err());
+        assert!(
+            source
+                .events(
+                    Some(cache.path()),
+                    &crate::repositories::inputs(
+                        &source.repository,
+                        source.repositories_file.as_deref()
+                    )
+                    .unwrap()
+                )
+                .is_err()
+        );
     }
 }

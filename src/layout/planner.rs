@@ -17,7 +17,6 @@ pub(super) struct Plan {
     pub(super) parts: Vec<(usize, Plan)>,
     samples: Arc<[Vec<Vec2>]>,
     footprints: Arc<[Vec<Vec2>]>,
-    radii: Arc<[f32]>,
     pub(super) time: f32,
     origin: f32,
     step: f32,
@@ -95,7 +94,6 @@ impl Plan {
             parts: Vec::new(),
             samples: samples.into(),
             footprints: footprints.into(),
-            radii: peak.into(),
             time: 0.0,
             origin: 0.0,
             step,
@@ -124,28 +122,6 @@ impl Plan {
             return plan.footprint(dir - offset, time);
         }
         interpolate(&self.footprints[dir], time, self.step)
-    }
-
-    pub(super) fn translate(&mut self, offset: Vec2) {
-        for row in Arc::make_mut(&mut self.samples) {
-            for position in row {
-                *position += offset;
-            }
-        }
-    }
-
-    pub(super) fn envelope(&self) -> (Vec2, Vec2) {
-        self.samples.iter().zip(self.radii.iter()).fold(
-            (Vec2::splat(f32::INFINITY), Vec2::splat(f32::NEG_INFINITY)),
-            |(mut low, mut high), (row, &radius)| {
-                let radius = radius + 3.0;
-                for &point in row {
-                    low = low.min(point - Vec2::splat(radius));
-                    high = high.max(point + Vec2::splat(radius));
-                }
-                (low, high)
-            },
-        )
     }
 }
 
@@ -572,7 +548,10 @@ impl Layout {
                 centres[parent].lerp(dir.position, footprint.y.clamp(0.0, 1.0))
             });
             centres[index] = centre;
-            if footprint.x > 0.0001 {
+            if footprint.x > 0.0001
+                && (self.repositories.is_empty()
+                    || self.repositories[dir.repository].live)
+            {
                 points.push((centre, footprint.x));
             }
         }
@@ -648,6 +627,7 @@ mod tests {
                 name: b"Ada".to_vec(),
                 email: Vec::new(),
             },
+            repository: 0,
             contributor: None,
             commit: String::new(),
             changes: changes
@@ -1032,6 +1012,7 @@ mod probes {
                 name: b"Ada".to_vec(),
                 email: Vec::new(),
             },
+            repository: 0,
             contributor: None,
             commit: String::new(),
             changes: changes
@@ -1219,6 +1200,7 @@ mod rate_probe {
                     name: b"Ada".to_vec(),
                     email: Vec::new(),
                 },
+                repository: 0,
                 contributor: None,
                 commit: String::new(),
                 changes: paths
