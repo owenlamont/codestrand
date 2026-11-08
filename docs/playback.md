@@ -175,6 +175,10 @@ the search cannot fit the bound. Use fewer repositories, shorten the imported hi
 reduce playback times if an input limit is exceeded. Single-repository playback is
 unaffected.
 
+Planning happens before the first frame. Large multi-repository histories can take
+several seconds to plan. To inspect a smaller interval, select the playback with
+`--start` and `--commits`.
+
 Tick and region-sample budgets apply to the playback selected by `--start` and `--commits`.
 
 To choose visual treatments, use

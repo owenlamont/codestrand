@@ -66,6 +66,7 @@ pub(super) struct File {
     pub path: String,
     pub dir: usize,
     slot: usize,
+    slot_offset: Vec2,
     pub position: Vec2,
     velocity: Vec2,
     pub presence: f32,
@@ -77,6 +78,11 @@ pub(super) struct File {
 }
 
 impl File {
+    fn set_slot(&mut self, slot: usize) {
+        self.slot = slot;
+        self.slot_offset = spiral(slot);
+    }
+
     pub(super) fn visible_presence(&self, dir: &Dir) -> f32 {
         let clearance = dir.radius() - self.position.distance(dir.position);
         self.presence
@@ -270,6 +276,7 @@ impl Layout {
                 path: path.to_owned(),
                 dir,
                 slot,
+                slot_offset: spiral(slot),
                 position: self.dirs[dir].position + spiral(slot),
                 velocity: Vec2::ZERO,
                 presence: 0.0,
@@ -337,7 +344,7 @@ impl Layout {
         let file = self.files.get_mut(&id).expect("indexed files exist");
         to.clone_into(&mut file.path);
         file.dir = dir;
-        file.slot = slot;
+        file.set_slot(slot);
         file.author = author;
         file.activity = 1.0;
         self.dirs[file.dir].touch_age = 0.0;
@@ -355,7 +362,7 @@ impl Layout {
         self.prune_empty();
         self.relax(dt);
         for file in self.files.values_mut() {
-            let target = self.dirs[file.dir].position + spiral(file.slot);
+            let target = self.dirs[file.dir].position + file.slot_offset;
             let desired =
                 ((target - file.position) * FILE_EASE).clamp_length_max(MAX_SPEED);
             file.velocity +=
@@ -404,7 +411,7 @@ impl Layout {
             self.plan.time = time;
         }
         for file in self.files.values_mut() {
-            file.position = self.dirs[file.dir].position + spiral(file.slot);
+            file.position = self.dirs[file.dir].position + file.slot_offset;
             file.velocity = Vec2::ZERO;
         }
     }
@@ -484,7 +491,7 @@ impl Layout {
                 self.files
                     .get_mut(&id)
                     .expect("occupied slots have files")
-                    .slot = packed.len();
+                    .set_slot(packed.len());
                 packed.push(Some(id));
             }
             dir.slots = packed;
@@ -594,6 +601,29 @@ mod tests {
     use super::*;
 
     const DT: f32 = 1.0 / 60.0;
+
+    #[test]
+    fn slot_offsets_follow_compaction_and_cross_directory_renames() {
+        let mut layout = Layout::empty();
+        for index in 0..5 {
+            layout.add(&format!("source/{index}"), 0.0, 0);
+        }
+        let kept = layout.file_index["source/4"];
+        assert_eq!(layout.files[&kept].slot, 4);
+        for index in 0..4 {
+            layout.remove(&format!("source/{index}"), 0.0, 0);
+        }
+        layout.fade_files(1.0);
+        layout.compact_slots();
+        assert_eq!(layout.files[&kept].slot, 0);
+        assert_eq!(layout.files[&kept].slot_offset, spiral(0));
+        layout.add("target/occupied", 0.0, 0);
+        assert_eq!(layout.rename("source/4", "target/moved", 0), kept);
+        assert_eq!(layout.files[&kept].slot, 1);
+        assert_eq!(layout.files[&kept].slot_offset, spiral(1));
+        assert_eq!(layout.rename("target/moved", "target/renamed", 0), kept);
+        assert_eq!(layout.files[&kept].slot_offset, spiral(1));
+    }
 
     #[test]
     fn rename_keeps_identity_and_glides_between_directories() {

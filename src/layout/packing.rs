@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use bevy::math::{FloatExt, Vec2};
 
@@ -407,12 +407,20 @@ struct Sample {
     presence: Vec<f32>,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct Placement {
+    tile: Option<Tile>,
+    origin: Vec2,
+    scale: f32,
+}
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Packing {
     nodes: Vec<Node>,
     regions: Arc<[Vec<RepositoryRegion>]>,
     samples: Arc<[Sample]>,
     rotated: Vec<bool>,
+    placements: Arc<[OnceLock<Vec<Placement>>]>,
 }
 
 fn rotations(
@@ -551,6 +559,7 @@ impl Packing {
             regions: regions.to_vec().into(),
             samples: samples.into(),
             rotated,
+            placements: (0..regions.len()).map(|_| OnceLock::new()).collect(),
         }
     }
 
@@ -587,6 +596,51 @@ impl Packing {
             .unwrap_or(usize::MAX)
             .min(self.samples.len().checked_sub(1)?);
         let sample = &self.samples[tick];
+        let computed;
+        let placement = if presence.is_none() {
+            self.placements[tick].get_or_init(|| self.fit(tick, None))
+        } else {
+            computed = self.fit(tick, presence);
+            &computed
+        };
+        let mut regions = self.regions[tick].clone();
+        let mut origins = Vec::with_capacity(regions.len());
+        let mut scales = Vec::with_capacity(regions.len());
+        for (i, r) in regions.iter_mut().enumerate() {
+            let turn = |p: Vec2| if self.rotated[i] { p.perp() } else { p };
+            let tile = placement[i].tile.filter(|_| selected(i));
+            let origin = if tile.is_some() {
+                placement[i].origin
+            } else {
+                Vec2::ZERO
+            };
+            let scale = if tile.is_some() {
+                placement[i].scale
+            } else {
+                0.0
+            };
+            let (low, high) = (turn(r.low), turn(r.high));
+            r.low = low.min(high) * scale + origin;
+            r.high = low.max(high) * scale + origin;
+            r.live = tile.is_some();
+            r.tile = tile;
+            r.files = sample.weights[i]
+                * (sample.presence[i]
+                    * presence
+                        .and_then(|v| v.get(i))
+                        .copied()
+                        .unwrap_or(1.0)
+                        .clamp(0.0, 1.0));
+            r.rotated = self.rotated[i];
+            r.outline.clear();
+            origins.push(origin);
+            scales.push(scale);
+        }
+        Some((regions, origins, scales))
+    }
+
+    fn fit(&self, tick: usize, presence: Option<&[f32]>) -> Vec<Placement> {
+        let sample = &self.samples[tick];
         let presence: Vec<_> = sample
             .presence
             .iter()
@@ -606,34 +660,55 @@ impl Packing {
             gutters(presence.iter().sum()),
         )
         .expect("presence-scaled tiles remain feasible");
-        let mut regions = self.regions[tick].clone();
-        let mut origins = Vec::with_capacity(regions.len());
-        let mut scales = Vec::with_capacity(regions.len());
-        for (i, r) in regions.iter_mut().enumerate() {
-            let turn = |p: Vec2| if self.rotated[i] { p.perp() } else { p };
-            let shape: Vec<_> = r.outline.iter().copied().map(turn).collect();
-            let tile = placement[i].filter(|_| selected(i));
-            let fitted = tile.map(|tile| fit::best(tile, &shape, r.height));
-            let origin = fitted.map_or(Vec2::ZERO, |f| f.origin);
-            let scale = fitted.map_or(0.0, |f| f.scale);
-            let (low, high) = (turn(r.low), turn(r.high));
-            r.low = low.min(high) * scale + origin;
-            r.high = low.max(high) * scale + origin;
-            r.live = tile.is_some();
-            r.tile = tile;
-            r.files = sample.weights[i] * presence[i];
-            r.rotated = self.rotated[i];
-            r.outline.clear();
-            origins.push(origin);
-            scales.push(scale);
-        }
-        Some((regions, origins, scales))
+        self.regions[tick]
+            .iter()
+            .enumerate()
+            .map(|(i, r)| {
+                let turn = |p: Vec2| if self.rotated[i] { p.perp() } else { p };
+                let shape: Vec<_> = r.outline.iter().copied().map(turn).collect();
+                let tile = placement[i];
+                let fitted = tile.map(|tile| fit::best(tile, &shape, r.height));
+                let origin = fitted.map_or(Vec2::ZERO, |f| f.origin);
+                let scale = fitted.map_or(0.0, |f| f.scale);
+                Placement {
+                    tile,
+                    origin,
+                    scale,
+                }
+            })
+            .collect()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cached_fits_match_fresh_fits_after_seek_and_presence_changes() {
+        let packing = Packing::before_service(&fixture());
+        for tick in [0, 60, 700, 1599, 700, 60, u64::MAX] {
+            let (cached, origins, scales) = packing.sample(tick).unwrap();
+            let (fresh, fresh_origins, fresh_scales) =
+                packing.sample_with_presence(tick, Some(&[])).unwrap();
+            assert_eq!(origins, fresh_origins);
+            assert_eq!(scales, fresh_scales);
+            for (a, b) in cached.iter().zip(fresh) {
+                assert_eq!(a.tile, b.tile);
+                assert_eq!((a.low, a.high, a.files), (b.low, b.high, b.files));
+            }
+            let (hidden, _, _) = packing
+                .sample_with_presence(tick, Some(&[0.0; 30]))
+                .unwrap();
+            assert!(hidden.iter().all(|r| r.tile.is_none()));
+            let (selected, selected_origins, selected_scales) =
+                packing.sample_repositories(tick, &[0]).unwrap();
+            assert_eq!(selected[0].tile, cached[0].tile);
+            assert_eq!(selected_origins[0], origins[0]);
+            assert_eq!(selected_scales[0], scales[0]);
+            assert!(selected[1..].iter().all(|r| r.tile.is_none()));
+        }
+    }
 
     #[test]
     fn births_finish_by_service_including_a_short_lead_in() {

@@ -558,6 +558,7 @@ impl Simulation {
         for (index, (avatar, target)) in
             state.avatars.iter_mut().zip(targets).enumerate()
         {
+            let travel = self.travel.sample(index, state.tick);
             avatar.activity *= (-dt / 3.0).exp();
             if state.layout.repositories.is_empty() {
                 let omega = 3.0;
@@ -569,7 +570,7 @@ impl Simulation {
             } else {
                 avatar.position = target;
                 avatar.velocity = Vec3::ZERO;
-                if let Some((point, _)) = self.travel.sample(index, state.tick) {
+                if let Some((point, _)) = travel {
                     avatar.position = slots::world(point);
                 }
             }
@@ -581,7 +582,7 @@ impl Simulation {
             let visible = now - avatar.last_active < AVATAR_IDLE;
             let fade = if visible { dt / 0.4 } else { -dt / 1.2 };
             avatar.presence = (avatar.presence + fade).clamp(0.0, 1.0);
-            if let Some((_, opacity)) = self.travel.sample(index, state.tick) {
+            if let Some((_, opacity)) = travel {
                 avatar.presence = avatar.presence.min(opacity);
             }
         }

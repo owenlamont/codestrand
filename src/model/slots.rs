@@ -528,12 +528,17 @@ impl Choice<'_> {
         let point = dock.point(self.tile, self.gap);
         let corners = self.envelope.corners(self.tile);
         let span = fan(point, &corners);
+        let (low, high) = corners
+            .iter()
+            .fold((point, point), |(low, high), &p| (low.min(p), high.max(p)));
         let crossings = self
             .obstacles
             .iter()
             .filter(|(repo, rect)| {
                 *repo != usize::MAX
                     && *repo != self.repository
+                    && low.cmple(rect.max).all()
+                    && high.cmpge(rect.min).all()
                     && swept_crosses(point, &corners, *rect)
             })
             .count();

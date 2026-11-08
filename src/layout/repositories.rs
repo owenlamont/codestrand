@@ -62,51 +62,47 @@ impl Layout {
         active: &[bool],
         geometry: crate::theme::Geometry,
     ) -> Vec<RepositoryRegion> {
+        let mut supports = vec![[f32::NEG_INFINITY; 8]; self.repositories.len()];
+        let mut files = vec![0_u32; self.repositories.len()];
+        for (_, dir) in self.dirs() {
+            super::outline::include(
+                &mut supports[dir.repository],
+                super::region_coordinates(dir.position),
+                dir.radius(),
+            );
+        }
+        let corners = super::outline::rectangle(
+            Vec2::new(geometry.file_min.x, geometry.file_min.z),
+            Vec2::new(geometry.file_max.x, geometry.file_max.z),
+        );
+        for (_, file) in self.files() {
+            let dir = self.dir(file.dir);
+            if file.state != super::Presence::Leaving {
+                files[dir.repository] = files[dir.repository].saturating_add(1);
+            }
+            let presence = file.visible_presence(dir);
+            if presence > 0.0 {
+                for &point in &corners {
+                    super::outline::include(
+                        &mut supports[dir.repository],
+                        super::region_coordinates(file.position + point * presence),
+                        0.0,
+                    );
+                }
+            }
+        }
         self.repositories
             .iter()
             .enumerate()
             .map(|(repository, region)| {
-                let mut files = 0_u32;
-                let mut supports = [f32::NEG_INFINITY; 8];
-                for (_, dir) in
-                    self.dirs().filter(|(_, dir)| dir.repository == repository)
-                {
-                    super::outline::include(
-                        &mut supports,
-                        super::region_coordinates(dir.position),
-                        dir.radius(),
-                    );
-                }
-                for (_, file) in self
-                    .files()
-                    .filter(|(_, file)| self.dirs[file.dir].repository == repository)
-                {
-                    if file.state != super::Presence::Leaving {
-                        files = files.saturating_add(1);
-                    }
-                    let presence = file.visible_presence(self.dir(file.dir));
-                    if presence <= 0.0 {
-                        continue;
-                    }
-                    for point in super::outline::rectangle(
-                        Vec2::new(geometry.file_min.x, geometry.file_min.z),
-                        Vec2::new(geometry.file_max.x, geometry.file_max.z),
-                    ) {
-                        super::outline::include(
-                            &mut supports,
-                            super::region_coordinates(file.position + point * presence),
-                            0.0,
-                        );
-                    }
-                }
-                let outline = super::outline::from_supports(supports);
+                let outline = super::outline::from_supports(supports[repository]);
                 let (low, high) = super::outline::bounds(&outline);
                 RepositoryRegion {
                     label: region.label.clone(),
                     low,
                     high,
                     live: active[repository],
-                    files: crate::model::count_u32(files),
+                    files: crate::model::count_u32(files[repository]),
                     tile: None,
                     outline,
                     height: geometry.file_max.y,

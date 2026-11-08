@@ -115,6 +115,21 @@ impl Plan {
         Some(interpolate(row, time, self.step))
     }
 
+    fn place(&self, time: f32, dirs: &mut [super::Dir]) {
+        if self.parts.is_empty() {
+            assert_eq!(dirs.len(), self.samples.len(), "planned directories");
+            let sample = interpolator(time, self.step, self.samples[0].len());
+            for (dir, row) in dirs.iter_mut().zip(self.samples.iter()) {
+                dir.position = sample(row);
+            }
+        } else {
+            for (index, (base, plan)) in self.parts.iter().enumerate() {
+                let end = self.parts.get(index + 1).map_or(dirs.len(), |p| p.0);
+                plan.place(time, &mut dirs[*base..end]);
+            }
+        }
+    }
+
     fn footprint(&self, dir: usize, time: f32) -> Vec2 {
         if let Some((offset, plan)) =
             self.parts.iter().rev().find(|(offset, _)| *offset <= dir)
@@ -126,10 +141,14 @@ impl Plan {
 }
 
 fn interpolate(row: &[Vec2], time: f32, step: f32) -> Vec2 {
+    interpolator(time, step, row.len())(row)
+}
+
+fn interpolator(time: f32, step: f32, length: usize) -> impl Fn(&[Vec2]) -> Vec2 {
     let at = (time.max(0.0) / step).floor();
     let index = usize::try_from(std::time::Duration::from_secs_f32(at).as_secs())
         .unwrap_or(usize::MAX)
-        .min(row.len() - 1);
+        .min(length - 1);
     let fraction = ((time
         - model::count_u32(u32::try_from(index).expect("sample index fits u32"))
             * step)
@@ -145,14 +164,16 @@ fn interpolate(row: &[Vec2], time: f32, step: f32) -> Vec2 {
     let controls = [
         index.saturating_sub(1),
         index,
-        (index + 1).min(row.len() - 1),
-        (index + 2).min(row.len() - 1),
+        (index + 1).min(length - 1),
+        (index + 2).min(length - 1),
     ];
-    controls
-        .into_iter()
-        .zip(weights)
-        .map(|(index, weight)| row[index] * (weight / 6.0))
-        .sum()
+    move |row| {
+        controls
+            .into_iter()
+            .zip(weights)
+            .map(|(index, weight)| row[index] * (weight / 6.0))
+            .sum()
+    }
 }
 
 fn occupancy(
@@ -595,11 +616,8 @@ impl Layout {
     pub(super) fn relax(&mut self, dt: f32) {
         self.plan.time += dt;
 
+        self.plan.place(self.plan.time, &mut self.dirs);
         for (index, dir) in self.dirs.iter_mut().enumerate() {
-            dir.position = self
-                .plan
-                .position(index)
-                .expect("planned directories have trajectories");
             let target = if index != 0 && dir.files == 0 && dir.children == 0 {
                 0.0
             } else {
@@ -619,6 +637,36 @@ mod tests {
         theme::Theme,
         timeline::{FileChange, Identity, Kind},
     };
+
+    #[test]
+    fn batched_splines_match_individual_directory_samples_exactly() {
+        let histories = (0..3)
+            .map(|repository| {
+                let mut events = crate::timeline::synthetic();
+                crate::repositories::namespace(&mut events, repository);
+                events
+            })
+            .collect();
+        let events = crate::repositories::merge(histories);
+        let starts = model::schedule::Schedule::new(&events, 0.5, 1.0).starts;
+        let combined = Layout::scheduled_repositories(
+            &events,
+            &starts,
+            &["First".into(), "Second".into(), "Third".into()],
+        );
+        for mut layout in [Layout::planned(&crate::timeline::synthetic()), combined] {
+            for tick in [0, 1, 13, 90, 1000, 10_000, 90, 1] {
+                layout.plan.time = model::tick_time(tick);
+                let expected: Vec<_> = (0..layout.dirs.len())
+                    .map(|index| layout.plan.position(index).unwrap())
+                    .collect();
+                layout.plan.place(layout.plan.time, &mut layout.dirs);
+                let actual: Vec<_> =
+                    layout.dirs.iter().map(|dir| dir.position).collect();
+                assert_eq!(actual, expected);
+            }
+        }
+    }
 
     fn event(seconds: i64, changes: &[(&str, Kind)]) -> Event {
         Event {
