@@ -83,6 +83,7 @@ struct Palette {
     tile: Option<(Handle<StandardMaterial>, Transform)>,
     glyph_mesh: Handle<Mesh>,
     glyphs: Vec<Handle<StandardMaterial>>,
+    heat_glyphs: Vec<Vec<Handle<StandardMaterial>>>,
     glyph_textures: Vec<(crate::theme::ThemeName, Vec<Handle<Image>>)>,
     avatars: Vec<Handle<StandardMaterial>>,
     glass: Vec<Handle<StandardMaterial>>,
@@ -128,7 +129,7 @@ impl Palette {
             .expect("every registered theme has preloaded textures")
             .1;
         let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
-        let glyphs = textures
+        let glyphs: Vec<_> = textures
             .iter()
             .map(|texture| {
                 materials.add(StandardMaterial {
@@ -137,6 +138,7 @@ impl Palette {
                 })
             })
             .collect();
+        let heat_glyphs = Self::heat_materials(&mut materials, &glyphs, theme);
         let tile = theme
             .file_tile
             .as_ref()
@@ -181,10 +183,43 @@ impl Palette {
             tile,
             glyph_mesh,
             glyphs,
+            heat_glyphs,
             glyph_textures,
             avatars,
             glass,
             directories,
+        }
+    }
+
+    fn heat_materials(
+        materials: &mut Assets<StandardMaterial>,
+        glyphs: &[Handle<StandardMaterial>],
+        theme: &Theme,
+    ) -> Vec<Vec<Handle<StandardMaterial>>> {
+        glyphs
+            .iter()
+            .map(|handle| {
+                let base = materials.get(handle).expect("glyph material").clone();
+                (1_u16..32)
+                    .map(|bucket| {
+                        materials.add(StandardMaterial {
+                            base_color: theme.heat_color(f32::from(bucket) / 31.0),
+                            ..base.clone()
+                        })
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn heat_glyph(&self, kind: usize, heat: f32) -> &Handle<StandardMaterial> {
+        let bucket = (1_u16..32)
+            .take_while(|bucket| heat >= (f32::from(*bucket) - 0.5) / 31.0)
+            .count();
+        if bucket == 0 {
+            &self.glyphs[kind]
+        } else {
+            &self.heat_glyphs[kind][bucket - 1]
         }
     }
 
@@ -522,6 +557,18 @@ pub(super) fn switch_theme(world: &mut World, name: crate::theme::ThemeName) {
             .find(|(name, _)| *name == theme.name)
             .expect("every registered theme has preloaded textures")
             .1;
+        for (handles, texture) in palette.heat_glyphs.iter().zip(textures) {
+            for (bucket, handle) in (1_u16..32).zip(handles) {
+                *world
+                    .resource_mut::<Assets<StandardMaterial>>()
+                    .get_mut(handle)
+                    .expect("heat bucket") = StandardMaterial {
+                    base_color: theme.heat_color(f32::from(bucket) / 31.0),
+                    base_color_texture: Some(texture.clone()),
+                    ..theme.glyph_material.clone()
+                };
+            }
+        }
         for (handle, texture) in palette.glyphs.iter().zip(textures) {
             *world
                 .resource_mut::<Assets<StandardMaterial>>()
@@ -656,15 +703,7 @@ fn sync_files(
     pools.files.retain(|id, entity| {
         let keep = layout.file(*id).is_some();
         if !keep {
-            let material = world
-                .get::<FileVisual>(*entity)
-                .expect("file visual")
-                .heat_material
-                .clone();
             world.despawn(*entity);
-            world
-                .resource_mut::<Assets<StandardMaterial>>()
-                .remove(material.id());
         }
         keep
     });
@@ -696,23 +735,21 @@ fn sync_files(
                 .expect("file entities are visuals")
                 .glyph_kind = glyph_kind;
         }
-        let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
-        let mut material = materials
-            .get(&palette.glyphs[glyph_kind])
-            .expect("glyph material")
-            .clone();
-        material.base_color = simulation.theme().heat_color(file.heat);
-        *materials
-            .get_mut(&heat_material)
-            .expect("file heat material") = material;
-        set_material(world, glyph, &heat_material);
+        let material = palette.heat_glyph(glyph_kind, file.heat);
+        if heat_material != *material {
+            set_material(world, glyph, material);
+            world
+                .get_mut::<FileVisual>(entity)
+                .expect("file visual")
+                .heat_material = material.clone();
+        }
         let dir = layout.dir(file.dir);
         set_material(
             world,
             membership,
             palette.directory(pools.hues.slots[file.dir], dir.depth),
         );
-        let glowing = file.heat > 0.03;
+        let glowing = file.activity > 0.03;
         if glowing && current != Some(file.author) {
             world.entity_mut(halo).insert(MeshMaterial3d(
                 palette.glass[file.author % palette.glass.len()].clone(),
@@ -723,7 +760,7 @@ fn sync_files(
                 .author = Some(file.author);
         }
         if let Some(mut transform) = world.get_mut::<Transform>(halo) {
-            let grow = 1.0 + simulation.theme().activity_growth * file.heat;
+            let grow = 1.0 + simulation.theme().activity_growth * file.activity;
             *transform = simulation.theme().activity_transform;
             transform.scale *= Vec3::new(grow, grow, 1.0);
         }
@@ -829,14 +866,7 @@ fn spawn_file(
     theme: &Theme,
     glyph_kind: usize,
 ) -> Entity {
-    let material = world
-        .resource::<Assets<StandardMaterial>>()
-        .get(&palette.glyphs[glyph_kind])
-        .expect("glyph material")
-        .clone();
-    let heat_material = world
-        .resource_mut::<Assets<StandardMaterial>>()
-        .add(material);
+    let heat_material = palette.glyphs[glyph_kind].clone();
     let membership = world
         .spawn((
             Mesh3d(palette.membership_mesh.clone()),
@@ -1661,15 +1691,22 @@ mod tests {
                 .get(&material.0)
                 .unwrap()
                 .base_color,
-            theme.heat_color(
-                world
-                    .resource::<Playback>()
-                    .0
-                    .layout()
-                    .file(id)
-                    .unwrap()
-                    .heat
-            )
+            world
+                .resource::<Assets<StandardMaterial>>()
+                .get(
+                    world.resource::<Palette>().heat_glyph(
+                        visual.glyph_kind,
+                        world
+                            .resource::<Playback>()
+                            .0
+                            .layout()
+                            .file(id)
+                            .unwrap()
+                            .heat
+                    )
+                )
+                .unwrap()
+                .base_color
         );
         assert_eq!(
             world.get::<Transform>(visual.glyph),
@@ -1755,6 +1792,23 @@ mod tests {
             .find(|(name, _)| *name == world.resource::<Playback>().0.theme().name)
             .unwrap()
             .1;
+        for (handles, texture) in palette.heat_glyphs.iter().zip(textures) {
+            for (bucket, handle) in (1_u16..32).zip(handles) {
+                let material = world
+                    .resource::<Assets<StandardMaterial>>()
+                    .get(handle)
+                    .unwrap();
+                assert_eq!(
+                    material.base_color,
+                    world
+                        .resource::<Playback>()
+                        .0
+                        .theme()
+                        .heat_color(f32::from(bucket) / 31.0)
+                );
+                assert_eq!(material.base_color_texture.as_ref(), Some(texture));
+            }
+        }
         for (material, texture) in palette.glyphs.iter().zip(textures) {
             assert_eq!(
                 world
@@ -2133,7 +2187,7 @@ mod tests {
             sync_structure(&mut world, &palette, &mut pools, &simulation);
             assert_eq!(
                 world.resource::<Assets<StandardMaterial>>().len(),
-                materials + pools.files.len()
+                materials
             );
             for (&entity, (index, dir)) in
                 pools.directories.iter().zip(simulation.layout().dirs())
@@ -2249,7 +2303,7 @@ mod tests {
             );
             assert_eq!(
                 world.resource::<Assets<StandardMaterial>>().len(),
-                material_count + pools.files.len()
+                material_count
             );
             assert_eq!(world.resource::<Assets<Image>>().len(), image_count);
         }
@@ -2328,8 +2382,68 @@ mod tests {
             );
             assert_eq!(
                 world.resource::<Assets<StandardMaterial>>().len(),
-                materials + pools.files.len(),
+                materials,
             );
         }
+    }
+
+    #[test]
+    fn cold_scene_does_not_mutate_materials() {
+        use bevy::asset::{AssetApp, AssetEvent, AssetPlugin};
+        let mut events = crate::timeline::synthetic();
+        events.truncate(1);
+        events[0].changes = (0..3000)
+            .map(|id| crate::timeline::FileChange {
+                path: format!("files/f{id}.rs"),
+                kind: crate::timeline::Kind::Added,
+                insertions: 10,
+                removals: 0,
+            })
+            .collect();
+        let mut simulation = Simulation::new(
+            events,
+            &model::Options {
+                heat_half_life: 0.01,
+                ..default()
+            },
+            &Theme::neon(),
+            &crate::contributors::Mappings::default(),
+        );
+        simulation.advance_to(60, 60);
+        assert_eq!(simulation.layout().files().count(), 3000);
+        assert!(
+            simulation
+                .layout()
+                .files()
+                .all(|(_, file)| file.heat < 0.001)
+        );
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+            .init_asset::<Mesh>()
+            .init_asset::<Image>()
+            .init_asset::<StandardMaterial>();
+        let palette = Palette::new(app.world_mut(), &Theme::neon());
+        let mut pools = Pools::default();
+        sync_files(app.world_mut(), &palette, &mut pools, &simulation);
+        app.update();
+        app.world_mut()
+            .resource_mut::<Messages<AssetEvent<StandardMaterial>>>()
+            .clear();
+        let material_count = app.world().resource::<Assets<StandardMaterial>>().len();
+        let mut mutations = 0;
+        for _ in 0..60 {
+            sync_files(app.world_mut(), &palette, &mut pools, &simulation);
+            app.update();
+            mutations += app
+                .world_mut()
+                .resource_mut::<Messages<AssetEvent<StandardMaterial>>>()
+                .drain()
+                .filter(|event| matches!(event, AssetEvent::Modified { .. }))
+                .count();
+        }
+        println!(
+            "3000 files, 60 unchanged cold frames: {mutations} material modifications; {material_count} allocated materials"
+        );
+        assert_eq!(mutations, 0);
     }
 }

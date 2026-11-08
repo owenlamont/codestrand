@@ -30,6 +30,7 @@ pub(super) struct File {
     pub state: Presence,
     delay: f32,
     pub heat: f32,
+    pub activity: f32,
     pub author: usize,
 }
 
@@ -170,6 +171,7 @@ impl Layout {
             file.state = Presence::Arriving;
             file.delay = delay;
             file.author = author;
+            file.activity = 1.0;
             return id;
         }
         let dir = self.ensure_dir(parent_path(path));
@@ -190,6 +192,7 @@ impl Layout {
                 state: Presence::Arriving,
                 delay,
                 heat: 0.0,
+                activity: 1.0,
                 author,
             },
         );
@@ -202,6 +205,7 @@ impl Layout {
             Some(&id) => {
                 let file = self.files.get_mut(&id).expect("indexed files exist");
                 file.author = author;
+                file.activity = 1.0;
                 id
             }
             None => self.add(path, 0.0, author),
@@ -219,6 +223,7 @@ impl Layout {
         file.state = Presence::Leaving;
         file.delay = delay;
         file.author = author;
+        file.activity = 1.0;
         Some(id)
     }
 
@@ -246,6 +251,7 @@ impl Layout {
         file.dir = dir;
         file.slot = slot;
         file.author = author;
+        file.activity = 1.0;
         if file.state == Presence::Leaving {
             file.state = Presence::Arriving;
         }
@@ -277,6 +283,10 @@ impl Layout {
         let decay = (-dt / half_life).exp2();
         for file in self.files.values_mut() {
             file.heat *= decay;
+            if file.heat < 0.001 {
+                file.heat = 0.0;
+            }
+            file.activity *= (-dt / 1.6).exp();
         }
     }
 
@@ -285,6 +295,7 @@ impl Layout {
         for file in self.files.values_mut() {
             file.delay = 0.0;
             file.heat = 0.0;
+            file.activity = 0.0;
             file.presence = match file.state {
                 Presence::Leaving => 0.0,
                 Presence::Arriving | Presence::Present => 1.0,

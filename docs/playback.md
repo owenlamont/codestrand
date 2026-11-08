@@ -29,9 +29,13 @@ layout, playback position and camera stay put.
 
 ## File heat
 
-Each touch adds heat based on added plus removed lines. Logarithmic damping keeps
-large changes from overwhelming small ones; repeated touches accumulate up to a cap.
-Neon and Phosphor brighten file icons smoothly while cold icons remain readable.
+Each non-deletion touch adds heat based on added plus removed lines. Logarithmic
+damping keeps large changes from overwhelming small ones; repeated touches
+accumulate up to a cap.
+Neon and Phosphor brighten file icons through 32 shared brightness levels while
+cold icons remain readable. Heat below 0.001 settles to zero. Activity halos pulse
+on every touch and decay independently with a 1.6-second time constant, unaffected
+by diff size or the heat half-life.
 
 `--heat-half-life 3` sets the cooling half-life in canonical playback seconds for
 preview and export (default `3`, accepted range `0.01` through `86400`). Live speed

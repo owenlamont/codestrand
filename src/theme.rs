@@ -64,6 +64,7 @@ pub(super) struct Theme {
     pub(super) glyph_ink: Option<[u8; 3]>,
     pub(super) glyphs: &'static [FileGlyph],
     pub(super) glyph_material: StandardMaterial,
+    pub(super) heat_gain: f32,
     pub(super) glyph_texture: GlyphTexture,
     pub(super) file_glyph_transform: Transform,
     pub(super) file_tile: Option<FileTile>,
@@ -115,12 +116,8 @@ pub(super) struct FileTile {
 
 impl Theme {
     pub(super) fn heat_color(&self, heat: f32) -> Color {
-        let gain = match self.name {
-            ThemeName::Neon => 2.5,
-            ThemeName::Phosphor => 3.5,
-        };
         let base = LinearRgba::from(self.glyph_material.base_color);
-        let brightness = 1.0 + gain * heat.clamp(0.0, 1.0);
+        let brightness = 1.0 + self.heat_gain * heat.clamp(0.0, 1.0);
         Color::linear_rgba(
             base.red * brightness,
             base.green * brightness,
@@ -145,6 +142,7 @@ impl Theme {
         };
         Self {
             name: ThemeName::Neon,
+            heat_gain: 2.5,
             glyph_ink: None,
             glyphs: icons::material(),
             glyph_texture: GlyphTexture {
@@ -214,6 +212,7 @@ impl Theme {
     fn phosphor() -> Self {
         let mut theme = Self::neon();
         theme.name = ThemeName::Phosphor;
+        theme.heat_gain = 3.5;
         theme.glyph_ink = Some([0x39, 0xff, 0x6a]);
         let green = Color::srgb_u8(0x39, 0xff, 0x6a);
         let dark = Color::srgb_u8(0x0b, 0x13, 0x0d);
@@ -326,7 +325,14 @@ mod tests {
             let warm = LinearRgba::from(theme.heat_color(0.5));
             let hot = LinearRgba::from(theme.heat_color(1.0));
             assert_eq!(cold, LinearRgba::from(theme.glyph_material.base_color));
-            assert!(hot.green > warm.green && warm.green > cold.green);
+            for (cold, warm, hot) in [
+                (cold.red, warm.red, hot.red),
+                (cold.green, warm.green, hot.green),
+                (cold.blue, warm.blue, hot.blue),
+            ] {
+                assert!(hot > warm && warm > cold);
+            }
+            assert_eq!(cold.alpha, warm.alpha);
             assert_eq!(cold.alpha, hot.alpha);
         }
     }

@@ -857,7 +857,9 @@ pub(crate) fn apply(
     let lines = f64::from(change.insertions) + f64::from(change.removals);
     #[expect(clippy::cast_possible_truncation, reason = "heat is bounded to 0.75")]
     let heat = (0.12 + 0.08 * lines.ln_1p()).min(0.75) as f32;
-    layout.heat(id, heat);
+    if !matches!(change.kind, Kind::Deleted) {
+        layout.heat(id, heat);
+    }
     id
 }
 
@@ -1046,6 +1048,11 @@ mod tests {
         let id = apply(&mut sim.state.layout, &change, 0);
         let small = sim.layout().file(id).unwrap().heat;
         assert!(small > 0.0);
+        let mut insertion = change.clone();
+        insertion.path = "insertions.rs".to_owned();
+        insertion.insertions = 100;
+        let inserted = apply(&mut sim.state.layout, &insertion, 0);
+        assert!(sim.layout().file(inserted).unwrap().heat > small);
         change.kind = Kind::Modified;
         change.removals = 100;
         apply(&mut sim.state.layout, &change, 0);
@@ -1070,6 +1077,33 @@ mod tests {
     }
 
     #[test]
+    fn deletion_does_not_add_heat_and_halos_decay_independently() {
+        let mut layout = Layout::planned_paths(&["a.rs"], 0);
+        let mut change = timeline::FileChange {
+            path: "a.rs".to_owned(),
+            kind: Kind::Added,
+            insertions: 0,
+            removals: 0,
+        };
+        let id = apply(&mut layout, &change, 0);
+        let heat = layout.file(id).unwrap().heat;
+        assert_eq!(layout.file(id).unwrap().activity, 1.0);
+        layout.cool_heat(6.0, 86400.0);
+        assert!(layout.file(id).unwrap().activity < 0.03);
+        assert!(layout.file(id).unwrap().heat > heat * 0.99);
+        change.kind = Kind::Deleted;
+        let before = layout.file(id).unwrap().heat;
+        apply(&mut layout, &change, 0);
+        assert_eq!(layout.file(id).unwrap().heat, before);
+        assert_eq!(layout.file(id).unwrap().activity, 1.0);
+        layout.cool_heat(1.0, 0.01);
+        assert_eq!(layout.file(id).unwrap().heat, 0.0);
+        assert!(layout.file(id).unwrap().activity > 0.5);
+        layout.settle(0, 0.0);
+        assert_eq!(layout.file(id).unwrap().activity, 0.0);
+    }
+
+    #[test]
     fn heat_cools_in_canonical_seconds_and_replays_at_any_frame_rate() {
         let mut events = timeline::synthetic();
         events.truncate(1);
@@ -1085,7 +1119,6 @@ mod tests {
         sim.advance_to(30, 60);
         let id = sim.layout().files().next().unwrap().0;
         let hot = sim.layout().file(id).unwrap().heat;
-        sim.change_rate(8.0);
         sim.advance_to(150, 60);
         let cooled = sim.layout().file(id).unwrap().heat;
         assert!((cooled - hot * 0.5).abs() < 0.000_01);
