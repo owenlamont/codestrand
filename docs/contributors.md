@@ -35,6 +35,13 @@ Remote overrides require an HTTPS URL without credentials.
 
 ## Contributor avatars
 
+Contributors keep a fixed height band above the file plane. Crowded playback smoothly
+shrinks avatars and names; small groups retain their normal size. When names overlap,
+recent commits raise a contributor's priority. Lower-priority names fade out, then need
+sustained clearance before fading back in. Some overlap during fades is intentional.
+Name placement uses the default fitted view, including when preview is orbited or zoomed.
+Playback time drives crowd scaling and fades, so export speed does not change them.
+
 Preview and export stay offline by default: local overrides and cached portraits are
 used, with the coloured sphere as the fallback. Add `--fetch-avatars` to either command
 to opt in to network requests before playback starts. Export never fetches during frame
