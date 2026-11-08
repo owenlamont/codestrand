@@ -36,6 +36,7 @@ pub(super) fn run(
     frames: u32,
     fps: u16,
     delay_ms: u16,
+    encoder: Option<crate::encoder::Encoder>,
 ) -> anyhow::Result<()> {
     render(
         directory,
@@ -43,6 +44,7 @@ pub(super) fn run(
         frames,
         fps,
         delay_ms,
+        encoder,
     )
 }
 
@@ -52,6 +54,7 @@ fn render(
     frames: u32,
     fps: u16,
     delay_ms: u16,
+    mut encoder: Option<crate::encoder::Encoder>,
 ) -> anyhow::Result<()> {
     let mut manifest = BufWriter::new(File::create(directory.join("frames.csv"))?);
     writeln!(manifest, "frame,seconds,commit,files,avatars,beams")?;
@@ -79,13 +82,18 @@ fn render(
     for index in 0..frames {
         app.world_mut().resource_mut::<scene::Frame>().index = index;
         let image = capture(&mut app, &target, index)?;
-        let path = directory.join(format!("frame-{index:05}.png"));
-        image
+        let pixels = image
             .try_into_dynamic()
             .context("convert captured frame")?
-            .to_rgb8()
-            .save(&path)
-            .with_context(|| format!("write frame {}", path.display()))?;
+            .to_rgb8();
+        if let Some(encoder) = &mut encoder {
+            encoder.write(pixels.into_raw())?;
+        } else {
+            let path = directory.join(format!("frame-{index:05}.png"));
+            pixels
+                .save(&path)
+                .with_context(|| format!("write frame {}", path.display()))?;
+        }
         let playback = &app.world().resource::<scene::Playback>().0;
         writeln!(
             manifest,
@@ -111,6 +119,9 @@ fn render(
         }
     }
     manifest.flush()?;
+    if let Some(encoder) = &mut encoder {
+        encoder.finish()?;
+    }
     eprintln!("Export complete: {}", directory.display());
     Ok(())
 }
@@ -234,6 +245,6 @@ mod tests {
             })
             .before(scene::animate),
         );
-        render(&output, (app, target), 120, 15, 0).unwrap();
+        render(&output, (app, target), 120, 15, 0, None).unwrap();
     }
 }
