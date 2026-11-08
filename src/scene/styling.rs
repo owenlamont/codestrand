@@ -308,19 +308,33 @@ pub(super) fn ground(
 ) {
     let theme = simulation.theme();
     let (focus, distance) = simulation.view();
+    let (eye, focus) = world.get_resource::<crate::camera::PreviewCamera>().map_or(
+        (focus + crate::model::view_direction() * distance, focus),
+        crate::camera::PreviewCamera::pose,
+    );
+    let distance = eye.distance(focus);
+    let direction = (eye - focus).normalize();
+    let (ground_focus, coverage) = if world.contains_resource::<crate::camera::PreviewCamera>() {
+        let far = world.query_filtered::<&Projection, With<SceneCamera>>()
+            .iter(world).filter_map(|projection| match projection {
+                Projection::Perspective(p) => Some(p.far),
+                _ => None,
+            }).next().unwrap_or(1000.0);
+        (eye, far * 4.0)
+    } else {
+        (focus, distance * 2.5)
+    };
     for mut transform in world
         .query_filtered::<&mut Transform, With<Ground>>()
         .iter_mut(world)
     {
-        *transform = Transform::from_xyz(focus.x, -0.18, focus.z)
+        *transform = Transform::from_xyz(ground_focus.x, -0.18, ground_focus.z)
             .with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2))
-            .with_scale(Vec3::splat(distance * 2.5));
+            .with_scale(Vec3::splat(coverage));
     }
     world.resource_scope(|world, mut styles: Mut<Styles>| {
         let backdrop_visible = theme.backdrop_svg().is_some();
-        let direction = crate::model::view_direction();
         let horizontal = Vec3::new(direction.x, 0.0, direction.z).normalize();
-        let eye = focus + direction * distance;
         let position = focus - horizontal * distance * 0.8 + Vec3::Y * distance * 0.12;
         *world
             .get_mut::<Transform>(styles.backdrop)
