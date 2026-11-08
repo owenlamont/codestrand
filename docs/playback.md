@@ -3,6 +3,10 @@
 Preview loops the selected history. Export renders the same launch timeline at
 explicit frame times, with a fixed camera and a 1x playback multiplier.
 
+Commit application times are precomputed for the selected history and pacing.
+The caption shows the last applied commit's date; cooling and fades advance in
+playback seconds. Seeking or restarting replays the same fixed simulation ticks.
+
 ## Controls
 
 | Input | Action |

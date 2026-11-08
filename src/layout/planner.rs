@@ -533,7 +533,7 @@ impl Layout {
 
     #[cfg(test)]
     pub(crate) fn planned(events: &[Event]) -> Self {
-        let starts = model::event_starts(events, 0.5, 1.0);
+        let starts = model::schedule::Schedule::new(events, 0.5, 1.0).starts;
         Self::scheduled(events, &starts)
     }
 
@@ -922,7 +922,7 @@ mod tests {
         let events: Vec<_> = (0..1_000)
             .map(|day| event(i64::from(day) * 86_400, &[("a/file", Kind::Modified)]))
             .collect();
-        let starts = model::event_starts(&events, 86_400.0, 86_400.0);
+        let starts = model::schedule::Schedule::new(&events, 86_400.0, 86_400.0).starts;
         assert!(tick_at(starts[999]) > u64::from(u32::MAX));
         let layout = Layout::scheduled(&events, &starts);
         assert!(layout.plan.samples[0].len() <= 8_194);
