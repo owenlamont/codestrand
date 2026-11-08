@@ -32,7 +32,25 @@ pub(crate) fn label_size(text: &str, height: f32) -> Vec2 {
     )
 }
 
-pub(super) fn distance(
+pub(crate) fn centre(regions: &[RepositoryRegion]) -> Vec3 {
+    let mut low = Vec2::splat(f32::INFINITY);
+    let mut high = Vec2::splat(f32::NEG_INFINITY);
+    for corner in regions
+        .iter()
+        .filter(|r| r.live)
+        .flat_map(RepositoryRegion::corners)
+    {
+        low = low.min(corner);
+        high = high.max(corner);
+    }
+    if low.is_finite() {
+        ground((low + high) * 0.5)
+    } else {
+        Vec3::ZERO
+    }
+}
+
+pub(crate) fn distance(
     regions: &[RepositoryRegion],
     focus: Vec3,
     fov: f32,
@@ -77,23 +95,13 @@ pub(super) fn distance(
 
 pub(super) fn plan(packing: &Packing, ticks: u32) -> Vec<View> {
     let mut views = Vec::new();
-    let mut focus = Vec3::ZERO;
-    let ease = 1.0 - (-tick_seconds() / 1.5).exp();
+    let focus = packing
+        .sample(u64::from(ticks))
+        .map_or(Vec3::ZERO, |(regions, _, _)| centre(&regions));
     for tick in 0..=ticks {
         let Some((regions, _, _)) = packing.sample(u64::from(tick)) else {
             break;
         };
-        let mut low = Vec2::splat(f32::INFINITY);
-        let mut high = Vec2::splat(f32::NEG_INFINITY);
-        for region in regions.iter().filter(|r| r.live) {
-            for corner in region.corners() {
-                low = low.min(corner);
-                high = high.max(corner);
-            }
-        }
-        if low.is_finite() {
-            focus = focus.lerp(ground((low + high) * 0.5), ease);
-        }
         let depth_bound = regions
             .iter()
             .filter(|r| r.live)
@@ -208,8 +216,10 @@ mod tests {
             ],
         );
         let mut previous = simulation.view().1;
+        let fixed_focus = simulation.view().0;
         for frame in 0..frames_for(simulation.duration(), 60).unwrap() {
             simulation.advance_to(frame, 60);
+            assert_eq!(simulation.view().0, fixed_focus, "camera pan at {frame}");
             let distance = simulation.view().1;
             assert!(distance >= previous - 0.0001, "inward zoom at {frame}");
             assert!(
@@ -240,6 +250,11 @@ mod tests {
             }
         }
         assert_eq!(simulation.commit(), simulation.total());
+        simulation.advance_to(frames_for(simulation.duration(), 60).unwrap() + 60, 60);
+        assert_eq!(simulation.view().0, fixed_focus);
+        simulation.advance_to(0, 60);
+        assert_eq!(simulation.view().0, fixed_focus);
+        simulation.advance_to(frames_for(simulation.duration(), 60).unwrap(), 60);
         assert_eq!(
             simulation
                 .layout()

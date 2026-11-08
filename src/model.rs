@@ -1162,14 +1162,10 @@ impl State {
         if let Some(view) = self
             .region_views
             .get(usize::try_from(self.tick).unwrap_or(usize::MAX))
+            .or_else(|| self.region_views.last())
         {
             self.focus = view.focus;
-            let tops = self.file_tops();
-            let points = self.scene_points(&tops);
-            self.distance = self
-                .distance
-                .max(view.distance)
-                .max(self.fit_distance(self.focus, &points, &tops));
+            self.distance = self.distance.max(view.distance);
         } else {
             let (focus, distance) = self.fit();
             let settle = if distance > self.distance { 0.3 } else { 1.5 };

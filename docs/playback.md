@@ -103,12 +103,15 @@ order. Contributor mappings apply across all repositories, so a matched contribu
 uses one avatar that moves between regions.
 
 Repository rows and order are chosen once from whole-history size, largest nearest the
-camera. Regions grow continuously around their evolving contents; neighbours move
+camera. The row search minimises the distance needed to fit the whole-history regions
+through the automatic camera's perspective at 16:9, including glass and raised labels.
+Regions grow continuously around their evolving contents; neighbours move
 outward with small gaps. New repositories grow into their assigned slots over two
 playback seconds and occupy no space before their first commit. History never pauses
 for layout changes. Region growth and camera easing use canonical playback time, so
-export pacing does not change the layout. The camera follows live regions and only
-zooms outward during growth. Automatic preview and export keep each live glass prism
+export pacing does not change the layout. The automatic camera keeps the whole-history
+arrangement's centre and viewing direction fixed, dollying outward along that direction
+as live regions grow. Automatic preview and export keep each live glass prism
 and raised repository label inside a 24-pixel viewport margin. Zoom anticipates growth
 and repository births; preview uses the current viewport and field of view. Free-camera
 controls remain independent of automatic framing.

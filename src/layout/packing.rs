@@ -3,6 +3,7 @@ use std::sync::Arc;
 use bevy::math::Vec2;
 
 use super::RepositoryRegion;
+use crate::model::framing;
 
 const GAP: f32 = 1.0;
 const GROW_SECONDS: f32 = 2.0;
@@ -71,31 +72,44 @@ impl Packing {
                 .total_cmp(&sizes[a].element_product())
                 .then(a.cmp(&b))
         });
+        let reservations = samples.last().expect("nonempty region history");
+        let sizes: Vec<_> = reservations
+            .high
+            .iter()
+            .zip(&reservations.low)
+            .map(|(high, low)| high - low)
+            .collect();
         let minimum = sizes.iter().map(|size| size.x).fold(0.0_f32, f32::max);
         let maximum = sizes.iter().map(|size| size.x + GAP).sum::<f32>();
         let mut best = Vec::new();
         let mut score = f32::INFINITY;
+        let mut placed = first.clone();
+        for region in &mut placed {
+            region.live = true;
+        }
         for trial in 0..=32_u16 {
             let limit = minimum + (maximum - minimum) * f32::from(trial) / 32.0;
             let mut rows = vec![Vec::new()];
-            let (mut width, mut height, mut x, mut row_height) =
-                (0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32);
+            let (mut height, mut x, mut row_height) = (0.0_f32, 0.0_f32, 0.0_f32);
             for &index in &order {
                 if x > 0.0 && x + sizes[index].x > limit {
-                    width = width.max(x - GAP);
                     height += row_height + GAP;
                     x = 0.0;
                     row_height = 0.0;
                     rows.push(Vec::new());
                 }
                 rows.last_mut().expect("front row exists").push(index);
+                placed[index].low = Vec2::new(x, -height - sizes[index].y);
+                placed[index].high = Vec2::new(x + sizes[index].x, -height);
                 x += sizes[index].x + GAP;
                 row_height = row_height.max(sizes[index].y);
             }
-            width = width.max(x - GAP);
-            height += row_height;
-            let candidate =
-                (width / (16.0 / 9.0)).max(height * crate::model::view_direction().y);
+            let candidate = framing::distance(
+                &placed,
+                framing::centre(&placed),
+                framing::FOV,
+                framing::VIEWPORT,
+            );
             if candidate < score {
                 score = candidate;
                 best = rows;
@@ -182,6 +196,48 @@ impl Packing {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn perspective_fit_prefers_two_rows_for_a_dominant_tall_repository() {
+        let sizes = [
+            Vec2::new(27.0, 22.0),
+            Vec2::new(61.0, 86.0),
+            Vec2::new(19.0, 18.0),
+            Vec2::new(37.0, 26.0),
+            Vec2::new(30.0, 26.0),
+        ];
+        let regions = sizes
+            .iter()
+            .enumerate()
+            .map(|(index, &size)| RepositoryRegion {
+                label: index.to_string(),
+                low: Vec2::ZERO,
+                high: size,
+                live: true,
+            })
+            .collect();
+        let history = [regions];
+        let packing = Packing::build(&history, &sizes);
+        assert_eq!(packing.rows, [vec![1, 3], vec![4, 0, 2]]);
+        assert_eq!(packing.rows, Packing::build(&history, &sizes).rows);
+        let fit = |packing: &Packing| {
+            let regions = packing.sample(0).unwrap().0;
+            framing::distance(
+                &regions,
+                framing::centre(&regions),
+                framing::FOV,
+                framing::VIEWPORT,
+            )
+        };
+        for rows in [
+            vec![vec![1, 3, 4, 0, 2]],
+            vec![vec![1], vec![3, 4], vec![0, 2]],
+        ] {
+            let mut alternative = packing.clone();
+            alternative.rows = rows;
+            assert!(fit(&packing) < fit(&alternative));
+        }
+    }
 
     #[test]
     fn growth_and_births_never_overlap_reorder_or_move_inward() {
