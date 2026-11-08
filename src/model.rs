@@ -1576,6 +1576,56 @@ mod tests {
     }
 
     #[test]
+    fn camera_keeps_moving_repository_glass_inside_the_export_frame() {
+        let histories = (0..5)
+            .map(|index| {
+                let mut history = crate::timeline::synthetic();
+                history.truncate(3);
+                crate::repositories::namespace(&mut history, index);
+                history
+            })
+            .collect();
+        let mut simulation = Simulation::with_repositories(
+            crate::repositories::merge(histories),
+            &Options {
+                seconds_per_day: 0.01,
+                max_idle_seconds: tick_seconds(),
+                ..Options::default()
+            },
+            &Theme::neon(),
+            &Mappings::default(),
+            &[
+                "A".to_owned(),
+                "B".to_owned(),
+                "C".to_owned(),
+                "D".to_owned(),
+                "E".to_owned(),
+            ],
+        );
+        for frame in 1..frames_for(simulation.duration(), 60).unwrap() {
+            simulation.advance_to(frame, 60);
+            let (focus, distance) = simulation.view();
+            let eye = focus + view_direction() * distance;
+            for region in simulation
+                .layout()
+                .repositories
+                .iter()
+                .filter(|region| region.live)
+            {
+                let corners =
+                    region.corners().map(|point| ground(point) + Vec3::Y * 1.1);
+                assert!(
+                    project(eye, focus, &corners).all(|point| point.is_some_and(
+                        |point| point.x.abs() <= 1.0 && point.y.abs() <= 1.0
+                    )),
+                    "frame {frame}: {}",
+                    region.label
+                );
+            }
+        }
+    }
+
+    #[test]
     fn heat_cools_in_canonical_seconds_and_replays_at_any_frame_rate() {
         let mut events = timeline::synthetic();
         events.truncate(1);
