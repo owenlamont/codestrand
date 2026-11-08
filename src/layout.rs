@@ -31,7 +31,6 @@ pub(super) struct File {
     delay: f32,
     pub heat: f32,
     pub activity: f32,
-    pub touch_age: f32,
     pub author: usize,
 }
 
@@ -56,6 +55,7 @@ pub(super) struct Dir {
     pub files: usize,
     children: usize,
     pub live: bool,
+    pub touch_age: f32,
     reserve: f32,
 }
 
@@ -95,6 +95,7 @@ impl Layout {
             files: 0,
             children: 0,
             live: true,
+            touch_age: f32::INFINITY,
             reserve: 0.4,
         };
         Self {
@@ -173,10 +174,11 @@ impl Layout {
             file.delay = delay;
             file.author = author;
             file.activity = 1.0;
-            file.touch_age = 0.0;
+            self.dirs[file.dir].touch_age = 0.0;
             return id;
         }
         let dir = self.ensure_dir(parent_path(path));
+        self.dirs[dir].touch_age = 0.0;
         let slot = self.claim_slot(dir);
         let id = self.next_id;
         self.next_id += 1;
@@ -195,7 +197,6 @@ impl Layout {
                 delay,
                 heat: 0.0,
                 activity: 1.0,
-                touch_age: 0.0,
                 author,
             },
         );
@@ -209,7 +210,7 @@ impl Layout {
                 let file = self.files.get_mut(&id).expect("indexed files exist");
                 file.author = author;
                 file.activity = 1.0;
-                file.touch_age = 0.0;
+                self.dirs[file.dir].touch_age = 0.0;
                 id
             }
             None => self.add(path, 0.0, author),
@@ -228,7 +229,7 @@ impl Layout {
         file.delay = delay;
         file.author = author;
         file.activity = 1.0;
-        file.touch_age = 0.0;
+        self.dirs[file.dir].touch_age = 0.0;
         Some(id)
     }
 
@@ -241,6 +242,7 @@ impl Layout {
             self.release(previous);
             self.files.remove(&previous);
         }
+        self.dirs[self.files[&id].dir].touch_age = 0.0;
         let dir = self.ensure_dir(parent_path(to));
         let slot = if self.files[&id].dir == dir {
             self.files[&id].slot
@@ -257,7 +259,7 @@ impl Layout {
         file.slot = slot;
         file.author = author;
         file.activity = 1.0;
-        file.touch_age = 0.0;
+        self.dirs[file.dir].touch_age = 0.0;
         if file.state == Presence::Leaving {
             file.state = Presence::Arriving;
         }
@@ -286,9 +288,11 @@ impl Layout {
     }
 
     pub(super) fn cool_heat(&mut self, dt: f32, half_life: f32) {
+        for dir in &mut self.dirs {
+            dir.touch_age += dt;
+        }
         let decay = (-dt / half_life).exp2();
         for file in self.files.values_mut() {
-            file.touch_age += dt;
             file.heat *= decay;
             if file.heat < 0.001 {
                 file.heat = 0.0;
@@ -299,11 +303,13 @@ impl Layout {
 
     /// Completes pending fades and relaxes for `steps` ticks, for history before playback.
     pub(super) fn settle(&mut self, steps: u32, dt: f32) {
+        for dir in &mut self.dirs {
+            dir.touch_age = f32::INFINITY;
+        }
         for file in self.files.values_mut() {
             file.delay = 0.0;
             file.heat = 0.0;
             file.activity = 0.0;
-            file.touch_age = f32::INFINITY;
             file.presence = match file.state {
                 Presence::Leaving => 0.0,
                 Presence::Arriving | Presence::Present => 1.0,
@@ -461,6 +467,7 @@ impl Layout {
             files: 0,
             children: 0,
             live: true,
+            touch_age: f32::INFINITY,
             reserve: 0.4,
         });
         self.dir_index.insert(path.to_owned(), index);

@@ -67,11 +67,11 @@ impl Lod {
         for (_, file) in layout.files() {
             low[file.dir] = low[file.dir].min(file.position - Vec2::splat(0.4));
             high[file.dir] = high[file.dir].max(file.position + Vec2::splat(0.4));
-            active[file.dir] |= file.touch_age < 2.5;
             files[file.dir] += 1;
         }
         for index in (0..count).rev() {
             let dir = layout.dir(index);
+            active[index] |= dir.touch_age <= 2.5;
             if dir.live {
                 low[index] = low[index].min(dir.position - Vec2::splat(0.4));
                 high[index] = high[index].max(dir.position + Vec2::splat(0.4));
@@ -223,6 +223,53 @@ mod tests {
         assert!(layout.file(id).unwrap().heat > 0.2);
         lod.sample(&layout, 3.64, view(10000.0));
         assert_eq!(lod.glyph.iter().sum::<f32>(), 1.0);
+    }
+
+    #[test]
+    fn directory_activity_outlives_deleted_and_renamed_files() {
+        for change in ["delete", "rename", "modify"] {
+            let mut layout = Layout::planned_paths(
+                &["a/b/one.rs", "a/b/two.rs", "a/b/three.rs", "other/one.rs"],
+                0,
+            );
+            layout.add("a/b/one.rs", 0.0, 0);
+            layout.add("a/b/two.rs", 0.0, 0);
+            layout.add("a/b/three.rs", 0.0, 0);
+            layout.settle(120, 1.0 / 60.0);
+            let initial = layout.clone();
+            let mut lod = Lod::default();
+            lod.sample(&layout, 0.0, view(10000.0));
+            assert!(lod.collapsed[1]);
+            let id = match change {
+                "delete" => layout.remove("a/b/one.rs", 0.6, 0).unwrap(),
+                "rename" => layout.rename("a/b/one.rs", "other/one.rs", 0),
+                _ => layout.touch("a/b/one.rs", 0),
+            };
+            for tick in 1_u16..=10 {
+                layout.cool_heat(0.25, 3.0);
+                layout.step(0.25);
+                let seconds = f32::from(tick) * 0.25;
+                lod.sample(&layout, seconds, view(10000.0));
+                assert!(!lod.collapsed[1], "{change} at {seconds}");
+                assert!(!lod.collapsed[2], "{change} at {seconds}");
+                let detail = lod.detail.clone();
+                lod.sample(&layout, seconds, view(10000.0));
+                assert_eq!(lod.detail, detail);
+                if change == "delete" && tick >= 6 {
+                    assert!(layout.file(id).is_none());
+                }
+            }
+            layout.cool_heat(0.5, 3.0);
+            layout.step(0.5);
+            lod.sample(&layout, 3.0, view(10000.0));
+            assert!(lod.collapsed[1]);
+            assert!(lod.collapsed[2]);
+            lod.sample(&initial, 0.0, view(10000.0));
+            let mut fresh = Lod::default();
+            fresh.sample(&initial, 0.0, view(10000.0));
+            assert_eq!(lod.detail, fresh.detail);
+            assert_eq!(lod.glyph, fresh.glyph);
+        }
     }
 
     #[test]
