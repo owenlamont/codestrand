@@ -69,7 +69,6 @@ struct Budget {
     changes: u64,
     retained_bytes: u64,
     playback_tip: Option<String>,
-    deadline: std::time::Instant,
     trees: BTreeMap<gix::ObjectId, (u64, usize, usize, u64)>,
 }
 
@@ -83,14 +82,13 @@ impl Budget {
             changes: 0,
             retained_bytes: 0,
             playback_tip: None,
-            deadline: std::time::Instant::now() + std::time::Duration::from_secs(300),
             trees: BTreeMap::new(),
         }
     }
 
     fn charge(&mut self, amount: u64) -> anyhow::Result<()> {
         self.work = self.work.saturating_add(amount);
-        if self.work > self.limits.work || std::time::Instant::now() >= self.deadline {
+        if self.work > self.limits.work {
             return Err(Exhausted.into());
         }
         Ok(())

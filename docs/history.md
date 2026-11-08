@@ -41,7 +41,6 @@ imports are never cached; later runs retry analysis.
 | Potential line comparisons per diff | 1,000,000,000 |
 | Total work charged for objects, bytes and lines | 32 GiB of work units |
 | Accounted graph, tree and retained history storage | 512 MiB |
-| Import deadline | 300 seconds, checked between bounded operations |
 
 Tree summaries count repeated subtrees at every expanded location before diffing.
 Object headers are checked before loading data; lines are counted before interning.
