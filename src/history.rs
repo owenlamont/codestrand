@@ -31,6 +31,150 @@ pub(super) struct History {
     rename_policy: &'static str,
     diff_policy: &'static str,
     pub(super) commits: Vec<Commit>,
+    pub(super) truncated: bool,
+}
+
+#[derive(Clone, Copy)]
+struct Limits {
+    commits: usize,
+    entries: u64,
+    blob_bytes: u64,
+    lines: u64,
+    work: u64,
+    object_bytes: u64,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            commits: 1_000_000,
+            entries: 2_000_000,
+            blob_bytes: 8 * 1024 * 1024 * 1024,
+            lines: 20_000_000,
+            work: 32 * 1024 * 1024 * 1024,
+            object_bytes: 16 * 1024 * 1024,
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("analysis truncated: history resource budget reached")]
+struct Exhausted;
+
+struct Budget {
+    limits: Limits,
+    blob_bytes: u64,
+    lines: u64,
+    work: u64,
+    changes: u64,
+    retained_bytes: u64,
+    playback_tip: Option<String>,
+    deadline: std::time::Instant,
+    trees: BTreeMap<gix::ObjectId, (u64, usize, usize, u64)>,
+}
+
+impl Budget {
+    fn new(limits: Limits) -> Self {
+        Self {
+            limits,
+            blob_bytes: 0,
+            lines: 0,
+            work: 0,
+            changes: 0,
+            retained_bytes: 0,
+            playback_tip: None,
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(300),
+            trees: BTreeMap::new(),
+        }
+    }
+
+    fn charge(&mut self, amount: u64) -> anyhow::Result<()> {
+        self.work = self.work.saturating_add(amount);
+        if self.work > self.limits.work || std::time::Instant::now() >= self.deadline {
+            return Err(Exhausted.into());
+        }
+        Ok(())
+    }
+
+    fn retain(&mut self, bytes: u64) -> anyhow::Result<()> {
+        self.retained_bytes = self.retained_bytes.saturating_add(bytes);
+        if self.retained_bytes > 512 * 1024 * 1024 {
+            return Err(Exhausted.into());
+        }
+        Ok(())
+    }
+
+    fn change(&mut self, change: &TreeChange<'_, '_, '_>) -> anyhow::Result<()> {
+        self.changes += 1;
+        self.charge(1)?;
+        if self.changes > self.limits.entries {
+            return Err(Exhausted.into());
+        }
+        let source_bytes = match change {
+            TreeChange::Rewrite {
+                source_location, ..
+            } => source_location.len(),
+            _ => 0,
+        };
+        self.retain((change.location().len() + source_bytes + 512) as u64)
+    }
+
+    fn object(
+        &mut self,
+        repo: &gix::Repository,
+        id: gix::ObjectId,
+    ) -> anyhow::Result<u64> {
+        self.charge(1)?;
+        let size = repo.find_header(id)?.size();
+        if size > self.limits.object_bytes {
+            return Err(Exhausted.into());
+        }
+        self.charge(size)?;
+        Ok(size)
+    }
+
+    fn tree(
+        &mut self,
+        repo: &gix::Repository,
+        id: gix::ObjectId,
+        depth: usize,
+    ) -> anyhow::Result<(u64, usize, usize, u64)> {
+        self.charge(1)?;
+        if depth > 256 {
+            return Err(Exhausted.into());
+        }
+        if let Some(&summary) = self.trees.get(&id) {
+            return Ok(summary);
+        }
+        let bytes = self.object(repo, id)?;
+        self.retain(bytes + 128)?;
+        let tree = repo.find_tree(id)?;
+        let mut summary = (0u64, 0usize, 0usize, 0u64);
+        for entry in tree.iter() {
+            self.charge(1)?;
+            let entry = entry?;
+            let child = if entry.mode().is_tree() {
+                self.tree(repo, entry.object_id(), depth + 1)?
+            } else {
+                (0, 0, 0, 0)
+            };
+            summary.0 = summary.0.saturating_add(1 + child.0);
+            summary.1 = summary.1.max(1 + child.1);
+            summary.2 = summary.2.max(entry.filename().len() + 1 + child.2);
+            summary.3 = summary.3.saturating_add(child.3).saturating_add(
+                (entry.filename().len() as u64 + 1).saturating_mul(1 + child.0),
+            );
+            if summary.0 > self.limits.entries
+                || summary.1 > 256
+                || summary.2 > 16_384
+                || summary.3 > 64 * 1024 * 1024
+            {
+                return Err(Exhausted.into());
+            }
+        }
+        self.trees.insert(id, summary);
+        Ok(summary)
+    }
 }
 
 #[derive(Serialize)]
@@ -107,20 +251,37 @@ pub(super) fn resolve(
     path: &Path,
     revision: &str,
 ) -> Result<(gix::Repository, gix::ObjectId), Error> {
-    let mut repo = gix::open(path).map_err(|source| Error::Open {
+    let mut repo = gix::open_opts(
+        path,
+        gix::open::Options::default()
+            .config_overrides(["gitoxide.objects.allocLimit=16777216"]),
+    )
+    .map_err(|source| Error::Open {
         path: path.to_owned(),
         source,
     })?;
     repo.object_cache_size(64 * 1024 * 1024);
     let tip = repo
         .rev_parse_single(revision)
-        .and_then(|id| id.object())
-        .and_then(gix::Object::peel_to_commit)
+        .and_then(|id| {
+            let header = match id.header() {
+                Ok(header) => header,
+                Err(error) if error.is_resource_exhausted() => return Ok(id.detach()),
+                Err(error) => return Err(error),
+            };
+            if header.kind() == gix::objs::Kind::Commit
+                || header.size() > Limits::default().object_bytes
+            {
+                return Ok(id.detach());
+            }
+            id.object()
+                .and_then(gix::Object::peel_to_commit)
+                .map(|commit| commit.id)
+        })
         .map_err(|source| Error::Revision {
             revision: revision.to_owned(),
             source,
-        })?
-        .id;
+        })?;
     Ok((repo, tip))
 }
 
@@ -132,18 +293,96 @@ pub(super) fn import_resolved(
 }
 
 fn load(repo: &gix::Repository, tip: gix::ObjectId) -> anyhow::Result<History> {
+    load_with_limits(repo, tip, Limits::default())
+}
+
+fn load_with_limits(
+    repo: &gix::Repository,
+    tip: gix::ObjectId,
+    limits: Limits,
+) -> anyhow::Result<History> {
+    let mut budget = Budget::new(limits);
+    let mut history = History {
+        tip: tip.to_string(),
+        merge_policy: "first-parent",
+        rename_policy: "exact-content-nonempty-no-copies",
+        diff_policy: "raw-blobs-histogram-nul-in-first-8000-bytes",
+        commits: Vec::new(),
+        truncated: false,
+    };
+    match bounded_load(repo, tip, &mut budget, &mut history.commits) {
+        Ok(()) => (),
+        Err(error)
+            if error.is::<Exhausted>()
+                || error.chain().any(|cause| {
+                    cause
+                        .downcast_ref::<gix::Error>()
+                        .is_some_and(gix::Error::is_resource_exhausted)
+                }) =>
+        {
+            history.truncated = true;
+            if let Some(tip) = &budget.playback_tip {
+                history.tip.clone_from(tip);
+            }
+            eprintln!(
+                "analysis truncated: history resource budget reached; showing completed commits only"
+            );
+        }
+        Err(error) => return Err(error),
+    }
+    Ok(history)
+}
+
+fn reachable(
+    repo: &gix::Repository,
+    tip: gix::ObjectId,
+    budget: &mut Budget,
+) -> anyhow::Result<BTreeMap<gix::ObjectId, Vec<gix::ObjectId>>> {
     let mut commits = BTreeMap::new();
     let mut pending = vec![tip];
     while let Some(id) = pending.pop() {
         if commits.contains_key(&id) {
             continue;
         }
+        if commits.len() >= budget.limits.commits {
+            return Err(Exhausted.into());
+        }
+        budget.object(repo, id).with_context(|| {
+            format!("read commit {id}; complete local history is required")
+        })?;
         let commit = repo.find_commit(id).with_context(|| {
             format!("read commit {id}; complete local history is required")
         })?;
-        let parents: Vec<_> = commit.parent_ids().map(gix::Id::detach).collect();
+        let mut parents = Vec::new();
+        for parent in commit.parent_ids() {
+            budget.charge(1)?;
+            if pending.len() + parents.len() >= budget.limits.commits {
+                return Err(Exhausted.into());
+            }
+            parents.push(parent.detach());
+        }
         pending.extend(&parents);
+        budget.retain((parents.len() * 64 + 256) as u64)?;
         commits.insert(id, parents);
+    }
+    Ok(commits)
+}
+
+fn bounded_load(
+    repo: &gix::Repository,
+    tip: gix::ObjectId,
+    budget: &mut Budget,
+    ordered: &mut Vec<Commit>,
+) -> anyhow::Result<()> {
+    let commits = reachable(repo, tip, budget)?;
+    let mut first_parents = BTreeSet::new();
+    let mut current = Some(tip);
+    while let Some(id) = current {
+        budget.charge(1)?;
+        if !first_parents.insert(id) {
+            bail!("commit graph contains a cycle");
+        }
+        current = commits[&id].first().copied();
     }
     let mut children: BTreeMap<_, Vec<_>> = BTreeMap::new();
     let mut remaining = BTreeMap::new();
@@ -158,21 +397,23 @@ fn load(repo: &gix::Repository, tip: gix::ObjectId) -> anyhow::Result<History> {
             children.entry(parent).or_default().push(id);
         }
     }
-    let mut resources = repo.diff_resource_cache(
-        gix::diff::blob::pipeline::Mode::ToGit,
-        gix::diff::blob::pipeline::WorktreeRoots::default(),
-    )?;
-    let mut ordered = Vec::with_capacity(commits.len());
+    let mut resources = bounded_resources(repo, budget)?;
     while let Some(id) = ready.pop_first() {
+        budget.charge(1)?;
         let commit = repo.find_commit(id)?;
         let parents = &commits[&id];
         let before = if let Some(parent) = parents.first() {
-            repo.find_commit(*parent)?.tree()?
+            let before_id = repo.find_commit(*parent)?.tree_id()?.detach();
+            budget.tree(repo, before_id, 0)?;
+            repo.find_tree(before_id)?
         } else {
             repo.empty_tree()
         };
-        let after = commit.tree()?;
+        let after_id = commit.tree_id()?.detach();
+        budget.tree(repo, after_id, 0)?;
+        let after = repo.find_tree(after_id)?;
         let mut changes = Vec::new();
+        let mut exhausted = false;
         before
             .changes()?
             .options(|options| {
@@ -186,19 +427,28 @@ fn load(repo: &gix::Repository, tip: gix::ObjectId) -> anyhow::Result<History> {
                     }));
             })
             .for_each_to_obtain_tree_with_cache(&after, &mut resources, |change| {
+                if budget.change(&change).is_err() {
+                    exhausted = true;
+                    return Ok(ControlFlow::Break(()));
+                }
                 changes.extend(records(change).into_iter().flatten());
                 Ok(ControlFlow::Continue(()))
             })?;
+        if exhausted {
+            return Err(Exhausted.into());
+        }
         resources.clear_resource_cache();
         changes.sort_by(|a, b| {
             (&a.path, &a.source_path, &a.kind).cmp(&(&b.path, &b.source_path, &b.kind))
         });
         for change in &mut changes {
-            change.diff = blob_diff(repo, change).with_context(|| {
-                format!("diff path {:?} in commit {id}", change.path)
-            })?;
+            change.diff =
+                bounded_blob_diff(repo, change, budget).with_context(|| {
+                    format!("diff path {:?} in commit {id}", change.path)
+                })?;
         }
         let decoded = commit.decode()?;
+        budget.retain(commit.data.len() as u64 * 3)?;
         ordered.push(Commit {
             id: id.to_string(),
             parents: parents.iter().map(ToString::to_string).collect(),
@@ -207,6 +457,9 @@ fn load(repo: &gix::Repository, tip: gix::ObjectId) -> anyhow::Result<History> {
             message: decoded.message.to_vec(),
             changes,
         });
+        if first_parents.contains(&id) {
+            budget.playback_tip = Some(id.to_string());
+        }
         for child in children.get(&id).into_iter().flatten() {
             let count = remaining
                 .get_mut(child)
@@ -220,13 +473,22 @@ fn load(repo: &gix::Repository, tip: gix::ObjectId) -> anyhow::Result<History> {
     if ordered.len() != commits.len() {
         bail!("commit graph contains a cycle");
     }
-    Ok(History {
-        tip: tip.to_string(),
-        merge_policy: "first-parent",
-        rename_policy: "exact-content-nonempty-no-copies",
-        diff_policy: "raw-blobs-histogram-nul-in-first-8000-bytes",
-        commits: ordered,
-    })
+    Ok(())
+}
+
+fn bounded_resources(
+    repo: &gix::Repository,
+    budget: &mut Budget,
+) -> anyhow::Result<gix::diff::blob::Platform> {
+    if let Ok(head) = repo.head_id() {
+        budget.object(repo, head.detach())?;
+        let tree = repo.find_commit(head.detach())?.tree_id()?.detach();
+        budget.tree(repo, tree, 0)?;
+    }
+    Ok(repo.diff_resource_cache(
+        gix::diff::blob::pipeline::Mode::ToGit,
+        gix::diff::blob::pipeline::WorktreeRoots::default(),
+    )?)
 }
 
 fn identity(raw: &[u8]) -> anyhow::Result<Identity> {
@@ -347,7 +609,11 @@ fn record(change: TreeChange<'_, '_, '_>) -> Option<Change> {
     })
 }
 
-fn blob_diff(repo: &gix::Repository, change: &Change) -> anyhow::Result<BlobDiff> {
+fn bounded_blob_diff(
+    repo: &gix::Repository,
+    change: &Change,
+    budget: &mut Budget,
+) -> anyhow::Result<BlobDiff> {
     if change
         .before
         .iter()
@@ -356,12 +622,17 @@ fn blob_diff(repo: &gix::Repository, change: &Change) -> anyhow::Result<BlobDiff
     {
         return Ok(BlobDiff::Gitlink);
     }
-    let load = |entry: &Option<Entry>| -> anyhow::Result<Vec<u8>> {
+    let mut load = |entry: &Option<Entry>| -> anyhow::Result<Vec<u8>> {
         match entry {
-            Some(entry) => Ok(repo
-                .find_blob(gix::ObjectId::from_hex(entry.id.as_bytes())?)?
-                .data
-                .clone()),
+            Some(entry) => {
+                let id = gix::ObjectId::from_hex(entry.id.as_bytes())?;
+                let size = budget.object(repo, id)?;
+                budget.blob_bytes = budget.blob_bytes.saturating_add(size);
+                if budget.blob_bytes > budget.limits.blob_bytes {
+                    return Err(Exhausted.into());
+                }
+                Ok(repo.find_blob(id)?.data.clone())
+            }
             None => Ok(Vec::new()),
         }
     };
@@ -375,12 +646,24 @@ fn blob_diff(repo: &gix::Repository, change: &Change) -> anyhow::Result<BlobDiff
     {
         return Ok(BlobDiff::Binary);
     }
+    let lines = |bytes: &[u8]| bytes.split(|&byte| byte == b'\n').count() as u64;
+    let before_lines = lines(&before);
+    let after_lines = lines(&after);
+    budget.lines = budget.lines.saturating_add(before_lines + after_lines);
+    if budget.lines > budget.limits.lines {
+        return Err(Exhausted.into());
+    }
+    if before_lines.saturating_mul(after_lines) > 1_000_000_000 {
+        return Err(Exhausted.into());
+    }
+    budget.charge(before_lines + after_lines)?;
     let input =
         gix::diff::blob::InternedInput::new(before.as_slice(), after.as_slice());
     let diff = gix::diff::blob::diff_with_slider_heuristics(
         gix::diff::blob::Algorithm::Histogram,
         &input,
     );
+    budget.retain(diff.hunks().count() as u64 * 16 + 512)?;
     let mut samples = Vec::new();
     for hunk in diff.hunks().filter(|_| {
         !crate::diff_samples::sensitive_path(&change.path)
@@ -412,4 +695,185 @@ fn blob_diff(repo: &gix::Repository, change: &Change) -> anyhow::Result<BlobDiff
         hunks,
         samples,
     })
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+
+    fn hostile_history(
+        levels: usize,
+        blob: &[u8],
+    ) -> (tempfile::TempDir, gix::Repository, gix::ObjectId) {
+        hostile_path(levels, blob, b"file")
+    }
+
+    fn hostile_path(
+        levels: usize,
+        blob: &[u8],
+        filename: &[u8],
+    ) -> (tempfile::TempDir, gix::Repository, gix::ObjectId) {
+        let root = crate::cache::test_directory().unwrap();
+        let repo = gix::init(root.path()).unwrap();
+        let blob = repo.write_blob(blob).unwrap().detach();
+        let mut tree = repo
+            .write_object(&gix::objs::Tree {
+                entries: vec![gix::objs::tree::Entry {
+                    mode: gix::objs::tree::EntryKind::Blob.into(),
+                    filename: filename.into(),
+                    oid: blob,
+                }],
+            })
+            .unwrap()
+            .detach();
+        for _ in 0..levels {
+            tree = repo
+                .write_object(&gix::objs::Tree {
+                    entries: ["a", "b"]
+                        .into_iter()
+                        .map(|name| gix::objs::tree::Entry {
+                            mode: gix::objs::tree::EntryKind::Tree.into(),
+                            filename: name.into(),
+                            oid: tree,
+                        })
+                        .collect(),
+                })
+                .unwrap()
+                .detach();
+        }
+        let signature = gix::actor::Signature {
+            name: "Author".into(),
+            email: "a@b".into(),
+            time: gix::date::Time {
+                seconds: 1_700_000_000,
+                offset: 0,
+            },
+        };
+        let tip = repo
+            .write_object(&gix::objs::Commit {
+                tree,
+                parents: std::iter::empty().collect(),
+                author: signature.clone(),
+                committer: signature,
+                encoding: None,
+                message: "fixture".into(),
+                extra_headers: Vec::new(),
+            })
+            .unwrap()
+            .detach();
+        (root, repo, tip)
+    }
+
+    #[test]
+    fn expanded_tree_and_inflated_diff_stop_cleanly() {
+        for (levels, blob) in [
+            (12, b"ok\n".to_vec()),
+            (
+                0,
+                b"line with repeated compressible content and enough bytes per line\n"
+                    .repeat(131_072),
+            ),
+        ] {
+            let (_root, repo, tip) = hostile_history(levels, &blob);
+            let history = load_with_limits(
+                &repo,
+                tip,
+                Limits {
+                    entries: 4096,
+                    blob_bytes: 4 * 1024 * 1024,
+                    ..Limits::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(serde_json::to_value(history).unwrap()["truncated"], true);
+        }
+    }
+
+    #[test]
+    fn each_independent_budget_truncates_instead_of_failing() {
+        let (_root, repo, tip) = hostile_history(0, b"first\nsecond\n");
+        for limits in [
+            Limits {
+                commits: 0,
+                ..Limits::default()
+            },
+            Limits {
+                entries: 0,
+                ..Limits::default()
+            },
+            Limits {
+                blob_bytes: 0,
+                ..Limits::default()
+            },
+            Limits {
+                lines: 0,
+                ..Limits::default()
+            },
+            Limits {
+                work: 0,
+                ..Limits::default()
+            },
+            Limits {
+                object_bytes: 0,
+                ..Limits::default()
+            },
+        ] {
+            assert!(load_with_limits(&repo, tip, limits).unwrap().truncated);
+        }
+        assert!(!import_resolved(&repo, tip).unwrap().truncated);
+    }
+
+    #[test]
+    fn deep_shared_tree_stops_before_gix_expansion() {
+        let (_root, repo, tip) = hostile_history(512, b"ok\n");
+        assert!(import_resolved(&repo, tip).unwrap().truncated);
+    }
+
+    #[test]
+    fn head_expansion_is_checked_before_diff_cache_construction() {
+        let (root, _repo, tip) = hostile_history(12, b"ok\n");
+        std::fs::write(root.path().join(".git/HEAD"), format!("{tip}\n")).unwrap();
+        let (repo, tip) = resolve(root.path(), "HEAD").unwrap();
+        assert!(
+            load_with_limits(
+                &repo,
+                tip,
+                Limits {
+                    entries: 4096,
+                    ..Limits::default()
+                }
+            )
+            .unwrap()
+            .truncated
+        );
+    }
+
+    #[test]
+    fn oversized_revision_stops_cleanly() {
+        let (root, repo, _) = hostile_history(0, b"ok\n");
+        let oversized = repo
+            .write_blob(vec![b'x'; 17 * 1024 * 1024])
+            .unwrap()
+            .detach();
+        assert!(
+            import(root.path(), &oversized.to_string())
+                .unwrap()
+                .truncated
+        );
+    }
+
+    // Unix index paths permit invalid UTF-8, so only Windows produces this dependency error.
+    #[cfg(windows)]
+    #[test]
+    fn dependency_path_error_is_escaped() {
+        let (root, _repo, tip) = hostile_path(0, b"ok\n", b"\x1b[31mfile\xff.txt");
+        std::fs::write(root.path().join(".git/HEAD"), format!("{tip}\n")).unwrap();
+        let error = import(root.path(), &tip.to_string())
+            .err()
+            .expect("Windows rejects the index path");
+        let error = anyhow::Error::from(error);
+        let raw = format!("{error:#}");
+        assert!(raw.contains('\u{1b}'));
+        assert!(!crate::terminal_escape(&raw).contains('\u{1b}'));
+    }
 }

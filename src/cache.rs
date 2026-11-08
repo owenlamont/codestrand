@@ -142,7 +142,7 @@ pub(super) fn load(
         tip: tip_text,
         events: timeline::from_history(&history),
     };
-    if let Some(path) = entry {
+    if let Some(path) = entry.filter(|_| !history.truncated) {
         let _ = store(&path, &snapshot);
     }
     Ok(snapshot.events)
