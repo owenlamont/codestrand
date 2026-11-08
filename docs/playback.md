@@ -68,3 +68,18 @@ changing commit times, layout, pulses, beams, avatar motion, settling or fades i
 timeline seconds. Changing live speed preserves the current position.
 
 Commits affecting more than 24 files aim beams at directories to reduce clutter.
+
+## Overview detail
+
+Small subtrees containing multiple files collapse into folder glyphs below a 32-pixel screen
+footprint. Zooming in expands the subtree above 40 pixels; the gap prevents
+flicker near the boundary. Each touch expands the affected subtree and
+its ancestors for 2.5 playback seconds, independently of heat. Files and folders scale
+between the two views over 0.3 real seconds in preview and 0.3 playback seconds in export.
+Footprints use logical pixels and a bounding circle to stay stable during orbit.
+
+Aggregation changes rendering only. Every directory and file keeps the same
+simulation and position at every zoom, including export. Directory landmarks rank by
+subtree size, with at most four extra top-level labels beyond the usual twenty.
+Labels inside fully collapsed subtrees and overlapping directory labels are omitted
+to keep the overview readable.

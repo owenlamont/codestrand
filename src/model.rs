@@ -427,7 +427,15 @@ impl Simulation {
         fragments
     }
 
+    #[cfg(test)]
     pub(super) fn labels(&self) -> Vec<Label> {
+        self.labels_for_detail(|_| true)
+    }
+
+    pub(super) fn labels_for_detail(
+        &self,
+        visible: impl Fn(usize) -> bool,
+    ) -> Vec<Label> {
         let layout = &self.state.layout;
         let mut subtree = vec![0_usize; layout.dir_count()];
         let mut centroids = vec![Vec2::ZERO; layout.dir_count()];
@@ -439,7 +447,10 @@ impl Simulation {
                 current = layout.dir(ancestor).parent;
             }
         }
-        let mut dirs: Vec<_> = layout.dirs().filter(|(_, dir)| dir.depth > 0).collect();
+        let mut dirs: Vec<_> = layout
+            .dirs()
+            .filter(|(index, dir)| dir.depth > 0 && visible(*index))
+            .collect();
         dirs.sort_by_key(|&(index, dir)| {
             (
                 std::cmp::Reverse(subtree[index] >> dir.depth.min(16)),
@@ -447,9 +458,25 @@ impl Simulation {
                 index,
             )
         });
+        let mut extra = 0;
+        let mut dirs: Vec<_> = dirs
+            .into_iter()
+            .enumerate()
+            .filter(|(rank, (_, dir))| {
+                if *rank < DIR_LABELS {
+                    true
+                } else if dir.depth == 1 && extra < 4 {
+                    extra += 1;
+                    true
+                } else {
+                    false
+                }
+            })
+            .map(|(_, dir)| dir)
+            .collect();
+        dirs.sort_by_key(|&(index, _)| std::cmp::Reverse(subtree[index]));
         let mut labels: Vec<Label> = dirs
             .into_iter()
-            .take(DIR_LABELS)
             .map(|(index, dir)| Label {
                 position: ground(centroids[index] / count(subtree[index].max(1))),
                 text: format!("{}/", dir.name()),
@@ -1563,6 +1590,60 @@ mod tests {
                 .iter()
                 .any(|label| label.text.ends_with("fixtures/"))
         );
+    }
+
+    #[test]
+    fn landmarks_rank_large_nested_subtrees_before_small_top_level_directories() {
+        let mut sim = simulation();
+        let paths: Vec<_> = (0..30)
+            .flat_map(|dir| (0..8).map(move |file| format!("big/d{dir}/f{file}.rs")))
+            .chain(std::iter::once("small/one.rs".to_owned()))
+            .collect();
+        sim.state.layout = Layout::planned_paths(
+            &paths.iter().map(String::as_str).collect::<Vec<_>>(),
+            0,
+        );
+        for path in &paths {
+            sim.state.layout.add(path, 0.0, 0);
+        }
+        let labels = sim.labels();
+        assert!(labels.iter().any(|label| label.text == "small/"));
+        assert!(
+            labels
+                .iter()
+                .filter(|label| label.text.starts_with('d'))
+                .count()
+                >= DIR_LABELS - 1
+        );
+        assert_eq!(labels[0].text, "big/");
+        assert_eq!(labels.last().unwrap().text, "small/");
+    }
+
+    #[test]
+    fn extra_top_level_landmarks_are_capped_and_hidden_directories_are_excluded() {
+        let mut sim = simulation();
+        let paths: Vec<_> = (0..50).map(|index| format!("d{index}/file.rs")).collect();
+        sim.state.layout = Layout::planned_paths(
+            &paths.iter().map(String::as_str).collect::<Vec<_>>(),
+            0,
+        );
+        for path in &paths {
+            sim.state.layout.add(path, 0.0, 0);
+        }
+        assert_eq!(
+            sim.labels()
+                .iter()
+                .filter(|label| label.kind == LabelKind::Landmark)
+                .count(),
+            DIR_LABELS + 4
+        );
+        let visible = sim.labels_for_detail(|index| index == 1);
+        let landmarks: Vec<_> = visible
+            .iter()
+            .filter(|label| label.kind == LabelKind::Landmark)
+            .collect();
+        assert_eq!(landmarks.len(), 1);
+        assert_eq!(landmarks[0].text, "d0/");
     }
 
     #[test]
