@@ -119,3 +119,6 @@ offline playback can reuse expired images. Failed refreshes retain cached images
 `--no-cache` disables avatar cache reads and writes too; local overrides still work.
 Delete the directory to clear saved avatars. Circular portraits retain the contributor
 colour as a ring; contributors without images keep the coloured sphere.
+
+Cache reads and writes reject linked directories in every path component. An unusable
+cache is treated as a miss; no linked destination is read or written.
