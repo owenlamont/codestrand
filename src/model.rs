@@ -354,7 +354,8 @@ impl Simulation {
         {
             active[event.repository] = true;
         }
-        let mut samples = vec![self.layout().local_regions(&active)];
+        let geometry = self.state.geometry;
+        let mut samples = vec![self.layout().local_regions(&active, geometry)];
         let mut sampled_events = 0;
         let ticks = frames_for(self.duration(), 60)
             .expect("multi-repository playback fits the supported frame range");
@@ -364,7 +365,7 @@ impl Simulation {
                 active[event.repository] = true;
             }
             sampled_events = self.state.next_event;
-            samples.push(self.layout().local_regions(&active));
+            samples.push(self.layout().local_regions(&active, geometry));
         }
         self.packing = crate::layout::packing::Packing::build(&samples);
         self.state = self.initial.clone();
@@ -1719,21 +1720,27 @@ mod tests {
             simulation.advance_to(frame, 60);
             let (focus, distance) = simulation.view();
             let eye = focus + view_direction() * distance;
-            for region in simulation
-                .layout()
-                .repositories
-                .iter()
-                .filter(|region| region.live)
-            {
-                let corners =
-                    region.corners().map(|point| ground(point) + Vec3::Y * 1.1);
-                assert!(
-                    project(eye, focus, &corners).all(|point| point.is_some_and(
-                        |point| point.x.abs() <= 1.0 && point.y.abs() <= 1.0
-                    )),
-                    "frame {frame}: {}",
-                    region.label
-                );
+            let layout = simulation.layout();
+            let geometry = simulation.theme().geometry();
+            for (_, file) in layout.files() {
+                let presence = file.visible_presence(layout.dir(file.dir));
+                if presence <= 0.0 {
+                    continue;
+                }
+                let tile = layout.repositories[layout.dir(file.dir).repository]
+                    .tile
+                    .unwrap();
+                let corners = box_corners(geometry.file_min, geometry.file_max)
+                    .map(|corner| ground(file.position) + corner * presence);
+                for point in project(eye, focus, &corners) {
+                    let point = point.expect("visible file in front of camera");
+                    assert!(
+                        point.cmpge(tile.low - Vec2::splat(0.0001)).all()
+                            && point.cmple(tile.high + Vec2::splat(0.0001)).all(),
+                        "frame {frame} {} at {point:?} outside {tile:?}",
+                        file.path
+                    );
+                }
             }
         }
     }

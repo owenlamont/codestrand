@@ -5,6 +5,7 @@ use serde::Serialize;
 
 use super::{Simulation, framing};
 use crate::layout::{Layout, packing::Tile};
+mod gaps;
 
 pub(crate) fn largest_empty(tiles: &[Tile]) -> f32 {
     let mut edges = vec![-1.0, 1.0];
@@ -42,6 +43,14 @@ struct Repository {
     tile_area: f32,
     content_area: f32,
     content_fill: f32,
+    content_low: [f32; 2],
+    content_high: [f32; 2],
+    reserved_low: [f32; 2],
+    reserved_high: [f32; 2],
+    current_low: [f32; 2],
+    current_high: [f32; 2],
+    scale: f32,
+    rotated: bool,
 }
 
 #[derive(Serialize)]
@@ -51,6 +60,7 @@ pub(crate) struct Metrics {
     pub largest_empty_rectangle: f32,
     content_fill: f32,
     repositories: Vec<Repository>,
+    pub content_largest_empty_inset: f32,
 }
 
 pub(crate) fn measure(layout: &Layout) -> Metrics {
@@ -58,31 +68,53 @@ pub(crate) fn measure(layout: &Layout) -> Metrics {
     let mut tiles = Vec::new();
     let mut content = 0.0;
     let mut coverage = 0.0;
+    let mut polygons = Vec::new();
     for (index, region) in layout.repositories.iter().enumerate() {
         let Some(tile) = region.tile else {
             continue;
         };
         let mut low = Vec2::splat(f32::INFINITY);
         let mut high = Vec2::splat(f32::NEG_INFINITY);
+        let mut current_low = low;
+        let mut current_high = high;
+        let mut scale = 0.0_f32;
         for (_, dir) in layout.dirs().filter(|(_, dir)| dir.repository == index) {
             let centre = crate::layout::region_coordinates(dir.position);
+            scale = dir.scale;
             low = low.min(centre - Vec2::splat(dir.radius()));
             high = high.max(centre + Vec2::splat(dir.radius()));
+            current_low = current_low.min(centre - Vec2::splat(dir.radius() + scale));
+            current_high = current_high.max(centre + Vec2::splat(dir.radius() + scale));
         }
         for (_, file) in layout
             .files()
             .filter(|(_, file)| layout.dir(file.dir).repository == index)
         {
+            let point = crate::layout::region_coordinates(file.position);
+            scale = layout.dir(file.dir).scale;
+            current_low = current_low.min(point - Vec2::splat(scale));
+            current_high = current_high.max(point + Vec2::splat(scale));
             let radius = 0.27 * file.visible_presence(layout.dir(file.dir));
             if radius <= 0.0 {
                 continue;
             }
-            let point = crate::layout::region_coordinates(file.position);
             low = low.min(point - Vec2::splat(radius));
             high = high.max(point + Vec2::splat(radius));
         }
         let content_area = if low.is_finite() {
-            framing::project_rectangle(low, high)
+            let mut polygon: Vec<_> = crate::layout::outline::rectangle(low, high)
+                .into_iter()
+                .map(framing::project_ground)
+                .collect();
+            for axis in [Vec2::X, Vec2::Y] {
+                polygon =
+                    crate::layout::outline::clip(&polygon, axis, axis.dot(tile.high));
+                polygon =
+                    crate::layout::outline::clip(&polygon, -axis, -axis.dot(tile.low));
+            }
+            let area = crate::layout::outline::area(&polygon) * 0.25;
+            polygons.push(polygon);
+            area
         } else {
             0.0
         };
@@ -98,6 +130,14 @@ pub(crate) fn measure(layout: &Layout) -> Metrics {
             tile_area,
             content_area,
             content_fill: content_area / tile_area.max(1e-12),
+            content_low: low.to_array(),
+            content_high: high.to_array(),
+            reserved_low: region.low.to_array(),
+            reserved_high: region.high.to_array(),
+            current_low: current_low.to_array(),
+            current_high: current_high.to_array(),
+            scale,
+            rotated: region.rotated,
         });
     }
     Metrics {
@@ -106,6 +146,7 @@ pub(crate) fn measure(layout: &Layout) -> Metrics {
         largest_empty_rectangle: largest_empty(&tiles),
         content_fill: content / coverage.max(1e-12),
         repositories,
+        content_largest_empty_inset: gaps::largest(&polygons),
     }
 }
 
@@ -116,7 +157,7 @@ pub(crate) fn run(
     serde_json::to_writer(
         &mut *writer,
         &serde_json::json!({"definitions":
-        "All areas are fractions of the full 1280x720 frame. Glass tiles are disjoint screen rectangles inside the 24 px margin. Largest empty rectangle is the exact maximum axis-aligned rectangle outside their union, including the margin. Content is the projected ground-plane AABB of current directory discs and file positions padded by their rendered size; not glyph ink or opaque pixel occupancy. Content fill divides content-envelope area by tile area; overall fill is area weighted. The first repository owns the empty lead-in tile. Weights are eased live file counts; empty active repositories retain weight one until archived. Samples include every commit boundary and every playback second."}),
+        "All areas are fractions of the full 1280x720 frame. Glass tiles are disjoint screen rectangles inside the 24 px margin. Largest empty rectangle is the exact maximum axis-aligned rectangle outside their union, including the margin. Content is the projected ground-plane AABB of current directory discs and file positions padded by their rendered size; not glyph ink or opaque pixel occupancy. Content fill divides content-envelope area by tile area; overall fill is area weighted. The first repository owns the empty lead-in tile. Weights are eased live file counts; empty active repositories retain weight one until archived. Samples include every canonical 1/60 second. Content AABBs are clipped to their own tiles; actual footprints may use trapezoid corners. Content largest-empty rectangles use fully covered cells on a 160x90 grid inside the 24 px margin, with 8 px boundary uncertainty."}),
     )?;
     writeln!(writer)?;
     let frames = super::frames_for(simulation.duration(), 60)?;
@@ -125,22 +166,16 @@ pub(crate) fn run(
     let elapsed = started.elapsed().as_secs_f64();
     std::hint::black_box(placement);
     eprintln!("treemap_single_sample_seconds={elapsed:.9}");
-    let mut previous_commit = usize::MAX;
     for frame in 0..=frames {
         simulation.advance_to(frame, 60);
-        if simulation.commit() != previous_commit
-            || frame.is_multiple_of(60)
-            || frame == frames
-        {
-            serde_json::to_writer(
-                &mut *writer,
-                &serde_json::json!({"frame": frame,
-                "seconds": super::tick_time(u64::from(frame)), "commit": simulation.commit(),
-                "metrics": measure(simulation.layout())}),
-            )?;
-            writeln!(writer)?;
-            previous_commit = simulation.commit();
-        }
+        serde_json::to_writer(
+            &mut *writer,
+            &serde_json::json!({
+                "frame": frame, "seconds": super::tick_time(u64::from(frame)),
+                "commit": simulation.commit(), "metrics": measure(simulation.layout())
+            }),
+        )?;
+        writeln!(writer)?;
         if frame.is_multiple_of(600) {
             eprintln!("treemap frame={frame}/{frames}");
         }
@@ -168,9 +203,8 @@ mod tests {
         assert_eq!(largest_empty(&[]), 1.0);
     }
 
-    #[test]
-    fn realistic_thirty_repository_history_fills_every_live_tick_and_replays() {
-        let histories = (0..30)
+    fn histories() -> Vec<Vec<crate::timeline::Event>> {
+        (0..30)
             .map(|index| {
                 let mut events = crate::timeline::synthetic();
                 for event in &mut events {
@@ -179,7 +213,12 @@ mod tests {
                 crate::repositories::namespace(&mut events, index);
                 events
             })
-            .collect();
+            .collect()
+    }
+
+    #[test]
+    fn realistic_thirty_repository_history_fills_every_live_tick_and_replays() {
+        let histories = histories();
         let names: Vec<_> = (0..30).map(|i| format!("Repository {i}")).collect();
         let mut simulation = Simulation::with_repositories(
             crate::repositories::merge(histories),
@@ -194,9 +233,20 @@ mod tests {
         );
         let frames = super::super::frames_for(simulation.duration(), 60).unwrap();
         let expected = Tile::viewport().area();
+        let rotations: Vec<_> = simulation
+            .layout()
+            .repositories
+            .iter()
+            .map(|r| r.rotated)
+            .collect();
+        let mut fills = Vec::new();
         for frame in 0..=frames {
             simulation.advance_to(frame, 60);
             let regions = &simulation.layout().repositories;
+            assert_eq!(
+                regions.iter().map(|r| r.rotated).collect::<Vec<_>>(),
+                rotations
+            );
             let tiles: Vec<_> = regions.iter().filter_map(|r| r.tile).collect();
             assert!(!tiles.is_empty(), "blank lead-in at frame {frame}");
             assert!(
@@ -221,6 +271,9 @@ mod tests {
             if frame.is_multiple_of(30) {
                 assert!(largest_empty(&tiles) < 0.034);
             }
+            if frame >= 60 && frame.is_multiple_of(60) {
+                fills.push(measure(simulation.layout()).content_fill);
+            }
             assert_eq!(
                 simulation.view(),
                 (bevy::math::Vec3::ZERO, framing::DISTANCE)
@@ -239,6 +292,21 @@ mod tests {
             }
         }
         let snapshot = serde_json::to_vec(&measure(simulation.layout())).unwrap();
+        fills.sort_by(f32::total_cmp);
+        eprintln!(
+            "content fill minimum={} median={}",
+            fills[0],
+            fills[fills.len() / 2]
+        );
+        assert!(
+            fills[0] >= 0.34,
+            "content-fill minimum regressed: {}",
+            fills[0]
+        );
+        assert!(
+            fills[fills.len() / 2] >= 0.60,
+            "content-fill median regressed"
+        );
         simulation.advance_to(0, 60);
         simulation.advance_to(frames, 60);
         assert_eq!(

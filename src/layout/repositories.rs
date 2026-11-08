@@ -35,6 +35,9 @@ impl Layout {
                 live: false,
                 files: 0.0,
                 tile: None,
+                outline: Vec::new(),
+                height: 0.0,
+                rotated: false,
             };
             combined.repositories.push(region);
             let base = combined.dirs.len();
@@ -54,24 +57,24 @@ impl Layout {
         combined
     }
 
-    pub(crate) fn local_regions(&self, active: &[bool]) -> Vec<RepositoryRegion> {
+    pub(crate) fn local_regions(
+        &self,
+        active: &[bool],
+        geometry: crate::theme::Geometry,
+    ) -> Vec<RepositoryRegion> {
         self.repositories
             .iter()
             .enumerate()
             .map(|(repository, region)| {
-                let mut low = Vec2::splat(f32::INFINITY);
-                let mut high = Vec2::splat(f32::NEG_INFINITY);
                 let mut files = 0_u32;
-                for (_, dir) in self.dirs().filter(|(_, dir)| {
-                    dir.repository == repository && (dir.files > 0 || dir.children > 0)
-                }) {
-                    low = low.min(
-                        crate::layout::region_coordinates(dir.position)
-                            - Vec2::splat(dir.radius() + 1.0),
-                    );
-                    high = high.max(
-                        crate::layout::region_coordinates(dir.position)
-                            + Vec2::splat(dir.radius() + 1.0),
+                let mut supports = [f32::NEG_INFINITY; 8];
+                for (_, dir) in
+                    self.dirs().filter(|(_, dir)| dir.repository == repository)
+                {
+                    super::outline::include(
+                        &mut supports,
+                        super::region_coordinates(dir.position),
+                        dir.radius(),
                     );
                 }
                 for (_, file) in self
@@ -81,17 +84,23 @@ impl Layout {
                     if file.state != super::Presence::Leaving {
                         files = files.saturating_add(1);
                     }
-                    low = low.min(
-                        crate::layout::region_coordinates(file.position) - Vec2::ONE,
-                    );
-                    high = high.max(
-                        crate::layout::region_coordinates(file.position) + Vec2::ONE,
-                    );
+                    let presence = file.visible_presence(self.dir(file.dir));
+                    if presence <= 0.0 {
+                        continue;
+                    }
+                    for point in super::outline::rectangle(
+                        Vec2::new(geometry.file_min.x, geometry.file_min.z),
+                        Vec2::new(geometry.file_max.x, geometry.file_max.z),
+                    ) {
+                        super::outline::include(
+                            &mut supports,
+                            super::region_coordinates(file.position + point * presence),
+                            0.0,
+                        );
+                    }
                 }
-                if !low.is_finite() {
-                    low = Vec2::splat(-2.0);
-                    high = Vec2::splat(2.0);
-                }
+                let outline = super::outline::from_supports(supports);
+                let (low, high) = super::outline::bounds(&outline);
                 RepositoryRegion {
                     label: region.label.clone(),
                     low,
@@ -99,6 +108,9 @@ impl Layout {
                     live: active[repository],
                     files: crate::model::count_u32(files),
                     tile: None,
+                    outline,
+                    height: geometry.file_max.y,
+                    rotated: false,
                 }
             })
             .collect()
@@ -129,12 +141,22 @@ impl Layout {
         for dir in &mut self.dirs {
             dir.local_position = dir.position;
             dir.scale = scales[dir.repository];
-            dir.position = dir.position * dir.scale + offsets[dir.repository];
+            let position = if regions[dir.repository].rotated {
+                dir.position.perp()
+            } else {
+                dir.position
+            };
+            dir.position = position * dir.scale + offsets[dir.repository];
         }
         for file in self.files.values_mut() {
             file.local_position = file.position;
             let dir = &self.dirs[file.dir];
-            file.position = file.position * dir.scale + offsets[dir.repository];
+            let position = if regions[dir.repository].rotated {
+                file.position.perp()
+            } else {
+                file.position
+            };
+            file.position = position * dir.scale + offsets[dir.repository];
         }
         self.repositories = regions;
         self.placed = true;
@@ -159,6 +181,14 @@ mod tests {
         }
         crate::repositories::namespace(&mut events, index);
         events
+    }
+
+    fn snapshot(simulation: &Simulation) -> Vec<(u64, String, Vec2)> {
+        simulation
+            .layout()
+            .files()
+            .map(|(id, file)| (id, file.path.clone(), file.position))
+            .collect()
     }
 
     #[test]
@@ -207,17 +237,20 @@ mod tests {
                     .filter(|r| r.live)
                 {
                     assert!(
-                        a.high.x <= b.low.x + 0.0001
-                            || b.high.x <= a.low.x + 0.0001
-                            || a.high.y <= b.low.y + 0.0001
-                            || b.high.y <= a.low.y + 0.0001,
+                        a.tile.unwrap().high.x <= b.tile.unwrap().low.x + 0.0001
+                            || b.tile.unwrap().high.x <= a.tile.unwrap().low.x + 0.0001
+                            || a.tile.unwrap().high.y <= b.tile.unwrap().low.y + 0.0001
+                            || b.tile.unwrap().high.y <= a.tile.unwrap().low.y + 0.0001,
                         "frame {frame}: {} overlaps {}",
                         a.label,
                         b.label
                     );
                 }
             }
-            for (_, file) in layout.files() {
+            for (_, file) in layout
+                .files()
+                .filter(|(_, f)| f.visible_presence(layout.dir(f.dir)) > 0.0)
+            {
                 let region = &layout.repositories[layout.dir(file.dir).repository];
                 assert!(
                     crate::layout::region_coordinates(file.position)
@@ -242,14 +275,6 @@ mod tests {
             }
             assert!(simulation.avatars().len() <= 1);
         }
-        let snapshot = |simulation: &Simulation| {
-            simulation
-                .layout()
-                .files()
-                .map(|(id, file)| (id, file.path.clone(), file.position))
-                .collect::<Vec<_>>()
-        };
-
         simulation.repository_label_plane = crate::repositories::LabelPlane::Raised;
         assert!(
             simulation

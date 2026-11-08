@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, HashMap};
 use bevy::math::Vec2;
 use planner::Plan;
 
+pub(crate) mod outline;
 pub(crate) mod packing;
 mod planner;
 mod repositories;
@@ -15,6 +16,9 @@ pub(super) struct RepositoryRegion {
     pub live: bool,
     pub files: f32,
     pub tile: Option<packing::Tile>,
+    pub outline: Vec<Vec2>,
+    pub height: f32,
+    pub rotated: bool,
 }
 
 pub(super) fn region_coordinates(point: Vec2) -> Vec2 {

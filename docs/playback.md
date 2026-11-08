@@ -104,14 +104,17 @@ uses one avatar that moves between regions.
 
 Live repositories share an ordered treemap inside a 24-pixel margin of the 16:9 export.
 The automatic camera stays fixed. Glass tiles account for perspective and cover the
-whole inset viewport, including while repositories appear or change size. Tile areas
-follow eased current file counts; empty active repositories retain weight one.
-Each repository keeps its local file layout and fits its tile with one uniform scale.
-Different content shapes can still leave space inside a tile.
+whole inset viewport, including while repositories appear or change size. Split ratios
+favour current content fit, with file counts providing priority rather than exact area
+weights; empty active repositories retain weight one. Each repository keeps its local
+file layout and fits its ground tile with one uniform scale. A fixed quarter-turn may
+be selected for a repository's whole history. Different content shapes can still leave
+space inside a tile.
 
 The split tree is selected once using content-fit scores from sampled history shapes,
 with larger repositories first in near-to-far traversal. Split axes and repository order
-remain fixed. File-count changes and births ease over canonical playback time; new
+remain fixed. Shared short transitions coordinate neighbouring tiles and content scales;
+growth reserves last only 0.15 playback seconds. New
 repositories occupy no space before their first commit. History never pauses for layout
 changes, and export pacing does not affect the layout. Other preview aspect ratios use
 conservative framing; the screen-filling allocation targets the 16:9 export camera.

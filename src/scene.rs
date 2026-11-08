@@ -1022,6 +1022,17 @@ fn sync_files(
         let position = Vec3::new(file.position.x, 0.0, file.position.y);
         if let Some(mut transform) = world.get_mut::<Transform>(entity) {
             transform.translation = position;
+            transform.rotation = Quat::from_rotation_y(
+                if layout
+                    .repositories
+                    .get(layout.dir(file.dir).repository)
+                    .is_some_and(|r| r.rotated)
+                {
+                    -std::f32::consts::FRAC_PI_2
+                } else {
+                    0.0
+                },
+            );
             transform.scale =
                 Vec3::splat(file.visible_presence(layout.dir(file.dir)) * detail);
         }
