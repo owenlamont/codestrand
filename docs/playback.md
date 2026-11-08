@@ -122,17 +122,21 @@ gutters partition the whole inset field. Gutters start at 32 pixels between stac
 tiles and 16 pixels between side-by-side tiles, shrinking above twelve repositories.
 Different content shapes can leave space inside a uniformly fitted tile.
 
-Contributors prefer a gutter slot above their current repository, aligned with the
-projected mean of touched files. A valid slot survives consecutive commits to the same
-repository. Placement checks the touched files throughout service, including additions
-and deletions, for an open half-plane and beams crossing another repository or its label.
+Contributors first appear in a gutter slot above their repository, aligned with the
+projected mean of touched files. Switching repositories chooses the nearest valid edge
+instead of requiring a detour to the top. A valid slot survives consecutive commits to
+the same repository. Placement checks the touched files throughout service, including
+additions and deletions, for an open half-plane and beams crossing another repository
+or its label.
 Other edges provide fallback docks. Avatars spread along edges; short names occupy clear
 lanes and yield when no safe name placement fits. Portrait size accounts for perspective.
 
 Multi-repository avatars travel through gutters and the frame margin. Routes avoid
 the full avatar disc, stop at corners and accelerate to at most `--avatar-max-speed`
-reference pixels/second (default `240`, minimum `1`). Crossing trips take turns in
-commit order; parked contributors also reserve clearance. Beams end when their author
+reference pixels/second (default `480`, minimum `1`), with a 0.2-second acceleration ramp.
+Trips reserve clearance in commit order against timed positions. Disjoint routes can
+run concurrently; crossing routes can wait at a clear node. Moving gutters are sampled
+with explicit speed and acceleration checks. Beams end when their author
 departs or changes repository. Idle contributors stay parked and fade as before.
 
 `--travel-cap` limits extra waiting per human trip (default `0.4` seconds; range `0`
@@ -142,6 +146,11 @@ and fades in at the destination. Blocked routes and contributors whose names con
 `[bot]` fade across. Zero disables extra waiting. Single-repository motion is unchanged.
 The caption holds the last applied date during waiting; heat, fragments and fades
 continue in presentation seconds.
+
+Planning starts from the first tick after the contributor's previous service, so gaps
+between that contributor's commits absorb travel before padding is needed. Padding is
+revalidated for at most four passes as the scene geometry changes; the cap applies to
+the accumulated wait per commit, including reserved waits.
 
 The CPU `layout-quality --treemap` report records fallback and least-bad slots,
 live beam crossings, travelling disc intersections, route points and travel padding.

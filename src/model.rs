@@ -71,7 +71,7 @@ impl Default for Options {
             start: 0,
             commits: None,
             travel_cap: 0.4,
-            avatar_max_speed: 240.0,
+            avatar_max_speed: 480.0,
         }
     }
 }
@@ -157,6 +157,7 @@ pub(super) struct Avatar {
     name_visibility: names::Visibility,
     commit: usize,
     slot: Option<slots::Placement>,
+    slot_origin: Option<Vec2>,
 }
 
 pub(super) struct Beam {
@@ -294,18 +295,25 @@ impl Simulation {
         let mut simulation =
             Self::build(events.clone(), options, theme, mappings, &[], repositories);
         if !repositories.is_empty() {
-            let padding = simulation.travel_padding(options);
-            if padding.iter().any(|&(_, ticks)| ticks > 0) {
-                simulation = Self::build(
-                    events,
-                    options,
-                    theme,
-                    mappings,
-                    &padding,
-                    repositories,
-                );
+            let mut padding = simulation.travel_padding(options);
+            for pass in 0..4 {
+                if padding.iter().any(|&(_, ticks)| ticks > 0) {
+                    simulation = Self::build(
+                        events.clone(),
+                        options,
+                        theme,
+                        mappings,
+                        &padding,
+                        repositories,
+                    );
+                }
+                simulation.plan_travel(options, &padding);
+                let adjusted = simulation.adjust_travel_padding(options, &padding);
+                if pass == 3 || adjusted == padding {
+                    break;
+                }
+                padding = adjusted;
             }
-            simulation.plan_travel(options, &padding);
         }
         simulation
     }
@@ -986,6 +994,7 @@ impl State {
             name_visibility: names::Visibility::default(),
             commit: 0,
             slot: None,
+            slot_origin: None,
         });
         self.authors.insert(contributor.key.clone(), index);
         index
@@ -1027,7 +1036,7 @@ impl State {
 
         let avatar = &mut self.avatars[author];
         if avatar.repository != event.repository {
-            avatar.slot = None;
+            avatar.slot_origin = avatar.slot.take().map(|s| s.point);
         }
         avatar.repository = event.repository;
         avatar.commit = self.next_event;

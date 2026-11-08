@@ -78,6 +78,13 @@ pub(super) struct Dock {
 }
 
 impl Dock {
+    #[cfg(test)]
+    pub(in crate::model) fn middle_top() -> Self {
+        Self {
+            edge: 0,
+            fraction: 0.5,
+        }
+    }
     fn point(self, tile: Tile, gap: Vec2) -> Vec2 {
         let low = tile.low * HALF;
         let high = tile.high * HALF;
@@ -357,7 +364,10 @@ impl State {
                 scale: name_scale,
                 envelope,
             };
-            let mut chosen = choice.select(avatar.slot.as_ref().map(|s| s.dock));
+            let mut chosen = avatar.slot_origin.map_or_else(
+                || choice.select(avatar.slot.as_ref().map(|s| s.dock)),
+                |point| choice.nearest(point),
+            );
             record.fallback |= chosen.dock.edge != 0;
             record.least_bad |= !chosen.valid();
             record.half_plane_failures += u32::from(!chosen.half_plane);
@@ -370,6 +380,7 @@ impl State {
                 occupied.push(rect);
             }
             self.avatars[index].slot = Some(chosen);
+            self.avatars[index].slot_origin = None;
         }
     }
 }
@@ -476,6 +487,24 @@ struct Choice<'a> {
 }
 
 impl Choice<'_> {
+    fn nearest(&self, point: Vec2) -> Placement {
+        self.free_docks()
+            .into_iter()
+            .chain((0..4).flat_map(|edge| {
+                (0..=16_u8).map(move |i| Dock {
+                    edge,
+                    fraction: f32::from(i) / 16.0,
+                })
+            }))
+            .map(|dock| self.assess(dock).0)
+            .filter(Placement::valid)
+            .min_by(|a, b| {
+                a.point
+                    .distance_squared(point)
+                    .total_cmp(&b.point.distance_squared(point))
+            })
+            .unwrap_or_else(|| self.select(None))
+    }
     fn assess(&self, dock: Dock) -> (Placement, f32) {
         let point = dock.point(self.tile, self.gap);
         let corners = self.envelope.corners(self.tile);
@@ -873,6 +902,16 @@ mod tests {
     }
 
     #[test]
+    fn repository_switch_uses_a_near_valid_edge_instead_of_the_top() {
+        let free = choice(&[], &[]);
+        let source = Vec2::new(0.0, -250.0);
+        let near = free.nearest(source);
+        assert!(near.valid());
+        assert_eq!(near.dock.edge, 2);
+        assert!(near.point.distance(source) < free.select(None).point.distance(source));
+    }
+
+    #[test]
     fn crowded_fixed_docks_use_free_edge_space() {
         let mut occupied = Vec::new();
         for index in 0..40 {
@@ -1146,7 +1185,7 @@ mod tests {
             std::fs::write(path, serde_json::to_vec_pretty(&summary).unwrap()).unwrap();
         }
         eprintln!("SLOT_SUMMARY {summary}");
-        moving.assert_clear(240.0);
+        moving.assert_clear(sim.travel.stats.max_speed);
     }
 
     #[test]
@@ -1180,6 +1219,16 @@ mod tests {
             &Options {
                 seconds_per_day: 1.0,
                 max_idle_seconds: 0.1,
+                avatar_max_speed: std::env::var("CODESTRAND_TRAVEL_SPEED")
+                    .ok()
+                    .map_or(Options::default().avatar_max_speed, |v| {
+                        v.parse().expect("test speed")
+                    }),
+                travel_cap: std::env::var("CODESTRAND_TRAVEL_CAP")
+                    .ok()
+                    .map_or(Options::default().travel_cap, |v| {
+                        v.parse().expect("test cap")
+                    }),
                 ..Default::default()
             },
             &Theme::neon(),
@@ -1190,5 +1239,14 @@ mod tests {
                 .collect::<Vec<_>>(),
         );
         validate(&mut sim);
+        let default = Options::default();
+        let cap = std::env::var("CODESTRAND_TRAVEL_CAP")
+            .ok()
+            .map_or(default.travel_cap, |v| v.parse::<f32>().expect("test cap"));
+        if sim.travel.stats.max_speed.to_bits() == default.avatar_max_speed.to_bits()
+            && cap.to_bits() == default.travel_cap.to_bits()
+        {
+            sim.travel.assert_human_motion();
+        }
     }
 }

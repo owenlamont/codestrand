@@ -169,7 +169,7 @@ struct Source {
     #[arg(long, default_value_t = 0.4, value_parser = travel_seconds)]
     travel_cap: f32,
     /// Maximum avatar travel speed in pixels/second at the 1280x720 reference size.
-    #[arg(long, default_value_t = 240.0, value_parser = avatar_speed)]
+    #[arg(long, default_value_t = 480.0, value_parser = avatar_speed)]
     avatar_max_speed: f32,
     /// File heat half-life in canonical playback seconds.
     #[arg(long, default_value_t = 3.0, value_parser = positive_seconds)]

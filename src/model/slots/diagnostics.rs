@@ -16,7 +16,7 @@ pub(crate) struct MovingBeams {
     first_disc: Option<serde_json::Value>,
     observed_beams: u64,
     #[serde(skip)]
-    previous: std::collections::BTreeMap<usize, (f32, bevy::math::Vec2, bool)>,
+    previous: std::collections::BTreeMap<usize, (u64, bevy::math::Vec2, bool)>,
 }
 
 impl MovingBeams {
@@ -60,16 +60,16 @@ impl MovingBeams {
             };
             let moving = avatar.presence > 0.0
                 && simulation.travel.travelling(author, state.tick);
-            if let Some((before, position, was_moving)) = self
-                .previous
-                .insert(author, (simulation.seconds(), point, moving))
+            if let Some((before, position, was_moving)) =
+                self.previous.insert(author, (state.tick, point, moving))
                 && moving
                 && was_moving
-                && simulation.seconds() > before
+                && state.tick > before
             {
-                self.maximum_travel_speed = self
-                    .maximum_travel_speed
-                    .max(point.distance(position) / (simulation.seconds() - before));
+                self.maximum_travel_speed = self.maximum_travel_speed.max(
+                    point.distance(position)
+                        / crate::model::tick_time(state.tick - before),
+                );
             }
             for (other, position) in projected.iter().enumerate().skip(author + 1) {
                 if avatar.presence > 0.0

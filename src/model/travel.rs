@@ -4,6 +4,8 @@ use bevy::math::{Rect, Vec2};
 use serde::Serialize;
 
 use super::{Simulation, frames_for, slots, tick_time};
+mod planning;
+use planning::trips;
 
 const HALF: Vec2 = Vec2::new(640.0, 360.0);
 const MAX_POSES: usize = 4_000_000;
@@ -29,6 +31,7 @@ struct Capture {
     services: Vec<Service>,
     poses: Vec<Vec<Pose>>,
     tiles: Vec<Vec<Option<crate::layout::packing::Tile>>>,
+    radii: Vec<f32>,
 }
 
 #[derive(Clone, Debug)]
@@ -44,7 +47,7 @@ struct Leg {
 impl Leg {
     fn new(from: Vec2, to: Vec2, start: f32, speed: f32) -> Self {
         let length = from.distance(to);
-        let acceleration = speed * 2.0;
+        let acceleration = speed * 5.0;
         let peak = speed.min((length * acceleration).sqrt());
         let ramp = peak / acceleration;
         let duration = if peak > 0.0 {
@@ -82,9 +85,40 @@ impl Leg {
 struct Route {
     legs: Vec<Leg>,
     duration: f32,
+    track: Vec<Vec2>,
 }
 
 impl Route {
+    fn is_empty(&self) -> bool {
+        self.legs.is_empty() && self.track.is_empty()
+    }
+    fn point_at(&self, tick: u64) -> Option<Vec2> {
+        if self.track.is_empty() {
+            self.sample(tick_time(tick))
+        } else {
+            Some(
+                self.track[usize::try_from(tick)
+                    .expect("bounded tick")
+                    .min(self.track.len() - 1)],
+            )
+        }
+    }
+    fn points(&self) -> Vec<[f32; 2]> {
+        if self.track.is_empty() {
+            self.legs
+                .iter()
+                .map(|l| l.from.to_array())
+                .chain(self.legs.last().map(|l| l.to.to_array()))
+                .collect()
+        } else {
+            self.track
+                .iter()
+                .step_by((self.track.len() / 64).max(1))
+                .chain(self.track.last())
+                .map(Vec2::to_array)
+                .collect()
+        }
+    }
     fn new(points: &[Vec2], speed: f32) -> Self {
         let mut route = Self::default();
         for points in points.windows(2) {
@@ -118,10 +152,20 @@ struct Trip {
     bot: bool,
     source_repository: usize,
     destination_repository: usize,
+    free: u64,
+    failure: Option<&'static str>,
+    cutoff: Option<u64>,
+    proof: Option<serde_json::Value>,
 }
 
 #[derive(Default, Serialize)]
 pub(super) struct Statistics {
+    pub human_complete: usize,
+    pub human_partial: usize,
+    pub human_no_route: usize,
+    pub bot_fades: usize,
+    pub max_speed: f32,
+    pub idle_human_reentries: usize,
     pub routed: usize,
     pub faded: usize,
     pub blocked: usize,
@@ -139,33 +183,79 @@ pub(super) struct Plan {
 }
 
 impl Plan {
+    #[cfg(test)]
+    pub(super) fn assert_human_motion(&self) {
+        let total = self.stats.human_complete
+            + self.stats.human_partial
+            + self.stats.human_no_route;
+        assert!(
+            self.stats.human_complete * 2 > total,
+            "most human switches must complete"
+        );
+        assert_eq!(self.stats.human_no_route, 0);
+        assert!(
+            self.trips
+                .iter()
+                .filter(|t| !t.bot
+                    && t.fade
+                    && t.source_repository != t.destination_repository)
+                .all(|t| planning::progress(t) >= 1.0),
+            "a partial trip must visibly move"
+        );
+    }
     pub fn report(&self) -> serde_json::Value {
-        serde_json::json!({"statistics":self.stats,"trips":self.trips.iter().map(|t| serde_json::json!({"author":t.author,"commit":t.commit,"source_repository":t.source_repository,"destination_repository":t.destination_repository,"departure":tick_time(t.departure),"service":tick_time(t.arrival),"fade":t.fade,"travel_seconds":t.route.duration,"points":t.route.legs.iter().map(|l| l.from.to_array()).chain(t.route.legs.last().map(|l| l.to.to_array())).collect::<Vec<_>>()})).collect::<Vec<_>>()})
+        serde_json::json!({"statistics":self.stats,"trips":self.trips.iter().map(|t| serde_json::json!({"author":t.author,"commit":t.commit,"bot":t.bot,"source_repository":t.source_repository,"destination_repository":t.destination_repository,"free":tick_time(t.free),"slack":tick_time(t.arrival-t.free),"departure":tick_time(t.departure),"service":tick_time(t.arrival),"fade":t.fade,"failure":t.failure,"proof":t.proof,"source":t.source.to_array(),"target":t.destination.to_array(),"visible_distance":planning::progress(t),"travel_seconds":t.route.duration,"points":t.route.points()})).collect::<Vec<_>>()})
     }
     pub fn sample(&self, author: usize, tick: u64) -> Option<(Vec2, f32)> {
         let trip = self
             .trips
             .iter()
             .find(|t| t.author == author && tick >= t.departure && tick < t.arrival)?;
-        let elapsed = tick_time(tick - trip.departure);
-        let available = trip.arrival - trip.departure;
-        if !trip.fade {
-            return Some((trip.route.sample(elapsed).unwrap_or(trip.destination), 1.0));
-        }
-        if trip.route.legs.is_empty() {
-            let remaining = trip.fade_ticks.saturating_sub(tick - trip.departure);
-            return Some((trip.source, fade_opacity(remaining, trip.fade_ticks)));
-        }
-        Some((
-            trip.route.sample(elapsed).expect("nonempty route"),
-            fade_opacity(trip.arrival - tick, 9.min(available / 2).max(1)),
-        ))
+        Some(trip.sample(tick))
     }
 
     pub fn travelling(&self, author: usize, tick: u64) -> bool {
         self.trips
             .iter()
             .any(|t| t.author == author && tick >= t.departure && tick < t.arrival)
+    }
+}
+
+impl Trip {
+    fn sample(&self, tick: u64) -> (Vec2, f32) {
+        let trip = self;
+        if let Some(cutoff) = trip.cutoff
+            && tick >= cutoff
+        {
+            return (
+                trip.route
+                    .point_at(cutoff.saturating_sub(trip.departure))
+                    .unwrap_or(trip.source),
+                0.0,
+            );
+        }
+        let available = trip.arrival - trip.departure;
+        if !trip.fade {
+            return (
+                trip.route
+                    .point_at(tick - trip.departure)
+                    .unwrap_or(trip.destination),
+                1.0,
+            );
+        }
+        if trip.route.is_empty() {
+            let remaining = trip.fade_ticks.saturating_sub(tick - trip.departure);
+            return (trip.source, fade_opacity(remaining, trip.fade_ticks));
+        }
+        (
+            trip.route
+                .point_at(tick - trip.departure)
+                .expect("nonempty route"),
+            fade_opacity(
+                trip.cutoff.unwrap_or(trip.arrival) - tick,
+                9.min(available / 2).max(1),
+            ),
+        )
     }
 }
 
@@ -180,12 +270,14 @@ fn capture(simulation: &mut Simulation) -> Capture {
         services: Vec::new(),
         poses: Vec::new(),
         tiles: Vec::new(),
+        radii: Vec::new(),
     };
     let mut seen = 0;
     let mut poses = 0;
     for frame in 0..=frames {
         simulation.advance_to(frame, 60);
         let state = &simulation.state;
+        capture.radii.push(6.5 * state.avatar_scale + 1.0);
         capture
             .tiles
             .push(state.layout.repositories.iter().map(|r| r.tile).collect());
@@ -233,126 +325,6 @@ fn capture(simulation: &mut Simulation) -> Capture {
     capture
 }
 
-fn swept(
-    capture: &Capture,
-    begin: u64,
-    end: u64,
-    radius: f32,
-    author: usize,
-) -> (Vec<Rect>, usize) {
-    let mut bounds: Vec<Option<Rect>> = vec![None; capture.tiles[0].len()];
-    for row in &capture.tiles[usize::try_from(begin).expect("bounded tick")
-        ..=usize::try_from(end)
-            .expect("bounded tick")
-            .min(capture.tiles.len() - 1)]
-    {
-        for (bound, tile) in bounds.iter_mut().zip(row) {
-            if let Some(tile) = tile {
-                let rect = Rect::from_corners(tile.low * HALF, tile.high * HALF);
-                *bound = Some(bound.map_or(rect, |b| b.union(rect)));
-            }
-        }
-    }
-    let mut obstacles: Vec<_> = bounds
-        .into_iter()
-        .flatten()
-        .map(|r| r.inflate(radius + 0.1))
-        .collect();
-    let tiles = obstacles.len();
-    for (_, poses) in capture
-        .poses
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| *i != author)
-    {
-        let first = poses.partition_point(|p| p.tick < begin);
-        let last = poses.partition_point(|p| p.tick <= end);
-        let mut bound: Option<Rect> = None;
-        for p in poses[first..last].iter().filter(|p| p.visible) {
-            let rect = Rect::from_center_size(p.point, Vec2::splat(4.0 * radius + 0.2));
-            bound = Some(bound.map_or(rect, |b| b.union(rect)));
-        }
-        obstacles.extend(bound);
-    }
-    (obstacles, tiles)
-}
-
-fn trips(capture: &Capture, speed: f32) -> (Vec<Trip>, usize) {
-    let mut previous: Vec<Option<usize>> = vec![None; capture.poses.len()];
-    let mut result = Vec::new();
-    let mut reserved_until = 0_u64;
-    let mut router = Router::default();
-    for (commit, service) in capture.services.iter().enumerate() {
-        let prior = previous[service.author].replace(commit);
-        let Some(prior) = prior.map(|i| &capture.services[i]) else {
-            continue;
-        };
-        if (prior.repository == service.repository && prior.dock == service.dock)
-            || tick_time(service.tick - prior.tick) >= super::AVATAR_IDLE + 1.2
-        {
-            continue;
-        }
-        let arrival = service.tick;
-        let mut departure = (prior.tick + 1).max(reserved_until).min(arrival - 1);
-        let begin = departure;
-        let poses = &capture.poses[service.author];
-        let pose = poses.partition_point(|p| p.tick <= begin);
-        let mut source = poses[pose.saturating_sub(1)].point;
-        let (obstacles, tiles) = swept(
-            capture,
-            begin,
-            service.tick,
-            prior.radius.max(service.radius),
-            service.author,
-        );
-        let points = if service.bot {
-            None
-        } else {
-            router.route(source, service.point, &obstacles, tiles)
-        };
-        let route = points
-            .as_ref()
-            .map_or_else(Route::default, |p| Route::new(p, speed));
-        let fade = service.bot
-            || points.is_none()
-            || route.duration > tick_time(arrival - departure);
-        if points.is_none() {
-            departure = arrival
-                .saturating_sub(9)
-                .max(prior.tick + 1)
-                .min(arrival - 1);
-            let pose = poses.partition_point(|p| p.tick <= departure);
-            source = poses[pose.saturating_sub(1)].point;
-        }
-        let fade_ticks = fade_clearance(
-            capture,
-            departure,
-            source,
-            prior.radius.max(service.radius),
-            service.author,
-        )
-        .min(arrival - departure);
-        result.push(Trip {
-            author: service.author,
-            commit,
-            departure,
-            arrival,
-            destination: service.point,
-            source,
-            fade_ticks,
-            route: if service.bot { Route::default() } else { route },
-            fade,
-            bot: service.bot,
-            source_repository: prior.repository,
-            destination_repository: service.repository,
-        });
-        if !service.bot && points.is_some() {
-            reserved_until = arrival;
-        }
-    }
-    (result, router.epochs)
-}
-
 fn fade_clearance(
     capture: &Capture,
     begin: u64,
@@ -390,6 +362,33 @@ fn fade_clearance(
 }
 
 impl Simulation {
+    pub(super) fn adjust_travel_padding(
+        &self,
+        options: &super::Options,
+        padding: &[(usize, u32)],
+    ) -> Vec<(usize, u32)> {
+        let mut result = padding.to_vec();
+        let cap = seconds_ticks(options.travel_cap, false);
+        for trip in self.travel.trips.iter().filter(|t| !t.bot && t.fade) {
+            let needed = if trip.route.is_empty() {
+                cap
+            } else {
+                seconds_ticks(
+                    (trip.route.duration - tick_time(trip.arrival - trip.departure))
+                        .max(0.0),
+                    true,
+                )
+            };
+            let commit = self.offset + trip.commit;
+            if let Some((_, ticks)) = result.iter_mut().find(|(i, _)| *i == commit) {
+                *ticks = ticks.saturating_add(needed).min(cap);
+            } else if needed > 0 {
+                result.push((commit, needed.min(cap)));
+            }
+        }
+        result.sort_unstable_by_key(|p| p.0);
+        result
+    }
     pub(super) fn travel_padding(
         &mut self,
         options: &super::Options,
@@ -408,8 +407,10 @@ impl Simulation {
                     .starts
                     .partition_point(|&s| s <= tick_time(trip.departure))
                     .saturating_sub(1);
-                let needed = if trip.route.legs.is_empty() {
+                let needed = if trip.bot {
                     0
+                } else if trip.route.is_empty() {
+                    cap
                 } else {
                     seconds_ticks(
                         (tick_time(trip.departure)
@@ -438,7 +439,50 @@ impl Simulation {
     ) {
         let capture = capture(self);
         let (trips, graph_epochs) = trips(&capture, options.avatar_max_speed);
+        let mut previous = vec![None; capture.poses.len()];
+        let mut human_switches = 0;
+        for service in &capture.services {
+            if previous[service.author]
+                .replace(service.repository)
+                .is_some_and(|r| r != service.repository)
+                && !service.bot
+            {
+                human_switches += 1;
+            }
+        }
         let stats = Statistics {
+            idle_human_reentries: human_switches
+                - trips
+                    .iter()
+                    .filter(|t| {
+                        !t.bot && t.source_repository != t.destination_repository
+                    })
+                    .count(),
+            human_complete: trips
+                .iter()
+                .filter(|t| {
+                    !t.bot && t.source_repository != t.destination_repository && !t.fade
+                })
+                .count(),
+            human_partial: trips
+                .iter()
+                .filter(|t| {
+                    !t.bot
+                        && t.source_repository != t.destination_repository
+                        && t.fade
+                        && !t.route.is_empty()
+                })
+                .count(),
+            human_no_route: trips
+                .iter()
+                .filter(|t| {
+                    !t.bot
+                        && t.source_repository != t.destination_repository
+                        && t.route.is_empty()
+                })
+                .count(),
+            bot_fades: trips.iter().filter(|t| t.bot).count(),
+            max_speed: options.avatar_max_speed,
             temporary_capture_bytes: capture
                 .poses
                 .iter()
@@ -455,22 +499,27 @@ impl Simulation {
                     .sum::<usize>()
                 + capture.tiles.capacity()
                     * std::mem::size_of::<Vec<Option<crate::layout::packing::Tile>>>()
-                + capture.services.capacity() * std::mem::size_of::<Service>(),
+                + capture.services.capacity() * std::mem::size_of::<Service>()
+                + capture.radii.capacity() * std::mem::size_of::<f32>()
+                + capture.poses.capacity() * std::mem::size_of::<Vec<Pose>>(),
             retained_route_bytes: trips.capacity() * std::mem::size_of::<Trip>()
                 + trips
                     .iter()
-                    .map(|t| t.route.legs.capacity() * std::mem::size_of::<Leg>())
+                    .map(|t| {
+                        t.route.legs.capacity() * std::mem::size_of::<Leg>()
+                            + t.route.track.capacity() * std::mem::size_of::<Vec2>()
+                    })
                     .sum::<usize>(),
             graph_epochs,
             routed: trips.iter().filter(|t| !t.fade).count(),
             faded: trips.iter().filter(|t| t.fade).count(),
             blocked: trips
                 .iter()
-                .filter(|t| !t.bot && t.route.legs.is_empty())
+                .filter(|t| !t.bot && t.route.is_empty())
                 .count(),
             partial: trips
                 .iter()
-                .filter(|t| !t.bot && t.fade && !t.route.legs.is_empty())
+                .filter(|t| !t.bot && t.fade && !t.route.is_empty())
                 .count(),
             padding_seconds: padding
                 .iter()
@@ -498,16 +547,38 @@ struct Router {
     epochs: usize,
 }
 
+#[derive(Clone, Copy)]
+struct Disc {
+    point: Vec2,
+    radius: f32,
+}
+
+#[derive(Debug)]
+enum RouteFailure {
+    Endpoint,
+    Budget,
+    Disconnected,
+}
+impl RouteFailure {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Endpoint => "endpoint",
+            Self::Budget => "search_budget",
+            Self::Disconnected => "disconnected",
+        }
+    }
+}
+
 impl Router {
     fn route(
         &mut self,
         source: Vec2,
         target: Vec2,
         obstacles: &[Rect],
-        tiles: usize,
-    ) -> Option<Vec<Vec2>> {
-        let changed = self.tiles.len() != tiles
-            || self.tiles.iter().zip(&obstacles[..tiles]).any(|(a, b)| {
+        bodies: &[Disc],
+    ) -> Result<Vec<Vec2>, RouteFailure> {
+        let changed = self.tiles.len() != obstacles.len()
+            || self.tiles.iter().zip(obstacles).any(|(a, b)| {
                 (a.min - b.min)
                     .abs()
                     .max_element()
@@ -515,21 +586,28 @@ impl Router {
                     >= 1.0
             });
         if changed || self.epochs == 0 {
-            self.tiles = obstacles[..tiles].to_vec();
+            self.tiles = obstacles.to_vec();
             self.axes = [vec![-632.0, 632.0], vec![-352.0, 352.0]];
             add_axes(&mut self.axes, &self.tiles);
             self.epochs += 1;
         }
-        let mut axes = self.axes.clone();
-        add_axes(&mut axes, &obstacles[tiles..]);
+        let mut axes = [vec![-634.2, 634.2], vec![-354.2, 354.2]];
+        add_axes(&mut axes, obstacles);
+        add_axes(
+            &mut axes,
+            &bodies
+                .iter()
+                .map(|b| Rect::from_center_size(b.point, Vec2::splat(2.0 * b.radius)))
+                .collect::<Vec<_>>(),
+        );
         axes[0].extend([source.x, target.x]);
         axes[1].extend([source.y, target.y]);
-        graph_route(source, target, obstacles, axes)
+        graph_route(source, target, obstacles, bodies, axes)
     }
 }
 
 fn add_axes(axes: &mut [Vec<f32>; 2], obstacles: &[Rect]) {
-    let limit = HALF - Vec2::splat(8.0);
+    let limit = HALF - Vec2::splat(5.8);
     for r in obstacles {
         for (axis, values) in axes.iter_mut().enumerate() {
             values.extend(
@@ -545,18 +623,29 @@ fn graph_route(
     source: Vec2,
     target: Vec2,
     obstacles: &[Rect],
+    bodies: &[Disc],
     mut axes: [Vec<f32>; 2],
-) -> Option<Vec<Vec2>> {
-    let limit = HALF - Vec2::splat(8.0);
-    if [source, target]
-        .iter()
-        .any(|p| p.abs().cmpgt(limit).any() || obstacles.iter().any(|r| r.contains(*p)))
-    {
-        return None;
+) -> Result<Vec<Vec2>, RouteFailure> {
+    let limit = HALF - Vec2::splat(5.8);
+    if [source, target].iter().any(|p| {
+        p.abs().cmpgt(limit).any()
+            || obstacles.iter().any(|r| r.contains(*p))
+            || bodies.iter().any(|b| b.point.distance(*p) < b.radius)
+    }) {
+        return Err(RouteFailure::Endpoint);
     }
-    let clear = |a, b| !obstacles.iter().any(|&r| slots::segment(a, b, r));
+    let clear = |a: Vec2, b: Vec2| {
+        !obstacles.iter().any(|&r| slots::segment(a, b, r))
+            && !bodies.iter().any(|body| {
+                let delta = b - a;
+                let t = ((body.point - a).dot(delta)
+                    / delta.length_squared().max(1e-8))
+                .clamp(0.0, 1.0);
+                body.point.distance(a + delta * t) < body.radius
+            })
+    };
     if clear(source, target) {
-        return Some(vec![source, target]);
+        return Ok(vec![source, target]);
     }
     for values in &mut axes {
         values.sort_by(f32::total_cmp);
@@ -575,7 +664,7 @@ fn graph_route(
     let point = |i: usize| Vec2::new(axes[0][i % width], axes[1][i / width]);
     let nodes = width * axes[1].len();
     if nodes > 10_000 {
-        return None;
+        return Err(RouteFailure::Budget);
     }
     let start = index(source);
     let end = index(target);
@@ -617,7 +706,7 @@ fn graph_route(
         }
     }
     if distance[end] == u64::MAX {
-        return None;
+        return Err(RouteFailure::Disconnected);
     }
     let mut path = vec![target];
     let mut node = end;
@@ -636,7 +725,7 @@ fn graph_route(
         simplified.push(path[next]);
         i = next;
     }
-    Some(simplified)
+    Ok(simplified)
 }
 
 #[cfg(test)]
@@ -778,8 +867,8 @@ mod tests {
         let a = Vec2::new(-300.0, 0.0);
         let b = -a;
         let mut router = Router::default();
-        let route = router.route(a, b, &obstacles, 1).unwrap();
-        assert_eq!(Some(route.clone()), router.route(a, b, &obstacles, 1));
+        let route = router.route(a, b, &obstacles, &[]).unwrap();
+        assert_eq!(route, router.route(a, b, &obstacles, &[]).unwrap());
         assert_eq!(router.epochs, 1);
         assert!(route.len() > 2);
         assert!(
@@ -787,7 +876,30 @@ mod tests {
                 .windows(2)
                 .all(|p| !slots::segment(p[0], p[1], obstacles[0]))
         );
-        assert!(router.route(Vec2::ZERO, b, &obstacles, 1).is_none());
+        assert!(router.route(Vec2::ZERO, b, &obstacles, &[]).is_err());
+    }
+
+    #[test]
+    fn exact_disc_contacts_are_allowed_and_geometric_failures_are_distinct() {
+        let mut router = Router::default();
+        let body = Disc {
+            point: Vec2::ZERO,
+            radius: 15.0,
+        };
+        assert!(
+            router
+                .route(Vec2::new(-15.0, 0.0), Vec2::new(-50.0, 0.0), &[], &[body])
+                .is_ok()
+        );
+        let wall = Rect::from_corners(Vec2::new(-10.0, -360.0), Vec2::new(10.0, 360.0));
+        assert!(matches!(
+            router.route(Vec2::new(-100.0, 0.0), Vec2::new(100.0, 0.0), &[wall], &[]),
+            Err(RouteFailure::Disconnected)
+        ));
+        assert!(matches!(
+            router.route(Vec2::ZERO, Vec2::new(100.0, 0.0), &[wall], &[]),
+            Err(RouteFailure::Endpoint)
+        ));
     }
 
     #[test]
@@ -798,9 +910,17 @@ mod tests {
                 240.0,
             );
             let mut prior = route.sample(0.0).unwrap();
+            let mut prior_velocity = Vec2::ZERO;
             for frame in 1..=super::frames_for(route.duration + 0.1, 60).unwrap() {
                 let point = route.sample(tick_time(u64::from(frame))).unwrap();
                 assert!(point.distance(prior) * 60.0 <= 240.01);
+                let velocity = (point - prior) * 60.0;
+                let acceleration = (velocity - prior_velocity).length() * 60.0;
+                assert!(
+                    acceleration <= 1200.5,
+                    "length={length} frame={frame} acceleration={acceleration}"
+                );
+                prior_velocity = velocity;
                 prior = point;
             }
             assert!(prior.distance(Vec2::splat(length)) < 0.001);
