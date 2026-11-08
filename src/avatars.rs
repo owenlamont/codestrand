@@ -208,7 +208,14 @@ fn response_body(status: u16, body: impl Read) -> Response {
 }
 
 fn hash(value: impl AsRef<[u8]>) -> String {
-    format!("{:x}", Sha256::digest(value))
+    use std::fmt::Write as _;
+
+    Sha256::digest(value)
+        .iter()
+        .fold(String::with_capacity(64), |mut hex, byte| {
+            write!(hex, "{byte:02x}").expect("writing to a String cannot fail");
+            hex
+        })
 }
 
 pub(super) fn noreply(email: &str) -> Option<String> {
@@ -622,6 +629,14 @@ mod tests {
 
     use super::*;
     use crate::contributors::{Accounts, Contributor};
+
+    #[test]
+    fn hash_is_lowercase_sha256_hex() {
+        assert_eq!(
+            hash("abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
 
     #[derive(Default)]
     struct Fake {
