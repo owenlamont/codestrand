@@ -1671,16 +1671,17 @@ fn diff_samples(world: &mut World, camera: &Camera, transform: &GlobalTransform)
                 theme.diff_removed
             };
             let prefix = if line.sample.added { '+' } else { '-' };
+            let text: String = line.sample.text.chars().take(88).collect();
             let columns = f32::from(
-                u8::try_from(line.sample.text.len() + 2).expect("bounded ASCII sample"),
+                u8::try_from(text.chars().count() + 2)
+                    .expect("snippet is capped at 88 characters"),
             );
-            let squeeze = (4.0 / (columns * 0.6)).min(1.0);
-            let scale = Vec2::new(squeeze, 1.0) * (size / 24.0);
+            let scale = Vec2::splat(size / 24.0 * (8.0 / (90.0 * 0.6)));
             let extent = Vec2::new(columns * 24.0 * 0.6, 24.0 * 1.2);
             let origin = point - extent * 0.5;
             replacements.push((line.fragment, visibility));
             Some((
-                format!("{prefix} {}", line.sample.text),
+                format!("{prefix} {text}"),
                 origin,
                 scale,
                 extent,
@@ -1771,6 +1772,17 @@ fn face_portraits(world: &mut World) {
 mod tests {
     use super::*;
 
+    fn assert_sample_layout(world: &World, text: Entity, pixels: f32) {
+        assert_eq!(
+            world.get::<Text>(text).unwrap().0,
+            format!("+ {}", "€".repeat(88))
+        );
+        let scale = world.get::<UiTransform>(text).unwrap().scale;
+        assert_eq!(scale.x, scale.y);
+        let width = 90.0 * 24.0 * 0.6 * scale.x;
+        assert!((width - pixels * 8.0).abs() < 0.001);
+    }
+
     #[test]
     fn preview_switch_loads_uncached_art_off_thread_before_applying_theme() {
         bevy::tasks::AsyncComputeTaskPool::get_or_init(bevy::tasks::TaskPool::new);
@@ -1829,7 +1841,7 @@ mod tests {
         events[0].changes[0].removals = 0;
         events[0].changes[0].samples = vec![crate::diff_samples::Sample {
             added: true,
-            text: "let added = true;".to_owned(),
+            text: "€".repeat(120),
         }];
         let mut simulation = Simulation::new(
             events,
@@ -1913,6 +1925,7 @@ mod tests {
                 ] {
                     assert!((alpha - line.alpha * opacity).abs() < 0.0001);
                 }
+                assert_sample_layout(&world, text, pixels);
                 assert_eq!(world.get::<Visibility>(text), Some(&Visibility::Inherited));
             } else {
                 assert_eq!(world.get::<Visibility>(text), Some(&Visibility::Hidden));

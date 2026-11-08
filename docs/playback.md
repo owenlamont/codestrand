@@ -111,10 +111,11 @@ a text shadow for contrast. Text and plain prisms crossfade; fully visible snipp
 replace their prisms. Extra fragments stay plain. Neon uses vivid green/red;
 Phosphor uses softer green/red.
 
-Snippet height is 0.07 world units and width is capped at four times that height,
-before the fragment scale envelope. Long lines compress horizontally to fit. Text
+Snippet text keeps the font's natural proportions with equal X and Y scaling.
+Lines are cut at 88 characters; the fixed uniform size fits 88 characters plus the
+direction prefix within eight beam diameters, before the fragment scale envelope. Text
 never grows to a minimum screen size: samples smoothly appear between 24 and 40
-projected height pixels, requiring the camera to be very close to the fragment.
+projected beam-diameter pixels, requiring the camera to be very close to the fragment.
 Overlapping snippets may overlap freely without collision or viewport-edge hiding.
 Files inside collapsed subtrees show no sample text; LOD keeps its fragment behaviour.
 
