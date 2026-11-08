@@ -713,7 +713,7 @@ pub(super) fn switch_theme(world: &mut World, name: crate::theme::ThemeName) {
         styling::apply(world, &theme);
     }
     for mut color in world
-        .query_filtered::<&mut TextColor, Without<Label>>()
+        .query_filtered::<&mut TextColor, (Without<Label>, Without<DiffSample>)>()
         .iter_mut(world)
     {
         color.0 = theme.heading;
@@ -1645,6 +1645,7 @@ fn labels(world: &mut World) {
 fn diff_samples(world: &mut World, camera: &Camera, transform: &GlobalTransform) {
     let playback = &world.resource::<Playback>().0;
     let theme = playback.theme();
+    let sample_shadow = theme.label_shadow;
 
     let mut replacements = Vec::new();
     let wanted: Vec<_> = playback
@@ -1727,7 +1728,8 @@ fn diff_samples(world: &mut World, camera: &Camera, transform: &GlobalTransform)
             node.height = px(extent.y);
             ui_transform.scale = scale;
             color.set_if_neq(TextColor(ink));
-            shadow.color = shadow.color.with_alpha(ink.alpha());
+            *shadow = sample_shadow;
+            shadow.color = shadow.color.with_alpha(shadow.color.alpha() * ink.alpha());
             visibility.set_if_neq(Visibility::Inherited);
         } else {
             visibility.set_if_neq(Visibility::Hidden);

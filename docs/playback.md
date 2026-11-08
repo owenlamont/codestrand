@@ -108,8 +108,10 @@ In repository playback, sampled added lines descend from the contributor; remove
 lines rise from the file and smoothly fade to transparent. The camera-facing snippet
 is the fragment, following the same path, phase and scale envelope above beams, with
 a text shadow for contrast. Text and plain prisms crossfade; fully visible snippets
-replace their prisms. Extra fragments stay plain. Neon uses vivid green/red;
-Phosphor uses softer green/red.
+replace their prisms. Extra fragments stay plain. Every theme supplies added/removed
+colours; Atlas uses dark ink on its light ground. Snippets use alpha blending and the
+theme's monospace font, with IBM Plex Mono for Atlas code beside its serif labels.
+Theme switching restyles active snippets without restarting their motion or fade.
 
 Snippet text keeps the font's natural proportions with equal X and Y scaling.
 Lines are cut at 88 characters; the fixed uniform size fits 88 characters plus the
