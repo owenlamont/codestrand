@@ -104,14 +104,19 @@ subtree size, with at most four extra top-level labels beyond the usual twenty.
 Labels inside fully collapsed subtrees and overlapping directory labels are omitted
 to keep the overview readable.
 
-In repository playback, sampled added lines ride the green fragments descending
-from the contributor; removed lines ride the red fragments rising from the file.
-Camera-facing text follows each piece and fades with the fragment phase. Text renders
-above beams, on a dark inset for contrast. Neon uses vivid green/red; Phosphor uses
-softer green/red. Extra fragments stay plain. Samples are hidden at overview scale,
-then fade in as the camera zooms closer: zero opacity at 12 projected text pixels,
-full opacity at 18. Colours follow the selected theme. Text that would overlap another
-sample or extend outside the viewport is temporarily hidden; fragments keep moving.
+In repository playback, sampled added lines descend from the contributor; removed
+lines rise from the file and smoothly fade to transparent. The camera-facing snippet
+is the fragment, following the same path, phase and scale envelope above beams, with
+a text shadow for contrast. Text and plain prisms crossfade; fully visible snippets
+replace their prisms. Extra fragments stay plain. Neon uses vivid green/red;
+Phosphor uses softer green/red.
+
+Snippet height is 0.07 world units and width is capped at four times that height,
+before the fragment scale envelope. Long lines compress horizontally to fit. Text
+never grows to a minimum screen size: samples smoothly appear between 24 and 40
+projected height pixels, requiring the camera to be very close to the fragment.
+Overlapping snippets may overlap freely without collision or viewport-edge hiding.
+Files inside collapsed subtrees show no sample text; LOD keeps its fragment behaviour.
 
 Samples come from actual changed lines: up to three per file and twelve per commit,
 preferring lines of 16–60 bytes. Lines over 72 bytes before trimming, non-ASCII text,

@@ -88,6 +88,7 @@ fn attach_samples<'a>(
     fragments: impl Iterator<Item = Fragment>,
     mut samples: impl Iterator<Item = &'a crate::diff_samples::Sample>,
     remaining: &mut usize,
+    detail: f32,
 ) -> Vec<Fragment> {
     fragments
         .map(|mut fragment| {
@@ -95,6 +96,7 @@ fn attach_samples<'a>(
                 && let Some(sample) = samples.next()
             {
                 fragment.sample = Some(sample.clone());
+                fragment.sample_detail = detail;
                 *remaining -= 1;
             }
             fragment
@@ -103,6 +105,8 @@ fn attach_samples<'a>(
 }
 
 pub(super) struct DiffLine {
+    pub fragment: usize,
+    pub detail: f32,
     pub position: Vec3,
     pub scale: f32,
     pub sample: crate::diff_samples::Sample,
@@ -131,6 +135,8 @@ pub(super) struct Beam {
 pub(super) struct Fragment {
     pub position: Vec3,
     pub rising: bool,
+    pub sample_detail: f32,
+    pub alpha: f32,
     pub scale: f32,
     pub sample: Option<crate::diff_samples::Sample>,
 }
@@ -444,7 +450,15 @@ impl Simulation {
         beams
     }
 
+    #[cfg(test)]
     pub(super) fn fragments(&self) -> Vec<Fragment> {
+        self.fragments_for_detail(|_| 1.0)
+    }
+
+    pub(super) fn fragments_for_detail(
+        &self,
+        detail: impl Fn(usize) -> f32,
+    ) -> Vec<Fragment> {
         let now = self.seconds();
         let mut fragments = Vec::new();
         let mut newest = BTreeMap::new();
@@ -462,9 +476,16 @@ impl Simulation {
                 let Some(to) = self.state.point(target) else {
                     continue;
                 };
+                let sample_detail = match target {
+                    Target::File(id) => {
+                        self.layout().file(id).map_or(0.0, |file| detail(file.dir))
+                    }
+                    Target::Dir(_) => 0.0,
+                };
                 let current = match target {
                     Target::File(id) => {
                         *newest.entry(id).or_insert(pulse_index) == pulse_index
+                            && sample_detail > 0.0
                     }
                     Target::Dir(_) => false,
                 };
@@ -473,6 +494,7 @@ impl Simulation {
                         diff_fragments(age, envelope, from, to, count, rising),
                         pulse.samples_for(target, rising).filter(|_| current),
                         &mut remaining,
+                        sample_detail,
                     ));
                 }
             }
@@ -480,15 +502,26 @@ impl Simulation {
         fragments
     }
 
+    #[cfg(test)]
     pub(super) fn diff_lines(&self) -> Vec<DiffLine> {
-        self.fragments()
+        self.diff_lines_for_detail(|_| 1.0)
+    }
+
+    pub(super) fn diff_lines_for_detail(
+        &self,
+        detail: impl Fn(usize) -> f32,
+    ) -> Vec<DiffLine> {
+        self.fragments_for_detail(detail)
             .into_iter()
-            .filter_map(|fragment| {
+            .enumerate()
+            .filter_map(|(index, fragment)| {
                 Some(DiffLine {
+                    fragment: index,
+                    detail: fragment.sample_detail,
                     position: fragment.position,
                     scale: fragment.scale * self.scale().sqrt(),
                     sample: fragment.sample?,
-                    alpha: fragment.scale,
+                    alpha: fragment.alpha,
                 })
             })
             .collect()
@@ -1039,6 +1072,13 @@ fn diff_fragments(
         Fragment {
             position,
             rising,
+            sample_detail: 1.0,
+            alpha: if rising {
+                let birth = (phase / 0.08).min(1.0);
+                envelope * birth * birth * (3.0 - 2.0 * birth) * (1.0 - phase).powi(2)
+            } else {
+                envelope * (1.0 - phase.powi(6))
+            },
             sample: None,
             scale: envelope * (1.0 - phase.powi(6)),
         }
@@ -1159,6 +1199,34 @@ mod tests {
     }
 
     #[test]
+    fn rising_fragments_fade_continuously_across_the_phase_wrap() {
+        let samples: Vec<_> = (0_u16..=2000)
+            .map(|step| {
+                super::diff_fragments(
+                    f32::from(step) / 1100.0,
+                    1.0,
+                    super::Vec3::Y * 4.0,
+                    super::Vec3::ZERO,
+                    1,
+                    true,
+                )
+                .next()
+                .unwrap()
+            })
+            .collect();
+        assert_eq!(samples[0].alpha, 0.0);
+        assert!(samples[500].position.y > samples[100].position.y);
+        assert!(samples[500].alpha < samples[100].alpha);
+        assert!(samples[999].alpha < 0.00001);
+        assert!(samples[1000].alpha < 0.00001);
+        assert!(
+            samples
+                .windows(2)
+                .all(|pair| { (pair[1].alpha - pair[0].alpha).abs() < 0.025 })
+        );
+    }
+
+    #[test]
     fn samples_attach_to_matching_directions_and_leave_extra_pieces_plain() {
         let mut events = crate::timeline::synthetic();
         events.truncate(1);
@@ -1221,6 +1289,15 @@ mod tests {
             &crate::contributors::Mappings::default(),
         );
         sim.advance_to(45, 60);
+        let hidden_dir = sim.layout().files().next().unwrap().1.dir;
+        assert!(
+            sim.diff_lines_for_detail(|dir| if dir == hidden_dir { 0.0 } else { 1.0 })
+                .is_empty()
+        );
+        assert_eq!(sim.diff_lines_for_detail(|_| 1.0).len(), 1);
+        let plain = sim.fragments_for_detail(|_| 0.0);
+        assert!(!plain.is_empty());
+        assert!(plain.iter().all(|fragment| fragment.sample.is_none()));
         let line = sim.diff_lines().pop().unwrap();
         assert!(line.alpha > 0.0 && line.alpha <= 1.0);
         assert!(sim.fragments().iter().any(|fragment| {

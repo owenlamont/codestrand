@@ -432,17 +432,15 @@ fn setup(world: &mut World) {
     for _ in 0..crate::diff_samples::PER_COMMIT {
         world.spawn((
             Text::new(""),
-            TextFont::from_font_size(4.0),
+            TextFont::from_font_size(24.0),
+            UiTransform::default(),
             TextColor(theme.diff_added),
             theme.label_shadow,
             TextLayout::new(Justify::Left, bevy::text::LineBreak::NoWrap),
             Node {
                 position_type: PositionType::Absolute,
-                border: UiRect::all(px(1.0)),
                 ..default()
             },
-            BackgroundColor(theme.clear),
-            BorderColor::all(theme.diff_added),
             ZIndex(1),
             Visibility::Hidden,
             UiTargetCamera(camera),
@@ -1367,7 +1365,16 @@ fn sync_activity(
         set_visible(world, entity, presence > 0.0);
     }
     styling::beams(world, palette, pools, simulation);
-    let fragments = simulation.fragments();
+    sync_fragments(world, palette, pools, simulation);
+}
+
+fn sync_fragments(
+    world: &mut World,
+    palette: &Palette,
+    pools: &mut Pools,
+    simulation: &Simulation,
+) {
+    let fragments = simulation.fragments_for_detail(|dir| pools.lod.detail[dir]);
     let mut pool = std::mem::take(&mut pools.fragments);
     while pool.len() < fragments.len() {
         let entity = block(
@@ -1377,17 +1384,29 @@ fn sync_activity(
             Vec3::ZERO,
             Vec3::ONE,
         );
+        let material = world
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(simulation.theme().descending.clone());
+        world.entity_mut(entity).insert(MeshMaterial3d(material));
         pool.push(entity);
     }
     for (entity, fragment) in pool.iter().zip(&fragments) {
-        let material = if fragment.rising {
-            &palette.rising
+        let mut material = if fragment.rising {
+            simulation.theme().rising.clone()
         } else {
-            &palette.descending
+            simulation.theme().descending.clone()
         };
-        world
-            .entity_mut(*entity)
-            .insert(MeshMaterial3d(material.clone()));
+        material.base_color = material.base_color.with_alpha(fragment.alpha);
+        material.alpha_mode = AlphaMode::Blend;
+        let handle = world
+            .get::<MeshMaterial3d<StandardMaterial>>(*entity)
+            .unwrap()
+            .0
+            .clone();
+        *world
+            .resource_mut::<Assets<StandardMaterial>>()
+            .get_mut(&handle)
+            .unwrap() = material;
         if let Some(mut transform) = world.get_mut::<Transform>(*entity) {
             *transform = Transform::from_translation(fragment.position).with_scale(
                 Vec3::new(0.12, 0.035, 0.2)
@@ -1623,101 +1642,91 @@ fn labels(world: &mut World) {
     }
 }
 
-fn place_sample(bounds: Rect, viewport: Vec2, occupied: &mut Vec<Rect>) -> bool {
-    if bounds.min.x < 0.0
-        || bounds.min.y < 0.0
-        || bounds.max.x > viewport.x
-        || bounds.max.y > viewport.y
-        || occupied
-            .iter()
-            .any(|other| !other.intersect(bounds).is_empty())
-    {
-        return false;
-    }
-    occupied.push(bounds);
-    true
-}
-
 fn diff_samples(world: &mut World, camera: &Camera, transform: &GlobalTransform) {
     let playback = &world.resource::<Playback>().0;
     let theme = playback.theme();
-    let viewport = camera.logical_viewport_size().unwrap_or(Vec2::ZERO);
-    let mut occupied: Vec<Rect> = Vec::new();
+
+    let mut replacements = Vec::new();
     let wanted: Vec<_> = playback
-        .diff_lines()
+        .diff_lines_for_detail(|dir| world.resource::<Pools>().lod.detail[dir])
         .into_iter()
         .filter_map(|line| {
             let point = camera.world_to_viewport(transform, line.position).ok()?;
             let top = camera
                 .world_to_viewport(
                     transform,
-                    line.position + transform.up() * (0.12 * line.scale),
+                    line.position + transform.up() * (0.07 * line.scale),
                 )
                 .ok()?;
             let projected = point.distance(top);
-            let visibility = crate::diff_samples::sample_visibility(projected);
+            let visibility =
+                crate::diff_samples::sample_visibility(projected) * line.detail;
             if visibility == 0.0 {
                 return None;
             }
-            let size = projected.round().clamp(1.0, 28.0);
+            let size = projected;
             let color = if line.sample.added {
                 theme.diff_added
             } else {
                 theme.diff_removed
             };
             let prefix = if line.sample.added { '+' } else { '-' };
-            let width = f32::from(
+            let columns = f32::from(
                 u8::try_from(line.sample.text.len() + 2).expect("bounded ASCII sample"),
-            ) * size
-                * 0.6;
-            let origin = point - Vec2::new(width * 0.5, size * 0.6);
-            let bounds = Rect::from_corners(
-                origin,
-                origin + Vec2::new(width + 2.0, size * 1.2 + 2.0),
             );
-            if !place_sample(bounds, viewport, &mut occupied) {
-                return None;
-            }
+            let squeeze = (4.0 / (columns * 0.6)).min(1.0);
+            let scale = Vec2::new(squeeze, 1.0) * (size / 24.0);
+            let extent = Vec2::new(columns * 24.0 * 0.6, 24.0 * 1.2);
+            let origin = point - extent * 0.5;
+            replacements.push((line.fragment, visibility));
             Some((
                 format!("{prefix} {}", line.sample.text),
                 origin,
-                size,
+                scale,
+                extent,
                 color.with_alpha(line.alpha * visibility),
-                theme.clear.with_alpha(line.alpha * visibility * 0.94),
             ))
         })
         .collect();
+    let fragments = world.resource::<Pools>().fragments.clone();
+    for (index, opacity) in replacements {
+        let entity = fragments[index];
+        let handle = world
+            .get::<MeshMaterial3d<StandardMaterial>>(entity)
+            .unwrap()
+            .0
+            .clone();
+        {
+            let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
+            let mut material = materials.get_mut(&handle).unwrap();
+            material.base_color = material
+                .base_color
+                .with_alpha(material.base_color.alpha() * (1.0 - opacity));
+            material.alpha_mode = AlphaMode::Blend;
+        }
+        set_visible(world, entity, opacity < 1.0);
+    }
     let mut wanted = wanted.into_iter();
     let mut query = world.query_filtered::<(
         &mut Text,
         &mut Node,
-        &mut TextFont,
+        &mut UiTransform,
         &mut TextColor,
-        &mut BackgroundColor,
-        &mut BorderColor,
+        &mut TextShadow,
         &mut Visibility,
     ), With<DiffSample>>();
-    for (
-        mut text,
-        mut node,
-        mut font,
-        mut color,
-        mut background,
-        mut border,
-        mut visibility,
-    ) in query.iter_mut(world)
+    for (mut text, mut node, mut ui_transform, mut color, mut shadow, mut visibility) in
+        query.iter_mut(world)
     {
-        if let Some((value, point, size, ink, fill)) = wanted.next() {
+        if let Some((value, point, scale, extent, ink)) = wanted.next() {
             text.set_if_neq(Text::new(value));
             node.left = px(point.x);
             node.top = px(point.y);
-            let font_size = bevy::text::FontSize::Px(size);
-            if font.font_size != font_size {
-                font.font_size = font_size;
-            }
+            node.width = px(extent.x);
+            node.height = px(extent.y);
+            ui_transform.scale = scale;
             color.set_if_neq(TextColor(ink));
-            background.set_if_neq(BackgroundColor(fill));
-            border.set_if_neq(BorderColor::all(ink));
+            shadow.color = shadow.color.with_alpha(ink.alpha());
             visibility.set_if_neq(Visibility::Inherited);
         } else {
             visibility.set_if_neq(Visibility::Hidden);
@@ -1812,27 +1821,103 @@ mod tests {
     }
 
     #[test]
-    fn samples_hide_collisions_and_clipping_without_shifting_the_fragment_anchor() {
-        let viewport = Vec2::new(1280.0, 720.0);
-        let mut occupied = Vec::new();
-        let bounds =
-            Rect::from_corners(Vec2::new(100.0, 100.0), Vec2::new(400.0, 120.0));
-        assert!(place_sample(bounds, viewport, &mut occupied));
-        assert!(!place_sample(bounds, viewport, &mut occupied));
-        assert!(!place_sample(
-            Rect::from_corners(Vec2::new(-1.0, 50.0), Vec2::new(300.0, 70.0)),
-            viewport,
-            &mut occupied
-        ));
-        assert!(!place_sample(
-            Rect::from_corners(Vec2::new(1200.0, 50.0), Vec2::new(1500.0, 70.0)),
-            viewport,
-            &mut occupied
-        ));
-        let separate =
-            Rect::from_corners(Vec2::new(100.0, 130.0), Vec2::new(400.0, 150.0));
-        assert!(place_sample(separate, viewport, &mut occupied));
-        assert_eq!(occupied, vec![bounds, separate]);
+    fn samples_replace_prisms_and_restore_them_when_zooming_out() {
+        let mut events = crate::timeline::synthetic();
+        events.truncate(1);
+        events[0].changes.truncate(1);
+        events[0].changes[0].insertions = 7;
+        events[0].changes[0].removals = 0;
+        events[0].changes[0].samples = vec![crate::diff_samples::Sample {
+            added: true,
+            text: "let added = true;".to_owned(),
+        }];
+        let mut simulation = Simulation::new(
+            events,
+            &model::Options::default(),
+            &Theme::neon(),
+            &crate::contributors::Mappings::default(),
+        );
+        simulation.advance_to(45, 60);
+        let line = simulation.diff_lines().pop().unwrap();
+        let mut world = World::new();
+        world.init_resource::<Assets<Mesh>>();
+        world.init_resource::<Assets<Image>>();
+        world.init_resource::<Assets<StandardMaterial>>();
+        let palette = Palette::new(&mut world, &Theme::neon());
+        let text = world
+            .spawn((
+                Text::new(""),
+                Node::default(),
+                UiTransform::default(),
+                TextColor::default(),
+                Theme::neon().label_shadow,
+                Visibility::Hidden,
+                DiffSample,
+            ))
+            .id();
+        world.insert_resource(Playback(simulation));
+        for (pixels, opacity) in [
+            (16.0, 0.0),
+            (32.0, 0.5),
+            (48.0, 1.0),
+            (32.0, 0.5),
+            (16.0, 0.0),
+        ] {
+            let mut pools = world.remove_resource::<Pools>().unwrap_or_default();
+            pools.lod.detail =
+                vec![1.0; world.resource::<Playback>().0.layout().dir_count()];
+            world.resource_scope(|world, playback: Mut<Playback>| {
+                sync_activity(world, &palette, &mut pools, &playback.0);
+            });
+            let prism = pools.fragments[line.fragment];
+            world.insert_resource(pools);
+            let extent = 0.07 * line.scale * 500.0 / pixels;
+            let camera = Camera {
+                computed: bevy::camera::ComputedCameraValues {
+                    clip_from_view: bevy::math::proj::orthographic(
+                        -extent, extent, -extent, extent, 0.1, 100.0,
+                    ),
+                    target_info: Some(bevy::camera::RenderTargetInfo {
+                        physical_size: UVec2::splat(1000),
+                        scale_factor: 1.0,
+                    }),
+                    ..default()
+                },
+                ..default()
+            };
+            diff_samples(
+                &mut world,
+                &camera,
+                &GlobalTransform::from_translation(line.position + Vec3::Z * 10.0),
+            );
+            let handle = &world
+                .get::<MeshMaterial3d<StandardMaterial>>(prism)
+                .unwrap()
+                .0;
+            let material = world
+                .resource::<Assets<StandardMaterial>>()
+                .get(handle)
+                .unwrap();
+            assert!(
+                (material.base_color.alpha() - line.alpha * (1.0 - opacity)).abs()
+                    < 0.0001
+            );
+            assert_eq!(
+                world.get::<Visibility>(prism) == Some(&Visibility::Hidden),
+                opacity >= 1.0
+            );
+            if opacity > 0.0 {
+                for alpha in [
+                    world.get::<TextColor>(text).unwrap().0.alpha(),
+                    world.get::<TextShadow>(text).unwrap().color.alpha(),
+                ] {
+                    assert!((alpha - line.alpha * opacity).abs() < 0.0001);
+                }
+                assert_eq!(world.get::<Visibility>(text), Some(&Visibility::Inherited));
+            } else {
+                assert_eq!(world.get::<Visibility>(text), Some(&Visibility::Hidden));
+            }
+        }
     }
 
     #[test]

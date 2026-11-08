@@ -91,7 +91,7 @@ fn sensitive_line(text: &str) -> bool {
 }
 
 pub(super) fn sample_visibility(on_screen_px: f32) -> f32 {
-    let weight = ((on_screen_px - 12.0) / 6.0).clamp(0.0, 1.0);
+    let weight = ((on_screen_px - 24.0) / 16.0).clamp(0.0, 1.0);
     weight * weight * (3.0 - 2.0 * weight)
 }
 
@@ -126,13 +126,13 @@ mod tests {
 
     #[test]
     fn visibility_hides_overview_and_smoothly_reveals_detail() {
-        for size in [0.0, 1.0, 6.0, 11.9, 12.0] {
+        for size in [0.0, 1.0, 6.0, 12.0, 23.9, 24.0] {
             assert_eq!(sample_visibility(size), 0.0);
         }
-        assert_eq!(sample_visibility(15.0), 0.5);
-        assert_eq!(sample_visibility(18.0), 1.0);
-        assert_eq!(sample_visibility(28.0), 1.0);
-        let values: Vec<_> = (0_u16..=180)
+        assert_eq!(sample_visibility(32.0), 0.5);
+        assert_eq!(sample_visibility(40.0), 1.0);
+        assert_eq!(sample_visibility(48.0), 1.0);
+        let values: Vec<_> = (0_u16..=480)
             .map(|i| sample_visibility(f32::from(i) / 10.0))
             .collect();
         assert!(values.windows(2).all(|pair| pair[0] <= pair[1]));
