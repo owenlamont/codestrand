@@ -26,11 +26,26 @@ pub(super) struct Contributor {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(super) struct Accounts {
     pub github: Option<String>,
+    pub gitlab: Option<String>,
+    pub avatar: Option<Avatar>,
     pub gravatar: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum Avatar {
+    Local(PathBuf),
+    Remote(String),
 }
 
 #[derive(Debug, thiserror::Error)]
 pub(super) enum Error {
+    #[error("contributors file {}: contributor {name:?}, {field}: {reason}", path.display())]
+    Invalid {
+        path: PathBuf,
+        name: String,
+        field: &'static str,
+        reason: &'static str,
+    },
     #[error("read contributors file {}", path.display())]
     Read { path: PathBuf, source: io::Error },
     #[error("parse contributors file {}", path.display())]
@@ -60,6 +75,8 @@ struct Entry {
     name: String,
     emails: Vec<String>,
     github: Option<String>,
+    gitlab: Option<String>,
+    avatar: Option<String>,
     gravatar: Option<String>,
 }
 
@@ -88,6 +105,20 @@ fn load_path(path: Option<&Path>, required: bool) -> Result<Mappings, Error> {
     Mappings::parse(&text, path)
 }
 
+fn avatar_path(value: &str, config: &Path) -> Result<Avatar, &'static str> {
+    if value.contains("://") {
+        return crate::avatars::https_url(value)
+            .then(|| Avatar::Remote(value.to_owned()))
+            .ok_or("expected an HTTPS URL or local image path");
+    }
+    if value.is_empty() {
+        return Err("expected a nonempty local image path");
+    }
+    Ok(Avatar::Local(
+        config.parent().unwrap_or(Path::new(".")).join(value),
+    ))
+}
+
 impl Mappings {
     fn parse(text: &str, path: &Path) -> Result<Self, Error> {
         let config: Config = toml::from_str(text).map_err(|source| Error::Parse {
@@ -96,6 +127,37 @@ impl Mappings {
         })?;
         let mut emails = HashMap::new();
         for (index, entry) in config.contributor.into_iter().enumerate() {
+            let invalid = |field, reason| Error::Invalid {
+                path: path.to_owned(),
+                name: entry.name.clone(),
+                field,
+                reason,
+            };
+            if let Some(login) = &entry.github
+                && !crate::avatars::valid_login(login)
+            {
+                return Err(invalid("github", "expected a GitHub login (not a URL)"));
+            }
+            if let Some(username) = &entry.gitlab
+                && (username.is_empty()
+                    || username.len() > 255
+                    || !username
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+                    || !username.as_bytes()[0].is_ascii_alphanumeric())
+            {
+                return Err(invalid(
+                    "gitlab",
+                    "expected a GitLab username (letters, digits, _, - or .)",
+                ));
+            }
+            let avatar = entry
+                .avatar
+                .as_ref()
+                .map(|value| {
+                    avatar_path(value, path).map_err(|reason| invalid("avatar", reason))
+                })
+                .transpose()?;
             for email in entry.emails {
                 let key = email.as_bytes().to_ascii_lowercase();
                 let contributor = Contributor {
@@ -103,6 +165,8 @@ impl Mappings {
                     name: entry.name.clone(),
                     accounts: Accounts {
                         github: entry.github.clone(),
+                        gitlab: entry.gitlab.clone(),
+                        avatar: avatar.clone(),
                         gravatar: entry.gravatar.clone(),
                     },
                     portrait: None,
@@ -202,6 +266,7 @@ mod tests {
 name = "Owen"
 emails = ["one@example.invalid", "two@example.invalid"]
 github = "owenlamont"
+gitlab = "owen.lamont"
 gravatar = "avatar@example.invalid"
 "#,
             Path::new("contributors.toml"),
@@ -214,12 +279,72 @@ gravatar = "avatar@example.invalid"
         mappings.apply(&mut events);
         let contributor = events[0].contributor.as_ref().unwrap();
         assert_eq!(contributor.accounts.github.as_deref(), Some("owenlamont"));
+        assert_eq!(contributor.accounts.gitlab.as_deref(), Some("owen.lamont"));
         assert_eq!(
             contributor.accounts.gravatar.as_deref(),
             Some("avatar@example.invalid")
         );
         assert_eq!(events[0].contributor, events[1].contributor);
     }
+
+    #[test]
+    fn invalid_accounts_and_overrides_report_contributor_field_and_file() {
+        for (field, value) in [
+            ("github", "https://github.com/alice"),
+            ("github", ""),
+            ("gitlab", "alice&email=secret"),
+            ("gitlab", ""),
+            ("avatar", "http://example.invalid/avatar.png"),
+            ("avatar", "https://"),
+            ("avatar", "https://user:password@example.invalid/a.png"),
+            ("avatar", ""),
+        ] {
+            let text = format!(
+                "[[contributor]]\nname = 'Alice'\nemails = []\n{field} = '{value}'"
+            );
+            let error = Mappings::parse(&text, Path::new("aliases.toml")).unwrap_err();
+            let message = error.to_string();
+            assert!(message.contains("aliases.toml"), "{message}");
+            assert!(message.contains("Alice"), "{message}");
+            assert!(message.contains(field), "{message}");
+        }
+    }
+
+    #[test]
+    fn local_override_resolves_relative_to_contributors_file() {
+        let root = tempfile::tempdir().unwrap();
+        let image = root.path().join("portrait.png");
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([10u8, 20, 30, 255]))
+            .save(&image)
+            .unwrap();
+        let mappings = Mappings::parse("[[contributor]]\nname = 'Alice'\nemails = ['a@example.invalid']\navatar = 'portrait.png'", &root.path().join("contributors.toml")).unwrap();
+        assert_eq!(
+            mappings.emails[b"a@example.invalid".as_slice()]
+                .accounts
+                .avatar
+                .as_ref(),
+            Some(&Avatar::Local(image.clone()))
+        );
+        fs::write(&image, b"invalid").unwrap();
+        assert!(
+            Mappings::parse(
+                "[[contributor]]\nname = 'Alice'\nemails = []\navatar = 'portrait.png'",
+                &root.path().join("contributors.toml")
+            )
+            .is_ok()
+        );
+    }
+    #[cfg(windows)]
+    #[test]
+    fn local_override_preserves_non_unicode_parent() {
+        use std::os::windows::ffi::OsStringExt;
+        let parent = PathBuf::from(std::ffi::OsString::from_wide(&[0xD800]));
+        assert_eq!(
+            avatar_path("portrait.png", &parent.join("contributors.toml")).unwrap(),
+            Avatar::Local(parent.join("portrait.png"))
+        );
+    }
+
     #[test]
     fn two_emails_share_an_avatar_and_colour_identity() {
         let mappings = Mappings::parse(
