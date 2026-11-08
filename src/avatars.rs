@@ -1,6 +1,5 @@
 use std::{
     collections::{HashMap, HashSet},
-    fs,
     io::{Cursor, Read, Write},
     path::{Path, PathBuf},
     sync::Arc,
@@ -30,17 +29,34 @@ pub(super) fn https_url(value: &str) -> bool {
     })
 }
 
-pub(super) fn local_portrait(path: &Path) -> Option<Portrait> {
-    let mut bytes = Vec::new();
-    fs::File::open(path)
-        .ok()?
-        .take(MAX_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .ok()?;
-    if u64::try_from(bytes.len()).ok()? > MAX_BYTES {
-        return None;
+fn local_portrait(path: &Path, root: &Path) -> std::io::Result<Option<Portrait>> {
+    let allowed = std::path::absolute(root)
+        .ok()
+        .zip(std::path::absolute(path).ok())
+        .is_some_and(|(root, path)| {
+            path.starts_with(root)
+                && !path
+                    .components()
+                    .any(|part| matches!(part, std::path::Component::ParentDir))
+        });
+    if !allowed {
+        return Err(std::io::Error::other(
+            "avatar path escapes contributors directory",
+        ));
     }
-    Portrait::decode(&bytes)
+    let file = match crate::cache::ConfinedFile::at(path, false)
+        .and_then(|file| file.open())
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let mut bytes = Vec::new();
+    file.take(MAX_BYTES + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_BYTES {
+        return Ok(None);
+    }
+    Ok(Portrait::decode(&bytes))
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -471,7 +487,10 @@ impl<N: Network> Resolver<N> {
 
     fn read(&self, key: &str) -> Option<Record> {
         let path = self.path(key)?;
-        let file = fs::File::open(path).ok()?;
+        let file = crate::cache::ConfinedFile::at(&path, false)
+            .ok()?
+            .open()
+            .ok()?;
         serde_json::from_reader(file.take(4096)).ok()
     }
 
@@ -486,24 +505,25 @@ impl<N: Network> Resolver<N> {
 
     fn store(&self, key: &str, record: &Record, image: Option<&[u8]>) -> Option<()> {
         let path = self.path(key)?;
-        let parent = path.parent()?;
-        fs::create_dir_all(parent).ok()?;
         if let Some(image) = image {
-            let mut file = tempfile::NamedTempFile::new_in(parent).ok()?;
-            file.write_all(image).ok()?;
-            file.flush().ok()?;
-            file.persist(path.with_extension("png")).ok()?;
+            crate::cache::ConfinedFile::at(&path.with_extension("png"), true)
+                .ok()?
+                .write(|file| file.write_all(image))
+                .ok()?;
         }
-        let mut file = tempfile::NamedTempFile::new_in(parent).ok()?;
-        serde_json::to_writer(file.as_file_mut(), record).ok()?;
-        file.flush().ok()?;
-        file.persist(path).ok()?;
+        crate::cache::ConfinedFile::at(&path, true)
+            .ok()?
+            .write(|file| Ok(serde_json::to_writer(file, record)?))
+            .ok()?;
         Some(())
     }
 
     fn portrait(&self, key: &str) -> Option<Arc<Portrait>> {
         let path = self.path(key)?.with_extension("png");
-        let file = fs::File::open(path).ok()?;
+        let file = crate::cache::ConfinedFile::at(&path, false)
+            .ok()?
+            .open()
+            .ok()?;
         let mut bytes = Vec::new();
         file.take(CACHE_BYTES + 1).read_to_end(&mut bytes).ok()?;
         if u64::try_from(bytes.len()).ok()? > CACHE_BYTES {
@@ -533,13 +553,21 @@ impl<N: Network> Resolver<N> {
         remote: Option<&str>,
         commit: &str,
     ) -> Option<Arc<Portrait>> {
-        if let Some(Avatar::Local(path)) = &accounts.avatar {
-            if let Some(portrait) = local_portrait(path) {
+        if let Some(Avatar::Local(path, root)) = &accounts.avatar {
+            let portrait = local_portrait(path, root);
+            if portrait.is_err() {
+                eprintln!(
+                    "avatars: rejected local override {}; using default portrait",
+                    crate::terminal_escape(&path.to_string_lossy())
+                );
+                return None;
+            }
+            if let Ok(Some(portrait)) = portrait {
                 return Some(Arc::new(portrait));
             }
             eprintln!(
                 "avatars: local override {} unavailable; trying account lookups",
-                path.display()
+                crate::terminal_escape(&path.to_string_lossy())
             );
         }
         let cached = self.read(key);
@@ -800,10 +828,41 @@ impl<N: Network> Resolver<N> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::VecDeque;
+    use std::{collections::VecDeque, fs};
 
     use super::*;
     use crate::contributors::{Accounts, Contributor};
+
+    #[test]
+    fn linked_avatar_cache_does_not_write_outside() {
+        let root = crate::cache::test_directory().unwrap();
+        let outside = crate::cache::test_directory().unwrap();
+        #[cfg(windows)]
+        assert!(
+            std::process::Command::new("cmd")
+                .args(["/d", "/c", "mklink", "/J"])
+                .arg(root.path().join("avatars-v2"))
+                .arg(outside.path())
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(outside.path(), root.path().join("avatars-v2"))
+            .unwrap();
+        let resolver = resolver(Some(root.path().to_owned()), false, vec![]);
+        resolver.store(
+            "test",
+            &Record {
+                checked: 0,
+                github: None,
+                image: false,
+            },
+            None,
+        );
+        assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
+    }
 
     #[test]
     fn hash_is_lowercase_sha256_hex() {
@@ -986,7 +1045,7 @@ mod tests {
 
     #[test]
     fn gitlab_username_precedes_inferred_github_and_reuses_cache() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::cache::test_directory().unwrap();
         let mut source =
             event("123+inferred@users.noreply.github.com", Some("explicit"));
         source.contributor.as_mut().unwrap().accounts.gitlab = Some("Alice".to_owned());
@@ -1046,7 +1105,7 @@ mod tests {
 
     #[test]
     fn gitlab_email_requires_separate_opt_in_and_encodes_commit_email() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::cache::test_directory().unwrap();
         let source = event("A+tag&x@example.invalid", None);
         let mut ordinary =
             resolver(Some(root.path().to_owned()), true, vec![Response::Missing]);
@@ -1098,12 +1157,14 @@ mod tests {
 
     #[test]
     fn explicit_overrides_win_and_local_files_work_without_cache_or_network() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::cache::test_directory().unwrap();
         let path = root.path().join("portrait.png");
         fs::write(&path, png()).unwrap();
         let mut source = event("author@example.invalid", Some("explicit"));
-        source.contributor.as_mut().unwrap().accounts.avatar =
-            Some(Avatar::Local(path));
+        source.contributor.as_mut().unwrap().accounts.avatar = Some(Avatar::Local(
+            path.clone(),
+            path.parent().unwrap().to_owned(),
+        ));
         let mut local = resolver(None, false, vec![]);
         let mut events = [source.clone()];
         local.resolve(&mut events, Some("owner/repo"));
@@ -1124,7 +1185,7 @@ mod tests {
 
     #[test]
     fn remote_override_cache_refresh_retains_failures_and_clears_confirmed_misses() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::cache::test_directory().unwrap();
         let mut source = event("a@example.invalid", None);
         source.contributor.as_mut().unwrap().accounts.avatar = Some(Avatar::Remote(
             "https://example.invalid/portrait.png".to_owned(),
@@ -1179,7 +1240,7 @@ mod tests {
             br#"{"avatar_url":"http://gitlab.com/avatar.png"}"#,
             b"invalid",
         ] {
-            let root = tempfile::tempdir().unwrap();
+            let root = crate::cache::test_directory().unwrap();
             let mut source = event("commit@example.invalid", None);
             source.contributor.as_mut().unwrap().accounts.gravatar =
                 Some("configured@example.invalid".to_owned());
@@ -1207,15 +1268,17 @@ mod tests {
 
     #[test]
     fn missing_and_undecodable_local_overrides_fall_back() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::cache::test_directory().unwrap();
         let path = root.path().join("portrait.png");
         for bytes in [None, Some(b"invalid".as_slice())] {
             if let Some(bytes) = bytes {
                 fs::write(&path, bytes).unwrap();
             }
             let mut source = event("commit@example.invalid", Some("explicit"));
-            source.contributor.as_mut().unwrap().accounts.avatar =
-                Some(Avatar::Local(path.clone()));
+            source.contributor.as_mut().unwrap().accounts.avatar = Some(Avatar::Local(
+                path.clone(),
+                path.parent().unwrap().to_owned(),
+            ));
             let mut resolver = resolver(None, true, vec![Response::Found(png())]);
             let mut events = [source];
             resolver.resolve(&mut events, None);
@@ -1231,13 +1294,15 @@ mod tests {
     #[test]
     fn local_override_loads_non_unicode_path_offline() {
         use std::os::windows::ffi::OsStringExt;
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::cache::test_directory().unwrap();
         let filename = std::ffi::OsString::from_wide(&[0xD800, 0x2E, 0x70, 0x6E, 0x67]);
         let path = root.path().join(filename);
         fs::write(&path, png()).unwrap();
         let mut source = event("commit@example.invalid", None);
-        source.contributor.as_mut().unwrap().accounts.avatar =
-            Some(Avatar::Local(path));
+        source.contributor.as_mut().unwrap().accounts.avatar = Some(Avatar::Local(
+            path.clone(),
+            path.parent().unwrap().to_owned(),
+        ));
         let mut resolver = resolver(None, false, vec![]);
         let mut events = [source];
         resolver.resolve(&mut events, None);
@@ -1325,7 +1390,7 @@ mod tests {
 
     #[test]
     fn commit_api_resolves_once_per_email_and_caches_identity() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::cache::test_directory().unwrap();
         let mut events = vec![event("author@example.invalid", None); 3];
         let mut resolver = resolver(
             Some(root.path().to_owned()),
@@ -1404,7 +1469,7 @@ mod tests {
 
     #[test]
     fn cache_hit_expiry_and_stale_offline_fallback() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::cache::test_directory().unwrap();
         let source = event("author@example.invalid", Some("explicit"));
         let mut initial = resolver(
             Some(root.path().to_owned()),
@@ -1434,7 +1499,7 @@ mod tests {
 
     #[test]
     fn negative_cache_and_duplicate_emails_avoid_requests() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::cache::test_directory().unwrap();
         let source = event("author@example.invalid", None);
         let mut initial = resolver(
             Some(root.path().to_owned()),
@@ -1496,7 +1561,7 @@ mod tests {
     }
     #[test]
     fn expired_miss_retries_and_authoritative_removal_clears_portrait() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::cache::test_directory().unwrap();
         let source = event("author@example.invalid", Some("explicit"));
         let mut missing = resolver(
             Some(root.path().to_owned()),
@@ -1566,7 +1631,7 @@ mod tests {
 
     #[test]
     fn incomplete_refresh_does_not_replace_cached_github_portrait() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::cache::test_directory().unwrap();
         let source = event("author@example.invalid", None);
         let mut initial = resolver(
             Some(root.path().to_owned()),
@@ -1604,7 +1669,7 @@ mod tests {
             vec![Response::Found(b"invalid".to_vec()), Response::Missing],
             vec![Response::Missing, Response::Found(b"invalid".to_vec())],
         ] {
-            let root = tempfile::tempdir().unwrap();
+            let root = crate::cache::test_directory().unwrap();
             let source = event("author@example.invalid", Some("explicit"));
             let mut initial = resolver(
                 Some(root.path().to_owned()),
@@ -1649,7 +1714,7 @@ mod tests {
     }
     #[test]
     fn first_undecodable_success_is_a_cached_terminal_miss() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::cache::test_directory().unwrap();
         let source = event("author@example.invalid", Some("explicit"));
         let mut initial = resolver(
             Some(root.path().to_owned()),
@@ -1666,7 +1731,7 @@ mod tests {
 
     #[test]
     fn gif_is_decoded_and_cache_contains_small_png_beside_metadata() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::cache::test_directory().unwrap();
         let mut gif = Cursor::new(Vec::new());
         image::RgbaImage::from_pixel(256, 256, image::Rgba([10, 20, 30, 255]))
             .write_to(&mut gif, image::ImageFormat::Gif)

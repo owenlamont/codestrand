@@ -25,10 +25,19 @@ are grouped by author name. A missing default file is fine; an explicit missing 
 unknown key or malformed TOML is an error. Edits take effect on cache hits; original
 authors and repository history remain unchanged.
 
+Configuration is limited to 1 MiB before parsing, 4,096 contributors, 4,096 total email
+aliases, and 4,096 bytes per string. Expanded alias payloads may total at most 16 MiB.
+Files exceeding a limit are rejected with a configuration error before alias expansion.
+
 Account fields accept usernames, never profile URLs or whitespace. GitHub logins use
 letters, digits and hyphens (bot logins may end in `[bot]`); GitLab usernames start with
 a letter or digit and may also contain `_`, `-` and `.`. Invalid fields report the file,
-contributor and field. Local avatar paths resolve relative to the TOML file. Local images
+contributor and field. Local avatar paths resolve relative to the TOML file and must stay
+inside the TOML file's directory. Absolute paths are accepted only inside that directory.
+Parent escapes, symlinks, directory junctions, network paths and device paths are rejected
+before opening an image. Rejected paths warn and use the default coloured sphere.
+All ancestors must be real directories, including ancestors of the TOML directory.
+Local images
 must decode as PNG, JPEG or GIF, at most 4 MiB and 2048 pixels per side. Missing or
 undecodable local images produce a warning and fall back to account lookups.
 Remote overrides require an HTTPS URL without credentials.
@@ -119,3 +128,6 @@ offline playback can reuse expired images. Failed refreshes retain cached images
 `--no-cache` disables avatar cache reads and writes too; local overrides still work.
 Delete the directory to clear saved avatars. Circular portraits retain the contributor
 colour as a ring; contributors without images keep the coloured sphere.
+
+Cache reads and writes reject linked directories in every path component. An unusable
+cache is treated as a miss; no linked destination is read or written.

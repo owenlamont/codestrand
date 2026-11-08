@@ -22,6 +22,42 @@ defaults to `HEAD`. Codestrand does not clone or fetch a remote repository: obta
 a complete local repository first. Inspection includes reachable commits, while
 playback follows the first-parent sequence.
 
+Revisions accept reference names, full or unambiguous abbreviated object IDs, and
+`HEAD` (also `@`). Parent selectors `^N` and first-parent ancestor selectors `~N` can
+be combined; `^{}` and `^{commit}` are accepted. Other Git revision expressions,
+including reflog and message searches, are rejected rather than delegated to unbounded
+reference traversal. Revision strings are limited to 4,096 bytes and navigation to
+1,000,000 steps, with the existing object-size and work budgets applied before loading.
+Annotated tags and symbolic references have a 64-hop limit and cycle detection.
+Cyclic or excessive chains produce an error, including when encountered through HEAD
+during diff setup. Import uses no wall-clock deadline.
+
+## Analysis limits
+
+Import stops at fixed safety limits and prints `analysis truncated: history resource
+budget reached; showing completed commits only`. Inspection also sets `truncated` in
+JSON. Playback uses the completed first-parent prefix, which can be empty. Partial
+imports are never cached; later runs retry analysis.
+
+| Budget | Limit |
+| --- | --- |
+| Reachable commits and pending parent references | 1,000,000 each |
+| Expanded entries per tree and retained changes overall | 2,000,000 each |
+| Expanded path bytes per tree | 64 MiB |
+| Tree depth and individual path bytes | 256 levels; 16,384 bytes |
+| Single inflated object / allocation | 16 MiB |
+| Inflated diff blob bytes overall | 8 GiB |
+| Diff input lines overall | 20,000,000 |
+| Potential line comparisons per diff | 1,000,000,000 |
+| Total work charged for objects, bytes and lines | 32 GiB of work units |
+| Accounted graph, tree and retained history storage | 512 MiB |
+
+Tree summaries count repeated subtrees at every expanded location before diffing.
+Object headers are checked before loading data; lines are counted before interning.
+The storage budget accounts for payloads and overhead, rather than measuring process
+RSS; dependency buffers and rendering need additional memory. Limits are fixed to keep
+hostile inputs bounded; playback selection does not increase limits.
+
 ## Cache
 
 Repository playback saves the latest imported timeline, diff counts and bounded
@@ -41,3 +77,9 @@ codestrand preview --repository /path/to/repository --no-cache
 Inspection and repositories with Git replacement objects always import directly.
 Messages, signatures, blob IDs and hunks are not cached. See
 [contributors](contributors.md) for separately cached portraits.
+
+Cache files are read only through real directories, with a 64 MiB byte ceiling before
+JSON parsing. Version, selected tip, commit identifiers, event/change counts, paths,
+author lengths, timestamps, diff counts and sample limits are checked before reuse.
+Only the canonical snapshot encoding is accepted: padded, malformed or invalid snapshots
+are misses and are rebuilt. Cache validation does not authenticate who wrote a snapshot.

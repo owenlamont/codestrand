@@ -1,18 +1,211 @@
 use std::{
+    ffi::OsString,
     fs,
-    io::{BufWriter, Write},
+    io::{self, BufWriter, Read, Write},
+    path::Component,
     path::{Path, PathBuf},
 };
 
+use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt, OpenOptionsSyncExt};
+use cap_std::fs::{Dir, OpenOptions};
 use serde::{Deserialize, Serialize};
 
 use crate::{history, timeline};
+
+#[cfg(test)]
+pub(super) fn test_directory() -> io::Result<tempfile::TempDir> {
+    tempfile::tempdir_in(std::env::temp_dir().canonicalize()?)
+}
+
+pub(super) struct ConfinedFile {
+    directory: Dir,
+    name: OsString,
+}
+
+impl ConfinedFile {
+    pub(super) fn at(path: &Path, create: bool) -> io::Result<Self> {
+        let absolute = std::path::absolute(path)?;
+        let mut anchor = PathBuf::new();
+        let mut parts = Vec::new();
+        for component in absolute.components() {
+            match component {
+                Component::Prefix(prefix) => {
+                    #[cfg(windows)]
+                    if !matches!(
+                        prefix.kind(),
+                        std::path::Prefix::Disk(_) | std::path::Prefix::VerbatimDisk(_)
+                    ) {
+                        return Err(io::Error::other(
+                            "network and device paths are not allowed",
+                        ));
+                    }
+                    anchor.push(prefix.as_os_str());
+                }
+                Component::RootDir => anchor.push(component.as_os_str()),
+                Component::Normal(part) => parts.push(part.to_owned()),
+                Component::CurDir => (),
+                Component::ParentDir => {
+                    return Err(io::Error::other("parent traversal is not allowed"));
+                }
+            }
+        }
+        let name = parts
+            .pop()
+            .ok_or_else(|| io::Error::other("expected a file path"))?;
+        let mut directory =
+            Dir::open_ambient_dir(anchor, cap_std::ambient_authority())?;
+        for part in parts {
+            if create {
+                match directory.create_dir(&part) {
+                    Ok(()) => (),
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => (),
+                    Err(error) => return Err(error),
+                }
+            }
+            directory = directory.open_dir_nofollow(part)?;
+        }
+        Ok(Self { directory, name })
+    }
+
+    pub(super) fn open(&self) -> io::Result<fs::File> {
+        let file = self.directory.open_with(
+            &self.name,
+            OpenOptions::new()
+                .read(true)
+                .follow(FollowSymlinks::No)
+                .nonblock(true),
+        )?;
+        if !file.metadata()?.is_file() {
+            return Err(io::Error::other("expected a regular file"));
+        }
+        Ok(file.into_std())
+    }
+
+    pub(super) fn write(
+        &self,
+        write: impl FnOnce(&mut cap_std::fs::File) -> io::Result<()>,
+    ) -> io::Result<()> {
+        static NEXT: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(0);
+        let temporary = format!(
+            ".codestrand-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
+        let mut file = self.directory.open_with(
+            &temporary,
+            OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .follow(FollowSymlinks::No),
+        )?;
+        let result = write(&mut file).and_then(|()| file.flush());
+        drop(file);
+        let result = result.and_then(|()| {
+            self.directory
+                .rename(&temporary, &self.directory, &self.name)
+        });
+        if result.is_err() {
+            let _ = self.directory.remove_file(&temporary);
+        }
+        result
+    }
+}
 
 #[derive(Serialize, Deserialize)]
 struct Snapshot {
     version: u32,
     tip: String,
     events: Vec<timeline::Event>,
+}
+
+const MAX_SNAPSHOT_BYTES: u64 = 64 * 1024 * 1024;
+
+struct SnapshotWriter<W> {
+    inner: W,
+    remaining: u64,
+}
+
+impl<W: Write> Write for SnapshotWriter<W> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if bytes.len() as u64 > self.remaining {
+            return Err(io::Error::other("snapshot byte limit reached"));
+        }
+        let written = self.inner.write(bytes)?;
+        self.remaining -= written as u64;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+fn valid_snapshot(snapshot: &Snapshot, tip: &str) -> bool {
+    let oid = |value: &str| {
+        value.len() == 40
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    };
+    if snapshot.version != timeline::CACHE_VERSION
+        || snapshot.tip != tip
+        || !oid(&snapshot.tip)
+        || snapshot.events.len() > 1_000_000
+    {
+        return false;
+    }
+    let mut changes = 0usize;
+    let mut commits = std::collections::HashSet::new();
+    for event in &snapshot.events {
+        if !oid(&event.commit)
+            || !commits.insert(&event.commit)
+            || event.author.name.len() > 4096
+            || event.author.email.len() > 4096
+            || !(-62_135_596_800..=253_402_300_799).contains(&event.seconds)
+        {
+            return false;
+        }
+        changes = changes.saturating_add(event.changes.len());
+        if changes > 2_000_000 || event.changes.is_empty() {
+            return false;
+        }
+        let mut samples = 0usize;
+        let path = |path: &str| {
+            !path.is_empty()
+                && path.len() <= 16_384
+                && !path.starts_with('/')
+                && !path.split('/').any(|part| part == ".." || part.is_empty())
+        };
+        for change in &event.changes {
+            if !path(&change.path)
+                || matches!(&change.kind, timeline::Kind::Moved { from } if !path(from))
+                || change.samples.len() > crate::diff_samples::PER_FILE
+                || u64::from(change.insertions) + u64::from(change.removals)
+                    > 20_000_000
+                || (crate::diff_samples::sensitive_path(change.path.as_bytes())
+                    && !change.samples.is_empty())
+            {
+                return false;
+            }
+            samples += change.samples.len();
+            for sample in &change.samples {
+                let mut checked = Vec::new();
+                crate::diff_samples::consider(
+                    &mut checked,
+                    sample.text.as_bytes(),
+                    sample.added,
+                );
+                if checked.as_slice() != std::slice::from_ref(sample) {
+                    return false;
+                }
+            }
+        }
+        if samples > crate::diff_samples::PER_COMMIT {
+            return false;
+        }
+    }
+    true
 }
 
 pub(super) fn root() -> Option<PathBuf> {
@@ -38,7 +231,7 @@ pub(super) fn load(
         tip: tip_text,
         events: timeline::from_history(&history),
     };
-    if let Some(path) = entry {
+    if let Some(path) = entry.filter(|_| !history.truncated) {
         let _ = store(&path, &snapshot);
     }
     Ok(snapshot.events)
@@ -53,21 +246,34 @@ fn entry_path(root: &Path, repo: &gix::Repository) -> Option<PathBuf> {
 }
 
 fn read(path: &Path, tip: &str) -> Option<Vec<timeline::Event>> {
-    let snapshot: Snapshot = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
-    (snapshot.version == timeline::CACHE_VERSION && snapshot.tip == tip)
+    let file = ConfinedFile::at(path, false).ok()?.open().ok()?;
+    if file.metadata().ok()?.len() > MAX_SNAPSHOT_BYTES {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_SNAPSHOT_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 > MAX_SNAPSHOT_BYTES {
+        return None;
+    }
+    let snapshot: Snapshot = serde_json::from_slice(&bytes).ok()?;
+    (valid_snapshot(&snapshot, tip) && serde_json::to_vec(&snapshot).ok()? == bytes)
         .then_some(snapshot.events)
 }
 
 fn store(path: &Path, snapshot: &Snapshot) -> Option<()> {
-    let parent = path.parent()?;
-    fs::create_dir_all(parent).ok()?;
-    let mut temporary = tempfile::NamedTempFile::new_in(parent).ok()?;
-    {
-        let mut writer = BufWriter::new(temporary.as_file_mut());
-        serde_json::to_writer(&mut writer, snapshot).ok()?;
-        writer.flush().ok()?;
-    }
-    temporary.persist(path).ok()?;
+    ConfinedFile::at(path, true)
+        .ok()?
+        .write(|file| {
+            let mut writer = SnapshotWriter {
+                inner: BufWriter::new(file),
+                remaining: MAX_SNAPSHOT_BYTES,
+            };
+            serde_json::to_writer(&mut writer, snapshot)?;
+            writer.flush()
+        })
+        .ok()?;
     Some(())
 }
 
@@ -78,6 +284,135 @@ mod tests {
     use clap::Parser;
 
     use super::*;
+
+    pub(crate) fn directory_link(target: &Path, link: &Path) {
+        #[cfg(windows)]
+        assert!(
+            Command::new("cmd")
+                .args(["/d", "/c", "mklink", "/J"])
+                .arg(link)
+                .arg(target)
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link).unwrap();
+    }
+
+    #[test]
+    fn linked_cache_namespace_cannot_redirect_reads_or_writes() {
+        let repo = fixture();
+        let root = crate::cache::test_directory().unwrap();
+        let outside = crate::cache::test_directory().unwrap();
+        let path = entry(root.path(), repo.path());
+        directory_link(outside.path(), path.parent().unwrap());
+        load(repo.path(), "HEAD", Some(root.path())).unwrap();
+        assert!(!outside.path().join("timeline.json").exists());
+        let events = load(repo.path(), "HEAD", None).unwrap();
+        fs::write(
+            outside.path().join("timeline.json"),
+            serde_json::to_vec(&Snapshot {
+                version: timeline::CACHE_VERSION,
+                tip: git(repo.path(), &["rev-parse", "HEAD"]),
+                events,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        remove_blob(repo.path());
+        assert!(load(repo.path(), "HEAD", Some(root.path())).is_err());
+    }
+
+    #[test]
+    fn cache_root_and_ancestors_reject_directory_links() {
+        let scratch = crate::cache::test_directory().unwrap();
+        let outside = crate::cache::test_directory().unwrap();
+        directory_link(outside.path(), &scratch.path().join("linked"));
+        for suffix in ["file.json", "nested/file.json"] {
+            let path = scratch.path().join("linked").join(suffix);
+            assert!(ConfinedFile::at(&path, true).is_err());
+            assert!(ConfinedFile::at(&path, false).is_err());
+        }
+        assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn padded_and_forged_snapshots_are_cache_misses() {
+        let repo = fixture();
+        let root = crate::cache::test_directory().unwrap();
+        let expected = load(repo.path(), "HEAD", Some(root.path())).unwrap();
+        let path = entry(root.path(), repo.path());
+        let original = fs::read(&path).unwrap();
+        let mut forged: serde_json::Value = serde_json::from_slice(&original).unwrap();
+        forged["events"][0]["commit"] = "=FORGED(),extra".into();
+        let mut padded = vec![b' '; 2 * 1024 * 1024];
+        padded.extend(serde_json::to_vec(&forged).unwrap());
+        fs::write(&path, padded).unwrap();
+        assert_eq!(
+            load(repo.path(), "HEAD", Some(root.path())).unwrap(),
+            expected
+        );
+        fs::write(&path, serde_json::to_vec(&forged).unwrap()).unwrap();
+        assert_eq!(
+            load(repo.path(), "HEAD", Some(root.path())).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn oversized_snapshot_is_rebuilt_without_reading_the_padding() {
+        let repo = fixture();
+        let root = crate::cache::test_directory().unwrap();
+        let expected = load(repo.path(), "HEAD", Some(root.path())).unwrap();
+        let path = entry(root.path(), repo.path());
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(MAX_SNAPSHOT_BYTES + 1)
+            .unwrap();
+        assert_eq!(
+            load(repo.path(), "HEAD", Some(root.path())).unwrap(),
+            expected
+        );
+        assert!(fs::metadata(path).unwrap().len() < MAX_SNAPSHOT_BYTES);
+    }
+
+    #[test]
+    fn snapshot_domains_and_lengths_are_validated() {
+        let repo = fixture();
+        let root = crate::cache::test_directory().unwrap();
+        load(repo.path(), "HEAD", Some(root.path())).unwrap();
+        let path = entry(root.path(), repo.path());
+        let bytes = fs::read(path).unwrap();
+        let snapshot: Snapshot = serde_json::from_slice(&bytes).unwrap();
+        let tip = snapshot.tip.clone();
+        assert!(valid_snapshot(&snapshot, &tip));
+        for (pointer, invalid) in [
+            ("/version", serde_json::json!(0)),
+            ("/tip", serde_json::json!("0".repeat(40))),
+            ("/events/0/commit", serde_json::json!("=FORGED(),extra")),
+            ("/events/0/seconds", serde_json::json!(i64::MAX)),
+            ("/events/0/changes/0/path", serde_json::json!("../outside")),
+            (
+                "/events/0/changes/0/insertions",
+                serde_json::json!(u32::MAX),
+            ),
+            (
+                "/events/0/changes/0/path",
+                serde_json::json!("x".repeat(16_385)),
+            ),
+        ] {
+            let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            *value.pointer_mut(pointer).unwrap() = invalid;
+            assert!(
+                !valid_snapshot(&serde_json::from_value(value).unwrap(), &tip),
+                "{pointer}"
+            );
+        }
+    }
 
     fn git(path: &Path, args: &[&str]) -> String {
         let mut command = Command::new("git");
@@ -113,7 +448,8 @@ mod tests {
     }
 
     fn fixture() -> tempfile::TempDir {
-        let scratch = tempfile::tempdir().expect("temporary directory is available");
+        let scratch =
+            crate::cache::test_directory().expect("temporary directory is available");
         git(scratch.path(), &["init", "--initial-branch=main"]);
         git(scratch.path(), &["config", "commit.gpgsign", "false"]);
         git(
@@ -146,7 +482,7 @@ mod tests {
         use clap::Parser;
 
         let repo = fixture();
-        let cache = tempfile::tempdir().unwrap();
+        let cache = crate::cache::test_directory().unwrap();
         let original = load(repo.path(), "HEAD", Some(cache.path())).unwrap();
         assert_ne!(original[0].changes[0].samples, []);
         for command in [vec!["preview"], vec!["export", "frames"]] {
@@ -210,7 +546,8 @@ mod tests {
     #[test]
     fn hit_returns_identical_events_without_importing_git() {
         let repo = fixture();
-        let cache = tempfile::tempdir().expect("cache directory is available");
+        let cache =
+            crate::cache::test_directory().expect("cache directory is available");
         let events =
             load(repo.path(), "HEAD", Some(cache.path())).expect("miss imports");
         assert_eq!(events.len(), 1);
@@ -232,7 +569,7 @@ mod tests {
     #[test]
     fn changed_contributors_file_applies_on_a_cache_hit() {
         let repo = fixture();
-        let cache = tempfile::tempdir().unwrap();
+        let cache = crate::cache::test_directory().unwrap();
         let config = cache.path().join("contributors.toml");
         let cli = crate::Cli::parse_from([
             "codestrand",
@@ -278,7 +615,8 @@ emails = ["author@example.invalid"]
     #[test]
     fn new_commit_misses_and_replaces_snapshot() {
         let repo = fixture();
-        let cache = tempfile::tempdir().expect("cache directory is available");
+        let cache =
+            crate::cache::test_directory().expect("cache directory is available");
         load(repo.path(), "HEAD", Some(cache.path())).expect("first import");
         commit(repo.path(), "first\nsecond\n");
         let events =
@@ -338,7 +676,7 @@ emails = ["author@example.invalid"]
         let repo = fixture();
         commit(repo.path(), "first\nlet previous = 1;\n");
         commit(repo.path(), "first\nlet current = 2;\n");
-        let cache = tempfile::tempdir().unwrap();
+        let cache = crate::cache::test_directory().unwrap();
         let events = load(repo.path(), "HEAD", Some(cache.path())).unwrap();
         let samples = &events.last().unwrap().changes[0].samples;
         assert!(
@@ -383,7 +721,7 @@ emails = ["author@example.invalid"]
         }
         git(repo.path(), &["add", "."]);
         git(repo.path(), &["commit", "-m", "crowded"]);
-        let cache = tempfile::tempdir().unwrap();
+        let cache = crate::cache::test_directory().unwrap();
         let events = load(repo.path(), "HEAD", Some(cache.path())).unwrap();
         let changes = &events.last().unwrap().changes;
         assert_eq!(changes.len(), 128);
@@ -409,7 +747,8 @@ emails = ["author@example.invalid"]
     #[test]
     fn mismatched_or_corrupt_entries_regenerate() {
         let repo = fixture();
-        let cache = tempfile::tempdir().expect("cache directory is available");
+        let cache =
+            crate::cache::test_directory().expect("cache directory is available");
         let events =
             load(repo.path(), "HEAD", Some(cache.path())).expect("first import");
         let path = entry(cache.path(), repo.path());
@@ -439,7 +778,8 @@ emails = ["author@example.invalid"]
     #[test]
     fn unavailable_cache_is_nonfatal() {
         let repo = fixture();
-        let scratch = tempfile::tempdir().expect("temporary directory is available");
+        let scratch =
+            crate::cache::test_directory().expect("temporary directory is available");
         let root = scratch.path().join("file");
         fs::write(&root, "not a directory").expect("fixture is writable");
         assert_eq!(
@@ -453,7 +793,8 @@ emails = ["author@example.invalid"]
     #[test]
     fn replacement_objects_cannot_reuse_or_overwrite_a_snapshot() {
         let repo = fixture();
-        let cache = tempfile::tempdir().expect("cache directory is available");
+        let cache =
+            crate::cache::test_directory().expect("cache directory is available");
         let original = git(repo.path(), &["rev-parse", "HEAD"]);
         let events =
             load(repo.path(), &original, Some(cache.path())).expect("first import");
@@ -482,7 +823,8 @@ emails = ["author@example.invalid"]
     #[test]
     fn bypass_flag_skips_reads_and_writes() {
         let repo = fixture();
-        let cache = tempfile::tempdir().expect("cache directory is available");
+        let cache =
+            crate::cache::test_directory().expect("cache directory is available");
         let cli = crate::Cli::parse_from([
             "codestrand",
             "preview",

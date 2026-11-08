@@ -1,12 +1,19 @@
 use std::{
     collections::HashMap,
     fs, io,
+    io::Read,
     path::{Path, PathBuf},
 };
 
 use serde::Deserialize;
 
 use crate::timeline::Event;
+
+const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
+const MAX_CONTRIBUTORS: usize = 4096;
+const MAX_ALIASES: usize = 4096;
+const MAX_STRING_BYTES: usize = 4096;
+const MAX_EXPANDED_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) enum Key {
@@ -33,12 +40,14 @@ pub(super) struct Accounts {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum Avatar {
-    Local(PathBuf),
+    Local(PathBuf, PathBuf),
     Remote(String),
 }
 
 #[derive(Debug, thiserror::Error)]
 pub(super) enum Error {
+    #[error("contributors file {} exceeds configuration limits", path.display())]
+    Limit { path: PathBuf },
     #[error("contributors file {}: contributor {name:?}, {field}: {reason}", path.display())]
     Invalid {
         path: PathBuf,
@@ -90,7 +99,7 @@ fn load_path(path: Option<&Path>, required: bool) -> Result<Mappings, Error> {
     let Some(path) = path else {
         return Ok(Mappings::default());
     };
-    let text = match fs::read_to_string(path) {
+    let text = match read_config(path) {
         Ok(text) => text,
         Err(source) if !required && source.kind() == io::ErrorKind::NotFound => {
             return Ok(Mappings::default());
@@ -105,6 +114,25 @@ fn load_path(path: Option<&Path>, required: bool) -> Result<Mappings, Error> {
     Mappings::parse(&text, path)
 }
 
+fn read_config(path: &Path) -> io::Result<String> {
+    let file = fs::File::open(path)?;
+    if !file.metadata()?.is_file() || file.metadata()?.len() > MAX_CONFIG_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "contributors file exceeds 1 MiB or is not a regular file",
+        ));
+    }
+    let mut text = String::new();
+    file.take(MAX_CONFIG_BYTES + 1).read_to_string(&mut text)?;
+    if text.len() as u64 > MAX_CONFIG_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "contributors file exceeds 1 MiB",
+        ));
+    }
+    Ok(text)
+}
+
 fn avatar_path(value: &str, config: &Path) -> Result<Avatar, &'static str> {
     if value.contains("://") {
         return crate::avatars::https_url(value)
@@ -116,15 +144,52 @@ fn avatar_path(value: &str, config: &Path) -> Result<Avatar, &'static str> {
     }
     Ok(Avatar::Local(
         config.parent().unwrap_or(Path::new(".")).join(value),
+        config.parent().unwrap_or(Path::new(".")).to_owned(),
     ))
 }
 
 impl Mappings {
     fn parse(text: &str, path: &Path) -> Result<Self, Error> {
+        let limit = || Error::Limit {
+            path: path.to_owned(),
+        };
+        if text.len() as u64 > MAX_CONFIG_BYTES {
+            return Err(limit());
+        }
         let config: Config = toml::from_str(text).map_err(|source| Error::Parse {
             path: path.to_owned(),
             source,
         })?;
+        if config.contributor.len() > MAX_CONTRIBUTORS {
+            return Err(limit());
+        }
+        let mut aliases = 0usize;
+        let mut expanded = 0usize;
+        for entry in &config.contributor {
+            let fields = [&entry.name]
+                .into_iter()
+                .chain(entry.github.iter())
+                .chain(entry.gitlab.iter())
+                .chain(entry.avatar.iter())
+                .chain(entry.gravatar.iter());
+            let mut bytes = 0;
+            for field in fields {
+                if field.len() > MAX_STRING_BYTES {
+                    return Err(limit());
+                }
+                bytes += field.len();
+            }
+            aliases += entry.emails.len();
+            for email in &entry.emails {
+                if email.len() > MAX_STRING_BYTES {
+                    return Err(limit());
+                }
+                expanded = expanded.saturating_add(bytes + email.len());
+            }
+            if aliases > MAX_ALIASES || expanded > MAX_EXPANDED_BYTES {
+                return Err(limit());
+            }
+        }
         let mut emails = HashMap::new();
         for (index, entry) in config.contributor.into_iter().enumerate() {
             let invalid = |field, reason| Error::Invalid {
@@ -217,6 +282,89 @@ fn unlisted_key(event: &Event) -> Key {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oversized_comment_is_rejected() {
+        let root = crate::cache::test_directory().unwrap();
+        let path = root.path().join("contributors.toml");
+        fs::write(&path, format!("#{}", "x".repeat(2 * 1024 * 1024))).unwrap();
+        assert!(load(Some(&path)).is_err());
+    }
+
+    #[test]
+    fn local_avatar_cannot_escape_config_directory() {
+        let root = crate::cache::test_directory().unwrap();
+        let outside = root.path().join("outside");
+        let config = root.path().join("config");
+        fs::create_dir(&outside).unwrap();
+        fs::create_dir(&config).unwrap();
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([10u8, 20, 30, 255]))
+            .save(outside.join("avatar.png"))
+            .unwrap();
+        #[cfg(windows)]
+        assert!(
+            std::process::Command::new("cmd")
+                .args(["/d", "/c", "mklink", "/J"])
+                .arg(config.join("images"))
+                .arg(&outside)
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, config.join("images")).unwrap();
+        for value in [
+            "../outside/avatar.png".to_owned(),
+            "images/avatar.png".to_owned(),
+            outside
+                .join("avatar.png")
+                .to_str()
+                .unwrap()
+                .replace('\\', "/"),
+        ] {
+            let mappings = Mappings::parse(
+                &format!(
+                    "[[contributor]]\nname='Author'\nemails=['a@b']\navatar='{value}'"
+                ),
+                &config.join("contributors.toml"),
+            )
+            .unwrap();
+            let mut history = events(&[("Author", "a@b")]);
+            mappings.apply(&mut history);
+            crate::avatars::Resolver::new(None::<crate::avatars::Http>, None, false, 0)
+                .resolve(&mut history, None);
+            assert!(
+                history[0].contributor.as_ref().unwrap().portrait.is_none(),
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn expanded_aliases_and_long_strings_are_rejected() {
+        let aliases = (0..4097)
+            .map(|i| format!("\"{i}@example.invalid\""))
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(
+            Mappings::parse(
+                &format!("[[contributor]]\nname='Author'\nemails=[{aliases}]"),
+                Path::new("contributors.toml")
+            )
+            .is_err()
+        );
+        assert!(
+            Mappings::parse(
+                &format!(
+                    "[[contributor]]\nname='{}'\nemails=['a@b']",
+                    "x".repeat(4097)
+                ),
+                Path::new("contributors.toml")
+            )
+            .is_err()
+        );
+    }
     use crate::{
         model::{Options, Simulation},
         theme::Theme,
@@ -313,7 +461,7 @@ gravatar = "avatar@example.invalid"
 
     #[test]
     fn local_override_resolves_relative_to_contributors_file() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::cache::test_directory().unwrap();
         let image = root.path().join("portrait.png");
         image::RgbaImage::from_pixel(2, 2, image::Rgba([10u8, 20, 30, 255]))
             .save(&image)
@@ -324,7 +472,7 @@ gravatar = "avatar@example.invalid"
                 .accounts
                 .avatar
                 .as_ref(),
-            Some(&Avatar::Local(image.clone()))
+            Some(&Avatar::Local(image.clone(), root.path().to_owned()))
         );
         fs::write(&image, b"invalid").unwrap();
         assert!(
@@ -342,7 +490,7 @@ gravatar = "avatar@example.invalid"
         let parent = PathBuf::from(std::ffi::OsString::from_wide(&[0xD800]));
         assert_eq!(
             avatar_path("portrait.png", &parent.join("contributors.toml")).unwrap(),
-            Avatar::Local(parent.join("portrait.png"))
+            Avatar::Local(parent.join("portrait.png"), parent)
         );
     }
 
@@ -454,7 +602,7 @@ emails = ["SAME@example.invalid"]
 
     #[test]
     fn only_missing_default_file_is_optional() {
-        let scratch = tempfile::tempdir().unwrap();
+        let scratch = crate::cache::test_directory().unwrap();
         let path = scratch.path().join("absent.toml");
         assert!(load_path(Some(&path), false).unwrap().emails.is_empty());
         let error = load(Some(&path)).unwrap_err();
