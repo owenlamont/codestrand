@@ -174,6 +174,12 @@ mod tests {
     }
     #[test]
     fn every_frame_contains_live_prisms_and_raised_labels_in_real_projections() {
+        for name in crate::theme::ThemeName::ALL {
+            assert_theme_framing(&name.build());
+        }
+    }
+
+    fn assert_theme_framing(theme: &Theme) {
         let histories = (0..5)
             .map(|index| {
                 let mut events = crate::timeline::synthetic();
@@ -191,7 +197,7 @@ mod tests {
                 max_idle_seconds: 0.2,
                 ..default()
             },
-            &Theme::neon(),
+            theme,
             &Mappings::default(),
             &[
                 "uv-secure".into(),

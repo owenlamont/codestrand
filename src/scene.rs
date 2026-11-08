@@ -464,6 +464,32 @@ fn setup(world: &mut World) {
     styling::setup(world, &theme);
 }
 
+fn repository_glass_material(theme: &Theme, index: usize) -> StandardMaterial {
+    StandardMaterial {
+        base_color: theme.glass[index % theme.glass.len()]
+            .base_color
+            .with_alpha(0.055),
+        alpha_mode: AlphaMode::Blend,
+        unlit: true,
+        cull_mode: None,
+        ..default()
+    }
+}
+fn recolor_repository_regions(world: &mut World, theme: &Theme) {
+    let regions: Vec<_> = world
+        .query::<(&RepositoryGlass, &MeshMaterial3d<StandardMaterial>)>()
+        .iter(world)
+        .map(|(region, material)| (region.0, material.0.clone()))
+        .collect();
+    let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
+    for (index, handle) in regions {
+        *materials
+            .get_mut(&handle)
+            .expect("repository glass material") =
+            repository_glass_material(theme, index);
+    }
+}
+
 fn repository_regions(world: &mut World, palette: &Palette) {
     let simulation = &world.resource::<Playback>().0;
     if !matches!(
@@ -474,20 +500,11 @@ fn repository_regions(world: &mut World, palette: &Palette) {
     }
     let regions = simulation.layout().repositories.clone();
     for (index, region) in regions.iter().enumerate() {
-        let hue = (f32::from(u16::try_from(index % 12).expect("bounded hue")) * 30.0
-            + 180.0)
-            % 360.0;
-        let color = Color::hsla(hue, 0.65, 0.55, 0.055);
         let material =
-            world
-                .resource_mut::<Assets<StandardMaterial>>()
-                .add(StandardMaterial {
-                    base_color: color,
-                    alpha_mode: AlphaMode::Blend,
-                    unlit: true,
-                    cull_mode: None,
-                    ..default()
-                });
+            repository_glass_material(world.resource::<Playback>().0.theme(), index);
+        let material = world
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(material);
         let centre = crate::layout::world_coordinates((region.low + region.high) * 0.5);
         let size = region.high - region.low;
         world.spawn((
@@ -760,6 +777,7 @@ pub(super) fn switch_theme(world: &mut World, name: crate::theme::ThemeName) {
                 };
         }
     });
+    recolor_repository_regions(world, &theme);
     world.insert_resource(ClearColor(theme.clear));
     if world.contains_resource::<styling::Styles>() {
         styling::apply(world, &theme);
@@ -1992,6 +2010,48 @@ mod tests {
         assert_eq!(sizes, std::collections::HashSet::from([14.0_f32.to_bits()]));
     }
 
+    #[test]
+    fn repository_glass_follows_every_theme_without_moving_regions() {
+        let mut events = crate::timeline::synthetic();
+        crate::repositories::namespace(&mut events, 0);
+        let mut simulation = Simulation::with_repositories(
+            events,
+            &model::Options::default(),
+            &Theme::neon(),
+            &crate::contributors::Mappings::default(),
+            &["first".into(), "second".into()],
+        );
+        simulation.repository_boundary = crate::repositories::Boundary::Glass;
+        let mut world = World::new();
+        world.insert_resource(Playback(simulation));
+        world.insert_resource(SceneTarget(Handle::<Image>::default().into()));
+        world.insert_resource(Title("test".into()));
+        world.init_resource::<Pools>();
+        world.init_resource::<Assets<Mesh>>();
+        world.init_resource::<Assets<Image>>();
+        world.init_resource::<Assets<StandardMaterial>>();
+        setup(&mut world);
+        let (entity, transform, handle) = world
+            .query_filtered::<(Entity, &Transform, &MeshMaterial3d<StandardMaterial>), With<RepositoryGlass>>()
+            .iter(&world)
+            .next()
+            .map(|(entity, transform, material)| (entity, *transform, material.0.clone()))
+            .unwrap();
+        for name in crate::theme::ThemeName::ALL {
+            switch_theme(&mut world, name);
+            let theme = name.build();
+            let material = world
+                .resource::<Assets<StandardMaterial>>()
+                .get(&handle)
+                .unwrap();
+            assert_eq!(
+                material.base_color,
+                theme.glass[0].base_color.with_alpha(0.055)
+            );
+            assert_eq!(material.alpha_mode, AlphaMode::Blend);
+            assert_eq!(world.get::<Transform>(entity), Some(&transform));
+        }
+    }
     #[test]
     fn preview_switch_loads_uncached_art_off_thread_before_applying_theme() {
         bevy::tasks::AsyncComputeTaskPool::get_or_init(bevy::tasks::TaskPool::new);
