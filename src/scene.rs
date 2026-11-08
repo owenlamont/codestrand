@@ -2494,6 +2494,20 @@ mod tests {
         );
         for &entity in &hidden {
             let visual = world.get::<FileVisual>(entity).unwrap();
+            let material = world
+                .resource::<Assets<StandardMaterial>>()
+                .get(&visual.heat_material)
+                .unwrap();
+            let textures = &palette
+                .glyph_textures
+                .iter()
+                .find(|(name, _)| *name == crate::theme::ThemeName::Phosphor)
+                .unwrap()
+                .1;
+            assert_eq!(
+                material.base_color_texture.as_ref(),
+                Some(&textures[visual.glyph_kind])
+            );
             assert_eq!(
                 world.get::<Transform>(visual.glyph),
                 Some(&simulation.theme().file_glyph_transform)
