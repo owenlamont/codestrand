@@ -42,6 +42,7 @@ struct Limits {
     lines: u64,
     work: u64,
     object_bytes: u64,
+    line_pairs: u64,
 }
 
 impl Default for Limits {
@@ -53,6 +54,7 @@ impl Default for Limits {
             lines: 20_000_000,
             work: 32 * 1024 * 1024 * 1024,
             object_bytes: 16 * 1024 * 1024,
+            line_pairs: 1_000_000_000,
         }
     }
 }
@@ -230,6 +232,7 @@ pub(super) enum BlobDiff {
     },
     Binary,
     Gitlink,
+    Skipped,
 }
 
 #[derive(Serialize)]
@@ -763,15 +766,23 @@ fn bounded_blob_diff(
     {
         return Ok(BlobDiff::Gitlink);
     }
-    let mut load = |entry: &Option<Entry>| -> anyhow::Result<Vec<u8>> {
+    let mut skipped = false;
+    for entry in change.before.iter().chain(&change.after) {
+        let id = gix::ObjectId::from_hex(entry.id.as_bytes())?;
+        budget.charge(1)?;
+        let size = repo.find_header(id)?.size();
+        budget.charge(size)?;
+        budget.blob_bytes = budget.blob_bytes.saturating_add(size);
+        skipped |= size > budget.limits.object_bytes
+            || budget.blob_bytes > budget.limits.blob_bytes;
+    }
+    if skipped {
+        return Ok(BlobDiff::Skipped);
+    }
+    let load = |entry: &Option<Entry>| -> anyhow::Result<Vec<u8>> {
         match entry {
             Some(entry) => {
                 let id = gix::ObjectId::from_hex(entry.id.as_bytes())?;
-                let size = budget.object(repo, id)?;
-                budget.blob_bytes = budget.blob_bytes.saturating_add(size);
-                if budget.blob_bytes > budget.limits.blob_bytes {
-                    return Err(Exhausted.into());
-                }
                 Ok(repo.find_blob(id)?.data.clone())
             }
             None => Ok(Vec::new()),
@@ -791,13 +802,12 @@ fn bounded_blob_diff(
     let before_lines = lines(&before);
     let after_lines = lines(&after);
     budget.lines = budget.lines.saturating_add(before_lines + after_lines);
-    if budget.lines > budget.limits.lines {
-        return Err(Exhausted.into());
-    }
-    if before_lines.saturating_mul(after_lines) > 1_000_000_000 {
-        return Err(Exhausted.into());
-    }
     budget.charge(before_lines + after_lines)?;
+    if budget.lines > budget.limits.lines
+        || before_lines.saturating_mul(after_lines) > budget.limits.line_pairs
+    {
+        return Ok(BlobDiff::Skipped);
+    }
     let input =
         gix::diff::blob::InternedInput::new(before.as_slice(), after.as_slice());
     let diff = gix::diff::blob::diff_with_slider_heuristics(
@@ -841,6 +851,57 @@ fn bounded_blob_diff(
 #[cfg(test)]
 mod security_tests {
     use super::*;
+
+    #[test]
+    fn expensive_diff_keeps_changes_and_later_commits() {
+        let (_root, repo, first) = hostile_history(0, b"a\nb\nc\nd\n");
+        let mut parent = first;
+        for content in [b"e\nf\ng\nh\n".as_slice(), b"later\n"] {
+            let blob = repo.write_blob(content).unwrap().detach();
+            let tree = repo
+                .write_object(&gix::objs::Tree {
+                    entries: vec![gix::objs::tree::Entry {
+                        mode: gix::objs::tree::EntryKind::Blob.into(),
+                        filename: "file".into(),
+                        oid: blob,
+                    }],
+                })
+                .unwrap()
+                .detach();
+            let commit = repo.find_commit(parent).unwrap();
+            let mut commit = commit.decode().unwrap().to_owned().unwrap();
+            commit.tree = tree;
+            commit.parents = [parent].into_iter().collect();
+            parent = repo.write_object(&commit).unwrap().detach();
+        }
+        let history = load_with_limits(
+            &repo,
+            parent,
+            Limits {
+                line_pairs: 20,
+                ..Limits::default()
+            },
+        )
+        .unwrap();
+        assert!(!history.truncated);
+        assert_eq!(history.commits.len(), 3);
+        let change = &history.commits[1].changes[0];
+        assert_eq!(change.path, b"file");
+        assert!(matches!(change.kind, ChangeKind::Modification));
+        assert_eq!(
+            serde_json::to_value(&change.diff).unwrap()["kind"],
+            "skipped"
+        );
+        assert!(matches!(
+            history.commits[2].changes[0].diff,
+            BlobDiff::Text { .. }
+        ));
+        let events = crate::timeline::from_history(&history);
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[1].changes[0].insertions, 0);
+        assert_eq!(events[1].changes[0].removals, 0);
+        assert_eq!(events[1].changes[0].samples.len(), 0);
+    }
 
     fn hostile_history(
         levels: usize,
@@ -907,12 +968,13 @@ mod security_tests {
 
     #[test]
     fn expanded_tree_and_inflated_diff_stop_cleanly() {
-        for (levels, blob) in [
-            (12, b"ok\n".to_vec()),
+        for (levels, blob, truncated) in [
+            (12, b"ok\n".to_vec(), true),
             (
                 0,
                 b"line with repeated compressible content and enough bytes per line\n"
                     .repeat(131_072),
+                false,
             ),
         ] {
             let (_root, repo, tip) = hostile_history(levels, &blob);
@@ -926,7 +988,13 @@ mod security_tests {
                 },
             )
             .unwrap();
-            assert_eq!(serde_json::to_value(history).unwrap()["truncated"], true);
+            assert_eq!(history.truncated, truncated);
+            if !truncated {
+                assert!(matches!(
+                    history.commits[0].changes[0].diff,
+                    BlobDiff::Skipped
+                ));
+            }
         }
     }
 
@@ -943,14 +1011,6 @@ mod security_tests {
                 ..Limits::default()
             },
             Limits {
-                blob_bytes: 0,
-                ..Limits::default()
-            },
-            Limits {
-                lines: 0,
-                ..Limits::default()
-            },
-            Limits {
                 work: 0,
                 ..Limits::default()
             },
@@ -962,6 +1022,110 @@ mod security_tests {
             assert!(load_with_limits(&repo, tip, limits).unwrap().truncated);
         }
         assert!(!import_resolved(&repo, tip).unwrap().truncated);
+    }
+
+    #[test]
+    fn oversized_blob_keeps_addition_rename_and_deletion() {
+        let (_root, repo, first) = hostile_history(0, &vec![b'x'; 4096]);
+        let commit = repo.find_commit(first).unwrap();
+        let mut commit = commit.decode().unwrap().to_owned().unwrap();
+        let tree = repo.find_tree(commit.tree).unwrap();
+        let mut tree = tree.decode().unwrap().to_owned();
+        tree.entries[0].filename = "renamed".into();
+        commit.tree = repo.write_object(&tree).unwrap().detach();
+        commit.parents = [first].into_iter().collect();
+        let renamed = repo.write_object(&commit).unwrap().detach();
+        commit.tree = repo.empty_tree().id;
+        commit.parents = [renamed].into_iter().collect();
+        let deleted = repo.write_object(&commit).unwrap().detach();
+        let history = load_with_limits(
+            &repo,
+            deleted,
+            Limits {
+                object_bytes: 1024,
+                ..Limits::default()
+            },
+        )
+        .unwrap();
+        assert!(!history.truncated);
+        assert_eq!(history.commits.len(), 3);
+        assert!(matches!(
+            history.commits[0].changes[0].kind,
+            ChangeKind::Addition
+        ));
+        let rename = &history.commits[1].changes[0];
+        assert!(matches!(rename.kind, ChangeKind::RenameCandidate));
+        assert_eq!(rename.path, b"renamed");
+        assert_eq!(rename.source_path.as_deref(), Some(b"file".as_slice()));
+        assert!(matches!(
+            history.commits[2].changes[0].kind,
+            ChangeKind::Deletion
+        ));
+        assert!(history.commits.iter().all(|commit| {
+            commit
+                .changes
+                .iter()
+                .all(|change| matches!(change.diff, BlobDiff::Skipped))
+        }));
+    }
+
+    #[test]
+    fn skipped_detail_remains_bounded_by_global_work() {
+        let (_root, repo, tip) = hostile_history(0, b"first\nsecond\n");
+        let history = import_resolved(&repo, tip).unwrap();
+        let change = &history.commits[0].changes[0];
+        for limits in [
+            Limits {
+                blob_bytes: 0,
+                ..Limits::default()
+            },
+            Limits {
+                lines: 0,
+                ..Limits::default()
+            },
+            Limits {
+                object_bytes: 0,
+                ..Limits::default()
+            },
+            Limits {
+                line_pairs: 0,
+                ..Limits::default()
+            },
+        ] {
+            let mut budget = Budget::new(Limits {
+                work: 100,
+                ..limits
+            });
+            assert!(matches!(
+                bounded_blob_diff(&repo, change, &mut budget).unwrap(),
+                BlobDiff::Skipped
+            ));
+            assert!(budget.work >= 13);
+            for _ in 0..100 {
+                if let Err(error) = bounded_blob_diff(&repo, change, &mut budget) {
+                    assert!(error.is::<Exhausted>());
+                    break;
+                }
+            }
+            assert!(budget.work > budget.limits.work);
+        }
+        for limits in [
+            Limits {
+                blob_bytes: 0,
+                ..Limits::default()
+            },
+            Limits {
+                lines: 0,
+                ..Limits::default()
+            },
+        ] {
+            let history = load_with_limits(&repo, tip, limits).unwrap();
+            assert!(!history.truncated);
+            assert!(matches!(
+                history.commits[0].changes[0].diff,
+                BlobDiff::Skipped
+            ));
+        }
     }
 
     #[test]

@@ -29,7 +29,7 @@ mod timeline;
 fn terminal_escape(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len());
     for character in value.chars() {
-        if character.is_control()
+        if (character.is_control() && !matches!(character, '\n' | '\t'))
             || matches!(character, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
         {
             escaped.extend(character.escape_default());
@@ -42,6 +42,14 @@ fn terminal_escape(value: &str) -> String {
 
 #[cfg(test)]
 mod terminal_tests {
+    #[test]
+    fn multiline_diagnostics_keep_layout_and_escape_controls() {
+        assert_eq!(
+            super::terminal_escape("error:\n\ttip\r\u{1b}[31m\u{202e}"),
+            "error:\n\ttip\\r\\u{1b}[31m\\u{202e}"
+        );
+    }
+
     #[test]
     fn escapes_paths_and_dependency_error_chains() {
         let error = anyhow::anyhow!("gix: bad path \u{1b}[31mfile\u{7}")
@@ -235,10 +243,11 @@ fn main() -> std::process::ExitCode {
     match run() {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("Error: {}", terminal_escape(&format!("{error:#}")));
-            if error.is::<clap::Error>() {
+            if let Some(usage) = error.downcast_ref::<clap::Error>() {
+                eprint!("{}", terminal_escape(&usage.to_string()));
                 std::process::ExitCode::from(2)
             } else {
+                eprintln!("Error: {}", terminal_escape(&format!("{error:#}")));
                 std::process::ExitCode::FAILURE
             }
         }

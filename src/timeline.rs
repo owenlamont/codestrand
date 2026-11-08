@@ -3,7 +3,7 @@ use std::{collections::HashMap, fmt::Write};
 use crate::history::{BlobDiff, ChangeKind, Commit, History};
 
 // Bump when the snapshot format, history import policies or timeline conversion change.
-pub(super) const CACHE_VERSION: u32 = 5;
+pub(super) const CACHE_VERSION: u32 = 6;
 
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(super) enum Kind {
@@ -89,6 +89,7 @@ fn sampled_changes(commit: &Commit) -> Vec<FileChange> {
                     ..
                 } => (insertions, removals),
                 BlobDiff::Binary | BlobDiff::Gitlink => (1, 1),
+                BlobDiff::Skipped => (0, 0),
             };
             let kind = match (&change.kind, &change.source_path) {
                 (ChangeKind::Addition, _) => Kind::Added,

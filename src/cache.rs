@@ -381,6 +381,23 @@ mod tests {
     }
 
     #[test]
+    fn skipped_line_detail_round_trips_through_snapshot_validation() {
+        let repo = fixture();
+        let root = crate::cache::test_directory().unwrap();
+        load(repo.path(), "HEAD", Some(root.path())).unwrap();
+        let path = entry(root.path(), repo.path());
+        let mut snapshot: Snapshot =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let change = &mut snapshot.events[0].changes[0];
+        change.insertions = 0;
+        change.removals = 0;
+        change.samples.clear();
+        assert!(valid_snapshot(&snapshot, &snapshot.tip));
+        store(&path, &snapshot).unwrap();
+        assert_eq!(read(&path, &snapshot.tip).unwrap(), snapshot.events);
+    }
+
+    #[test]
     fn snapshot_domains_and_lengths_are_validated() {
         let repo = fixture();
         let root = crate::cache::test_directory().unwrap();

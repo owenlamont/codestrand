@@ -4,6 +4,42 @@
 use std::process::Command;
 
 #[test]
+fn usage_error_preserves_clap_layout_and_exit_status() {
+    let output = Command::new(env!("CARGO_BIN_EXE_codestrand"))
+        .args(["inspect", "--bogus", "x"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let name = std::path::Path::new(env!("CARGO_BIN_EXE_codestrand"))
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        format!(
+            "error: unexpected argument '--bogus' found\n\n  tip: to pass '--bogus' as a value, use '-- --bogus'\n\nUsage: {name} inspect [OPTIONS] <REPOSITORY>\n\nFor more information, try '--help'.\n"
+        )
+    );
+    assert_eq!(output.stdout, [] as [u8; 0]);
+}
+
+#[test]
+fn value_errors_print_clap_message_once() {
+    let output = Command::new(env!("CARGO_BIN_EXE_codestrand"))
+        .args(["export", "x", "--fps", "0"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(stderr.matches("0 is not in 1..=240").count(), 1, "{stderr}");
+    assert!(
+        stderr.ends_with("For more information, try '--help'.\n"),
+        "{stderr}"
+    );
+}
+
+#[test]
 fn invalid_cli_values_cannot_emit_terminal_controls() {
     let output = Command::new(env!("CARGO_BIN_EXE_codestrand"))
         .args(["preview", "--seconds-per-day", "\u{1b}[31m\u{7}"])
