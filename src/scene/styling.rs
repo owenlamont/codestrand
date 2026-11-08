@@ -11,15 +11,37 @@ use super::{
 };
 use crate::theme::{AvatarStyle, BeamStyle, FontStyle};
 
-fn belongs_to(layout: &crate::layout::Layout, mut dir: usize, ancestor: usize) -> bool {
-    loop {
-        if dir == ancestor {
-            return true;
+#[derive(Default)]
+struct Territories {
+    revision: Option<u64>,
+    owners: Vec<usize>,
+    radii: Vec<f32>,
+}
+
+impl Territories {
+    fn update(&mut self, layout: &crate::layout::Layout) {
+        if self.revision == Some(layout.revision()) {
+            return;
         }
-        let Some(parent) = layout.dir(dir).parent else {
-            return false;
-        };
-        dir = parent;
+        self.owners.resize(layout.dir_count(), 0);
+        self.radii.clear();
+        self.radii.resize(layout.dir_count(), 1.0);
+        for index in 1..layout.dir_count() {
+            let parent = layout.dir(index).parent.expect("non-root directory");
+            self.owners[index] = if parent == 0 {
+                index
+            } else {
+                self.owners[parent]
+            };
+        }
+        for (_, file) in layout.files() {
+            let owner = self.owners[file.dir];
+            if owner != 0 {
+                self.radii[owner] = self.radii[owner]
+                    .max(file.position.distance(layout.dir(owner).position));
+            }
+        }
+        self.revision = Some(layout.revision());
     }
 }
 
@@ -48,6 +70,7 @@ pub(super) struct Styles {
     pub(super) beams: Vec<Handle<StandardMaterial>>,
     pub(super) territories: Vec<Handle<StandardMaterial>>,
     territory_pool: Vec<Entity>,
+    territory_layout: Territories,
     leaders: Vec<Entity>,
 }
 
@@ -156,6 +179,7 @@ pub(super) fn setup(world: &mut World, theme: &Theme) {
         beams,
         territories,
         territory_pool: Vec::new(),
+        territory_layout: Territories::default(),
         leaders: Vec::new(),
     });
     apply(world, theme);
@@ -314,16 +338,21 @@ pub(super) fn ground(
     );
     let distance = eye.distance(focus);
     let direction = (eye - focus).normalize();
-    let (ground_focus, coverage) = if world.contains_resource::<crate::camera::PreviewCamera>() {
-        let far = world.query_filtered::<&Projection, With<SceneCamera>>()
-            .iter(world).filter_map(|projection| match projection {
-                Projection::Perspective(p) => Some(p.far),
-                _ => None,
-            }).next().unwrap_or(1000.0);
-        (eye, far * 4.0)
-    } else {
-        (focus, distance * 2.5)
-    };
+    let (ground_focus, coverage) =
+        if world.contains_resource::<crate::camera::PreviewCamera>() {
+            let far = world
+                .query_filtered::<&Projection, With<SceneCamera>>()
+                .iter(world)
+                .filter_map(|projection| match projection {
+                    Projection::Perspective(p) => Some(p.far),
+                    _ => None,
+                })
+                .next()
+                .unwrap_or(1000.0);
+            (eye, far * 4.0)
+        } else {
+            (focus, distance * 2.5)
+        };
     for mut transform in world
         .query_filtered::<&mut Transform, With<Ground>>()
         .iter_mut(world)
@@ -344,6 +373,7 @@ pub(super) fn ground(
         set_visible(world, styles.backdrop, backdrop_visible);
         let mut used = 0;
         if theme.territories {
+            styles.territory_layout.update(simulation.layout());
             let mesh = palette.disc.clone();
             let material = styles.territories[0].clone();
             let dirs: Vec<_> = simulation
@@ -360,13 +390,7 @@ pub(super) fn ground(
             );
             for (index, dir) in dirs {
                 let slot = hues[index] % 12;
-                let radius = simulation
-                    .layout()
-                    .files()
-                    .filter(|(_, f)| belongs_to(simulation.layout(), f.dir, index))
-                    .map(|(_, f)| f.position.distance(dir.position))
-                    .fold(1.0_f32, f32::max)
-                    + 0.5;
+                let radius = styles.territory_layout.radii[index] + 0.5;
                 for ring in 0..3 {
                     let entity = styles.territory_pool[used];
                     used += 1;

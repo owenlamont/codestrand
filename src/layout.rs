@@ -81,6 +81,7 @@ pub(super) struct Layout {
     files: BTreeMap<u64, File>,
     file_index: HashMap<String, u64>,
     next_id: u64,
+    revision: u64,
     plan: Plan,
 }
 
@@ -104,6 +105,7 @@ impl Layout {
             files: BTreeMap::new(),
             file_index: HashMap::new(),
             next_id: 0,
+            revision: 0,
             plan: Plan::default(),
         }
     }
@@ -146,6 +148,10 @@ impl Layout {
         self.dirs.iter().enumerate().filter(|(_, dir)| dir.live)
     }
 
+    pub(super) fn revision(&self) -> u64 {
+        self.revision
+    }
+
     pub(super) fn dir_count(&self) -> usize {
         self.dirs.len()
     }
@@ -168,6 +174,7 @@ impl Layout {
     }
 
     pub(super) fn add(&mut self, path: &str, delay: f32, author: usize) -> u64 {
+        self.revision += 1;
         if let Some(&id) = self.file_index.get(path) {
             let file = self.files.get_mut(&id).expect("indexed files exist");
             file.state = Presence::Arriving;
@@ -235,6 +242,7 @@ impl Layout {
 
     /// Keeps the file's identity and current position while it glides to its new slot.
     pub(super) fn rename(&mut self, from: &str, to: &str, author: usize) -> u64 {
+        self.revision += 1;
         let Some(id) = self.file_index.remove(from) else {
             return self.add(to, 0.0, author);
         };
@@ -268,6 +276,7 @@ impl Layout {
     }
 
     pub(super) fn step(&mut self, dt: f32) {
+        self.revision += 1;
         self.fade_files(dt);
         self.compact_slots();
         self.prune_empty();
@@ -303,6 +312,7 @@ impl Layout {
 
     /// Completes pending fades and relaxes for `steps` ticks, for history before playback.
     pub(super) fn settle(&mut self, steps: u32, dt: f32) {
+        self.revision += 1;
         for dir in &mut self.dirs {
             dir.touch_age = f32::INFINITY;
         }
