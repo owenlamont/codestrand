@@ -9,20 +9,36 @@ const TRANSITION_SECONDS: f32 = 0.3;
 #[derive(Default)]
 pub(super) struct Lod {
     seconds: Option<f32>,
+    transition_seconds: f32,
     collapsed: Vec<bool>,
     blend: Vec<f32>,
     pub detail: Vec<f32>,
     pub glyph: Vec<f32>,
     pub size: Vec<f32>,
+    low: Vec<Vec2>,
+    high: Vec<Vec2>,
+    active: Vec<bool>,
+    files: Vec<usize>,
+    pub glyphs: Vec<usize>,
 }
 
 impl Lod {
+    #[cfg(test)]
     pub(super) fn sample(&mut self, layout: &Layout, seconds: f32, view: View) {
+        self.sample_clocks(layout, seconds, seconds, view);
+    }
+
+    pub(super) fn sample_clocks(
+        &mut self,
+        layout: &Layout,
+        seconds: f32,
+        transition_seconds: f32,
+        view: View,
+    ) {
         let reset = self.seconds.is_none_or(|previous| seconds < previous);
-        let dt = self
-            .seconds
-            .map_or(0.0, |previous| (seconds - previous).max(0.0));
+        let dt = (transition_seconds - self.transition_seconds).max(0.0);
         self.seconds = Some(seconds);
+        self.transition_seconds = transition_seconds;
         let count = layout.dir_count();
         if reset {
             self.collapsed.clear();
@@ -33,14 +49,25 @@ impl Lod {
         self.detail.resize(count, 1.0);
         self.glyph.resize(count, 0.0);
         self.size.resize(count, 1.0);
-        let mut low = vec![Vec2::splat(f32::INFINITY); count];
-        let mut high = vec![Vec2::splat(f32::NEG_INFINITY); count];
-        let mut active = vec![false; count];
-        let mut files = vec![0_usize; count];
+        self.low.resize(count, Vec2::ZERO);
+        self.low.fill(Vec2::splat(f32::INFINITY));
+        self.high.resize(count, Vec2::ZERO);
+        self.high.fill(Vec2::splat(f32::NEG_INFINITY));
+        self.active.resize(count, false);
+        self.active.fill(false);
+        self.files.resize(count, 0);
+        self.files.fill(0);
+        self.glyphs.clear();
+        let (low, high, active, files) = (
+            &mut self.low,
+            &mut self.high,
+            &mut self.active,
+            &mut self.files,
+        );
         for (_, file) in layout.files() {
             low[file.dir] = low[file.dir].min(file.position - Vec2::splat(0.4));
             high[file.dir] = high[file.dir].max(file.position + Vec2::splat(0.4));
-            active[file.dir] |= file.heat > 0.2;
+            active[file.dir] |= file.touch_age < 2.5;
             files[file.dir] += 1;
         }
         for index in (0..count).rev() {
@@ -81,6 +108,9 @@ impl Lod {
             let weight =
                 self.blend[index] * self.blend[index] * (3.0 - 2.0 * self.blend[index]);
             self.glyph[index] = parent_detail * weight;
+            if self.glyph[index] > 0.0 {
+                self.glyphs.push(index);
+            }
             self.detail[index] = parent_detail * (1.0 - weight);
             let point = Vec3::new(dir.position.x, 0.0, dir.position.y);
             let depth = (point - view.eye).dot((view.focus - view.eye).normalize());
@@ -104,27 +134,13 @@ impl View {
             return f32::INFINITY;
         }
         let forward = (self.focus - self.eye).normalize();
-        let right = forward.cross(Vec3::Y).normalize();
-        let up = right.cross(forward);
-        let mut minimum = Vec2::splat(f32::INFINITY);
-        let mut maximum = Vec2::splat(f32::NEG_INFINITY);
-        for point in [
-            low,
-            Vec2::new(low.x, high.y),
-            high,
-            Vec2::new(high.x, low.y),
-        ] {
-            let offset = Vec3::new(point.x, 0.0, point.y) - self.eye;
-            let depth = offset.dot(forward);
-            if depth <= 0.5 {
-                return f32::INFINITY;
-            }
-            let projected = Vec2::new(offset.dot(right), offset.dot(up)) * self.height
-                / (2.0 * depth * (self.fov * 0.5).tan());
-            minimum = minimum.min(projected);
-            maximum = maximum.max(projected);
+        let center = (low + high) * 0.5;
+        let radius = (high - low).length() * 0.5;
+        let depth = (Vec3::new(center.x, 0.0, center.y) - self.eye).dot(forward);
+        if depth - radius <= 0.5 {
+            return f32::INFINITY;
         }
-        (maximum - minimum).max_element()
+        radius * self.height / (depth * (self.fov * 0.5).tan())
     }
 }
 
@@ -165,21 +181,13 @@ mod tests {
     }
 
     #[test]
-    fn nested_collapse_has_one_glyph_and_leaves_layout_unchanged() {
+    fn nested_collapse_has_one_glyph() {
         let layout = layout();
-        let positions: Vec<_> = layout.files().map(|(_, file)| file.position).collect();
         let mut lod = Lod::default();
         lod.sample(&layout, 0.0, view(10000.0));
         assert_eq!(lod.glyph.iter().sum::<f32>(), 1.0);
         assert_eq!(lod.detail[0], 1.0);
         assert_eq!(*lod.detail.last().unwrap(), 0.0);
-        assert_eq!(
-            positions,
-            layout
-                .files()
-                .map(|(_, file)| file.position)
-                .collect::<Vec<_>>()
-        );
     }
 
     #[test]
@@ -203,14 +211,48 @@ mod tests {
         let mut layout = layout();
         let mut lod = Lod::default();
         lod.sample(&layout, 0.0, view(10000.0));
-        layout.add("a/b/one.rs", 0.0, 0);
+        let id = layout.touch("a/b/one.rs", 0);
+        layout.heat(id, 0.12 + 0.08 * 2.0_f32.ln());
+        assert!(layout.file(id).unwrap().heat < 0.2);
         lod.sample(&layout, 0.31, view(10000.0));
         assert_eq!(lod.detail, vec![1.0; lod.detail.len()]);
+        layout.heat(id, 1.0);
         for _ in 0..200 {
-            layout.step(1.0 / 60.0);
+            layout.cool_heat(1.0 / 60.0, 3.0);
         }
+        assert!(layout.file(id).unwrap().heat > 0.2);
         lod.sample(&layout, 3.64, view(10000.0));
         assert_eq!(lod.glyph.iter().sum::<f32>(), 1.0);
+    }
+
+    #[test]
+    fn preview_transition_ignores_playback_speed() {
+        let layout = layout();
+        for speed in [0.125, 8.0] {
+            let mut lod = Lod::default();
+            lod.sample_clocks(&layout, 0.0, 0.0, view(10000.0));
+            lod.sample_clocks(&layout, 0.15 * speed, 0.15, view(1.0));
+            assert_eq!(lod.detail[1], 0.5);
+            lod.sample_clocks(&layout, 0.3 * speed, 0.3, view(1.0));
+            assert_eq!(lod.detail[1], 1.0);
+        }
+    }
+
+    #[test]
+    fn bounding_circle_is_stable_during_orbit() {
+        let camera = view(100.0);
+        let expected = camera.footprint(Vec2::splat(-2.0), Vec2::splat(2.0));
+        for angle in [0.2, 0.7, 1.4, 2.5] {
+            let rotated = View {
+                eye: Quat::from_rotation_y(angle) * camera.eye,
+                ..camera
+            };
+            assert!(
+                (rotated.footprint(Vec2::splat(-2.0), Vec2::splat(2.0)) - expected)
+                    .abs()
+                    < 0.001
+            );
+        }
     }
 
     #[test]
@@ -219,15 +261,7 @@ mod tests {
         let mut lod = Lod::default();
         let mut camera = view(10000.0);
         lod.sample(&layout, 0.0, camera);
-        let bounds = layout.files().fold(
-            (Vec2::splat(f32::INFINITY), Vec2::splat(f32::NEG_INFINITY)),
-            |(low, high), (_, file)| {
-                (
-                    low.min(file.position - Vec2::splat(0.4)),
-                    high.max(file.position + Vec2::splat(0.4)),
-                )
-            },
-        );
+        let bounds = (lod.low[1], lod.high[1]);
         camera.height *= 36.0 / camera.footprint(bounds.0, bounds.1);
         lod.sample(&layout, 0.4, camera);
         assert!(lod.collapsed[1]);

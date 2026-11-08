@@ -710,12 +710,7 @@ pub(super) fn animate(world: &mut World) {
     });
 }
 
-fn sync_files(
-    world: &mut World,
-    palette: &Palette,
-    pools: &mut Pools,
-    simulation: &Simulation,
-) {
+fn sync_lod(world: &mut World, pools: &mut Pools, simulation: &Simulation) {
     let layout = simulation.layout();
     let (focus, distance) = simulation.view();
     let (eye, focus) = world.get_resource::<PreviewCamera>().map_or(
@@ -726,7 +721,7 @@ fn sync_files(
         .query::<&Window>()
         .iter(world)
         .next()
-        .map_or(720.0, |window| model::count_u32(window.physical_height()));
+        .map_or(720.0, Window::height);
     let fov = world
         .query_filtered::<&Projection, With<SceneCamera>>()
         .iter(world)
@@ -736,9 +731,17 @@ fn sync_files(
             _ => None,
         })
         .unwrap_or(std::f32::consts::FRAC_PI_4);
-    pools.lod.sample(
+    let seconds = if world.contains_resource::<PreviewCamera>() {
+        world
+            .get_resource::<Time<Real>>()
+            .map_or(0.0, Time::elapsed_secs)
+    } else {
+        simulation.seconds()
+    };
+    pools.lod.sample_clocks(
         layout,
         simulation.seconds(),
+        seconds,
         lod::View {
             eye,
             focus,
@@ -746,6 +749,16 @@ fn sync_files(
             fov,
         },
     );
+}
+
+fn sync_files(
+    world: &mut World,
+    palette: &Palette,
+    pools: &mut Pools,
+    simulation: &Simulation,
+) {
+    sync_lod(world, pools, simulation);
+    let layout = simulation.layout();
     pools.hues.sync(layout);
     pools.files.retain(|id, entity| {
         let keep = layout.file(*id).is_some();
@@ -1048,10 +1061,7 @@ fn sync_structure(
         set_visible(world, *entity, pools.lod.detail[index] > 0.0);
     }
     hide_rest(world, pool, dirs.len());
-    let glyphs: Vec<_> = layout
-        .dirs()
-        .filter(|(index, _)| pools.lod.glyph[*index] > 0.0)
-        .collect();
+    let glyphs = &pools.lod.glyphs;
     let pool = grow(
         world,
         &mut pools.aggregates,
@@ -1059,7 +1069,8 @@ fn sync_structure(
         &palette.folder,
         &palette.edge,
     );
-    for (&entity, &(index, dir)) in pool.iter().zip(&glyphs) {
+    for (&entity, &index) in pool.iter().zip(glyphs) {
+        let dir = layout.dir(index);
         set_material(
             world,
             entity,
@@ -1421,16 +1432,24 @@ fn labels(world: &mut World) {
         caption.push_str(&camera.caption());
     }
     let geometry = playback.0.theme();
-    let wanted = playback.0.labels().into_iter().filter_map(|label| {
-        let point = camera.world_to_viewport(&transform, label.position).ok()?;
-        let anchor = if label.kind == model::LabelKind::Avatar {
-            label.position - geometry.avatar_label_offset
-        } else {
-            label.position
-        };
-        let distance = transform.translation().distance_squared(anchor);
-        Some((label, point, distance))
-    });
+    let lod = &world.resource::<Pools>().lod;
+    let wanted = playback
+        .0
+        .labels_for_detail(|index| {
+            lod.detail.get(index).is_none_or(|&weight| weight > 0.0)
+                || lod.glyph.get(index).is_some_and(|&weight| weight > 0.0)
+        })
+        .into_iter()
+        .filter_map(|label| {
+            let point = camera.world_to_viewport(&transform, label.position).ok()?;
+            let anchor = if label.kind == model::LabelKind::Avatar {
+                label.position - geometry.avatar_label_offset
+            } else {
+                label.position
+            };
+            let distance = transform.translation().distance_squared(anchor);
+            Some((label, point, distance))
+        });
     let chosen = place_labels(wanted.collect(), geometry.label_height);
     let mut query = world.query_filtered::<(
         &mut Text,
@@ -2403,9 +2422,9 @@ mod tests {
     }
 
     #[test]
-    fn collapsed_files_skip_visuals_then_expand_without_moving_layout() {
+    fn collapsed_files_restore_visibility_after_zoom_and_theme_switch() {
         let events = crate::timeline::synthetic();
-        let mut simulation = Simulation::new(
+        let simulation = Simulation::new(
             events.clone(),
             &model::Options {
                 start: events.len(),
@@ -2420,27 +2439,66 @@ mod tests {
         world.init_resource::<Assets<StandardMaterial>>();
         let palette = Palette::new(&mut world, &Theme::neon());
         let mut pools = Pools::default();
-        world.insert_resource(PreviewCamera::new((Vec3::ZERO, 20000.0)));
+        world.insert_resource(Time::<Real>::default());
         sync_files(&mut world, &palette, &mut pools, &simulation);
-        assert!(pools.lod.glyph.iter().any(|&weight| weight > 0.0));
-        assert!(pools.files.len() < simulation.layout().files().count());
+        let (focus, distance) = simulation.view();
+        let mut fallback = lod::Lod::default();
+        fallback.sample(
+            simulation.layout(),
+            simulation.seconds(),
+            lod::View {
+                eye: focus + model::view_direction() * distance,
+                focus,
+                height: 720.0,
+                fov: std::f32::consts::FRAC_PI_4,
+            },
+        );
+        assert_eq!(pools.lod.detail, fallback.detail);
+        assert_eq!(pools.lod.glyph, fallback.glyph);
+        assert_eq!(pools.lod.size, fallback.size);
         world.insert_resource(PreviewCamera::new((Vec3::ZERO, 1.0)));
-        simulation.advance_to(30, 30);
-        let positions: Vec<_> = simulation
-            .layout()
-            .files()
-            .map(|(_, file)| file.position)
-            .collect();
+        world
+            .resource_mut::<Time<Real>>()
+            .advance_by(std::time::Duration::from_secs(1));
         sync_files(&mut world, &palette, &mut pools, &simulation);
         assert_eq!(pools.files.len(), simulation.layout().files().count());
-        assert_eq!(
-            positions,
-            simulation
-                .layout()
-                .files()
-                .map(|(_, file)| file.position)
-                .collect::<Vec<_>>()
+        world.insert_resource(PreviewCamera::new((Vec3::ZERO, 20000.0)));
+        world
+            .resource_mut::<Time<Real>>()
+            .advance_by(std::time::Duration::from_secs(1));
+        sync_files(&mut world, &palette, &mut pools, &simulation);
+        assert!(pools.lod.glyph.iter().any(|&weight| weight > 0.0));
+        let hidden: Vec<_> = pools
+            .files
+            .values()
+            .copied()
+            .filter(|&entity| {
+                world.get::<Visibility>(entity) == Some(&Visibility::Hidden)
+            })
+            .collect();
+        assert_ne!(hidden, []);
+        world.insert_resource(palette);
+        world.insert_resource(Playback(simulation));
+        switch_theme(&mut world, crate::theme::ThemeName::Phosphor);
+        let palette = world.remove_resource::<Palette>().unwrap();
+        let simulation = world.remove_resource::<Playback>().unwrap().0;
+        world.insert_resource(PreviewCamera::new((Vec3::ZERO, 1.0)));
+        world
+            .resource_mut::<Time<Real>>()
+            .advance_by(std::time::Duration::from_secs(1));
+        sync_files(&mut world, &palette, &mut pools, &simulation);
+        assert_eq!(pools.files.len(), simulation.layout().files().count());
+        assert!(
+            hidden.iter().all(|&entity| world.get::<Visibility>(entity)
+                == Some(&Visibility::Inherited))
         );
+        for &entity in &hidden {
+            let visual = world.get::<FileVisual>(entity).unwrap();
+            assert_eq!(
+                world.get::<Transform>(visual.glyph),
+                Some(&simulation.theme().file_glyph_transform)
+            );
+        }
         sync_structure(&mut world, &palette, &mut pools, &simulation);
         assert!(pools.aggregates.iter().all(
             |&entity| world.get::<Visibility>(entity) == Some(&Visibility::Hidden)
