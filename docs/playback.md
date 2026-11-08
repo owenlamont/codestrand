@@ -91,8 +91,10 @@ path = "../second"
 
 Paths in the TOML file resolve relative to the file. Labels default to the repository
 directory name. Repeated flags and a file can be combined; flag entries come first.
-Duplicate repositories and labels are rejected. Each entry is a table so future repository
-metadata can be added; archive dates are not supported yet.
+Paths resolving to the same location share one entry; the first entry wins. Labels for
+distinct repositories must be unique. Each entry is a table so future repository metadata
+can be added; archive dates are not supported yet. The combined list is limited to 30
+unique repositories before any history is imported or avatars are resolved.
 
 Repository manifests must be regular files no larger than 1 MiB, with at most 4,096
 entries. Repository paths are limited to 4,096 bytes before filesystem resolution.

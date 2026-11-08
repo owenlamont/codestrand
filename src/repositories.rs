@@ -11,6 +11,7 @@ use crate::timeline::{Event, Kind};
 const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 const MAX_MANIFEST_ENTRIES: usize = 4096;
 const MAX_PATH_BYTES: usize = 4096;
+pub(super) const MAX_REPOSITORIES: usize = 30;
 
 #[derive(Clone, Copy, Debug, Default, clap::ValueEnum, serde::Serialize)]
 pub(super) enum Boundary {
@@ -98,7 +99,8 @@ pub(super) fn inputs(
     }
     let mut seen = std::collections::HashSet::new();
     let mut labels = std::collections::HashSet::new();
-    for repository in &mut repositories {
+    let mut unique = Vec::new();
+    for mut repository in repositories {
         anyhow::ensure!(
             repository.path.as_os_str().len() <= MAX_PATH_BYTES,
             "repository path exceeds 4096 bytes"
@@ -107,10 +109,7 @@ pub(super) fn inputs(
             format!("resolve repository {}", repository.path.display())
         })?;
         if !seen.insert(path.clone()) {
-            bail!(
-                "repository listed more than once: {}",
-                repository.path.display()
-            );
+            continue;
         }
         if repository
             .label
@@ -123,8 +122,9 @@ pub(super) fn inputs(
         if !labels.insert(repository.name()) {
             bail!("repository labels must be unique: {}", repository.name());
         }
+        unique.push(repository);
     }
-    Ok(repositories)
+    Ok(unique)
 }
 
 pub(super) fn prefix(index: usize) -> String {
@@ -177,7 +177,36 @@ pub(super) fn merge(histories: Vec<Vec<Event>>) -> Vec<Event> {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
+
     use super::*;
+
+    #[test]
+    fn repository_limit_counts_unique_resolved_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths: Vec<_> = (0..30)
+            .map(|i| temp.path().join(format!("repo-{i}")))
+            .collect();
+        for path in &paths {
+            std::fs::create_dir(path).unwrap();
+        }
+        let file = temp.path().join("repos.toml");
+        let mut document = String::new();
+        for i in 0..30 {
+            writeln!(
+                document,
+                "[[repositories]]\npath='repo-{i}'\nlabel='Manifest {i}'"
+            )
+            .unwrap();
+        }
+        std::fs::write(&file, document).unwrap();
+        let mut flags = paths.clone();
+        flags.push(paths[0].join("..").join("repo-0"));
+        let repositories = inputs(&flags, Some(&file)).unwrap();
+        assert_eq!(repositories.len(), 30);
+        assert_eq!(repositories[0].path, paths[0].canonicalize().unwrap());
+        assert_eq!(repositories[0].name(), "repo-0");
+    }
 
     #[test]
     fn manifest_limits_reject_a_four_mib_comment() {
@@ -236,7 +265,7 @@ mod tests {
     }
 
     #[test]
-    fn file_paths_are_relative_to_manifest_and_duplicate_clones_are_rejected() {
+    fn file_paths_are_relative_to_manifest_and_duplicates_keep_the_first_entry() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::create_dir(temp.path().join("repo")).unwrap();
         let file = temp.path().join("repos.toml");
@@ -251,7 +280,9 @@ mod tests {
             temp.path().join("repo").canonicalize().unwrap()
         );
         assert_eq!(repositories[0].name(), "Project");
-        assert!(inputs(&[temp.path().join("repo")], Some(&file)).is_err());
+        let combined = inputs(&[temp.path().join("repo")], Some(&file)).unwrap();
+        assert_eq!(combined.len(), 1);
+        assert_eq!(combined[0].name(), "repo");
         std::fs::write(&file, "repositories = []").unwrap();
         assert!(inputs(&[], Some(&file)).is_err());
     }

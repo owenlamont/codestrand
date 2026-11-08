@@ -217,7 +217,7 @@ impl Simulation {
         let duration = starts.last().copied().unwrap_or(LEAD_IN) + TAIL;
         let ticks = frames_for(duration, 60)?;
         anyhow::ensure!(
-            repositories <= 30
+            repositories <= crate::repositories::MAX_REPOSITORIES
                 && ticks <= 216_000
                 && usize::try_from(ticks)
                     .ok()
