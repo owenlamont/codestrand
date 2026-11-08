@@ -80,6 +80,10 @@ enum Command {
 }
 
 #[derive(clap::Args, serde::Serialize)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each bool is an independent clap switch"
+)]
 struct Source {
     /// Local repository to play; a built-in synthetic history plays when omitted.
     #[arg(long)]
