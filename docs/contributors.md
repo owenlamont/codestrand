@@ -32,7 +32,12 @@ Files exceeding a limit are rejected with a configuration error before alias exp
 Account fields accept usernames, never profile URLs or whitespace. GitHub logins use
 letters, digits and hyphens (bot logins may end in `[bot]`); GitLab usernames start with
 a letter or digit and may also contain `_`, `-` and `.`. Invalid fields report the file,
-contributor and field. Local avatar paths resolve relative to the TOML file. Local images
+contributor and field. Local avatar paths resolve relative to the TOML file and must stay
+inside the TOML file's directory. Absolute paths are accepted only inside that directory.
+Parent escapes, symlinks, directory junctions, network paths and device paths are rejected
+before opening an image. Rejected paths warn and use the default coloured sphere.
+All ancestors must be real directories, including ancestors of the TOML directory.
+Local images
 must decode as PNG, JPEG or GIF, at most 4 MiB and 2048 pixels per side. Missing or
 undecodable local images produce a warning and fall back to account lookups.
 Remote overrides require an HTTPS URL without credentials.

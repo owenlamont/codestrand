@@ -40,7 +40,7 @@ pub(super) struct Accounts {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum Avatar {
-    Local(PathBuf),
+    Local(PathBuf, PathBuf),
     Remote(String),
 }
 
@@ -144,6 +144,7 @@ fn avatar_path(value: &str, config: &Path) -> Result<Avatar, &'static str> {
     }
     Ok(Avatar::Local(
         config.parent().unwrap_or(Path::new(".")).join(value),
+        config.parent().unwrap_or(Path::new(".")).to_owned(),
     ))
 }
 
@@ -291,6 +292,56 @@ mod tests {
     }
 
     #[test]
+    fn local_avatar_cannot_escape_config_directory() {
+        let root = crate::cache::test_directory().unwrap();
+        let outside = root.path().join("outside");
+        let config = root.path().join("config");
+        fs::create_dir(&outside).unwrap();
+        fs::create_dir(&config).unwrap();
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([10u8, 20, 30, 255]))
+            .save(outside.join("avatar.png"))
+            .unwrap();
+        #[cfg(windows)]
+        assert!(
+            std::process::Command::new("cmd")
+                .args(["/d", "/c", "mklink", "/J"])
+                .arg(config.join("images"))
+                .arg(&outside)
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, config.join("images")).unwrap();
+        for value in [
+            "../outside/avatar.png".to_owned(),
+            "images/avatar.png".to_owned(),
+            outside
+                .join("avatar.png")
+                .to_str()
+                .unwrap()
+                .replace('\\', "/"),
+        ] {
+            let mappings = Mappings::parse(
+                &format!(
+                    "[[contributor]]\nname='Author'\nemails=['a@b']\navatar='{value}'"
+                ),
+                &config.join("contributors.toml"),
+            )
+            .unwrap();
+            let mut history = events(&[("Author", "a@b")]);
+            mappings.apply(&mut history);
+            crate::avatars::Resolver::new(None::<crate::avatars::Http>, None, false, 0)
+                .resolve(&mut history, None);
+            assert!(
+                history[0].contributor.as_ref().unwrap().portrait.is_none(),
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
     fn expanded_aliases_and_long_strings_are_rejected() {
         let aliases = (0..4097)
             .map(|i| format!("\"{i}@example.invalid\""))
@@ -421,7 +472,7 @@ gravatar = "avatar@example.invalid"
                 .accounts
                 .avatar
                 .as_ref(),
-            Some(&Avatar::Local(image.clone()))
+            Some(&Avatar::Local(image.clone(), root.path().to_owned()))
         );
         fs::write(&image, b"invalid").unwrap();
         assert!(
@@ -439,7 +490,7 @@ gravatar = "avatar@example.invalid"
         let parent = PathBuf::from(std::ffi::OsString::from_wide(&[0xD800]));
         assert_eq!(
             avatar_path("portrait.png", &parent.join("contributors.toml")).unwrap(),
-            Avatar::Local(parent.join("portrait.png"))
+            Avatar::Local(parent.join("portrait.png"), parent)
         );
     }
 

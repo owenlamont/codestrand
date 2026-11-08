@@ -29,17 +29,34 @@ pub(super) fn https_url(value: &str) -> bool {
     })
 }
 
-pub(super) fn local_portrait(path: &Path) -> Option<Portrait> {
-    let mut bytes = Vec::new();
-    std::fs::File::open(path)
-        .ok()?
-        .take(MAX_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .ok()?;
-    if u64::try_from(bytes.len()).ok()? > MAX_BYTES {
-        return None;
+fn local_portrait(path: &Path, root: &Path) -> std::io::Result<Option<Portrait>> {
+    let allowed = std::path::absolute(root)
+        .ok()
+        .zip(std::path::absolute(path).ok())
+        .is_some_and(|(root, path)| {
+            path.starts_with(root)
+                && !path
+                    .components()
+                    .any(|part| matches!(part, std::path::Component::ParentDir))
+        });
+    if !allowed {
+        return Err(std::io::Error::other(
+            "avatar path escapes contributors directory",
+        ));
     }
-    Portrait::decode(&bytes)
+    let file = match crate::cache::ConfinedFile::at(path, false)
+        .and_then(|file| file.open())
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let mut bytes = Vec::new();
+    file.take(MAX_BYTES + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_BYTES {
+        return Ok(None);
+    }
+    Ok(Portrait::decode(&bytes))
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -536,8 +553,16 @@ impl<N: Network> Resolver<N> {
         remote: Option<&str>,
         commit: &str,
     ) -> Option<Arc<Portrait>> {
-        if let Some(Avatar::Local(path)) = &accounts.avatar {
-            if let Some(portrait) = local_portrait(path) {
+        if let Some(Avatar::Local(path, root)) = &accounts.avatar {
+            let portrait = local_portrait(path, root);
+            if portrait.is_err() {
+                eprintln!(
+                    "avatars: rejected local override {}; using default portrait",
+                    crate::terminal_escape(&path.to_string_lossy())
+                );
+                return None;
+            }
+            if let Ok(Some(portrait)) = portrait {
                 return Some(Arc::new(portrait));
             }
             eprintln!(
@@ -1136,8 +1161,10 @@ mod tests {
         let path = root.path().join("portrait.png");
         fs::write(&path, png()).unwrap();
         let mut source = event("author@example.invalid", Some("explicit"));
-        source.contributor.as_mut().unwrap().accounts.avatar =
-            Some(Avatar::Local(path.clone()));
+        source.contributor.as_mut().unwrap().accounts.avatar = Some(Avatar::Local(
+            path.clone(),
+            path.parent().unwrap().to_owned(),
+        ));
         let mut local = resolver(None, false, vec![]);
         let mut events = [source.clone()];
         local.resolve(&mut events, Some("owner/repo"));
@@ -1248,8 +1275,10 @@ mod tests {
                 fs::write(&path, bytes).unwrap();
             }
             let mut source = event("commit@example.invalid", Some("explicit"));
-            source.contributor.as_mut().unwrap().accounts.avatar =
-                Some(Avatar::Local(path.clone()));
+            source.contributor.as_mut().unwrap().accounts.avatar = Some(Avatar::Local(
+                path.clone(),
+                path.parent().unwrap().to_owned(),
+            ));
             let mut resolver = resolver(None, true, vec![Response::Found(png())]);
             let mut events = [source];
             resolver.resolve(&mut events, None);
@@ -1270,8 +1299,10 @@ mod tests {
         let path = root.path().join(filename);
         fs::write(&path, png()).unwrap();
         let mut source = event("commit@example.invalid", None);
-        source.contributor.as_mut().unwrap().accounts.avatar =
-            Some(Avatar::Local(path.clone()));
+        source.contributor.as_mut().unwrap().accounts.avatar = Some(Avatar::Local(
+            path.clone(),
+            path.parent().unwrap().to_owned(),
+        ));
         let mut resolver = resolver(None, false, vec![]);
         let mut events = [source];
         resolver.resolve(&mut events, None);
