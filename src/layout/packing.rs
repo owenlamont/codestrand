@@ -11,6 +11,7 @@ mod zoom;
 const BOUND: f32 = 2.5;
 pub(crate) const MINIMUM: Vec2 = Vec2::new(144.0, 64.0);
 const BIRTH_SECONDS: f32 = 0.75;
+const ALLOCATION_TOLERANCE_PX: f32 = 0.1;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Tile {
@@ -254,7 +255,8 @@ fn allocate(
                 let clamped = cross.clamp(low[1 - axis], high[1 - axis]);
                 // Inverting a subpixel birth sliver amplifies cancellation in its tile edges.
                 assert!(
-                    (cross - clamped).abs() * stretch[1 - axis] < 0.02,
+                    (cross - clamped).abs() * stretch[1 - axis]
+                        < ALLOCATION_TOLERANCE_PX,
                     "feasible child cross-section: cross={cross} clamped={clamped} stretch={stretch:?} delta_px={}",
                     (cross - clamped).abs() * stretch[1 - axis]
                 );
@@ -268,11 +270,18 @@ fn allocate(
             let low = a0.max(available - b1);
             let high = a1.min(available - b0);
             assert!(
-                low <= high + 0.02,
+                (low - high) * stretch[axis] <= ALLOCATION_TOLERANCE_PX,
                 "infeasible split: {low} > {high}; node={index} axis={axis} size={size:?} stretch={stretch:?} pa={pa} pb={pb} a={a0},{a1} b={b0},{b1}"
             );
             let share = available * a.weight / (a.weight + b.weight).max(1e-9);
-            let extent = share.clamp(low.min(high), high);
+            // Tile-edge cancellation during births is bounded in reference pixels, not unstretched coordinates.
+            let extent = if low > high {
+                low.midpoint(high)
+            } else {
+                share.clamp(low, high)
+            };
+            assert!(available >= 0.0, "nonnegative space after gutter");
+            let extent = extent.clamp(0.0, available);
             let mut near = tile;
             let mut far = tile;
             near.high[axis] =

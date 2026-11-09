@@ -452,12 +452,20 @@ impl Simulation {
             );
             let adjusted = simulation.adjust_travel_padding(options, &padding);
             if adjusted == padding {
+                anyhow::ensure!(
+                    options.travel_cap != TravelCap::None
+                        || simulation.travel.stats.faded == 0,
+                    "uncapped travel stalled at planning pass {} with {} fades remaining; shorten the history or increase avatar speed",
+                    pass + 1,
+                    simulation.travel.stats.faded
+                );
                 break;
             }
             if pass + 1 == passes {
                 anyhow::ensure!(
                     options.travel_cap != TravelCap::None,
-                    "uncapped travel did not converge within 64 planning passes; shorten the history or increase avatar speed"
+                    "uncapped travel did not converge within 64 planning passes ({} fades remaining); shorten the history or increase avatar speed",
+                    simulation.travel.stats.faded
                 );
                 break;
             }
@@ -1958,6 +1966,96 @@ mod tests {
             |_| 216_000,
         );
         assert!(Simulation::check_schedule(&events, &options, 5, &schedule).is_err());
+    }
+
+    fn short_repository_history(count: usize) -> (Vec<Event>, Vec<String>) {
+        let events = (0..count * 3)
+            .map(|index| {
+                let mut row = vec![timeline::synthetic().remove(0)];
+                row[0].seconds = i64::try_from(index).unwrap() * 86_400;
+                row[0].author.name = format!("person{}", index % 3).into_bytes();
+                row[0].author.email =
+                    format!("p{}@test.invalid", index % 3).into_bytes();
+                crate::repositories::namespace(&mut row, index % count);
+                row.remove(0)
+            })
+            .collect();
+        let labels = (0..count).map(|index| format!("repo{index}")).collect();
+        (events, labels)
+    }
+
+    #[test]
+    fn short_repository_births_preserve_feasible_tiles() {
+        for (count, gutter) in [(10, 0.0), (10, 4.0), (30, 0.0), (30, 4.0)] {
+            let (events, labels) = short_repository_history(count);
+            let options = Options {
+                seconds_per_day: 0.05,
+                max_idle_seconds: 0.05,
+                gutter,
+                ..Options::default()
+            };
+            let simulation = Simulation::build(
+                events,
+                &options,
+                &Theme::neon(),
+                &Mappings::default(),
+                &[],
+                &labels,
+            );
+            for tick in 0..=frames_for(simulation.duration(), 60).unwrap() {
+                let (regions, _, _) =
+                    simulation.packing.sample(u64::from(tick)).unwrap();
+                for tile in regions.iter().filter_map(|region| region.tile) {
+                    assert!(tile.low.is_finite() && tile.high.is_finite());
+                    assert!(tile.high.cmpge(tile.low).all());
+                    assert!(
+                        tile.low
+                            .cmpge(crate::layout::packing::Tile::viewport().low)
+                            .all()
+                    );
+                    assert!(
+                        tile.high
+                            .cmple(crate::layout::packing::Tile::viewport().high)
+                            .all()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn uncapped_short_history_has_no_silent_fades() {
+        let (events, labels) = short_repository_history(10);
+        let options = Options {
+            seconds_per_day: 0.2,
+            max_idle_seconds: 0.2,
+            travel_cap: TravelCap::None,
+            bot_travel: BotTravel::Walk,
+            ..Options::default()
+        };
+        match Simulation::try_with_repositories(
+            events,
+            &options,
+            &Theme::neon(),
+            &Mappings::default(),
+            &labels,
+        ) {
+            Ok(mut simulation) => {
+                assert_eq!(simulation.travel.stats.faded, 0);
+                let mut audit = slots::diagnostics::MovingBeams::default();
+                for tick in 0..=frames_for(simulation.duration(), 60).unwrap() {
+                    simulation.advance_to(tick, 60);
+                    audit.observe(&simulation);
+                }
+                audit.assert_clear(options.avatar_max_speed);
+            }
+            Err(error) => assert!(
+                error.to_string().contains(
+                    "uncapped travel did not converge within 64 planning passes"
+                ),
+                "{error}"
+            ),
+        }
     }
 
     #[test]
