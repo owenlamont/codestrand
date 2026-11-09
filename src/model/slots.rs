@@ -857,7 +857,7 @@ impl Choice<'_> {
     fn select(&self, previous: Option<Dock>) -> Placement {
         if let Some((p, _)) = previous
             .map(|dock| self.assess(dock))
-            .filter(|(p, cost)| p.valid() && *cost < std::f32::consts::PI)
+            .filter(|(p, _)| p.valid())
         {
             return p;
         }
@@ -1238,6 +1238,17 @@ mod tests {
         assert!(!intersect(name, foreign));
     }
 
+    #[test]
+    fn hard_valid_docks_persist_while_new_docks_prefer_clear_content() {
+        let first = choice(&[], &[]).select(None);
+        let content = [(0, disk(first.point, 7.5))];
+        let mut next = choice(&content, &[]);
+        next.beams = &[];
+        assert!(next.assess(first.dock).0.valid());
+        assert_eq!(next.select(Some(first.dock)).dock, first.dock);
+        let fresh = next.select(None);
+        assert!(next.content_cost(fresh.point) < next.content_cost(first.point));
+    }
     #[test]
     fn prefers_top_keeps_a_valid_dock_and_uses_other_edges_when_blocked() {
         let free = choice(&[], &[]);

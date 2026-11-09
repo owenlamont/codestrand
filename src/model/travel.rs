@@ -10,6 +10,13 @@ use planning::trips;
 const HALF: Vec2 = Vec2::new(640.0, 360.0);
 const MAX_POSES: usize = 4_000_000;
 
+pub(super) fn interior(tile: crate::layout::packing::Tile, radius: f32) -> Rect {
+    let rect = Rect::from_corners(tile.low * HALF, tile.high * HALF);
+    let inset =
+        (2.0 * radius + 0.1).min((rect.size().min_element() * 0.5 - 0.1).max(0.0));
+    rect.inflate(-inset)
+}
+
 #[derive(Clone, Copy, Debug)]
 struct Pose {
     tick: u64,
@@ -351,11 +358,10 @@ fn fade_clearance(
         let row = &capture.tiles[usize::try_from(tick)
             .expect("bounded fade tick")
             .min(capture.tiles.len() - 1)];
-        let tile_collision = row.iter().flatten().any(|tile| {
-            Rect::from_corners(tile.low * HALF, tile.high * HALF)
-                .inflate(-0.1)
-                .contains(point)
-        });
+        let tile_collision = row
+            .iter()
+            .flatten()
+            .any(|tile| interior(*tile, radius).contains(point));
         let avatar_collision = capture
             .poses
             .iter()
@@ -602,6 +608,38 @@ impl RouteFailure {
     }
 }
 
+#[derive(Clone, Copy)]
+struct Costs<'a> {
+    content: &'a [Rect],
+    tiles: &'a [Rect],
+    radius: f32,
+}
+
+impl Costs<'_> {
+    fn clear(self, a: Vec2, b: Vec2) -> bool {
+        !self.content.iter().any(|&r| slots::segment(a, b, r))
+            && !self
+                .tiles
+                .iter()
+                .any(|r| slots::segment(a, b, r.inflate(-0.1)))
+    }
+    fn multiplier(self, a: Vec2, b: Vec2) -> f32 {
+        let point = a.midpoint(b);
+        let depth = self
+            .tiles
+            .iter()
+            .filter(|r| r.contains(point))
+            .map(|r| (point - r.min).min(r.max - point).min_element().max(0.0))
+            .fold(0.0_f32, f32::max);
+        let overlaps = self
+            .content
+            .iter()
+            .filter(|&&r| slots::segment(a, b, r))
+            .count();
+        1.0 + 100.0 * super::count(overlaps) + 10.0 * depth / self.radius.max(1.0)
+    }
+}
+
 impl Router {
     #[cfg(test)]
     fn route(
@@ -611,7 +649,17 @@ impl Router {
         obstacles: &[Rect],
         bodies: &[Disc],
     ) -> Result<Vec<Vec2>, RouteFailure> {
-        self.cost_route(source, target, obstacles, bodies, &[], 5.8)
+        self.cost_route(
+            source,
+            target,
+            obstacles,
+            bodies,
+            Costs {
+                content: &[],
+                tiles: &[],
+                radius: 5.8,
+            },
+        )
     }
 
     fn cost_route(
@@ -620,8 +668,7 @@ impl Router {
         target: Vec2,
         obstacles: &[Rect],
         bodies: &[Disc],
-        content: &[Rect],
-        radius: f32,
+        costs: Costs<'_>,
     ) -> Result<Vec<Vec2>, RouteFailure> {
         let changed = self.tiles.len() != obstacles.len()
             || self.tiles.iter().zip(obstacles).any(|(a, b)| {
@@ -635,7 +682,7 @@ impl Router {
             self.tiles = obstacles.to_vec();
             self.epochs += 1;
         }
-        let limit = HALF - Vec2::splat(radius + 0.001);
+        let limit = HALF - Vec2::splat(costs.radius + 0.001);
         let mut axes = [vec![-limit.x, limit.x], vec![-limit.y, limit.y]];
         add_axes(&mut axes, obstacles);
         add_axes(
@@ -647,8 +694,8 @@ impl Router {
         );
         axes[0].extend([source.x, target.x]);
         axes[1].extend([source.y, target.y]);
-        add_axes(&mut axes, content);
-        graph_route(source, target, obstacles, bodies, content, axes, limit)
+        add_axes(&mut axes, costs.tiles);
+        graph_route(source, target, obstacles, bodies, costs, axes, limit)
     }
 }
 
@@ -665,7 +712,7 @@ fn graph_route(
     target: Vec2,
     obstacles: &[Rect],
     bodies: &[Disc],
-    content: &[Rect],
+    costs: Costs<'_>,
     mut axes: [Vec<f32>; 2],
     limit: Vec2,
 ) -> Result<Vec<Vec2>, RouteFailure> {
@@ -686,9 +733,7 @@ fn graph_route(
                 body.point.distance(a + delta * t) < body.radius
             })
     };
-    if clear(source, target)
-        && !content.iter().any(|&r| slots::segment(source, target, r))
-    {
+    if clear(source, target) && costs.clear(source, target) {
         return Ok(vec![source, target]);
     }
     for (axis, values) in axes.iter_mut().enumerate() {
@@ -738,8 +783,7 @@ fn graph_route(
             }
             let a = point(i);
             let b = point(next);
-            let penalty = content.iter().filter(|&&r| slots::segment(a, b, r)).count();
-            let delta = a.distance(b) * (1.0 + 100.0 * super::count(penalty));
+            let delta = a.distance(b) * costs.multiplier(a, b);
             #[expect(
                 clippy::cast_possible_truncation,
                 clippy::cast_sign_loss,
@@ -763,53 +807,176 @@ fn graph_route(
         path.push(point(node));
     }
     path.reverse();
-    Ok(simplify_path(&path, clear, content))
+    Ok(simplify_path(&path))
 }
 
-fn simplify_path(
-    path: &[Vec2],
-    clear: impl Fn(Vec2, Vec2) -> bool,
-    content: &[Rect],
-) -> Vec<Vec2> {
-    let mut simplified = vec![path[0]];
-    let mut i = 0;
-    while i + 1 < path.len() {
-        let next = (i + 1..path.len())
-            .rev()
-            .find(|&j| {
-                clear(path[i], path[j])
-                    && !content.iter().any(|&r| slots::segment(path[i], path[j], r))
-            })
-            .unwrap_or(i + 1);
-        simplified.push(path[next]);
-        i = next;
+fn simplify_path(path: &[Vec2]) -> Vec<Vec2> {
+    let mut result = vec![path[0]];
+    for (index, &point) in path.iter().enumerate().skip(1) {
+        let collinear = index + 1 < path.len() && {
+            let before = path[index - 1];
+            let after = path[index + 1];
+            (before.x.to_bits() == point.x.to_bits()
+                && point.x.to_bits() == after.x.to_bits())
+                || (before.y.to_bits() == point.y.to_bits()
+                    && point.y.to_bits() == after.y.to_bits())
+        };
+        if !collinear {
+            result.push(point);
+        }
     }
-    simplified
+    result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
+    fn edge_corridors_leave_a_central_guard_even_during_birth() {
+        let tile = crate::layout::packing::Tile {
+            low: Vec2::splat(-0.5),
+            high: Vec2::splat(0.5),
+        };
+        let core = interior(tile, 14.0);
+        assert_eq!(core.min, tile.low * HALF + Vec2::splat(28.1));
+        assert!(!core.contains(Vec2::new(tile.low.x * HALF.x + 7.0, 0.0)));
+        assert!(slots::segment(
+            Vec2::new(-400.0, 0.0),
+            Vec2::new(400.0, 0.0),
+            core
+        ));
+        let sliver = crate::layout::packing::Tile {
+            low: Vec2::splat(-0.001),
+            high: Vec2::splat(0.001),
+        };
+        let core = interior(sliver, 14.0);
+        assert!(core.contains(Vec2::ZERO));
+        assert!(core.size().min_element() >= 0.1999);
+    }
+    #[test]
     fn routing_uses_the_full_portrait_radius_at_the_frame_edge() {
         let mut router = Router::default();
         let wall = Rect::from_corners(Vec2::new(-20.0, -350.0), Vec2::new(20.0, 350.0));
         let a = Vec2::new(-100.0, 0.0);
         let b = Vec2::new(100.0, 0.0);
-        assert!(router.cost_route(a, b, &[wall], &[], &[], 14.0).is_err());
-        let route = router.cost_route(a, b, &[wall], &[], &[], 5.8).unwrap();
+        assert!(
+            router
+                .cost_route(
+                    a,
+                    b,
+                    &[wall],
+                    &[],
+                    Costs {
+                        content: &[],
+                        tiles: &[],
+                        radius: 14.0
+                    }
+                )
+                .is_err()
+        );
+        let route = router
+            .cost_route(
+                a,
+                b,
+                &[wall],
+                &[],
+                Costs {
+                    content: &[],
+                    tiles: &[],
+                    radius: 5.8,
+                },
+            )
+            .unwrap();
         assert!(
             route
                 .iter()
                 .all(|p| p.abs().cmple(HALF - Vec2::splat(5.8)).all())
         );
         let wall = wall.inflate(-20.0);
-        let route = router.cost_route(a, b, &[wall], &[], &[], 14.0).unwrap();
+        let route = router
+            .cost_route(
+                a,
+                b,
+                &[wall],
+                &[],
+                Costs {
+                    content: &[],
+                    tiles: &[],
+                    radius: 14.0,
+                },
+            )
+            .unwrap();
         assert!(
             route
                 .iter()
                 .all(|p| p.abs().cmple(HALF - Vec2::splat(14.0)).all())
         );
+    }
+    #[test]
+    fn thirty_birth_slivers_with_content_stay_within_the_graph_budget() {
+        let tiles: Vec<_> = (0..30_u16)
+            .map(|i| {
+                let x = -540.0 + f32::from(i) * 36.0;
+                Rect::from_corners(Vec2::new(x, -300.0), Vec2::new(x + 32.0, 300.0))
+            })
+            .collect();
+        let cores: Vec<_> = tiles.iter().map(|r| r.inflate(-15.9)).collect();
+        let content: Vec<_> = tiles
+            .iter()
+            .enumerate()
+            .map(|(i, r)| {
+                Rect::from_center_size(
+                    Vec2::new(r.center().x, super::super::count(i) * 7.0 - 100.0),
+                    Vec2::new(
+                        4.0 + super::super::count(i) * 0.1,
+                        20.0 + super::super::count(i) * 0.3,
+                    ),
+                )
+            })
+            .collect();
+        let route = Router::default()
+            .cost_route(
+                Vec2::new(-610.0, 0.0),
+                Vec2::new(610.0, 0.0),
+                &cores,
+                &[],
+                Costs {
+                    content: &content,
+                    tiles: &tiles,
+                    radius: 14.0,
+                },
+            )
+            .unwrap();
+        assert!(
+            route
+                .windows(2)
+                .all(|p| cores.iter().all(|&r| !slots::segment(p[0], p[1], r)))
+        );
+    }
+    #[test]
+    fn clear_content_still_prefers_the_shared_tile_edge() {
+        let tile = Rect::from_corners(Vec2::splat(-100.0), Vec2::splat(100.0));
+        let mut router = Router::default();
+        let route = router
+            .cost_route(
+                Vec2::new(-100.0, -90.0),
+                Vec2::new(100.0, -90.0),
+                &[tile.inflate(-28.1)],
+                &[],
+                Costs {
+                    content: &[],
+                    tiles: &[tile],
+                    radius: 14.0,
+                },
+            )
+            .unwrap();
+        assert!(
+            route
+                .windows(2)
+                .filter(|p| p[0].distance(p[1]) > 100.0)
+                .all(|p| p[0].y <= -99.9 && p[1].y <= -99.9)
+        );
+        assert!(route.iter().any(|p| p.y < -100.0));
     }
     #[test]
     fn routes_prefer_content_clear_edges_but_accept_unavoidable_content() {
@@ -818,7 +985,17 @@ mod tests {
         let source = Vec2::new(-100.0, 0.0);
         let target = Vec2::new(100.0, 0.0);
         let route = router
-            .cost_route(source, target, &[], &[], &[content], 14.0)
+            .cost_route(
+                source,
+                target,
+                &[],
+                &[],
+                Costs {
+                    content: &[content],
+                    tiles: &[],
+                    radius: 14.0,
+                },
+            )
             .unwrap();
         assert!(
             route
@@ -826,7 +1003,17 @@ mod tests {
                 .all(|p| !slots::segment(p[0], p[1], content))
         );
         let unavoidable = router
-            .cost_route(Vec2::ZERO, target, &[], &[], &[content], 14.0)
+            .cost_route(
+                Vec2::ZERO,
+                target,
+                &[],
+                &[],
+                Costs {
+                    content: &[content],
+                    tiles: &[],
+                    radius: 14.0,
+                },
+            )
             .unwrap();
         assert_eq!(unavoidable[0], Vec2::ZERO);
         assert_eq!(*unavoidable.last().unwrap(), target);

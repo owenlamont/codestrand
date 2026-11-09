@@ -1,5 +1,5 @@
 use super::{
-    Capture, Disc, HALF, Pose, Rect, Route, Router, Trip, Vec2, fade_clearance,
+    Capture, Costs, Disc, HALF, Pose, Rect, Route, Router, Trip, Vec2, fade_clearance,
     seconds_ticks, tick_time,
 };
 
@@ -16,13 +16,22 @@ impl Capture {
             .min(self.radii.len() - 1)]
     }
 
-    fn tiles(&self, tick: u64, _radius: f32) -> Vec<Rect> {
+    fn boundaries(&self, tick: u64) -> Vec<Rect> {
         self.tiles[usize::try_from(tick)
             .expect("bounded tick")
             .min(self.tiles.len() - 1)]
         .iter()
         .flatten()
-        .map(|t| Rect::from_corners(t.low * HALF, t.high * HALF).inflate(-0.1))
+        .map(|t| Rect::from_corners(t.low * HALF, t.high * HALF))
+        .collect()
+    }
+    fn tiles(&self, tick: u64, radius: f32) -> Vec<Rect> {
+        self.tiles[usize::try_from(tick)
+            .expect("bounded tick")
+            .min(self.tiles.len() - 1)]
+        .iter()
+        .flatten()
+        .map(|t| super::interior(*t, radius))
         .collect()
     }
 }
@@ -38,7 +47,11 @@ fn occupied(
     if point.abs().cmpgt(HALF - Vec2::splat(radius)).any() {
         return Some("frame_edge");
     }
-    if capture.tiles(tick, 0.0).iter().any(|r| r.contains(point)) {
+    if capture
+        .tiles(tick, radius)
+        .iter()
+        .any(|r| r.contains(point))
+    {
         return Some("moving_tile");
     }
     for other in 0..capture.poses.len() {
@@ -247,13 +260,17 @@ impl Search<'_> {
         let tiles = self.capture.tiles(epoch, radius + 0.0002);
         let content =
             swept_content(self.capture, candidate.departure, candidate.arrival, radius);
+        let boundaries = self.capture.boundaries(epoch);
         match self.router.cost_route(
             candidate.source,
             candidate.destination,
             &tiles,
             bodies,
-            &content,
-            radius,
+            Costs {
+                content: &content,
+                tiles: &boundaries,
+                radius,
+            },
         ) {
             Ok(points) => {
                 candidate.failure = None;

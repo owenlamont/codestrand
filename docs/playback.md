@@ -163,7 +163,8 @@ minimum, then move to free nearby lanes before truncating as a last resort. Name
 visible with their avatars. Portrait size accounts for perspective.
 
 Multi-repository avatars travel along tile edges, gutters and the frame margin.
-Route centres stay outside tile interiors. Content overlap is a soft cost, swept
+Routes stay within one portrait diameter of tile edges; central tile rectangles
+remain impassable, including during births. Content overlap is a soft cost, swept
 over each trip; avatar-to-avatar clearance remains hard. Routes stop at corners
 and accelerate to at most `--avatar-max-speed`
 reference pixels/second (default `480`, minimum `1`), with a 0.2-second acceleration ramp.

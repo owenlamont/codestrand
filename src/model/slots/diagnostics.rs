@@ -155,9 +155,7 @@ impl MovingBeams {
                 .filter_map(|(i, r)| r.tile.map(|t| (i, t)))
             {
                 self.travelling_centre_interior += u64::from(
-                    Rect::from_corners(tile.low * HALF, tile.high * HALF)
-                        .inflate(-0.15)
-                        .contains(point),
+                    crate::model::travel::interior(tile, radius + 0.05).contains(point),
                 );
                 if index == avatar.repository {
                     continue;
