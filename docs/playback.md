@@ -148,14 +148,14 @@ gutters partition the whole inset field. `--gutter` sets the visible spacing in
 1280×720 reference pixels: default `4`, range `0`–`20`, including touching tiles at
 `0`. Avatars remain doubled through five repositories, then taper with a smoothstep
 curve to the original diameter at thirty. Crowd scaling also remains active.
-Avatar bodies and names prefer clear content rectangles, including repository labels
+Names prefer clear content rectangles, including repository labels
 and a small margin, but may overlap content near tile edges when space is tight.
 Different content shapes can leave space inside a uniformly fitted tile.
 
 Contributors first appear in a gutter slot above their repository, aligned with the
 projected mean of touched files. Switching repositories chooses the nearest valid edge
-instead of requiring a detour to the top. A slot without avatar overlap survives
-consecutive commits while its beam and frame checks remain valid.
+instead of requiring a detour to the top. A slot survives consecutive commits while
+its beam and frame checks remain valid.
 Placement checks the touched files throughout service, including
 additions and deletions, for an open half-plane and beams crossing another repository
 or its label.
@@ -163,22 +163,21 @@ Other edges provide fallback docks. Avatars spread along edges; names shrink to 
 minimum, then move to free nearby lanes before truncating as a last resort. Names remain
 visible with their avatars. Portrait size accounts for perspective.
 
-Multi-repository avatars travel along tile edges, gutters and the frame margin.
-Routes stay within one portrait diameter of tile edges; central tile rectangles
-remain impassable, including during births. Content overlap is a soft cost, swept
-over each trip. Avatar clearance is a stronger soft cost for routes and new slots:
-clear options win, and unavoidable crowd overlap is accepted after a bounded wait
-of up to 30 canonical ticks. Routes stop at corners and accelerate to at most
-`--avatar-max-speed` reference pixels/second (default `480`, minimum `1`), with a
-0.2-second acceleration ramp. Trips score timed positions in commit order. Disjoint
-routes can run concurrently. Moving gutters are sampled with explicit speed and
-acceleration checks; frame limits and tile central guards remain hard constraints.
-Beams end when their author departs or changes repository, cancelling in-flight
-fragments together. Otherwise,
-beams remain until the last emitted fragment arrives, then fade. When not travelling,
-after five inactive playback seconds contributors
-remain parked at their last slot while fading over 1.2 seconds. Faded contributors
-release their lane and reappear directly at their next slot, without a screen-wide trip.
+Multi-repository travel follows gutter centrelines and the outer margin. Parking slots
+sit on the same network. Routes never cross tile interiors, including unused areas;
+portraits may overlap tile edges beside a narrow gutter. Dijkstra minimises network
+length. Other avatars have no travel cost: walkers never wait or detour for each other.
+Parking still spreads avatars when clear slots are available.
+
+A contributor can depart once its previous commit's last fragment has arrived and the
+moving gutter route can meet the speed limit. Travel overlaps other contributors'
+animations; commits remain strictly chronological. Routes stop at corners and accelerate
+toward `--avatar-max-speed` reference pixels/second (default `480`, minimum `1`).
+Moving junctions follow the gutter network, with every canonical sample checked against
+the speed limit, frame bounds and tile guards. A shared parking point creates no trip.
+After five inactive playback seconds, contributors follow their parked gutter slot
+while fading over 1.2 seconds. Capped playback releases faded lanes and re-enters at the
+next service slot after a long idle gap.
 
 `--travel-cap` limits extra waiting per walking trip (default `0.4` seconds; range `0`
 through `3600`, or `none` to wait as long as the route needs). Available gaps between
@@ -208,13 +207,14 @@ codestrand export frames --repositories-file repositories.toml \
   --travel-cap none --bot-travel walk --avatar-max-speed 480 --frames 90 --fps 30
 ```
 
-Planning starts from the first tick after the contributor's previous service, so gaps
-between that contributor's commits absorb travel before padding is needed. Padding is
-revalidated as the scene geometry changes: at most four passes for numeric caps.
+Planning tests departure ticks from the contributor's fragment completion onward.
+Gaps between that contributor's commits absorb travel before padding is needed.
+Padding is revalidated as scene geometry changes. Numeric caps use at most five
+padded rebuilds, including one cleanup of unused service padding.
 Uncapped padding grows until every walking trip completes, subject to the existing
 216,000-tick, 2,000,000-region-sample and 4,000,000-pose capture budgets. Each Dijkstra
-search is limited to 10,000 graph nodes. Numeric caps apply to accumulated waiting
-per commit, including reserved waits.
+search is limited to 10,000 graph nodes; thirty repositories need at most 3,844.
+Numeric caps apply to accumulated extra waiting per commit.
 
 The CPU `layout-quality --treemap` report records fallback and least-bad slots,
 live beam crossings, travelling disc intersections, route points and travel padding.

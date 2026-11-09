@@ -79,33 +79,30 @@ pub(super) struct Dock {
 
 impl Dock {
     #[cfg(test)]
-    pub(in crate::model) fn middle_top() -> Self {
-        Self {
-            edge: 0,
-            fraction: 0.5,
+    pub(in crate::model) fn new(edge: u8, fraction: f32) -> Self {
+        Self { edge, fraction }
+    }
+    pub(in crate::model) fn on_network(self, tile: Tile) -> Vec2 {
+        let low = tile.low * HALF;
+        let high = tile.high * HALF;
+        let fraction = self.fraction.clamp(0.0, 1.0);
+        match self.edge {
+            0 => Vec2::new(low.x + (high.x - low.x) * fraction, high.y),
+            1 => Vec2::new(high.x, low.y + (high.y - low.y) * fraction),
+            2 => Vec2::new(low.x + (high.x - low.x) * fraction, low.y),
+            _ => Vec2::new(low.x, low.y + (high.y - low.y) * fraction),
         }
     }
     fn point(self, tile: Tile, gap: Vec2) -> Vec2 {
+        let fraction = self.fraction;
         let inset = Vec2::splat(0.05);
         let low = tile.low * HALF + inset;
         let high = tile.high * HALF - inset;
         match self.edge {
-            0 => Vec2::new(
-                low.x + (high.x - low.x) * self.fraction,
-                high.y + gap.y * 0.5,
-            ),
-            1 => Vec2::new(
-                high.x + gap.x * 0.5,
-                low.y + (high.y - low.y) * self.fraction,
-            ),
-            2 => Vec2::new(
-                low.x + (high.x - low.x) * self.fraction,
-                low.y - gap.y * 0.5,
-            ),
-            _ => Vec2::new(
-                low.x - gap.x * 0.5,
-                low.y + (high.y - low.y) * self.fraction,
-            ),
+            0 => Vec2::new(low.x + (high.x - low.x) * fraction, high.y + gap.y * 0.5),
+            1 => Vec2::new(high.x + gap.x * 0.5, low.y + (high.y - low.y) * fraction),
+            2 => Vec2::new(low.x + (high.x - low.x) * fraction, low.y - gap.y * 0.5),
+            _ => Vec2::new(low.x - gap.x * 0.5, low.y + (high.y - low.y) * fraction),
         }
     }
 }
@@ -371,10 +368,8 @@ impl State {
                 && let Some(slot) = &mut avatar.slot
             {
                 slot.name = None;
-                if self.uncapped_travel
-                    && let Some(tile) = self.layout.repositories[avatar.repository].tile
-                {
-                    slot.point = slot.dock.point(tile, gap);
+                if let Some(tile) = self.layout.repositories[avatar.repository].gutter {
+                    slot.point = slot.dock.on_network(tile);
                 }
                 if avatar.slot_presence > 0.0 {
                     occupied.push(disk(slot.point, radius));
@@ -384,6 +379,19 @@ impl State {
         let mut order: Vec<_> = (0..self.avatars.len())
             .filter(|&i| now - self.avatars[i].last_active < super::AVATAR_IDLE)
             .collect();
+        let retained: Vec<_> = self
+            .avatars
+            .iter()
+            .map(|avatar| {
+                if now - avatar.last_active >= super::AVATAR_IDLE {
+                    return None;
+                }
+                let slot = avatar.slot.as_ref()?;
+                let tile = self.layout.repositories[avatar.repository].gutter?;
+                Some(disk(slot.dock.on_network(tile), radius))
+            })
+            .collect();
+        occupied.extend(retained.iter().flatten().copied());
         order.sort_by(|&a, &b| {
             self.avatars[b]
                 .last_active
@@ -391,6 +399,11 @@ impl State {
                 .then(a.cmp(&b))
         });
         for index in order {
+            if let Some(own) = retained[index]
+                && let Some(position) = occupied.iter().position(|r| *r == own)
+            {
+                occupied.remove(position);
+            }
             let avatar = &self.avatars[index];
             let commit = avatar.commit;
             let envelope = envelopes[commit];
@@ -405,6 +418,7 @@ impl State {
             let text = short_name(&avatar.name, name_scale, tile.pixels().x - 24.0);
             let choice = Choice {
                 tile,
+                gutter: self.layout.repositories[avatar.repository].gutter,
                 gap,
                 radius,
                 obstacles: &obstacles,
@@ -760,6 +774,7 @@ fn free_lane(body: Vec2, size: Vec2, blocked: &[Rect]) -> Option<(Vec2, Rect)> {
 
 struct Choice<'a> {
     tile: Tile,
+    gutter: Option<Tile>,
     gap: Vec2,
     radius: f32,
     obstacles: &'a [(usize, Rect)],
@@ -772,6 +787,12 @@ struct Choice<'a> {
 }
 
 impl Choice<'_> {
+    fn point(&self, dock: Dock) -> Vec2 {
+        self.gutter.map_or_else(
+            || dock.point(self.tile, self.gap),
+            |tile| dock.on_network(tile),
+        )
+    }
     fn nearest(&self, point: Vec2) -> Placement {
         self.free_docks()
             .into_iter()
@@ -787,24 +808,12 @@ impl Choice<'_> {
                 self.avatar_cost(a.point)
                     .total_cmp(&self.avatar_cost(b.point))
                     .then(
-                        self.content_cost(a.point)
-                            .total_cmp(&self.content_cost(b.point)),
-                    )
-                    .then(
                         a.point
                             .distance_squared(point)
                             .total_cmp(&b.point.distance_squared(point)),
                     )
             })
             .unwrap_or_else(|| self.select(None))
-    }
-    fn content_cost(&self, point: Vec2) -> f32 {
-        self.obstacles
-            .iter()
-            .map(|(_, r)| {
-                (self.radius - point.distance(point.clamp(r.min, r.max))).max(0.0)
-            })
-            .sum()
     }
     fn avatar_cost(&self, point: Vec2) -> f32 {
         let body = disk(point, self.radius);
@@ -814,7 +823,7 @@ impl Choice<'_> {
             .sum()
     }
     fn assess(&self, dock: Dock) -> (Placement, f32) {
-        let point = dock.point(self.tile, self.gap);
+        let point = self.point(dock);
         let corners = self.envelope.corners(self.tile);
         let span = fan(point, &corners);
         let (low, high) = corners
@@ -845,15 +854,7 @@ impl Choice<'_> {
                 overlaps,
                 missing_tile: false,
             },
-            span + 10_000.0 * self.avatar_cost(point)
-                + self
-                    .obstacles
-                    .iter()
-                    .map(|(_, r)| {
-                        let nearest = point.clamp(r.min, r.max);
-                        (self.radius - point.distance(nearest)).max(0.0) * 100.0
-                    })
-                    .sum::<f32>(),
+            span + 10_000.0 * self.avatar_cost(point),
         )
     }
 
@@ -864,7 +865,7 @@ impl Choice<'_> {
     fn select(&self, previous: Option<Dock>) -> Placement {
         if let Some((p, _)) = previous
             .map(|dock| self.assess(dock))
-            .filter(|(p, _)| p.valid() && self.avatar_cost(p.point) == 0.0)
+            .filter(|(p, _)| p.valid())
         {
             return p;
         }
@@ -893,13 +894,7 @@ impl Choice<'_> {
             }
         }
         let fixed = self.best(docks.iter().copied());
-        if fixed.valid()
-            && self.avatar_cost(fixed.point) == 0.0
-            && self
-                .obstacles
-                .iter()
-                .all(|(_, r)| !intersect(disk(fixed.point, self.radius), *r))
-        {
+        if fixed.valid() && self.avatar_cost(fixed.point) == 0.0 {
             return fixed;
         }
         docks.extend(self.free_docks());
@@ -936,19 +931,19 @@ impl Choice<'_> {
 
     fn free_docks(&self) -> Vec<Dock> {
         let mut docks = Vec::new();
+        let tile = self.gutter.unwrap_or(self.tile);
         for edge in 0..4 {
             let axis = usize::from(edge % 2 == 1);
             let cross = 1 - axis;
-            let origin = Dock {
+            let origin = self.point(Dock {
                 edge,
                 fraction: 0.0,
-            }
-            .point(self.tile, self.gap);
+            });
             if origin[cross].abs() + self.radius > HALF[cross] {
                 continue;
             }
-            let low = (self.tile.low * HALF)[axis].max(-HALF[axis] + self.radius);
-            let high = (self.tile.high * HALF)[axis].min(HALF[axis] - self.radius);
+            let low = (tile.low * HALF)[axis].max(-HALF[axis] + self.radius);
+            let high = (tile.high * HALF)[axis].min(HALF[axis] - self.radius);
             if low > high {
                 continue;
             }
@@ -956,7 +951,6 @@ impl Choice<'_> {
                 .occupied
                 .iter()
                 .copied()
-                .chain(self.obstacles.iter().map(|(_, r)| r.inflate(-HALO)))
                 .filter(|r| {
                     origin[cross] + self.radius > r.min[cross]
                         && origin[cross] - self.radius < r.max[cross]
@@ -986,8 +980,9 @@ impl Choice<'_> {
 
     fn interval_docks(&self, edge: u8, low: f32, high: f32) -> [Dock; 3] {
         let axis = usize::from(edge % 2 == 1);
-        let origin = (self.tile.low * HALF)[axis];
-        let span = ((self.tile.high - self.tile.low) * HALF)[axis];
+        let tile = self.gutter.unwrap_or(self.tile);
+        let origin = (tile.low * HALF)[axis];
+        let span = ((tile.high - tile.low) * HALF)[axis];
         let inset = ((high - low) * 0.25).min(0.001);
         [low + inset, low.midpoint(high), high - inset].map(|value| Dock {
             edge,
@@ -1207,6 +1202,7 @@ mod tests {
     }
     fn choice<'a>(obstacles: &'a [(usize, Rect)], occupied: &'a [Rect]) -> Choice<'a> {
         Choice {
+            gutter: None,
             tile: Tile {
                 low: Vec2::splat(-0.3),
                 high: Vec2::splat(0.3),
@@ -1251,7 +1247,7 @@ mod tests {
     }
 
     #[test]
-    fn hard_valid_docks_persist_while_new_docks_prefer_clear_content() {
+    fn content_cannot_move_a_gutter_dock() {
         let first = choice(&[], &[]).select(None);
         let content = [(0, disk(first.point, 7.5))];
         let mut next = choice(&content, &[]);
@@ -1259,7 +1255,7 @@ mod tests {
         assert!(next.assess(first.dock).0.valid());
         assert_eq!(next.select(Some(first.dock)).dock, first.dock);
         let fresh = next.select(None);
-        assert!(next.content_cost(fresh.point) < next.content_cost(first.point));
+        assert_eq!(fresh.dock, first.dock);
     }
     #[test]
     fn prefers_top_keeps_a_valid_dock_and_uses_other_edges_when_blocked() {
@@ -1367,6 +1363,33 @@ mod tests {
             short_name("A contributor with a very long display name", 1.0, 112.0);
         assert!(text.ends_with("..."));
         assert!(8.0 + 8.6 * count(text.chars().count()) <= 112.0);
+    }
+
+    #[test]
+    fn newcomers_cannot_take_a_retained_parking_slot() {
+        let mut events = vec![crate::timeline::synthetic().remove(0)];
+        crate::repositories::namespace(&mut events, 0);
+        let mut sim = Simulation::with_repositories(
+            events,
+            &Options::default(),
+            &Theme::neon(),
+            &Mappings::default(),
+            &["a".into(), "b".into()],
+        );
+        sim.advance_to(60, 60);
+        let mut state = sim.state.clone();
+        let old = state.avatars[0].slot.as_ref().unwrap().dock;
+        let mut newcomer = state.avatars[0].clone();
+        newcomer.slot = None;
+        newcomer.last_active = sim.seconds();
+        state.avatars.push(newcomer);
+        state.place_slots(&sim.envelopes, sim.seconds());
+        let first = state.avatars[0].slot.as_ref().unwrap();
+        let next = state.avatars[1].slot.as_ref().unwrap();
+        assert_eq!(first.dock, old);
+        assert!(
+            first.point.distance(next.point) >= 2.0 * state.avatar_radius() - 0.001
+        );
     }
 
     fn thirty() -> Simulation {
@@ -1618,6 +1641,88 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires local repositories and diagnostic path"]
+    fn local_travel_activity_audit() {
+        let started = std::time::Instant::now();
+        let (mut sim, _) = super::super::nitpicks::local_simulation();
+        let planning = started.elapsed().as_secs_f64();
+        let nominal = super::super::Schedule::new(&sim.events, 1.0, 0.1);
+        let frames = super::super::frames_for(sim.duration(), 60).unwrap();
+        let mut idle = 0_u64;
+        let mut animation = 0_u64;
+        let mut motion = 0_u64;
+        let mut previous = Vec::<(usize, Vec3, Option<Dock>)>::new();
+        let mut lane_changes = 0_u64;
+        let mut lane_moves = 0_u64;
+        let mut animated = vec![0_u64; sim.events.len()];
+        let mut services = Vec::new();
+        let mut seen = 0;
+        let mut moving = diagnostics::MovingBeams::default();
+        for frame in 0..=frames {
+            sim.advance_to(frame, 60);
+            moving.observe(&sim);
+            let active = !sim.beams().is_empty() || !sim.fragments().is_empty();
+            let mut moved = false;
+            for (index, avatar) in sim.state.avatars.iter().enumerate() {
+                if let Some(&(commit, point, dock)) = previous.get(index) {
+                    lane_changes += u64::from(
+                        commit == avatar.commit
+                            && dock != avatar.slot.as_ref().map(|s| s.dock)
+                            && avatar.presence > 0.0,
+                    );
+                    let changed = point.distance(avatar.position) > 0.00001;
+                    moved |= changed && avatar.presence > 0.0;
+                    lane_moves += u64::from(
+                        changed
+                            && commit == avatar.commit
+                            && avatar.presence > 0.0
+                            && !sim.travel.travelling(index, sim.state.tick),
+                    );
+                }
+            }
+            previous = sim
+                .state
+                .avatars
+                .iter()
+                .map(|a| (a.commit, a.position, a.slot.as_ref().map(|s| s.dock)))
+                .collect();
+            for pulse in &sim.state.pulses {
+                if sim.pulse_beams_visible(pulse)
+                    && super::super::envelope(
+                        sim.seconds() - pulse.start,
+                        pulse.end - pulse.start,
+                    ) > 0.0
+                    && pulse
+                        .targets
+                        .iter()
+                        .any(|&(target, ..)| sim.state.point(target).is_some())
+                {
+                    animated[pulse.commit] += 1;
+                }
+            }
+            for commit in seen..sim.state.next_event {
+                let contributor = sim.events[commit].contributor.as_ref().unwrap();
+                services.push(serde_json::json!({"commit":commit,"tick":frame,"author":sim.state.authors[&contributor.key],"nominal":nominal.starts[commit]}));
+            }
+            seen = sim.state.next_event;
+            idle += u64::from(!active && !moved);
+            animation += u64::from(active);
+            motion += u64::from(moved);
+        }
+        let value = serde_json::json!({"duration":sim.duration(),"plan_seconds":planning,
+            "frames":frames+1,"idle_frames":idle,"animation_frames":animation,
+            "motion_frames":motion,"lane_move_frames":lane_moves,"lane_changes":lane_changes,
+            "commits_without_animation":animated.iter().filter(|&&a| a==0).count(),
+            "animation_frame_counts":animated,"brief_commits_100ms":animated.iter().filter(|&&n|n>0 && n<=6).count(),"services":services,"travel":sim.travel.report(),
+            "moving_beams":moving});
+        std::fs::write(
+            std::env::var("CODESTRAND_TRAVEL_DIAGNOSTIC").unwrap(),
+            serde_json::to_vec_pretty(&value).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
     #[ignore = "requires local five-repository manifest and travel diagnostic path"]
     fn local_uncapped_travel_and_bot_classification() {
         let started = std::time::Instant::now();
@@ -1820,18 +1925,5 @@ mod tests {
             sim.duration()
         );
         validate(&mut sim);
-        let default = Options::default();
-        let cap = std::env::var("CODESTRAND_TRAVEL_CAP")
-            .ok()
-            .map_or(default.travel_cap, |v| {
-                crate::travel_seconds(&v).expect("test cap")
-            });
-        if repos.len() == 5
-            && sim.travel.stats.max_speed.to_bits()
-                == default.avatar_max_speed.to_bits()
-            && cap == default.travel_cap
-        {
-            sim.travel.assert_human_motion();
-        }
     }
 }

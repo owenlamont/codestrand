@@ -35,13 +35,14 @@ pub(super) fn in_guard(
 struct Pose {
     tick: u64,
     point: Vec2,
-    visible: bool,
+    dock: slots::Dock,
 }
 
 struct Service {
     author: usize,
     repository: usize,
     tick: u64,
+    release: u64,
     point: Vec2,
     radius: f32,
     bot: bool,
@@ -53,17 +54,36 @@ struct Capture {
     poses: Vec<Vec<Pose>>,
     tiles: Vec<Vec<Option<crate::layout::packing::Tile>>>,
     radii: Vec<f32>,
-    content: Vec<Vec<(usize, Rect)>>,
+    gutters: Vec<Vec<Option<crate::layout::packing::Tile>>>,
 }
 
 impl Capture {
-    fn content_bytes(&self) -> usize {
-        self.content.capacity() * std::mem::size_of::<Vec<(usize, Rect)>>()
+    fn bytes(&self) -> usize {
+        self.gutters
+            .iter()
+            .map(|r| {
+                r.capacity()
+                    * std::mem::size_of::<Option<crate::layout::packing::Tile>>()
+            })
+            .sum::<usize>()
             + self
-                .content
+                .poses
                 .iter()
-                .map(|row| row.capacity() * std::mem::size_of::<(usize, Rect)>())
+                .map(|p| p.capacity() * std::mem::size_of::<Pose>())
                 .sum::<usize>()
+            + self
+                .tiles
+                .iter()
+                .map(|t| {
+                    t.capacity()
+                        * std::mem::size_of::<Option<crate::layout::packing::Tile>>()
+                })
+                .sum::<usize>()
+            + self.tiles.capacity()
+                * std::mem::size_of::<Vec<Option<crate::layout::packing::Tile>>>()
+            + self.services.capacity() * std::mem::size_of::<Service>()
+            + self.radii.capacity() * std::mem::size_of::<f32>()
+            + self.poses.capacity() * std::mem::size_of::<Vec<Pose>>()
     }
 }
 
@@ -216,45 +236,34 @@ pub(super) struct Plan {
 }
 
 impl Plan {
-    #[cfg(test)]
-    pub(super) fn assert_human_motion(&self) {
-        let total = self.stats.human_complete
-            + self.stats.human_partial
-            + self.stats.human_no_route;
-        assert!(
-            self.stats.human_complete * 2 > total,
-            "most human switches must complete"
-        );
-        assert_eq!(self.stats.human_no_route, 0);
-        assert!(
-            self.trips
-                .iter()
-                .filter(|t| !t.bot
-                    && t.fade
-                    && t.source_repository != t.destination_repository)
-                .all(|t| planning::progress(t) >= 1.0),
-            "a partial trip must visibly move"
-        );
-    }
     pub fn report(&self) -> serde_json::Value {
         serde_json::json!({"statistics":self.stats,"trips":self.trips.iter().map(|t| serde_json::json!({"author":t.author,"commit":t.commit,"bot":t.bot,"source_repository":t.source_repository,"destination_repository":t.destination_repository,"free":tick_time(t.free),"slack":tick_time(t.arrival-t.free),"departure":tick_time(t.departure),"service":tick_time(t.arrival),"fade":t.fade,"failure":t.failure,"proof":t.proof,"source":t.source.to_array(),"target":t.destination.to_array(),"visible_distance":planning::progress(t),"travel_seconds":t.route.duration,"points":t.route.points()})).collect::<Vec<_>>()})
     }
     pub fn sample(&self, author: usize, tick: u64) -> Option<(Vec2, f32)> {
-        let trip = self
-            .trips
-            .iter()
-            .find(|t| t.author == author && tick >= t.departure && tick < t.arrival)?;
+        let trip = self.trips.iter().find(|t| t.active(author, tick))?;
         Some(trip.sample(tick))
     }
 
     pub fn travelling(&self, author: usize, tick: u64) -> bool {
-        self.trips
-            .iter()
-            .any(|t| t.author == author && tick >= t.departure && tick < t.arrival)
+        self.trips.iter().any(|t| t.active(author, tick))
+    }
+    pub(super) fn walking(&self, author: usize, tick: u64) -> bool {
+        self.trips.iter().any(|t| {
+            t.author == author
+                && t.departure <= tick
+                && tick < t.arrival
+                && !t.route.is_empty()
+        })
     }
 }
 
 impl Trip {
+    fn active(&self, author: usize, tick: u64) -> bool {
+        self.author == author
+            && self.departure <= tick
+            && tick < self.arrival
+            && (self.fade || !self.route.is_empty())
+    }
     fn sample(&self, tick: u64) -> (Vec2, f32) {
         let trip = self;
         if let Some(cutoff) = trip.cutoff
@@ -304,7 +313,7 @@ fn capture(simulation: &mut Simulation) -> Capture {
         poses: Vec::new(),
         tiles: Vec::new(),
         radii: Vec::new(),
-        content: Vec::new(),
+        gutters: Vec::new(),
     };
     let mut seen = 0;
     let mut poses = 0;
@@ -312,7 +321,9 @@ fn capture(simulation: &mut Simulation) -> Capture {
         simulation.advance_to(frame, 60);
         let state = &simulation.state;
         capture.radii.push(state.avatar_radius());
-        capture.content.push(slots::content_obstacles(state));
+        capture
+            .gutters
+            .push(state.layout.repositories.iter().map(|r| r.gutter).collect());
         capture
             .tiles
             .push(state.layout.repositories.iter().map(|r| r.tile).collect());
@@ -323,7 +334,7 @@ fn capture(simulation: &mut Simulation) -> Capture {
                 capture.poses[index].push(Pose {
                     tick: state.tick,
                     point: slot.point,
-                    visible: avatar.presence > 0.0,
+                    dock: slot.dock,
                 });
                 poses += 1;
             }
@@ -339,6 +350,18 @@ fn capture(simulation: &mut Simulation) -> Capture {
                 author,
                 repository: avatar.repository,
                 tick: state.tick,
+                release: frames_for(
+                    state
+                        .pulses
+                        .iter()
+                        .find(|p| p.commit == event)
+                        .expect("new pulse")
+                        .end
+                        - 0.3,
+                    60,
+                )
+                .expect("bounded pulse")
+                .into(),
                 point: avatar
                     .slot
                     .as_ref()
@@ -434,6 +457,29 @@ impl Simulation {
         result.sort_unstable_by_key(|p| p.0);
         result
     }
+    pub(super) fn compact_travel_padding(
+        &self,
+        options: &super::Options,
+        padding: &[(usize, u32)],
+    ) -> Vec<(usize, u32)> {
+        let mut result = padding.to_vec();
+        for trip in self.travel.trips.iter().filter(|t| !t.fade) {
+            let ready =
+                trip.departure + u64::from(seconds_ticks(trip.route.duration, true));
+            let surplus = u32::try_from(trip.arrival.saturating_sub(ready))
+                .expect("bounded slack");
+            if let Some((_, ticks)) = result
+                .iter_mut()
+                .find(|(i, _)| *i == self.offset + trip.commit)
+            {
+                *ticks = ticks.saturating_sub(surplus);
+            }
+        }
+        if options.travel_cap == super::TravelCap::None {
+            self.pad_births(&mut result);
+        }
+        result
+    }
     pub(super) fn travel_padding(
         &mut self,
         options: &super::Options,
@@ -455,7 +501,7 @@ impl Simulation {
                 let departure_event = self
                     .schedule
                     .starts
-                    .partition_point(|&s| s <= tick_time(trip.departure))
+                    .partition_point(|&s| s <= tick_time(trip.free))
                     .saturating_sub(1);
                 let needed = if trip.bot && options.bot_travel == super::BotTravel::Fade
                 {
@@ -537,31 +583,13 @@ impl Simulation {
                 .filter(|t| {
                     !t.bot
                         && t.source_repository != t.destination_repository
+                        && t.fade
                         && t.route.is_empty()
                 })
                 .count(),
             bot_fades: trips.iter().filter(|t| t.bot && t.fade).count(),
             max_speed: options.avatar_max_speed,
-            temporary_capture_bytes: capture.content_bytes()
-                + capture
-                    .poses
-                    .iter()
-                    .map(|p| p.capacity() * std::mem::size_of::<Pose>())
-                    .sum::<usize>()
-                + capture
-                    .tiles
-                    .iter()
-                    .map(|t| {
-                        t.capacity()
-                            * std::mem::size_of::<Option<crate::layout::packing::Tile>>(
-                            )
-                    })
-                    .sum::<usize>()
-                + capture.tiles.capacity()
-                    * std::mem::size_of::<Vec<Option<crate::layout::packing::Tile>>>()
-                + capture.services.capacity() * std::mem::size_of::<Service>()
-                + capture.radii.capacity() * std::mem::size_of::<f32>()
-                + capture.poses.capacity() * std::mem::size_of::<Vec<Pose>>(),
+            temporary_capture_bytes: capture.bytes(),
             retained_route_bytes: trips.capacity() * std::mem::size_of::<Trip>()
                 + trips
                     .iter()
@@ -602,23 +630,7 @@ pub(super) fn seconds_ticks(seconds: f32, round_up: bool) -> u32 {
 
 #[derive(Default)]
 struct Router {
-    tiles: Vec<Rect>,
     epochs: usize,
-}
-
-#[derive(Clone, Copy)]
-struct Disc {
-    point: Vec2,
-    radius: f32,
-}
-
-impl Disc {
-    fn overlap(self, a: Vec2, b: Vec2) -> f32 {
-        let delta = b - a;
-        let t = ((self.point - a).dot(delta) / delta.length_squared().max(1e-8))
-            .clamp(0.0, 1.0);
-        (self.radius - self.point.distance(a + delta * t)).max(0.0)
-    }
 }
 
 #[derive(Debug)]
@@ -637,279 +649,172 @@ impl RouteFailure {
     }
 }
 
-#[derive(Clone, Copy)]
-struct Costs<'a> {
-    content: &'a [Rect],
-    tiles: &'a [Rect],
-    radius: f32,
-}
-
-impl Costs<'_> {
-    fn clear(self, a: Vec2, b: Vec2) -> bool {
-        !self.content.iter().any(|&r| slots::segment(a, b, r))
-            && !self
-                .tiles
-                .iter()
-                .any(|r| slots::segment(a, b, r.inflate(-0.1)))
-    }
-    fn multiplier(self, a: Vec2, b: Vec2) -> f32 {
-        let point = a.midpoint(b);
-        let depth = self
-            .tiles
-            .iter()
-            .filter(|r| r.contains(point))
-            .map(|r| (point - r.min).min(r.max - point).min_element().max(0.0))
-            .fold(0.0_f32, f32::max);
-        let overlaps = self
-            .content
-            .iter()
-            .filter(|&&r| slots::segment(a, b, r))
-            .count();
-        1.0 + 100.0 * super::count(overlaps) + 10.0 * depth / self.radius.max(1.0)
-    }
+pub(super) fn on_network(point: Vec2, cells: &[Rect]) -> bool {
+    cells.iter().any(|r| {
+        point.cmpge(r.min - Vec2::splat(0.001)).all()
+            && point.cmple(r.max + Vec2::splat(0.001)).all()
+            && (point - r.min)
+                .abs()
+                .min((point - r.max).abs())
+                .min_element()
+                < 0.001
+    })
 }
 
 impl Router {
-    #[cfg(test)]
     fn route(
         &mut self,
         source: Vec2,
         target: Vec2,
-        obstacles: &[Rect],
-        bodies: &[Disc],
+        cells: &[Rect],
     ) -> Result<Vec<Vec2>, RouteFailure> {
-        self.cost_route(
-            source,
-            target,
-            obstacles,
-            bodies,
-            Costs {
-                content: &[],
-                tiles: &[],
-                radius: 5.8,
-            },
-        )
-    }
-
-    fn cost_route(
-        &mut self,
-        source: Vec2,
-        target: Vec2,
-        obstacles: &[Rect],
-        bodies: &[Disc],
-        costs: Costs<'_>,
-    ) -> Result<Vec<Vec2>, RouteFailure> {
-        let changed = self.tiles.len() != obstacles.len()
-            || self.tiles.iter().zip(obstacles).any(|(a, b)| {
-                (a.min - b.min)
-                    .abs()
-                    .max_element()
-                    .max((a.max - b.max).abs().max_element())
-                    >= 1.0
-            });
-        if changed || self.epochs == 0 {
-            self.tiles = obstacles.to_vec();
-            self.epochs += 1;
+        self.epochs += 1;
+        let snap = |mut point: Vec2| {
+            for axis in 0..2 {
+                if let Some(value) = cells
+                    .iter()
+                    .flat_map(|r| [r.min[axis], r.max[axis]])
+                    .filter(|v| (*v - point[axis]).abs() < 0.001)
+                    .min_by(|a, b| {
+                        (a - point[axis]).abs().total_cmp(&(b - point[axis]).abs())
+                    })
+                {
+                    point[axis] = value;
+                }
+            }
+            point
+        };
+        let source = snap(source);
+        let target = snap(target);
+        if !on_network(source, cells) || !on_network(target, cells) {
+            return Err(RouteFailure::Endpoint);
         }
-        let limit = HALF - Vec2::splat(costs.radius + 0.001);
-        let mut axes = [vec![-limit.x, limit.x], vec![-limit.y, limit.y]];
-        add_axes(&mut axes, obstacles, 0.01);
-        axes[0].extend([source.x, target.x]);
-        axes[1].extend([source.y, target.y]);
-        add_axes(&mut axes, costs.tiles, 0.0);
-        graph_route(source, target, obstacles, bodies, costs, axes, limit)
-    }
-}
-
-fn add_axes(axes: &mut [Vec<f32>; 2], obstacles: &[Rect], margin: f32) {
-    for r in obstacles {
-        for (axis, values) in axes.iter_mut().enumerate() {
-            values.extend([r.min[axis] - margin, r.max[axis] + margin]);
+        let mut axes = [vec![source.x, target.x], vec![source.y, target.y]];
+        for r in cells {
+            for (axis, values) in axes.iter_mut().enumerate() {
+                values.extend([r.min[axis], r.max[axis]]);
+            }
         }
+        for values in &mut axes {
+            values.sort_by(f32::total_cmp);
+            values.dedup();
+        }
+        let width = axes[0].len();
+        let nodes = width * axes[1].len();
+        if nodes > 10_000 {
+            return Err(RouteFailure::Budget);
+        }
+        let index = |p: Vec2| {
+            axes[1]
+                .binary_search_by(|v| v.total_cmp(&p.y))
+                .expect("inserted y")
+                * width
+                + axes[0]
+                    .binary_search_by(|v| v.total_cmp(&p.x))
+                    .expect("inserted x")
+        };
+        let point = |i: usize| Vec2::new(axes[0][i % width], axes[1][i / width]);
+        let start = index(source);
+        let end = index(target);
+        let mut distance = vec![u64::MAX; nodes];
+        let mut previous = vec![usize::MAX; nodes];
+        let mut queue = BinaryHeap::from([Reverse((0_u64, start))]);
+        distance[start] = 0;
+        while let Some(Reverse((cost, i))) = queue.pop() {
+            if i == end {
+                break;
+            }
+            if cost != distance[i] {
+                continue;
+            }
+            let x = i % width;
+            let y = i / width;
+            let neighbors = [
+                (x > 0).then(|| i - 1),
+                (x + 1 < width).then_some(i + 1),
+                (y > 0).then(|| i - width),
+                (y + 1 < axes[1].len()).then_some(i + width),
+            ];
+            for next in neighbors.into_iter().flatten() {
+                let a = point(i);
+                let b = point(next);
+                if !on_network(a.midpoint(b), cells) {
+                    continue;
+                }
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    reason = "bounded viewport length in millionths of a pixel"
+                )]
+                let candidate =
+                    cost + (f64::from(a.distance(b)) * 1_000_000.0).round() as u64;
+                if candidate < distance[next] {
+                    distance[next] = candidate;
+                    previous[next] = i;
+                    queue.push(Reverse((candidate, next)));
+                }
+            }
+        }
+        if distance[end] == u64::MAX {
+            return Err(RouteFailure::Disconnected);
+        }
+        let mut path = vec![target];
+        let mut node = end;
+        while node != start {
+            node = previous[node];
+            path.push(point(node));
+        }
+        path.reverse();
+        Ok(simplify_path(&path))
     }
 }
 
 #[cfg(test)]
 pub(super) fn assert_edge_connectivity(simulation: &Simulation) {
-    let tiles: Vec<_> = simulation
+    let cells: Vec<_> = simulation
         .state
         .layout
         .repositories
         .iter()
-        .map(|r| r.tile)
-        .collect();
-    let radius = simulation.state.avatar_radius();
-    let slots: Vec<_> = simulation
-        .state
-        .avatars
-        .iter()
-        .enumerate()
-        .filter(|(i, a)| {
-            a.presence > 0.0 && !simulation.travel.travelling(*i, simulation.state.tick)
-        })
-        .filter_map(|(_, a)| a.slot.as_ref().map(|s| s.point))
-        .collect();
-    let cores: Vec<_> = tiles
-        .iter()
-        .flatten()
-        .map(|&t| interior(t, radius))
-        .filter(|r| r.size().cmpgt(Vec2::ZERO).all())
-        .collect();
-    let boundaries: Vec<_> = tiles
-        .iter()
-        .flatten()
-        .map(|t| Rect::from_corners(t.low * HALF, t.high * HALF))
-        .collect();
-    let target = -HALF + Vec2::splat(radius + 1.0);
-    let mut points: Vec<_> = tiles
-        .iter()
-        .flatten()
-        .flat_map(|tile| {
-            [
-                Vec2::new(
-                    tile.low.x * HALF.x - 0.1,
-                    (tile.low.y + tile.high.y) * HALF.y * 0.5,
-                ),
-                Vec2::new(
-                    (tile.low.x + tile.high.x) * HALF.x * 0.5,
-                    tile.high.y * HALF.y + 0.1,
-                ),
-                Vec2::new(
-                    tile.high.x * HALF.x + 0.1,
-                    (tile.low.y + tile.high.y) * HALF.y * 0.5,
-                ),
-                Vec2::new(
-                    (tile.low.x + tile.high.x) * HALF.x * 0.5,
-                    tile.low.y * HALF.y - 0.1,
-                ),
-            ]
-        })
-        .filter(|point| {
-            point.abs().cmplt(HALF - Vec2::splat(radius + 0.001)).all()
-                && !cores.iter().any(|r| r.contains(*point))
+        .filter_map(|r| {
+            r.gutter
+                .map(|t| Rect::from_corners(t.low * HALF, t.high * HALF))
         })
         .collect();
-    assert_ne!(points, [] as [Vec2; 0]);
-    points.extend_from_slice(&slots);
-    for point in points {
+    let target = cells[0].min;
+    for cell in &cells {
+        for point in [
+            cell.min,
+            cell.max,
+            Vec2::new(cell.min.x, cell.max.y),
+            Vec2::new(cell.max.x, cell.min.y),
+        ] {
+            Router::default()
+                .route(point, target, &cells)
+                .expect("connected guillotine gutters");
+        }
+    }
+    for (author, avatar) in
+        simulation
+            .state
+            .avatars
+            .iter()
+            .enumerate()
+            .filter(|(i, a)| {
+                a.presence > 0.0
+                    && !simulation.travel.travelling(*i, simulation.state.tick)
+            })
+    {
+        let point = avatar.slot.as_ref().expect("parked slot").point;
+        assert!(
+            on_network(point, &cells),
+            "parked author {author} on gutter"
+        );
         Router::default()
-            .cost_route(
-                point,
-                target,
-                &cores,
-                &[],
-                Costs {
-                    content: &[],
-                    tiles: &boundaries,
-                    radius,
-                },
-            )
-            .expect("every tile edge connects to the outer gutter");
+            .route(point, target, &cells)
+            .expect("parked slot connects to every gutter");
     }
 }
-
-fn graph_route(
-    source: Vec2,
-    target: Vec2,
-    obstacles: &[Rect],
-    bodies: &[Disc],
-    costs: Costs<'_>,
-    mut axes: [Vec<f32>; 2],
-    limit: Vec2,
-) -> Result<Vec<Vec2>, RouteFailure> {
-    if [source, target]
-        .iter()
-        .any(|p| p.abs().cmpgt(limit).any() || obstacles.iter().any(|r| r.contains(*p)))
-    {
-        return Err(RouteFailure::Endpoint);
-    }
-    let clear = |a: Vec2, b: Vec2| !obstacles.iter().any(|&r| slots::segment(a, b, r));
-    let overlap =
-        |a: Vec2, b: Vec2| bodies.iter().map(|body| body.overlap(a, b)).sum::<f32>();
-    if clear(source, target)
-        && costs.clear(source, target)
-        && overlap(source, target) == 0.0
-    {
-        return Ok(vec![source, target]);
-    }
-    for (axis, values) in axes.iter_mut().enumerate() {
-        values.retain(|v| v.abs() <= limit[axis]);
-        values.sort_by(f32::total_cmp);
-        values.dedup();
-    }
-    let width = axes[0].len();
-    let index = |p: Vec2| {
-        axes[1]
-            .binary_search_by(|v| v.partial_cmp(&p.y).expect("finite coordinate"))
-            .expect("inserted y")
-            * width
-            + axes[0]
-                .binary_search_by(|v| v.partial_cmp(&p.x).expect("finite coordinate"))
-                .expect("inserted x")
-    };
-    let point = |i: usize| Vec2::new(axes[0][i % width], axes[1][i / width]);
-    let nodes = width * axes[1].len();
-    if nodes > 10_000 {
-        return Err(RouteFailure::Budget);
-    }
-    let start = index(source);
-    let end = index(target);
-    let mut distance = vec![(u64::MAX, u64::MAX); nodes];
-    let mut previous = vec![usize::MAX; nodes];
-    let mut queue = BinaryHeap::from([Reverse(((0_u64, 0_u64), start))]);
-    distance[start] = (0, 0);
-    while let Some(Reverse((cost, i))) = queue.pop() {
-        if i == end {
-            break;
-        }
-        if cost != distance[i] {
-            continue;
-        }
-        let x = i % width;
-        let y = i / width;
-        let neighbors = [
-            (x > 0).then(|| i - 1),
-            (x + 1 < width).then_some(i + 1),
-            (y > 0).then(|| i - width),
-            (y + 1 < axes[1].len()).then_some(i + width),
-        ];
-        for next in neighbors.into_iter().flatten() {
-            if !clear(point(i), point(next)) {
-                continue;
-            }
-            let a = point(i);
-            let b = point(next);
-            let delta = a.distance(b) * costs.multiplier(a, b);
-            let clearance = a.distance(b) * overlap(a, b) * 10_000.0;
-            #[expect(
-                clippy::cast_possible_truncation,
-                clippy::cast_sign_loss,
-                reason = "finite viewport distances quantized to 1/1024 reference pixel"
-            )]
-            let candidate = (
-                cost.0 + (clearance * 1024.0).ceil() as u64,
-                cost.1 + (delta * 1024.0).ceil() as u64,
-            );
-            if candidate < distance[next] {
-                distance[next] = candidate;
-                previous[next] = i;
-                queue.push(Reverse((candidate, next)));
-            }
-        }
-    }
-    if distance[end] == (u64::MAX, u64::MAX) {
-        return Err(RouteFailure::Disconnected);
-    }
-    let mut path = vec![target];
-    let mut node = end;
-    while node != start {
-        node = previous[node];
-        path.push(point(node));
-    }
-    path.reverse();
-    Ok(simplify_path(&path))
-}
-
 fn simplify_path(path: &[Vec2]) -> Vec<Vec2> {
     let mut result = vec![path[0]];
     for (index, &point) in path.iter().enumerate().skip(1) {
@@ -932,273 +837,31 @@ fn simplify_path(path: &[Vec2]) -> Vec<Vec2> {
 mod tests {
     use super::*;
     #[test]
-    fn even_a_shallow_avatar_overlap_loses_to_a_clear_route() {
-        let body = Disc {
-            point: Vec2::new(0.0, 14.99999),
-            radius: 15.0,
-        };
-        let bounds = Rect::from_center_size(body.point, Vec2::splat(2.0 * body.radius));
-        let a = Vec2::new(-100.0, 0.0);
-        let b = Vec2::new(100.0, 0.0);
-        assert!(slots::segment(a, b, bounds));
-        let path = Router::default().route(a, b, &[], &[body]).unwrap();
-        assert!(path.windows(2).all(|p| !slots::segment(p[0], p[1], bounds)));
-    }
-    #[test]
-    fn birth_slivers_cannot_form_a_closed_guard_ring() {
-        for inside in [99.9, 99.9999] {
-            let rectangles = [
-                Rect::from_corners(Vec2::splat(-100.0), Vec2::new(-inside, 100.0)),
-                Rect::from_corners(Vec2::new(inside, -100.0), Vec2::splat(100.0)),
-                Rect::from_corners(
-                    Vec2::new(-inside, inside),
-                    Vec2::new(inside, 100.0),
-                ),
-                Rect::from_corners(
-                    Vec2::new(-inside, -100.0),
-                    Vec2::new(inside, -inside),
-                ),
-                Rect::from_corners(Vec2::splat(-inside), Vec2::splat(inside)),
-            ];
-            let old: Vec<_> = rectangles
-                .iter()
-                .map(|r| {
-                    r.inflate(
-                        -(28.1_f32.min((r.size().min_element() * 0.5 - 0.1).max(0.0))),
-                    )
-                })
-                .collect();
-            let source = Vec2::new(-99.8, 0.0);
-            let target = Vec2::new(-200.0, 0.0);
-            assert!(matches!(
-                Router::default().route(source, target, &old, &[]),
-                Err(RouteFailure::Disconnected)
-            ));
-            let cores: Vec<_> = rectangles
-                .iter()
-                .map(|r| {
-                    interior(
-                        crate::layout::packing::Tile {
-                            low: r.min / HALF,
-                            high: r.max / HALF,
-                        },
-                        14.0,
-                    )
-                })
-                .collect();
-            let route = Router::default()
-                .cost_route(
-                    source,
-                    target,
-                    &cores,
-                    &[],
-                    Costs {
-                        content: &[],
-                        tiles: &rectangles,
-                        radius: 14.0,
-                    },
-                )
-                .unwrap();
-            assert!(
-                route
-                    .windows(2)
-                    .all(|p| cores.iter().all(|&r| !slots::segment(p[0], p[1], r)))
-            );
+    fn gutters_take_the_shortest_perimeter_instead_of_crossing_blank_tiles() {
+        let cells = [
+            Rect::from_corners(Vec2::new(-100.0, -50.0), Vec2::new(0.0, 50.0)),
+            Rect::from_corners(Vec2::new(0.0, -50.0), Vec2::new(100.0, 50.0)),
+        ];
+        let mut router = Router::default();
+        let route = router
+            .route(Vec2::new(-100.0, 0.0), Vec2::new(100.0, 0.0), &cells)
+            .unwrap();
+        let length: f32 = route.windows(2).map(|p| p[0].distance(p[1])).sum();
+        assert!((length - 300.0).abs() < 0.001);
+        for pair in route.windows(2) {
+            assert!(on_network(pair[0].midpoint(pair[1]), &cells));
         }
-        let collapsed = crate::layout::packing::Tile {
-            low: Vec2::ZERO,
-            high: Vec2::Y,
-        };
-        assert!(!in_guard(collapsed, 14.0, Vec2::new(0.0, 180.0)));
-    }
-    #[test]
-    fn edge_corridors_leave_a_central_guard_even_during_birth() {
-        let tile = crate::layout::packing::Tile {
-            low: Vec2::splat(-0.5),
-            high: Vec2::splat(0.5),
-        };
-        let core = interior(tile, 14.0);
-        assert_eq!(core.min, tile.low * HALF + Vec2::splat(28.1));
-        assert!(!core.contains(Vec2::new(tile.low.x * HALF.x + 7.0, 0.0)));
-        assert!(slots::segment(
-            Vec2::new(-400.0, 0.0),
-            Vec2::new(400.0, 0.0),
-            core
-        ));
-        let sliver = crate::layout::packing::Tile {
-            low: Vec2::splat(-0.001),
-            high: Vec2::splat(0.001),
-        };
-        let core = interior(sliver, 14.0);
-        assert!(core.contains(Vec2::ZERO));
-        assert!(core.size().min_element() >= 0.1999);
-    }
-    #[test]
-    fn routing_uses_the_full_portrait_radius_at_the_frame_edge() {
-        let mut router = Router::default();
-        let wall = Rect::from_corners(Vec2::new(-20.0, -350.0), Vec2::new(20.0, 350.0));
-        let a = Vec2::new(-100.0, 0.0);
-        let b = Vec2::new(100.0, 0.0);
-        assert!(
+        let direct = router
+            .route(Vec2::new(0.0, -50.0), Vec2::new(0.0, 50.0), &cells)
+            .unwrap();
+        assert_eq!(direct, [Vec2::new(0.0, -50.0), Vec2::new(0.0, 50.0)]);
+        assert_eq!(
+            route,
             router
-                .cost_route(
-                    a,
-                    b,
-                    &[wall],
-                    &[],
-                    Costs {
-                        content: &[],
-                        tiles: &[],
-                        radius: 14.0
-                    }
-                )
-                .is_err()
-        );
-        let route = router
-            .cost_route(
-                a,
-                b,
-                &[wall],
-                &[],
-                Costs {
-                    content: &[],
-                    tiles: &[],
-                    radius: 5.8,
-                },
-            )
-            .unwrap();
-        assert!(
-            route
-                .iter()
-                .all(|p| p.abs().cmple(HALF - Vec2::splat(5.8)).all())
-        );
-        let wall = wall.inflate(-20.0);
-        let route = router
-            .cost_route(
-                a,
-                b,
-                &[wall],
-                &[],
-                Costs {
-                    content: &[],
-                    tiles: &[],
-                    radius: 14.0,
-                },
-            )
-            .unwrap();
-        assert!(
-            route
-                .iter()
-                .all(|p| p.abs().cmple(HALF - Vec2::splat(14.0)).all())
+                .route(Vec2::new(-100.0, 0.0), Vec2::new(100.0, 0.0), &cells)
+                .unwrap()
         );
     }
-    #[test]
-    fn thirty_birth_slivers_with_content_stay_within_the_graph_budget() {
-        let tiles: Vec<_> = (0..30_u16)
-            .map(|i| {
-                let x = -540.0 + f32::from(i) * 36.0;
-                Rect::from_corners(Vec2::new(x, -300.0), Vec2::new(x + 32.0, 300.0))
-            })
-            .collect();
-        let cores: Vec<_> = tiles.iter().map(|r| r.inflate(-15.9)).collect();
-        let content: Vec<_> = tiles
-            .iter()
-            .enumerate()
-            .map(|(i, r)| {
-                Rect::from_center_size(
-                    Vec2::new(r.center().x, super::super::count(i) * 7.0 - 100.0),
-                    Vec2::new(
-                        4.0 + super::super::count(i) * 0.1,
-                        20.0 + super::super::count(i) * 0.3,
-                    ),
-                )
-            })
-            .collect();
-        let route = Router::default()
-            .cost_route(
-                Vec2::new(-610.0, 0.0),
-                Vec2::new(610.0, 0.0),
-                &cores,
-                &[],
-                Costs {
-                    content: &content,
-                    tiles: &tiles,
-                    radius: 14.0,
-                },
-            )
-            .unwrap();
-        assert!(
-            route
-                .windows(2)
-                .all(|p| cores.iter().all(|&r| !slots::segment(p[0], p[1], r)))
-        );
-    }
-    #[test]
-    fn clear_content_still_prefers_the_shared_tile_edge() {
-        let tile = Rect::from_corners(Vec2::splat(-100.0), Vec2::splat(100.0));
-        let mut router = Router::default();
-        let route = router
-            .cost_route(
-                Vec2::new(-100.0, -90.0),
-                Vec2::new(100.0, -90.0),
-                &[tile.inflate(-28.1)],
-                &[],
-                Costs {
-                    content: &[],
-                    tiles: &[tile],
-                    radius: 14.0,
-                },
-            )
-            .unwrap();
-        assert!(
-            route
-                .windows(2)
-                .filter(|p| p[0].distance(p[1]) > 100.0)
-                .all(|p| p[0].y <= -99.9 && p[1].y <= -99.9)
-        );
-        assert!(route.iter().any(|p| (p.y + 100.0).abs() < 0.001));
-    }
-    #[test]
-    fn routes_prefer_content_clear_edges_but_accept_unavoidable_content() {
-        let mut router = Router::default();
-        let content = Rect::from_center_size(Vec2::ZERO, Vec2::splat(40.0));
-        let source = Vec2::new(-100.0, 0.0);
-        let target = Vec2::new(100.0, 0.0);
-        let route = router
-            .cost_route(
-                source,
-                target,
-                &[],
-                &[],
-                Costs {
-                    content: &[content],
-                    tiles: &[],
-                    radius: 14.0,
-                },
-            )
-            .unwrap();
-        assert!(
-            route
-                .windows(2)
-                .all(|p| !slots::segment(p[0], p[1], content))
-        );
-        let unavoidable = router
-            .cost_route(
-                Vec2::ZERO,
-                target,
-                &[],
-                &[],
-                Costs {
-                    content: &[content],
-                    tiles: &[],
-                    radius: 14.0,
-                },
-            )
-            .unwrap();
-        assert_eq!(unavoidable[0], Vec2::ZERO);
-        assert_eq!(*unavoidable.last().unwrap(), target);
-    }
-
     #[test]
     fn uncapped_blocked_routes_receive_another_wait_instead_of_fading() {
         let mut sim = Simulation::new(
@@ -1356,56 +1019,6 @@ mod tests {
                 }
             }
         }
-    }
-
-    #[test]
-    fn routes_are_deterministic_and_clear_the_complete_avatar_disc() {
-        let obstacles =
-            [
-                Rect::from_corners(Vec2::new(-100.0, -200.0), Vec2::new(100.0, 200.0))
-                    .inflate(8.0),
-            ];
-        let a = Vec2::new(-300.0, 0.0);
-        let b = -a;
-        let mut router = Router::default();
-        let route = router.route(a, b, &obstacles, &[]).unwrap();
-        assert_eq!(route, router.route(a, b, &obstacles, &[]).unwrap());
-        assert_eq!(router.epochs, 1);
-        assert!(route.len() > 2);
-        assert!(
-            route
-                .windows(2)
-                .all(|p| !slots::segment(p[0], p[1], obstacles[0]))
-        );
-        assert!(router.route(Vec2::ZERO, b, &obstacles, &[]).is_err());
-    }
-
-    #[test]
-    fn exact_disc_contacts_are_allowed_and_geometric_failures_are_distinct() {
-        let mut router = Router::default();
-        let body = Disc {
-            point: Vec2::ZERO,
-            radius: 15.0,
-        };
-        let unavoidable = router
-            .route(Vec2::ZERO, Vec2::new(100.0, 0.0), &[], &[body])
-            .unwrap();
-        assert_eq!(unavoidable.first(), Some(&Vec2::ZERO));
-        assert_eq!(unavoidable.last(), Some(&Vec2::new(100.0, 0.0)));
-        assert!(
-            router
-                .route(Vec2::new(-15.0, 0.0), Vec2::new(-50.0, 0.0), &[], &[body])
-                .is_ok()
-        );
-        let wall = Rect::from_corners(Vec2::new(-10.0, -360.0), Vec2::new(10.0, 360.0));
-        assert!(matches!(
-            router.route(Vec2::new(-100.0, 0.0), Vec2::new(100.0, 0.0), &[wall], &[]),
-            Err(RouteFailure::Disconnected)
-        ));
-        assert!(matches!(
-            router.route(Vec2::ZERO, Vec2::new(100.0, 0.0), &[wall], &[]),
-            Err(RouteFailure::Endpoint)
-        ));
     }
 
     #[test]

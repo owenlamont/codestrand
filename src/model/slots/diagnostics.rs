@@ -15,6 +15,7 @@ pub(crate) struct MovingBeams {
     avatar_overlap_max_px: f32,
     worst_overlap_tick: u64,
     travelling_centre_interior: u64,
+    travelling_off_network: u64,
     maximum_travel_speed: f32,
     first_disc: Option<serde_json::Value>,
     first_overlap: Option<serde_json::Value>,
@@ -49,6 +50,10 @@ impl MovingBeams {
         assert_eq!(
             self.travelling_centre_interior, 0,
             "route cut across tile interior"
+        );
+        assert_eq!(
+            self.travelling_off_network, 0,
+            "travel outside gutter centrelines"
         );
 
         assert!(
@@ -123,10 +128,22 @@ impl MovingBeams {
             self.observe_content(state, avatar, point, radius, &content);
             let moving = avatar.presence > 0.0
                 && simulation.travel.travelling(author, state.tick);
+            if moving && simulation.travel.walking(author, state.tick) {
+                let cells: Vec<_> = state
+                    .layout
+                    .repositories
+                    .iter()
+                    .filter_map(|r| {
+                        r.gutter
+                            .map(|t| Rect::from_corners(t.low * HALF, t.high * HALF))
+                    })
+                    .collect();
+                self.travelling_off_network +=
+                    u64::from(!super::super::travel::on_network(point, &cells));
+            }
             if let Some((before, position, was_moving)) =
                 self.previous.insert(author, (state.tick, point, moving))
-                && moving
-                && was_moving
+                && (moving || was_moving)
                 && state.tick > before
             {
                 self.maximum_travel_speed = self.maximum_travel_speed.max(

@@ -171,7 +171,7 @@ struct Source {
     /// Maximum extra seconds per walking trip; none waits for the route, zero never waits.
     #[arg(long, default_value = "0.4", value_parser = travel_seconds)]
     travel_cap: model::TravelCap,
-    /// Bot travel policy: fade across or route and wait like humans.
+    /// Bot travel policy: fade across or walk the shortest gutter route.
     #[arg(long, value_enum, default_value = "fade")]
     bot_travel: model::BotTravel,
     /// Maximum avatar travel speed in pixels/second at the 1280x720 reference size.

@@ -293,7 +293,6 @@ struct State {
     avatar_scale: f32,
     avatar_size: f32,
     gutter: f32,
-    uncapped_travel: bool,
     slot_records: BTreeMap<usize, slots::Record>,
 }
 
@@ -416,9 +415,10 @@ impl Simulation {
             Self::build(events.clone(), options, theme, mappings, &[], repositories);
         let mut padding = simulation.travel_padding(options);
         let mut pass = 0;
+        let mut compacted = false;
         loop {
             pass += 1;
-            if padding.iter().any(|&(_, ticks)| ticks > 0) {
+            if pass > 1 || padding.iter().any(|&(_, ticks)| ticks > 0) {
                 let schedule = Schedule::with_padding(
                     &events[options.selected_range(events.len())],
                     options.seconds_per_day,
@@ -448,12 +448,21 @@ impl Simulation {
                 simulation.travel.stats.padding_seconds
             );
             let adjusted = simulation.adjust_travel_padding(options, &padding);
-            if adjusted == padding
-                || (options.travel_cap != TravelCap::None && pass == 4)
-            {
+            let settled = adjusted == padding
+                || (options.travel_cap != TravelCap::None && pass >= 4);
+            if !settled {
+                padding = adjusted;
+                continue;
+            }
+            if compacted {
                 break;
             }
-            padding = adjusted;
+            compacted = true;
+            let tighter = simulation.compact_travel_padding(options, &padding);
+            if tighter == padding {
+                break;
+            }
+            padding = tighter;
         }
         simulation.caption_plan =
             caption::plan(&simulation.schedule, &simulation.events);
@@ -509,7 +518,6 @@ impl Simulation {
             avatar_size: options.avatar_size
                 * repository_avatar_factor(repositories.len()),
             gutter: options.gutter,
-            uncapped_travel: options.travel_cap == TravelCap::None,
             slot_records: BTreeMap::new(),
         };
         for event in &events[..start] {

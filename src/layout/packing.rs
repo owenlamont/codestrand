@@ -424,6 +424,72 @@ struct Placement {
     scale: f32,
 }
 
+fn gutter_cells(nodes: &[Node], placement: &[Placement]) -> Vec<Option<Tile>> {
+    fn bounds(nodes: &[Node], index: usize, placement: &[Placement]) -> Option<Tile> {
+        match nodes[index] {
+            Node::Repository(i) => placement[i].tile,
+            Node::Split { first, second, .. } => {
+                match (
+                    bounds(nodes, first, placement),
+                    bounds(nodes, second, placement),
+                ) {
+                    (Some(a), Some(b)) => Some(Tile {
+                        low: a.low.min(b.low),
+                        high: a.high.max(b.high),
+                    }),
+                    (a, b) => a.or(b),
+                }
+            }
+        }
+    }
+    fn divide(
+        nodes: &[Node],
+        index: usize,
+        cell: Tile,
+        placement: &[Placement],
+        result: &mut [Option<Tile>],
+    ) {
+        match nodes[index] {
+            Node::Repository(i) => result[i] = placement[i].tile.map(|_| cell),
+            Node::Split {
+                axis,
+                first,
+                second,
+            } => {
+                let a = bounds(nodes, first, placement);
+                let b = bounds(nodes, second, placement);
+                match (a, b) {
+                    (Some(a), Some(b)) => {
+                        let cut = a.high[axis].midpoint(b.low[axis]);
+                        let mut near = cell;
+                        let mut far = cell;
+                        near.high[axis] = cut;
+                        far.low[axis] = cut;
+                        divide(nodes, first, near, placement, result);
+                        divide(nodes, second, far, placement, result);
+                    }
+                    (Some(_), None) => divide(nodes, first, cell, placement, result),
+                    (None, Some(_)) => divide(nodes, second, cell, placement, result),
+                    (None, None) => {}
+                }
+            }
+        }
+    }
+    let mut result = vec![None; placement.len()];
+    let limit = Vec2::ONE - Vec2::splat(32.0) / framing::VIEWPORT;
+    divide(
+        nodes,
+        0,
+        Tile {
+            low: -limit,
+            high: limit,
+        },
+        placement,
+        &mut result,
+    );
+    result
+}
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Packing {
     gutter_scale: f32,
@@ -644,6 +710,7 @@ impl Packing {
             &computed
         };
         let mut regions = self.regions[tick].clone();
+        let gutters = gutter_cells(&self.nodes, placement);
         let mut origins = Vec::with_capacity(regions.len());
         let mut scales = Vec::with_capacity(regions.len());
         for (i, r) in regions.iter_mut().enumerate() {
@@ -665,6 +732,7 @@ impl Packing {
             r.height *= scale;
             r.live = tile.is_some();
             r.tile = tile;
+            r.gutter = gutters[i].filter(|_| selected(i));
             r.files = sample.weights[i]
                 * (sample.presence[i]
                     * presence
@@ -878,6 +946,7 @@ mod tests {
                             live: tick >= i * 40,
                             files: f32::from(1 + (i * 37 + tick / 30) % 200),
                             tile: None,
+                            gutter: None,
                             outline: outline::rectangle(-size, size),
                             height: 0.105,
                             rotated: false,

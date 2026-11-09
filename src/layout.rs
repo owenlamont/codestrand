@@ -16,6 +16,7 @@ pub(super) struct RepositoryRegion {
     pub live: bool,
     pub files: f32,
     pub tile: Option<packing::Tile>,
+    pub gutter: Option<packing::Tile>,
     pub outline: Vec<Vec2>,
     pub height: f32,
     pub rotated: bool,
