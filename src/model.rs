@@ -401,6 +401,29 @@ impl Simulation {
         mappings: &Mappings,
         repositories: &[String],
     ) -> anyhow::Result<Self> {
+        let passes = if options.travel_cap == TravelCap::None {
+            64
+        } else {
+            4
+        };
+        Self::try_with_repository_passes(
+            events,
+            options,
+            theme,
+            mappings,
+            repositories,
+            passes,
+        )
+    }
+
+    fn try_with_repository_passes(
+        events: Vec<Event>,
+        options: &Options,
+        theme: &Theme,
+        mappings: &Mappings,
+        repositories: &[String],
+        passes: usize,
+    ) -> anyhow::Result<Self> {
         if repositories.is_empty() {
             return Ok(Self::build(
                 events,
@@ -415,11 +438,6 @@ impl Simulation {
         let mut simulation =
             Self::build(events.clone(), options, theme, mappings, &[], repositories);
         let mut padding = simulation.travel_padding(options);
-        let passes = if options.travel_cap == TravelCap::None {
-            64
-        } else {
-            4
-        };
         for pass in 0..passes {
             if padding.iter().any(|&(_, ticks)| ticks > 0) {
                 let schedule = Schedule::with_padding(
@@ -451,21 +469,25 @@ impl Simulation {
                 simulation.travel.stats.padding_seconds
             );
             let adjusted = simulation.adjust_travel_padding(options, &padding);
+            let walking_fades = simulation.travel.stats.faded
+                - if options.bot_travel == BotTravel::Fade {
+                    simulation.travel.stats.bot_fades
+                } else {
+                    0
+                };
             if adjusted == padding {
                 anyhow::ensure!(
-                    options.travel_cap != TravelCap::None
-                        || simulation.travel.stats.faded == 0,
+                    options.travel_cap != TravelCap::None || walking_fades == 0,
                     "uncapped travel stalled at planning pass {} with {} fades remaining; shorten the history or increase avatar speed",
                     pass + 1,
-                    simulation.travel.stats.faded
+                    walking_fades
                 );
                 break;
             }
             if pass + 1 == passes {
                 anyhow::ensure!(
                     options.travel_cap != TravelCap::None,
-                    "uncapped travel did not converge within 64 planning passes ({} fades remaining); shorten the history or increase avatar speed",
-                    simulation.travel.stats.faded
+                    "uncapped travel did not converge within {passes} planning passes ({walking_fades} walking fades remaining); shorten the history or increase avatar speed"
                 );
                 break;
             }
@@ -2033,12 +2055,13 @@ mod tests {
             bot_travel: BotTravel::Walk,
             ..Options::default()
         };
-        match Simulation::try_with_repositories(
+        match Simulation::try_with_repository_passes(
             events,
             &options,
             &Theme::neon(),
             &Mappings::default(),
             &labels,
+            1,
         ) {
             Ok(mut simulation) => {
                 assert_eq!(simulation.travel.stats.faded, 0);
@@ -2051,11 +2074,40 @@ mod tests {
             }
             Err(error) => assert!(
                 error.to_string().contains(
-                    "uncapped travel did not converge within 64 planning passes"
+                    "uncapped travel did not converge within 1 planning passes"
                 ),
                 "{error}"
             ),
         }
+    }
+
+    #[test]
+    fn uncapped_default_bot_policy_allows_intentional_fades() {
+        let events = (0..4)
+            .map(|index| {
+                let mut row = vec![timeline::synthetic().remove(0)];
+                row[0].seconds = i64::try_from(index).unwrap() * 86_400;
+                row[0].author.name = b"Automation[bot]".to_vec();
+                row[0].author.email = b"automation@test.invalid".to_vec();
+                crate::repositories::namespace(&mut row, index % 2);
+                row.remove(0)
+            })
+            .collect();
+        let options = Options {
+            seconds_per_day: 0.3,
+            travel_cap: TravelCap::None,
+            ..Options::default()
+        };
+        let simulation = Simulation::try_with_repositories(
+            events,
+            &options,
+            &Theme::neon(),
+            &Mappings::default(),
+            &["a".into(), "b".into()],
+        )
+        .unwrap();
+        assert_eq!(simulation.travel.stats.bot_fades, 3);
+        assert_eq!(simulation.travel.stats.faded, 3);
     }
 
     #[test]
