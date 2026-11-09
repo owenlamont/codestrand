@@ -168,9 +168,12 @@ struct Source {
     /// Maximum canonical timeline seconds between commits, compressing idle gaps.
     #[arg(long, default_value_t = 1.0, value_parser = idle_seconds)]
     max_idle_seconds: f32,
-    /// Maximum extra seconds per human trip; zero fades across without waiting.
-    #[arg(long, default_value_t = 0.4, value_parser = travel_seconds)]
-    travel_cap: f32,
+    /// Maximum extra seconds per walking trip; none waits for the route, zero never waits.
+    #[arg(long, default_value = "0.4", value_parser = travel_seconds)]
+    travel_cap: model::TravelCap,
+    /// Bot travel policy: fade across or route and wait like humans.
+    #[arg(long, value_enum, default_value = "fade")]
+    bot_travel: model::BotTravel,
     /// Maximum avatar travel speed in pixels/second at the 1280x720 reference size.
     #[arg(long, default_value_t = 480.0, value_parser = avatar_speed)]
     avatar_max_speed: f32,
@@ -285,6 +288,7 @@ impl Source {
             start: self.start,
             commits: self.commits,
             travel_cap: self.travel_cap,
+            bot_travel: self.bot_travel,
             avatar_max_speed: self.avatar_max_speed,
         };
         let names = if repositories.len() > 1 {
@@ -298,14 +302,13 @@ impl Source {
         let mut simulation = if names.is_empty() {
             model::Simulation::new(events, &options, &theme::Theme::neon(), &mappings)
         } else {
-            model::Simulation::check_repository_plan(&events, &options, names.len())?;
-            model::Simulation::with_repositories(
+            model::Simulation::try_with_repositories(
                 events,
                 &options,
                 &theme::Theme::neon(),
                 &mappings,
                 &names,
-            )
+            )?
         };
         simulation.repository_boundary = self.repository_boundary;
         simulation.caption_style = self.caption_style;
@@ -331,12 +334,15 @@ fn idle_seconds(value: &str) -> Result<f32, String> {
     Ok(seconds)
 }
 
-fn travel_seconds(value: &str) -> Result<f32, String> {
+fn travel_seconds(value: &str) -> Result<model::TravelCap, String> {
+    if value == "none" {
+        return Ok(model::TravelCap::None);
+    }
     let seconds = value.parse::<f32>().map_err(|e| e.to_string())?;
     if seconds.is_finite() && (0.0..=3600.0).contains(&seconds) {
-        Ok(seconds)
+        Ok(model::TravelCap::Seconds(seconds))
     } else {
-        Err("travel cap must be finite and between 0 and 3600 seconds".to_owned())
+        Err("travel cap must be none or finite seconds between 0 and 3600".to_owned())
     }
 }
 
@@ -616,6 +622,34 @@ mod tests {
         assert!(
             Cli::try_parse_from(["codestrand", "preview", "--max-idle-seconds", &cap])
                 .is_ok()
+        );
+    }
+
+    #[test]
+    fn cli_accepts_uncapped_travel_and_walking_bots_but_rejects_invalid_limits() {
+        let cli = Cli::try_parse_from([
+            "codestrand",
+            "preview",
+            "--travel-cap",
+            "none",
+            "--bot-travel",
+            "walk",
+        ])
+        .unwrap();
+        let Some(Command::Preview { source, .. }) = cli.command else {
+            panic!("preview")
+        };
+        assert_eq!(source.travel_cap, model::TravelCap::None);
+        assert_eq!(source.bot_travel, model::BotTravel::Walk);
+        for value in ["NaN", "inf", "-1", "3601", "unlimited"] {
+            assert!(
+                Cli::try_parse_from(["codestrand", "preview", "--travel-cap", value])
+                    .is_err()
+            );
+        }
+        assert_eq!(
+            travel_seconds("3600").unwrap(),
+            model::TravelCap::Seconds(3600.0)
         );
     }
 }

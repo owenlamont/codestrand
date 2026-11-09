@@ -168,28 +168,36 @@ Trips reserve clearance in commit order against timed positions. Disjoint routes
 run concurrently; crossing routes can wait at a clear node. Moving gutters are sampled
 with explicit speed and acceleration checks. Beams end when their author
 departs or changes repository, cancelling their in-flight fragments together. Otherwise,
-beams remain until the last emitted fragment arrives, then fade. After five inactive
-playback seconds, contributors
+beams remain until the last emitted fragment arrives, then fade. When not travelling,
+after five inactive playback seconds contributors
 remain parked at their last slot while fading over 1.2 seconds. Faded contributors
 release their lane and reappear directly at their next slot, without a screen-wide trip.
 
-`--travel-cap` limits extra waiting per human trip (default `0.4` seconds; range `0`
-through `3600`). Available gaps between commits also count toward travel. If a trip
+`--travel-cap` limits extra waiting per walking trip (default `0.4` seconds; range `0`
+through `3600`, or `none` to wait as long as the route needs). Available gaps between
+commits also count toward travel. If a capped trip
 cannot finish in time, the avatar moves along the safe route, fades out at the deadline
-and fades in at the destination. Blocked routes and contributors whose names contain
-`[bot]` fade across. Zero disables extra waiting. Single-repository motion is unchanged.
+and fades in at the destination. Blocked routes still fade across. Zero disables extra
+waiting. `--bot-travel fade` is the default; `--bot-travel walk` gives bots the same
+routing and waiting policy as humans. Bot classification uses an explicit `bot` override
+in `contributors.toml`, then a GitHub noreply login ending in `[bot]`, then the displayed
+name's `[bot]` suffix. Single-repository motion is unchanged.
+Walking avatars remain visible during travel. With `--travel-cap none`, walking trips
+also remain routed across long idle gaps instead of disappearing and re-entering at a
+different repository. After the last service, the normal inactivity fade still applies.
 The caption holds the last applied date during waiting; heat, fragments and fades
 continue in presentation seconds.
 
 ```sh
 codestrand export frames --repositories-file repositories.toml \
-  --travel-cap 0.4 --avatar-max-speed 480 --frames 90 --fps 30
+  --travel-cap none --bot-travel walk --avatar-max-speed 480 --frames 90 --fps 30
 ```
 
 Planning starts from the first tick after the contributor's previous service, so gaps
 between that contributor's commits absorb travel before padding is needed. Padding is
-revalidated for at most four passes as the scene geometry changes; the cap applies to
-the accumulated wait per commit, including reserved waits.
+revalidated as the scene geometry changes: at most four passes for numeric caps and
+16 for `none`. An uncapped plan that cannot converge reports an error. Numeric caps
+apply to the accumulated wait per commit, including reserved waits.
 
 The CPU `layout-quality --treemap` report records fallback and least-bad slots,
 live beam crossings, travelling disc intersections, route points and travel padding.
@@ -199,7 +207,9 @@ free-camera controls remain independent.
 
 Multi-repository planning supports up to 30 repositories, 216,000 simulation ticks,
 2,000,000 region samples and 4,000,000 temporary avatar poses. The preflight includes
-worst-case travel padding. Route searches stop at 10,000 nodes and fade across when
+worst-case travel padding for numeric caps. With `none`, each actual padded schedule is
+checked before rebuilding; exceeding a budget reports an error rather than allocating
+an unbounded plan. Route searches stop at 10,000 nodes and fade across when
 the search cannot fit the bound. Use fewer repositories, shorten the imported history or
 reduce playback times if an input limit is exceeded. Single-repository playback is
 unaffected.

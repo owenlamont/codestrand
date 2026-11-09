@@ -53,8 +53,40 @@ pub(super) struct Options {
     pub max_idle_seconds: f32,
     pub start: usize,
     pub commits: Option<usize>,
-    pub travel_cap: f32,
+    pub travel_cap: TravelCap,
+    pub bot_travel: BotTravel,
     pub avatar_max_speed: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize)]
+pub(super) enum TravelCap {
+    Seconds(f32),
+    None,
+}
+
+impl TravelCap {
+    fn ticks(self) -> u32 {
+        match self {
+            Self::Seconds(seconds) => travel::seconds_ticks(seconds, false),
+            Self::None => 216_000,
+        }
+    }
+
+    fn blocked_ticks(self) -> u32 {
+        match self {
+            Self::None => 0,
+            Self::Seconds(_) => self.ticks(),
+        }
+    }
+}
+
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum, serde::Serialize,
+)]
+pub(super) enum BotTravel {
+    Walk,
+    #[default]
+    Fade,
 }
 
 impl Options {
@@ -75,7 +107,8 @@ impl Default for Options {
             max_idle_seconds: 1.0,
             start: 0,
             commits: None,
-            travel_cap: 0.4,
+            travel_cap: TravelCap::Seconds(0.4),
+            bot_travel: BotTravel::Fade,
             avatar_max_speed: 480.0,
         }
     }
@@ -179,6 +212,8 @@ pub(super) struct Avatar {
     touched: Vec<u64>,
     last_active: f32,
     pub presence: f32,
+    // Service-only fading keeps lane occupancy identical in planning and playback.
+    slot_presence: f32,
     pub projection_scale: f32,
     height_band: f32,
     activity: f32,
@@ -287,12 +322,24 @@ impl Simulation {
             options.max_idle_seconds,
             |_| {
                 if repositories > 0 {
-                    travel::seconds_ticks(options.travel_cap, false)
+                    match options.travel_cap {
+                        TravelCap::Seconds(_) => options.travel_cap.ticks(),
+                        TravelCap::None => 0,
+                    }
                 } else {
                     0
                 }
             },
         );
+        Self::check_schedule(events, options, repositories, &schedule)
+    }
+
+    fn check_schedule(
+        events: &[Event],
+        options: &Options,
+        repositories: usize,
+        schedule: &Schedule,
+    ) -> anyhow::Result<()> {
         let ticks = frames_for(schedule.duration(), 60)?;
         let authors = events[options.selected_range(events.len())]
             .iter()
@@ -336,35 +383,76 @@ impl Simulation {
         mappings: &Mappings,
         repositories: &[String],
     ) -> Self {
+        Self::try_with_repositories(events, options, theme, mappings, repositories)
+            .expect("validated repository playback")
+    }
+
+    pub(super) fn try_with_repositories(
+        events: Vec<Event>,
+        options: &Options,
+        theme: &Theme,
+        mappings: &Mappings,
+        repositories: &[String],
+    ) -> anyhow::Result<Self> {
         if repositories.is_empty() {
-            return Self::build(events, options, theme, mappings, &[], repositories);
+            return Ok(Self::build(
+                events,
+                options,
+                theme,
+                mappings,
+                &[],
+                repositories,
+            ));
         }
+        Self::check_repository_plan(&events, options, repositories.len())?;
         let mut simulation =
             Self::build(events.clone(), options, theme, mappings, &[], repositories);
-        if !repositories.is_empty() {
-            let mut padding = simulation.travel_padding(options);
-            for pass in 0..4 {
-                if padding.iter().any(|&(_, ticks)| ticks > 0) {
-                    simulation = Self::build(
-                        events.clone(),
-                        options,
-                        theme,
-                        mappings,
-                        &padding,
-                        repositories,
-                    );
-                }
-                simulation.plan_travel(options, &padding);
-                let adjusted = simulation.adjust_travel_padding(options, &padding);
-                if pass == 3 || adjusted == padding {
-                    break;
-                }
-                padding = adjusted;
+        let mut padding = simulation.travel_padding(options);
+        let passes = if options.travel_cap == TravelCap::None {
+            16
+        } else {
+            4
+        };
+        for pass in 0..passes {
+            if padding.iter().any(|&(_, ticks)| ticks > 0) {
+                let schedule = Schedule::with_padding(
+                    &events[options.selected_range(events.len())],
+                    options.seconds_per_day,
+                    options.max_idle_seconds,
+                    |index| {
+                        padding
+                            .iter()
+                            .find(|&&(event, _)| event == options.start + index)
+                            .map_or(0, |&(_, ticks)| ticks)
+                    },
+                );
+                Self::check_schedule(&events, options, repositories.len(), &schedule)?;
+                simulation = Self::build(
+                    events.clone(),
+                    options,
+                    theme,
+                    mappings,
+                    &padding,
+                    repositories,
+                );
             }
+            simulation.plan_travel(options, &padding);
+            let adjusted = simulation.adjust_travel_padding(options, &padding);
+            if adjusted == padding {
+                break;
+            }
+            if pass + 1 == passes {
+                anyhow::ensure!(
+                    options.travel_cap != TravelCap::None,
+                    "uncapped travel did not converge within 16 planning passes; shorten the history or increase avatar speed"
+                );
+                break;
+            }
+            padding = adjusted;
         }
         simulation.caption_plan =
             caption::plan(&simulation.schedule, &simulation.events);
-        simulation
+        Ok(simulation)
     }
 
     fn build(
@@ -630,7 +718,11 @@ impl Simulation {
             } else {
                 slots::projection_scale(avatar.position)
             };
-            let visible = now - avatar.last_active < AVATAR_IDLE;
+            let service_visible = now - avatar.last_active < AVATAR_IDLE;
+            let service_fade = if service_visible { dt / 0.4 } else { -dt / 1.2 };
+            avatar.slot_presence =
+                (avatar.slot_presence + service_fade).clamp(0.0, 1.0);
+            let visible = travel.is_some() || service_visible;
             let fade = if visible { dt / 0.4 } else { -dt / 1.2 };
             avatar.presence = (avatar.presence + fade).clamp(0.0, 1.0);
             if let Some((_, opacity)) = travel {
@@ -1053,6 +1145,7 @@ impl State {
             touched: Vec::new(),
             last_active: now,
             presence: 0.0,
+            slot_presence: 0.0,
             projection_scale: 1.0,
             height_band: names::height_band(&contributor.key),
             activity: 0.0,
@@ -1781,6 +1874,23 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn uncapped_actual_padding_still_obeys_capture_budgets() {
+        let events = crate::timeline::synthetic();
+        let options = Options {
+            travel_cap: TravelCap::None,
+            ..Options::default()
+        };
+        assert!(Simulation::check_repository_plan(&events, &options, 5).is_ok());
+        let schedule = Schedule::with_padding(
+            &events,
+            options.seconds_per_day,
+            options.max_idle_seconds,
+            |_| 216_000,
+        );
+        assert!(Simulation::check_schedule(&events, &options, 5, &schedule).is_err());
     }
 
     #[test]

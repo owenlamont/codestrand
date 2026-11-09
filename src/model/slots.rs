@@ -346,7 +346,7 @@ impl State {
                 && let Some(slot) = &mut avatar.slot
             {
                 slot.name = None;
-                if avatar.presence > 0.0 {
+                if avatar.slot_presence > 0.0 {
                     occupied.push(disk(slot.point, radius));
                 }
             }
@@ -1321,6 +1321,52 @@ mod tests {
             "slot":a.slot.as_ref().map(|s| serde_json::json!({"edge":s.dock.edge,"fraction":s.dock.fraction,"point":s.point.to_array(),"name":s.name.map(|p| p.to_array()),"text":s.text,"valid":s.valid()}))
         })).collect())
     }
+    fn assert_traveller_presence(sim: &Simulation, frame: u32) {
+        for (author, avatar) in sim.state.avatars.iter().enumerate() {
+            if sim
+                .travel
+                .sample(author, sim.state.tick)
+                .is_some_and(|(_, opacity)| opacity > 0.0)
+            {
+                assert!(avatar.presence > 0.0, "walking avatar idled out at {frame}");
+            }
+        }
+    }
+
+    #[test]
+    fn visible_idle_walkers_do_not_reserve_their_old_service_slot() {
+        let histories = (0..2)
+            .map(|index| {
+                let mut events = vec![crate::timeline::synthetic().remove(0)];
+                events[0].author.email =
+                    format!("author{index}@example.com").into_bytes();
+                events[0].seconds = i64::try_from(index).unwrap();
+                crate::repositories::namespace(&mut events, index);
+                events
+            })
+            .collect();
+        let mut sim = Simulation::with_repositories(
+            crate::repositories::merge(histories),
+            &Options::default(),
+            &Theme::neon(),
+            &Mappings::default(),
+            &["a".into(), "b".into()],
+        );
+        sim.advance_to(120, 60);
+        let mut state = sim.state.clone();
+        state.avatars[0].last_active = 0.0;
+        state.avatars[0].presence = 0.0;
+        state.avatars[0].slot_presence = 0.0;
+        state.avatars[1].last_active = 12.0;
+        state.place_slots(&sim.envelopes, 12.0);
+        let expected = state.avatars[1].slot.as_ref().unwrap().point;
+        state.avatars[0].slot.as_mut().unwrap().point = expected;
+        state.avatars[0].presence = 1.0;
+        state.place_slots(&sim.envelopes, 12.0);
+        assert_eq!(state.avatars[1].slot.as_ref().unwrap().point, expected);
+        assert!(state.avatars[1].slot.as_ref().unwrap().valid());
+    }
+
     fn validate(sim: &mut Simulation) {
         let frames = crate::model::frames_for(sim.duration(), 60).unwrap();
         let mut moving = diagnostics::MovingBeams::default();
@@ -1338,17 +1384,29 @@ mod tests {
             let obstacles = obstacles(&sim.state);
             let mut bodies = Vec::new();
             let mut names = Vec::new();
+            assert_traveller_presence(sim, frame);
             for avatar in sim.state.avatars.iter().filter(|a| {
                 sim.seconds() - a.last_active < super::super::AVATAR_IDLE
                     || a.presence > 0.0
             }) {
+                // A traveller's retained service slot is not its current position.
+                if sim
+                    .travel
+                    .travelling(sim.state.authors[&avatar.key], sim.state.tick)
+                {
+                    continue;
+                }
                 let Some(slot) = &avatar.slot else {
                     continue;
                 };
                 if !slot.valid() {
                     assert!(sim.state.slot_records[&avatar.commit].least_bad);
                 }
-                if slot.valid() {
+                // Idle lane proofs are stale; MovingBeams checks actual travelling
+                // discs and live beams independently on every frame.
+                if slot.valid()
+                    && sim.seconds() - avatar.last_active < super::super::AVATAR_IDLE
+                {
                     let tile =
                         sim.layout().repositories[avatar.repository].tile.unwrap();
                     let corners = sim.envelopes[avatar.commit].corners(tile);
@@ -1405,6 +1463,25 @@ mod tests {
         }
         eprintln!("SLOT_SUMMARY {summary}");
         moving.assert_clear(sim.travel.stats.max_speed);
+    }
+
+    #[test]
+    #[ignore = "requires local five-repository manifest and travel diagnostic path"]
+    fn local_uncapped_travel_and_bot_classification() {
+        let started = std::time::Instant::now();
+        let (mut sim, _) = super::super::nitpicks::local_simulation();
+        let mut seen = std::collections::HashSet::new();
+        let contributors: Vec<_> = sim.events.iter().filter_map(|event| {
+            let c = event.contributor.as_ref().unwrap();
+            seen.insert(c.key.clone()).then(|| serde_json::json!({"name":c.name,"email":String::from_utf8_lossy(&event.author.email),"rule":c.bot_rule(&event.author.email),"bot":c.is_bot(&event.author.email)}))
+        }).collect();
+        let report = serde_json::json!({"duration":sim.duration(),"plan_seconds":started.elapsed().as_secs_f64(),"contributors":contributors,"travel":sim.travel.report()});
+        std::fs::write(
+            std::env::var("CODESTRAND_TRAVEL_DIAGNOSTIC").unwrap(),
+            serde_json::to_vec_pretty(&report).unwrap(),
+        )
+        .unwrap();
+        validate(&mut sim);
     }
 
     #[test]
@@ -1557,7 +1634,7 @@ mod tests {
                 travel_cap: std::env::var("CODESTRAND_TRAVEL_CAP")
                     .ok()
                     .map_or(Options::default().travel_cap, |v| {
-                        v.parse().expect("test cap")
+                        crate::travel_seconds(&v).expect("test cap")
                     }),
                 ..Default::default()
             },
@@ -1594,11 +1671,13 @@ mod tests {
         let default = Options::default();
         let cap = std::env::var("CODESTRAND_TRAVEL_CAP")
             .ok()
-            .map_or(default.travel_cap, |v| v.parse::<f32>().expect("test cap"));
+            .map_or(default.travel_cap, |v| {
+                crate::travel_seconds(&v).expect("test cap")
+            });
         if repos.len() == 5
             && sim.travel.stats.max_speed.to_bits()
                 == default.avatar_max_speed.to_bits()
-            && cap.to_bits() == default.travel_cap.to_bits()
+            && cap == default.travel_cap
         {
             sim.travel.assert_human_motion();
         }

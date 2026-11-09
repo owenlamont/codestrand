@@ -127,10 +127,27 @@ pub(super) fn local_simulation() -> (Simulation, Vec<crate::repositories::Reposi
         &Options {
             seconds_per_day: 1.0,
             max_idle_seconds: 0.1,
+            travel_cap: std::env::var("CODESTRAND_TRAVEL_CAP")
+                .ok()
+                .map_or(Options::default().travel_cap, |value| {
+                    crate::travel_seconds(&value).unwrap()
+                }),
+            bot_travel: if std::env::var("CODESTRAND_BOT_TRAVEL").as_deref()
+                == Ok("walk")
+            {
+                BotTravel::Walk
+            } else {
+                BotTravel::Fade
+            },
             ..Default::default()
         },
         &Theme::neon(),
-        &Mappings::default(),
+        &crate::contributors::load(
+            std::env::var_os("CODESTRAND_CONTRIBUTORS")
+                .as_ref()
+                .map(std::path::Path::new),
+        )
+        .unwrap(),
         &repos
             .iter()
             .map(crate::repositories::Repository::name)

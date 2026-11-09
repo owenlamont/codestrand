@@ -15,6 +15,7 @@ emails = ["owen@personal.example", "owen@work.example"]
 github = "owenlamont"           # optional GitHub login
 gitlab = "owenlamont"           # optional GitLab.com username
 gravatar = "owen@avatar.example" # optional Gravatar email
+bot = false                   # optional bot classification override
 # avatar = "portraits/owen.png"  # optional local path or HTTPS URL; overrides lookups
 ```
 
@@ -24,6 +25,12 @@ displayed with the name from the last commit in playback order. Commits without 
 are grouped by author name. A missing default file is fine; an explicit missing file,
 unknown key or malformed TOML is an error. Edits take effect on cache hits; original
 authors and repository history remain unchanged.
+
+`bot = true` marks automation and `bot = false` marks a human, overriding automatic
+detection even after a display-name change. Without an override, a parsed GitHub noreply
+login ending in `[bot]` identifies a bot; a displayed name ending in `[bot]` is the
+fallback. `[bot]` elsewhere in a name does not match. Bot avatars fade between
+repositories by default; use `--bot-travel walk` to route them like humans.
 
 Configuration is limited to 1 MiB before parsing, 4,096 contributors, 4,096 total email
 aliases, and 4,096 bytes per string. Expanded alias payloads may total at most 16 MiB.

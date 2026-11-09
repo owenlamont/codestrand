@@ -310,7 +310,7 @@ fn capture(simulation: &mut Simulation) -> Capture {
                     .expect("tile exists before service")
                     .point,
                 radius: 6.5 * state.avatar_scale + 1.0,
-                bot: contributor.name.to_ascii_lowercase().contains("[bot]"),
+                bot: contributor.is_bot(&simulation.events[event].author.email),
                 dock: avatar.slot.as_ref().expect("service slot").dock,
             });
         }
@@ -368,10 +368,12 @@ impl Simulation {
         padding: &[(usize, u32)],
     ) -> Vec<(usize, u32)> {
         let mut result = padding.to_vec();
-        let cap = seconds_ticks(options.travel_cap, false);
-        for trip in self.travel.trips.iter().filter(|t| !t.bot && t.fade) {
+        let cap = options.travel_cap.ticks();
+        for trip in self.travel.trips.iter().filter(|t| {
+            (!t.bot || options.bot_travel == super::BotTravel::Walk) && t.fade
+        }) {
             let needed = if trip.route.is_empty() {
-                cap
+                options.travel_cap.blocked_ticks()
             } else {
                 seconds_ticks(
                     (trip.route.duration - tick_time(trip.arrival - trip.departure))
@@ -394,8 +396,13 @@ impl Simulation {
         options: &super::Options,
     ) -> Vec<(usize, u32)> {
         let capture = capture(self);
-        let (routes, _) = trips(&capture, options.avatar_max_speed);
-        let cap = seconds_ticks(options.travel_cap, false);
+        let (routes, _) = trips(
+            &capture,
+            options.avatar_max_speed,
+            options.bot_travel,
+            options.travel_cap == super::TravelCap::None,
+        );
+        let cap = options.travel_cap.ticks();
         let mut shifts = vec![0_u64; self.events.len()];
         let mut extra = 0_u64;
         let mut padding = Vec::new();
@@ -407,10 +414,11 @@ impl Simulation {
                     .starts
                     .partition_point(|&s| s <= tick_time(trip.departure))
                     .saturating_sub(1);
-                let needed = if trip.bot {
+                let needed = if trip.bot && options.bot_travel == super::BotTravel::Fade
+                {
                     0
                 } else if trip.route.is_empty() {
-                    cap
+                    options.travel_cap.blocked_ticks()
                 } else {
                     seconds_ticks(
                         (tick_time(trip.departure)
@@ -438,7 +446,12 @@ impl Simulation {
         padding: &[(usize, u32)],
     ) {
         let capture = capture(self);
-        let (trips, graph_epochs) = trips(&capture, options.avatar_max_speed);
+        let (trips, graph_epochs) = trips(
+            &capture,
+            options.avatar_max_speed,
+            options.bot_travel,
+            options.travel_cap == super::TravelCap::None,
+        );
         let mut previous = vec![None; capture.poses.len()];
         let mut human_switches = 0;
         for service in &capture.services {
@@ -481,7 +494,7 @@ impl Simulation {
                         && t.route.is_empty()
                 })
                 .count(),
-            bot_fades: trips.iter().filter(|t| t.bot).count(),
+            bot_fades: trips.iter().filter(|t| t.bot && t.fade).count(),
             max_speed: options.avatar_max_speed,
             temporary_capture_bytes: capture
                 .poses
@@ -782,7 +795,7 @@ mod tests {
                 events.extend(history);
             }
             let options = super::super::Options {
-                travel_cap: cap,
+                travel_cap: super::super::TravelCap::Seconds(cap),
                 seconds_per_day: 0.3,
                 ..Default::default()
             };
@@ -829,9 +842,7 @@ mod tests {
         assert_eq!(a.travel.report(), b.travel.report());
         assert!(a.schedule.starts.windows(2).all(|s| s[0] < s[1]));
         for event in 0..a.events.len() {
-            assert!(
-                a.schedule.padding(event) <= seconds_ticks(options.travel_cap, false)
-            );
+            assert!(a.schedule.padding(event) <= options.travel_cap.ticks());
         }
         for frame in [0, 15, 30, 45, 60, 90, 120, 20, 80, 0, 110] {
             a.advance_to(frame, 30);

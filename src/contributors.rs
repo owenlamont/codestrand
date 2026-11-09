@@ -26,8 +26,37 @@ pub(super) enum Key {
 pub(super) struct Contributor {
     pub key: Key,
     pub name: String,
+    pub bot: Option<bool>,
     pub accounts: Accounts,
     pub portrait: Option<std::sync::Arc<crate::avatars::Portrait>>,
+}
+
+impl Contributor {
+    pub(super) fn bot_rule(&self, email: &[u8]) -> &'static str {
+        if let Some(bot) = self.bot {
+            return if bot {
+                "override_bot"
+            } else {
+                "override_human"
+            };
+        }
+        if crate::avatars::noreply(&String::from_utf8_lossy(email))
+            .is_some_and(|login| login.ends_with("[bot]"))
+        {
+            "github_noreply"
+        } else if self.name.to_ascii_lowercase().ends_with("[bot]") {
+            "name_suffix"
+        } else {
+            "human"
+        }
+    }
+
+    pub(super) fn is_bot(&self, email: &[u8]) -> bool {
+        matches!(
+            self.bot_rule(email),
+            "override_bot" | "github_noreply" | "name_suffix"
+        )
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -82,6 +111,7 @@ struct Config {
 #[serde(deny_unknown_fields)]
 struct Entry {
     name: String,
+    bot: Option<bool>,
     emails: Vec<String>,
     github: Option<String>,
     gitlab: Option<String>,
@@ -228,6 +258,7 @@ impl Mappings {
                 let contributor = Contributor {
                     key: Key::Config(index),
                     name: entry.name.clone(),
+                    bot: entry.bot,
                     accounts: Accounts {
                         github: entry.github.clone(),
                         gitlab: entry.gitlab.clone(),
@@ -261,6 +292,7 @@ impl Mappings {
                 Some(self.emails.get(&email).cloned().unwrap_or_else(|| {
                     let key = unlisted_key(event);
                     Contributor {
+                        bot: None,
                         name: names[&key].clone(),
                         accounts: Accounts::default(),
                         portrait: None,
@@ -282,6 +314,48 @@ fn unlisted_key(event: &Event) -> Key {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bot_overrides_precede_noreply_and_suffix_without_substring_matches() {
+        let mut history = events(&[
+            (
+                "Renamed automation",
+                "42+dependabot[bot]@users.noreply.github.com",
+            ),
+            ("Human [bot] notes", "human@example.com"),
+            (
+                "Fallback[bot]",
+                "invalid+login[bot]@users.noreply.github.com",
+            ),
+            ("Normal", "other@example.com"),
+        ]);
+        Mappings::default().apply(&mut history);
+        let rules: Vec<_> = history
+            .iter()
+            .map(|e| e.contributor.as_ref().unwrap().bot_rule(&e.author.email))
+            .collect();
+        assert_eq!(rules, ["github_noreply", "human", "name_suffix", "human"]);
+        for (value, expected) in [(false, "override_human"), (true, "override_bot")] {
+            let mappings = Mappings::parse(&format!("[[contributor]]\nname='Renamed'\nemails=['42+dependabot[bot]@users.noreply.github.com']\nbot={value}"), Path::new("contributors.toml")).unwrap();
+            mappings.apply(&mut history);
+            assert_eq!(
+                history[0]
+                    .contributor
+                    .as_ref()
+                    .unwrap()
+                    .bot_rule(&history[0].author.email),
+                expected
+            );
+            assert_eq!(
+                history[0]
+                    .contributor
+                    .as_ref()
+                    .unwrap()
+                    .is_bot(&history[0].author.email),
+                value
+            );
+        }
+    }
 
     #[test]
     fn oversized_comment_is_rejected() {

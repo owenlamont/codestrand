@@ -14,6 +14,7 @@ pub(crate) struct MovingBeams {
     travelling_avatar_overlaps: u64,
     maximum_travel_speed: f32,
     first_disc: Option<serde_json::Value>,
+    first_overlap: Option<serde_json::Value>,
     observed_beams: u64,
     #[serde(skip)]
     previous: std::collections::BTreeMap<usize, (u64, bevy::math::Vec2, bool)>,
@@ -79,6 +80,7 @@ impl MovingBeams {
                         .is_some_and(|p| (p * HALF).distance(point) < 2.0 * radius)
                 {
                     self.travelling_avatar_overlaps += 1;
+                    self.first_overlap.get_or_insert_with(|| serde_json::json!({"frame":state.tick,"author":author,"other":other,"point":point.to_array(),"other_point":position.map(|p| (p * HALF).to_array()),"radius":radius,"distance":position.map(|p| (p * HALF).distance(point)),"sample":simulation.travel.sample(author,state.tick).map(|(p,a)| (p.to_array(),a)),"other_sample":simulation.travel.sample(other,state.tick).map(|(p,a)| (p.to_array(),a))}));
                 }
             }
         }

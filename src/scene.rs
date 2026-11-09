@@ -2458,6 +2458,7 @@ mod tests {
         events.truncate(2);
         crate::contributors::Mappings::default().apply(&mut events);
         events[0].contributor = Some(crate::contributors::Contributor {
+            bot: None,
             key: crate::contributors::Key::Config(0),
             name: "Portrait".to_owned(),
             accounts: default(),

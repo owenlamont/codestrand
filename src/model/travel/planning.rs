@@ -289,7 +289,12 @@ impl Search<'_> {
     }
 }
 
-pub(super) fn trips(capture: &Capture, speed: f32) -> (Vec<Trip>, usize) {
+pub(super) fn trips(
+    capture: &Capture,
+    speed: f32,
+    bots: crate::model::BotTravel,
+    keep_idle: bool,
+) -> (Vec<Trip>, usize) {
     let mut previous = vec![None; capture.poses.len()];
     let mut result = Vec::new();
     let mut router = Router::default();
@@ -301,7 +306,9 @@ pub(super) fn trips(capture: &Capture, speed: f32) -> (Vec<Trip>, usize) {
             continue;
         };
         if (prior.repository == service.repository && prior.dock == service.dock)
-            || tick_time(service.tick - prior.tick) >= crate::model::AVATAR_IDLE + 1.2
+            || ((!keep_idle || (service.bot && bots == crate::model::BotTravel::Fade))
+                && tick_time(service.tick - prior.tick)
+                    >= crate::model::AVATAR_IDLE + 1.2)
         {
             continue;
         }
@@ -328,7 +335,7 @@ pub(super) fn trips(capture: &Capture, speed: f32) -> (Vec<Trip>, usize) {
             cutoff: None,
             proof: None,
         };
-        if !service.bot {
+        if !service.bot || bots == crate::model::BotTravel::Walk {
             best = Search {
                 capture,
                 reservations: &result,
@@ -369,6 +376,25 @@ pub(super) fn trips(capture: &Capture, speed: f32) -> (Vec<Trip>, usize) {
 mod tests {
     use super::super::{Service, slots};
     use super::*;
+
+    #[test]
+    fn walking_bots_use_the_same_reserved_routes_as_humans() {
+        let mut capture = fixture();
+        let (humans, _) = trips(&capture, 240.0, crate::model::BotTravel::Walk, false);
+        for service in &mut capture.services {
+            service.bot = true;
+        }
+        let (bots, _) = trips(&capture, 240.0, crate::model::BotTravel::Walk, false);
+        let (fades, _) = trips(&capture, 240.0, crate::model::BotTravel::Fade, false);
+        assert!(!bots.is_empty());
+        assert!(bots.iter().all(|t| !t.fade));
+        assert!(fades.iter().all(|t| t.fade && t.route.is_empty()));
+        for (human, bot) in humans.iter().zip(bots) {
+            assert_eq!(human.route.points(), bot.route.points());
+            assert_eq!(human.departure, bot.departure);
+            assert_eq!(human.arrival, bot.arrival);
+        }
+    }
 
     fn fixture() -> Capture {
         Capture {
@@ -413,7 +439,8 @@ mod tests {
     #[test]
     fn disjoint_trips_use_their_own_service_slack_concurrently() {
         let capture = fixture();
-        let (trips, _) = super::trips(&capture, 240.0);
+        let (trips, _) =
+            super::trips(&capture, 240.0, crate::model::BotTravel::Fade, false);
         assert_eq!(trips.len(), 2);
         assert_eq!(trips[0].departure, 11);
         assert_eq!(trips[1].departure, 21);
@@ -422,9 +449,40 @@ mod tests {
     }
 
     #[test]
+    fn uncapped_walks_do_not_turn_into_idle_reentries() {
+        let mut capture = fixture();
+        capture.services.retain(|s| s.author == 0);
+        capture.services[1].tick = 600;
+        capture.poses.truncate(1);
+        capture.poses[0] = (0..=600)
+            .map(|tick| Pose {
+                tick,
+                point: if tick < 600 {
+                    Vec2::new(-100.0, -60.0)
+                } else {
+                    Vec2::new(100.0, -60.0)
+                },
+                visible: true,
+            })
+            .collect();
+        capture.tiles = vec![vec![]; 601];
+        capture.radii = vec![7.5; 601];
+        for service in &mut capture.services {
+            service.bot = true;
+        }
+        let (idle, _) = trips(&capture, 240.0, crate::model::BotTravel::Walk, false);
+        assert!(idle.is_empty());
+        let (walking, _) = trips(&capture, 240.0, crate::model::BotTravel::Walk, true);
+        assert_eq!(walking.len(), 1);
+        assert!(!walking[0].fade);
+        assert_eq!(walking[0].sample(500).1, 1.0);
+    }
+
+    #[test]
     fn crossing_routes_wait_without_overlapping() {
         let capture = fixture();
-        let (mut trips, _) = super::trips(&capture, 240.0);
+        let (mut trips, _) =
+            super::trips(&capture, 240.0, crate::model::BotTravel::Fade, false);
         trips[0].source = Vec2::new(-100.0, 0.0);
         trips[0].destination = Vec2::new(100.0, 0.0);
         trips[0].departure = 0;
@@ -460,7 +518,8 @@ mod tests {
         for pose in &mut capture.poses[0] {
             pose.point = Vec2::new(tick_time(pose.tick) * 0.6, 0.0);
         }
-        let (mut trips, _) = super::trips(&fixture(), 240.0);
+        let (mut trips, _) =
+            super::trips(&fixture(), 240.0, crate::model::BotTravel::Fade, false);
         let trip = &mut trips[0];
         trip.departure = 1;
         trip.arrival = 120;
