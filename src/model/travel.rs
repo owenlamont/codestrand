@@ -244,6 +244,32 @@ impl Plan {
         Some(trip.sample(tick))
     }
 
+    pub(super) fn departing(&self, author: usize, tick: u64) -> bool {
+        self.trips
+            .iter()
+            .any(|t| t.author == author && t.departure == tick)
+    }
+    pub(super) fn label_boundary_cost(
+        &self,
+        author: usize,
+        tick: u64,
+        body: Vec2,
+        rect: Rect,
+    ) -> f32 {
+        let Some(trip) = self.trips.iter().find(|t| t.active(author, tick)) else {
+            return 0.0;
+        };
+        trip.route
+            .points()
+            .iter()
+            .map(|p| {
+                let delta = Vec2::from_array(*p) - body;
+                ((rect.min + delta + HALF).min(Vec2::ZERO).length_squared()
+                    + (rect.max + delta - HALF).max(Vec2::ZERO).length_squared())
+                    * 1e9
+            })
+            .sum()
+    }
     pub fn travelling(&self, author: usize, tick: u64) -> bool {
         self.trips.iter().any(|t| t.active(author, tick))
     }

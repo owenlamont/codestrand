@@ -2,10 +2,6 @@ use bevy::math::{Rect, Vec2};
 
 use crate::contributors::Key;
 
-pub(super) fn priority(activity: f32, visible: bool) -> f32 {
-    activity * if visible { 1.25 } else { 1.0 }
-}
-
 pub(super) fn scale(active: usize) -> f32 {
     (1.0 / (1.0 + super::count(active.saturating_sub(3)) * 0.035).sqrt()).max(0.72)
 }
@@ -38,13 +34,15 @@ pub(super) struct Visibility {
 pub(super) struct Placement {
     pub point: Vec2,
     pub body: Vec2,
+    pub attachment: u8,
+    pub commit: usize,
     pub text: String,
     pub scale: f32,
 }
 
 impl super::State {
-    pub(super) fn place_names(&mut self, dt: f32) {
-        self.place_slot_names(dt);
+    pub(super) fn place_names(&mut self, dt: f32, travel: &super::travel::Plan) {
+        self.place_slot_names(dt, travel);
     }
 }
 #[cfg(test)]

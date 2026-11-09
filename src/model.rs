@@ -789,7 +789,7 @@ impl Simulation {
             }
         }
         state.place_view(dt);
-        state.place_names(dt);
+        state.place_names(dt, &self.travel);
     }
 
     pub(super) fn theme(&self) -> &Theme {

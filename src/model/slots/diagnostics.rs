@@ -5,6 +5,16 @@ use bevy::math::{Rect, Vec3};
 
 #[derive(Default, Serialize)]
 pub(crate) struct MovingBeams {
+    pub parked_close_pairs: u64,
+    pub label_nearest_violations: u64,
+    pub label_parked_violations: u64,
+    pub label_avoidable_parked: u64,
+    pub label_parked_max_distance: f32,
+    pub label_clipped_frames: u64,
+    pub label_violation_examples: Vec<serde_json::Value>,
+    pub label_gap_max: f32,
+    #[serde(skip)]
+    label_gaps: Vec<f32>,
     pair_frames: u64,
     endpoint_inside_foreign: u64,
     origin_inside_foreign: u64,
@@ -33,6 +43,14 @@ pub(crate) struct MovingBeams {
 }
 
 impl MovingBeams {
+    #[cfg(test)]
+    pub fn label_gap_p95(&self) -> f32 {
+        let mut gaps = self.label_gaps.clone();
+        gaps.sort_by(f32::total_cmp);
+        gaps.get(gaps.len().saturating_sub(1) * 95 / 100)
+            .copied()
+            .unwrap_or(0.0)
+    }
     fn overlap_depth(&mut self, depth: f32, tick: u64) {
         if depth > self.avatar_overlap_max_px {
             self.avatar_overlap_max_px = depth;
@@ -108,6 +126,130 @@ impl MovingBeams {
             }
         }
     }
+    fn classify_label_violation(
+        &mut self,
+        state: &crate::model::State,
+        other: usize,
+        body: bevy::math::Vec2,
+        point: bevy::math::Vec2,
+        moving: bool,
+    ) {
+        if moving {
+            return;
+        }
+        self.label_parked_max_distance =
+            self.label_parked_max_distance.max(body.distance(point));
+        let name = state.avatars[other]
+            .name_visibility
+            .placement
+            .as_ref()
+            .unwrap();
+        let size = crate::model::names::rect(
+            bevy::math::Vec2::ZERO,
+            &name.text,
+            name.scale,
+            state.geometry.label_height,
+        )
+        .size();
+        let distance = state.avatar_radius() + 4.0 / 3.0;
+        let possible = (0..8).any(|attachment| {
+            let rect = super::attached_rect(body, size, distance, attachment);
+            rect.min.cmpge(-HALF + bevy::math::Vec2::splat(0.5)).all()
+                && rect.max.cmple(HALF - bevy::math::Vec2::splat(0.5)).all()
+                && state
+                    .avatars
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, a)| *i != other && a.presence > 0.0)
+                    .all(|(_, a)| {
+                        let p = project(
+                            state.focus + view_direction() * state.distance,
+                            state.focus,
+                            &[a.position],
+                        )
+                        .next()
+                        .flatten()
+                        .unwrap()
+                            * HALF;
+                        p.distance(p.clamp(rect.min, rect.max)) > distance + 0.001
+                    })
+        });
+        self.label_avoidable_parked += u64::from(possible);
+    }
+    fn record_label_violation(&mut self, example: serde_json::Value) {
+        if self.label_violation_examples.len() < 12 {
+            self.label_violation_examples.push(example);
+        }
+    }
+    fn observe_labels(
+        &mut self,
+        simulation: &Simulation,
+        author: usize,
+        point: bevy::math::Vec2,
+        radius: f32,
+        projected: &[Option<bevy::math::Vec2>],
+    ) {
+        let state = &simulation.state;
+        let avatar = &state.avatars[author];
+        if avatar.presence <= 0.0 {
+            return;
+        }
+        let bounds = |name: &crate::model::names::Placement| {
+            let size = crate::model::names::rect(
+                bevy::math::Vec2::ZERO,
+                &name.text,
+                name.scale,
+                state.geometry.label_height,
+            )
+            .size();
+            Rect::from_corners(
+                name.point - bevy::math::Vec2::Y * size.y,
+                name.point + bevy::math::Vec2::X * size.x,
+            )
+        };
+        let distance = |rect: Rect| {
+            (point.distance(point.clamp(rect.min, rect.max)) - radius).max(0.0)
+        };
+        if let Some(name) = &avatar.name_visibility.placement {
+            let gap = distance(bounds(name));
+            self.label_gap_max = self.label_gap_max.max(gap);
+            self.label_gaps.push(gap);
+            let rect = bounds(name);
+            self.label_clipped_frames += u64::from(
+                rect.min.cmplt(-HALF + bevy::math::Vec2::splat(0.25)).any()
+                    || rect.max.cmpgt(HALF - bevy::math::Vec2::splat(0.25)).any(),
+            );
+            for (i, other) in state
+                .avatars
+                .iter()
+                .enumerate()
+                .filter(|(i, a)| *i != author && a.presence > 0.0)
+            {
+                if let Some(other_name) = &other.name_visibility.placement
+                    && distance(bounds(other_name)) <= gap + 0.0001
+                {
+                    self.label_nearest_violations += 1;
+                    let moving =
+                        simulation.travel.travelling(author, simulation.state.tick)
+                            || simulation.travel.travelling(i, simulation.state.tick);
+                    self.label_parked_violations += u64::from(!moving);
+                    let other_body = projected[i].unwrap() * HALF;
+                    self.classify_label_violation(state, i, other_body, point, moving);
+                    self.record_label_violation(serde_json::json!({"tick":state.tick,"author":author,"other":i,"moving":moving,"distance":projected[i].map(|p| (p * HALF).distance(point))}));
+                    break;
+                }
+            }
+        }
+        for (other, position) in projected.iter().enumerate().skip(author + 1) {
+            self.parked_close_pairs += u64::from(
+                state.avatars[other].presence > 0.0
+                    && !simulation.travel.travelling(author, simulation.state.tick)
+                    && !simulation.travel.travelling(other, simulation.state.tick)
+                    && position
+                        .is_some_and(|p| (p * HALF).distance(point) < 3.0 * radius),
+            );
+        }
+    }
     fn observe_avatars(&mut self, simulation: &Simulation) {
         let state = &simulation.state;
         if state.layout.repositories.is_empty() {
@@ -125,6 +267,7 @@ impl MovingBeams {
             let Some(point) = projected[author].map(|p| p * HALF) else {
                 continue;
             };
+            self.observe_labels(simulation, author, point, radius, &projected);
             self.observe_content(state, avatar, point, radius, &content);
             let moving = avatar.presence > 0.0
                 && simulation.travel.travelling(author, state.tick);
