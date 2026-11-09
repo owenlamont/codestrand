@@ -302,7 +302,7 @@ fn app(simulation: Simulation, title: String) -> App {
         .add_systems(Update, animate)
         .add_systems(
             PostUpdate,
-            (sync_avatar_camera, face_portraits)
+            (sync_avatar_camera, face_portraits, face_file_glyphs)
                 .chain()
                 .before(bevy::camera::CameraUpdateSystems)
                 .before(bevy::transform::TransformSystems::Propagate),
@@ -1992,9 +1992,72 @@ fn face_portraits(world: &mut World) {
     }
 }
 
+pub(crate) fn glyph_rotation(parent: Quat, camera: Quat) -> Quat {
+    // Cancel repository orientation before applying the shared camera-facing basis.
+    parent.inverse() * camera
+}
+
+fn face_file_glyphs(world: &mut World) {
+    let Ok(camera) = world
+        .query_filtered::<&Transform, With<SceneCamera>>()
+        .single(world)
+        .map(|transform| transform.rotation)
+    else {
+        return;
+    };
+    let glyphs: Vec<_> = world
+        .query::<(&FileVisual, &Transform)>()
+        .iter(world)
+        .map(|(visual, transform)| {
+            (visual.glyph, glyph_rotation(transform.rotation, camera))
+        })
+        .collect();
+    for (entity, rotation) in glyphs {
+        world
+            .get_mut::<Transform>(entity)
+            .expect("file glyph transform")
+            .rotation = rotation;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_glyphs_face_the_camera_after_repository_rotation_and_theme_reset() {
+        let mut world = World::new();
+        world.init_resource::<Assets<Mesh>>();
+        world.init_resource::<Assets<Image>>();
+        world.init_resource::<Assets<StandardMaterial>>();
+        let theme = Theme::neon();
+        let palette = Palette::new(&mut world, &theme);
+        let parent = spawn_file(&mut world, &palette, &theme, 0);
+        let glyph = world.get::<FileVisual>(parent).unwrap().glyph;
+        let camera = Transform::from_translation(model::view_direction() * 60.0)
+            .looking_at(Vec3::ZERO, Vec3::Y);
+        world.spawn((SceneCamera, camera));
+        for turn in [0.0, -std::f32::consts::FRAC_PI_2] {
+            world.get_mut::<Transform>(parent).unwrap().rotation =
+                Quat::from_rotation_y(turn);
+            *world.get_mut::<Transform>(glyph).unwrap() = theme.file_glyph_transform;
+            face_file_glyphs(&mut world);
+            let parent = world.get::<Transform>(parent).unwrap();
+            let child = world.get::<Transform>(glyph).unwrap();
+            assert!(
+                (parent.rotation * child.rotation).abs_diff_eq(camera.rotation, 1e-6)
+            );
+            assert_eq!(child.scale, theme.file_glyph_transform.scale);
+            for point in [Vec3::new(-0.5, -0.5, 0.0), Vec3::new(0.5, -0.5, 0.0)] {
+                assert!(
+                    (parent.to_matrix() * child.to_matrix())
+                        .transform_point3(point)
+                        .y
+                        > 0.0
+                );
+            }
+        }
+    }
 
     fn assert_sample_layout(world: &World, text: Entity, pixels: f32) {
         assert_eq!(

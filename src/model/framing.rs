@@ -3,6 +3,9 @@ use bevy::math::{Vec2, Vec3};
 use super::{ground, view_direction};
 use crate::layout::RepositoryRegion;
 
+#[cfg(test)]
+mod diagnostics;
+
 pub(crate) const FOV: f32 = std::f32::consts::FRAC_PI_4;
 pub(crate) const VIEWPORT: Vec2 = Vec2::new(1280.0, 720.0);
 pub(crate) const GLASS_BOTTOM: f32 = -0.1;

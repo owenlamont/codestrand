@@ -16,7 +16,7 @@ playback seconds. Seeking or restarting replays the same fixed simulation ticks.
 | `]` | Double live speed, up to 8x |
 | `,` / `.` | Previous or next theme |
 | WASD | Pan; return from contributor follow to free camera |
-| Right mouse drag | Orbit |
+| Right mouse drag | Orbit horizontally at the fixed camera pitch |
 | Scroll wheel | Zoom |
 | Tab | Follow or cycle visible contributors |
 | Space | Restore the fit-to-scene camera over half a second |
@@ -24,6 +24,11 @@ playback seconds. Seeking or restarting replays the same fixed simulation ticks.
 The caption shows the live multiplier, theme, camera mode and follow target. Following
 returns to free camera when the target fades out. Preview controls do not change
 the exported camera or timeline.
+
+The camera keeps the same 23.116-degree pitch above the file plane in every repository
+tile and in single-repository playback. Fitting changes position or distance without
+flattening the viewing angle. File glyphs face the camera and shrink uniformly; directory
+structures, membership rings and activity halos remain on the file plane.
 
 ## Themes
 

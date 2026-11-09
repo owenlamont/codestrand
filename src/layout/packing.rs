@@ -667,7 +667,10 @@ impl Packing {
                 let turn = |p: Vec2| if self.rotated[i] { p.perp() } else { p };
                 let shape: Vec<_> = r.outline.iter().copied().map(turn).collect();
                 let tile = placement[i];
-                let fitted = tile.map(|tile| fit::best(tile, &shape, r.height));
+                // A fixed screen anchor avoids switching between equal-area fit vertices.
+                let fitted = tile.map(|tile| {
+                    fit::anchored(tile, &shape, r.height, Vec2::splat(0.5))
+                });
                 let origin = fitted.map_or(Vec2::ZERO, |f| f.origin);
                 let scale = fitted.map_or(0.0, |f| f.scale);
                 Placement {
