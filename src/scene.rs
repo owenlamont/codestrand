@@ -30,6 +30,7 @@ const LABELS: usize = 72;
 const GRID_LINES: i16 = 20;
 const AVATAR_LAYER: usize = 1;
 
+mod caption;
 mod lod;
 mod styling;
 
@@ -463,6 +464,11 @@ fn setup(world: &mut World) {
 }
 
 fn setup_caption(world: &mut World, camera: Entity, repository_labels: usize) {
+    if repository_labels > 0 {
+        heading(world, camera, "CODESTRAND", 24.0, 0.0, 18.0);
+        caption::setup(world, camera);
+        return;
+    }
     let title = world.resource::<Title>().0.clone();
     let caption_y = if repository_labels > 0 {
         heading(world, camera, "CODESTRAND", 24.0, 0.0, 18.0);
@@ -1863,6 +1869,7 @@ fn labels(world: &mut World) {
         styling::leaders(world, &points, &theme, camera_entity);
     }
     sync_labels(world, chosen, &theme);
+    caption::update(world, &caption);
     let mut query = world.query_filtered::<&mut Text, With<Caption>>();
     if let Ok(mut text) = query.single_mut(world)
         && text.0 != caption

@@ -107,7 +107,7 @@ fn fragments_and_visible_names_survive_switches_seeks_and_rewind() {
     }
 }
 
-fn local_simulation() -> (Simulation, Vec<crate::repositories::Repository>) {
+pub(super) fn local_simulation() -> (Simulation, Vec<crate::repositories::Repository>) {
     let manifest = std::env::var("CODESTRAND_SLOT_REPOSITORIES").unwrap();
     let repos = crate::repositories::inputs(&[], Some(std::path::Path::new(&manifest)))
         .unwrap();

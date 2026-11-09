@@ -13,6 +13,7 @@ use crate::{
     timeline::{Event, Kind},
 };
 
+pub(crate) mod caption;
 pub(crate) mod framing;
 #[cfg(test)]
 mod measurement;
@@ -256,6 +257,8 @@ struct State {
 
 /// Deterministic playback stepped at a fixed tick rate, independent of output frame rate.
 pub(super) struct Simulation {
+    pub caption_style: caption::Style,
+    caption_plan: Vec<caption::Transition>,
     packing: crate::layout::packing::Packing,
     envelopes: Vec<slots::Envelope>,
     pub repository_boundary: crate::repositories::Boundary,
@@ -359,6 +362,8 @@ impl Simulation {
                 padding = adjusted;
             }
         }
+        simulation.caption_plan =
+            caption::plan(&simulation.schedule, &simulation.events);
         simulation
     }
 
@@ -442,6 +447,8 @@ impl Simulation {
         events.truncate(end);
         events.drain(..start);
         let mut simulation = Self {
+            caption_style: caption::Style::default(),
+            caption_plan: Vec::new(),
             packing: crate::layout::packing::Packing::default(),
             envelopes: Vec::new(),
             repository_boundary: crate::repositories::Boundary::default(),
@@ -724,8 +731,10 @@ impl Simulation {
             );
         };
         format!(
-            "{}   |   {}   |   commit {} / {}   |   {}x",
+            "{}   |   {}{}   |   commit {} / {}   |   {}x",
             date(event.seconds),
+            self.caption_repository()
+                .map_or_else(String::new, |(_, name)| format!("{name}   |   ")),
             event
                 .contributor
                 .as_ref()

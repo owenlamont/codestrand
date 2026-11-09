@@ -123,6 +123,9 @@ enum Command {
     reason = "each bool is an independent clap switch"
 )]
 struct Source {
+    /// Multi-repository caption colour treatment; single-repository playback is unchanged.
+    #[arg(long, value_enum, default_value = "chip")]
+    caption_style: model::caption::Style,
     /// Local repository to play; repeat for a shared timeline; synthetic when omitted.
     #[arg(long)]
     repository: Vec<PathBuf>,
@@ -305,6 +308,7 @@ impl Source {
             )
         };
         simulation.repository_boundary = self.repository_boundary;
+        simulation.caption_style = self.caption_style;
         simulation.repository_label_plane = self.repository_label_plane;
         Ok((simulation, title))
     }

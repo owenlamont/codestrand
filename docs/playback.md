@@ -7,6 +7,15 @@ Commit application times are precomputed for the selected history and pacing.
 The caption shows the last applied commit's date; cooling and fades advance in
 playback seconds. Seeking or restarting replays the same fixed simulation ticks.
 
+Multi-repository captions also name the applying commit's repository. The default
+`--caption-style chip` colours only the repository name's background, matching its tile
+hue. `--caption-style bar` tints the entire caption bar, cross-fading for 0.3 playback
+seconds, with at least 0.8 seconds between transitions (at least 0.5 seconds steady).
+Rapid changes coalesce to the
+latest repository when the hold expires; the caption text always updates immediately.
+Both treatments use white text on opaque dark tints with at least 5.52:1 contrast.
+Single-repository captions retain their original appearance with either setting.
+
 ## Controls
 
 | Input | Action |
