@@ -12,9 +12,23 @@ const MAX_POSES: usize = 4_000_000;
 
 pub(super) fn interior(tile: crate::layout::packing::Tile, radius: f32) -> Rect {
     let rect = Rect::from_corners(tile.low * HALF, tile.high * HALF);
-    let inset =
-        (2.0 * radius + 0.1).min((rect.size().min_element() * 0.5 - 0.1).max(0.0));
-    rect.inflate(-inset)
+    let half = rect.size().min_element() * 0.5;
+    let inset = (2.0 * radius + 0.1).min((half - 0.1).max(half * 0.5));
+    let guard = rect.inflate(-inset);
+    if guard.min.cmple(rect.min).any() || guard.max.cmpge(rect.max).any() {
+        Rect::from_center_size(rect.center(), Vec2::ZERO)
+    } else {
+        guard
+    }
+}
+
+pub(super) fn in_guard(
+    tile: crate::layout::packing::Tile,
+    radius: f32,
+    point: Vec2,
+) -> bool {
+    let guard = interior(tile, radius);
+    guard.size().cmpgt(Vec2::ZERO).all() && guard.contains(point)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -346,13 +360,7 @@ fn capture(simulation: &mut Simulation) -> Capture {
     capture
 }
 
-fn fade_clearance(
-    capture: &Capture,
-    begin: u64,
-    point: Vec2,
-    radius: f32,
-    author: usize,
-) -> u64 {
+fn fade_clearance(capture: &Capture, begin: u64, point: Vec2, radius: f32) -> u64 {
     for offset in 0..=9_u64 {
         let tick = begin + offset;
         let row = &capture.tiles[usize::try_from(tick)
@@ -361,21 +369,8 @@ fn fade_clearance(
         let tile_collision = row
             .iter()
             .flatten()
-            .any(|tile| interior(*tile, radius).contains(point));
-        let avatar_collision = capture
-            .poses
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| *i != author)
-            .any(|(_, poses)| {
-                let i = poses.partition_point(|p| p.tick < tick);
-                poses.get(i).is_some_and(|p| {
-                    p.tick == tick
-                        && p.visible
-                        && p.point.distance(point) < 2.0 * radius + 0.01
-                })
-            });
-        if tile_collision || avatar_collision {
+            .any(|tile| in_guard(*tile, radius, point));
+        if tile_collision {
             return offset;
         }
     }
@@ -383,6 +378,28 @@ fn fade_clearance(
 }
 
 impl Simulation {
+    fn pad_births(&self, padding: &mut Vec<(usize, u32)>) {
+        let mut born = vec![false; self.initial.layout.repositories.len()];
+        for (_, file) in self.initial.layout.files() {
+            born[self.initial.layout.dir(file.dir).repository] = true;
+        }
+        if let Some(first) = self.events.first() {
+            born[first.repository] = true;
+        }
+        for (index, event) in self.events.iter().enumerate() {
+            if std::mem::replace(&mut born[event.repository], true) {
+                continue;
+            }
+            let commit = self.offset + index;
+            let ticks = crate::layout::packing::BIRTH_TICKS;
+            if let Some((_, wait)) = padding.iter_mut().find(|(i, _)| *i == commit) {
+                *wait = (*wait).max(ticks);
+            } else {
+                padding.push((commit, ticks));
+            }
+        }
+        padding.sort_unstable_by_key(|p| p.0);
+    }
     pub(super) fn adjust_travel_padding(
         &self,
         options: &super::Options,
@@ -462,6 +479,9 @@ impl Simulation {
                 routes.next();
             }
             shifts[commit] = extra;
+        }
+        if options.travel_cap == super::TravelCap::None {
+            self.pad_births(&mut padding);
         }
         padding
     }
@@ -592,6 +612,15 @@ struct Disc {
     radius: f32,
 }
 
+impl Disc {
+    fn overlap(self, a: Vec2, b: Vec2) -> f32 {
+        let delta = b - a;
+        let t = ((self.point - a).dot(delta) / delta.length_squared().max(1e-8))
+            .clamp(0.0, 1.0);
+        (self.radius - self.point.distance(a + delta * t)).max(0.0)
+    }
+}
+
 #[derive(Debug)]
 enum RouteFailure {
     Endpoint,
@@ -684,26 +713,98 @@ impl Router {
         }
         let limit = HALF - Vec2::splat(costs.radius + 0.001);
         let mut axes = [vec![-limit.x, limit.x], vec![-limit.y, limit.y]];
-        add_axes(&mut axes, obstacles);
-        add_axes(
-            &mut axes,
-            &bodies
-                .iter()
-                .map(|b| Rect::from_center_size(b.point, Vec2::splat(2.0 * b.radius)))
-                .collect::<Vec<_>>(),
-        );
+        add_axes(&mut axes, obstacles, 0.01);
         axes[0].extend([source.x, target.x]);
         axes[1].extend([source.y, target.y]);
-        add_axes(&mut axes, costs.tiles);
+        add_axes(&mut axes, costs.tiles, 0.0);
         graph_route(source, target, obstacles, bodies, costs, axes, limit)
     }
 }
 
-fn add_axes(axes: &mut [Vec<f32>; 2], obstacles: &[Rect]) {
+fn add_axes(axes: &mut [Vec<f32>; 2], obstacles: &[Rect], margin: f32) {
     for r in obstacles {
         for (axis, values) in axes.iter_mut().enumerate() {
-            values.extend([r.min[axis] - 0.01, r.max[axis] + 0.01]);
+            values.extend([r.min[axis] - margin, r.max[axis] + margin]);
         }
+    }
+}
+
+#[cfg(test)]
+pub(super) fn assert_edge_connectivity(simulation: &Simulation) {
+    let tiles: Vec<_> = simulation
+        .state
+        .layout
+        .repositories
+        .iter()
+        .map(|r| r.tile)
+        .collect();
+    let radius = simulation.state.avatar_radius();
+    let slots: Vec<_> = simulation
+        .state
+        .avatars
+        .iter()
+        .enumerate()
+        .filter(|(i, a)| {
+            a.presence > 0.0 && !simulation.travel.travelling(*i, simulation.state.tick)
+        })
+        .filter_map(|(_, a)| a.slot.as_ref().map(|s| s.point))
+        .collect();
+    let cores: Vec<_> = tiles
+        .iter()
+        .flatten()
+        .map(|&t| interior(t, radius))
+        .filter(|r| r.size().cmpgt(Vec2::ZERO).all())
+        .collect();
+    let boundaries: Vec<_> = tiles
+        .iter()
+        .flatten()
+        .map(|t| Rect::from_corners(t.low * HALF, t.high * HALF))
+        .collect();
+    let target = -HALF + Vec2::splat(radius + 1.0);
+    let mut points: Vec<_> = tiles
+        .iter()
+        .flatten()
+        .flat_map(|tile| {
+            [
+                Vec2::new(
+                    tile.low.x * HALF.x - 0.1,
+                    (tile.low.y + tile.high.y) * HALF.y * 0.5,
+                ),
+                Vec2::new(
+                    (tile.low.x + tile.high.x) * HALF.x * 0.5,
+                    tile.high.y * HALF.y + 0.1,
+                ),
+                Vec2::new(
+                    tile.high.x * HALF.x + 0.1,
+                    (tile.low.y + tile.high.y) * HALF.y * 0.5,
+                ),
+                Vec2::new(
+                    (tile.low.x + tile.high.x) * HALF.x * 0.5,
+                    tile.low.y * HALF.y - 0.1,
+                ),
+            ]
+        })
+        .filter(|point| {
+            point.abs().cmplt(HALF - Vec2::splat(radius + 0.001)).all()
+                && !cores.iter().any(|r| r.contains(*point))
+        })
+        .collect();
+    assert_ne!(points, [] as [Vec2; 0]);
+    points.extend_from_slice(&slots);
+    for point in points {
+        Router::default()
+            .cost_route(
+                point,
+                target,
+                &cores,
+                &[],
+                Costs {
+                    content: &[],
+                    tiles: &boundaries,
+                    radius,
+                },
+            )
+            .expect("every tile edge connects to the outer gutter");
     }
 }
 
@@ -716,24 +817,19 @@ fn graph_route(
     mut axes: [Vec<f32>; 2],
     limit: Vec2,
 ) -> Result<Vec<Vec2>, RouteFailure> {
-    if [source, target].iter().any(|p| {
-        p.abs().cmpgt(limit).any()
-            || obstacles.iter().any(|r| r.contains(*p))
-            || bodies.iter().any(|b| b.point.distance(*p) < b.radius)
-    }) {
+    if [source, target]
+        .iter()
+        .any(|p| p.abs().cmpgt(limit).any() || obstacles.iter().any(|r| r.contains(*p)))
+    {
         return Err(RouteFailure::Endpoint);
     }
-    let clear = |a: Vec2, b: Vec2| {
-        !obstacles.iter().any(|&r| slots::segment(a, b, r))
-            && !bodies.iter().any(|body| {
-                let delta = b - a;
-                let t = ((body.point - a).dot(delta)
-                    / delta.length_squared().max(1e-8))
-                .clamp(0.0, 1.0);
-                body.point.distance(a + delta * t) < body.radius
-            })
-    };
-    if clear(source, target) && costs.clear(source, target) {
+    let clear = |a: Vec2, b: Vec2| !obstacles.iter().any(|&r| slots::segment(a, b, r));
+    let overlap =
+        |a: Vec2, b: Vec2| bodies.iter().map(|body| body.overlap(a, b)).sum::<f32>();
+    if clear(source, target)
+        && costs.clear(source, target)
+        && overlap(source, target) == 0.0
+    {
         return Ok(vec![source, target]);
     }
     for (axis, values) in axes.iter_mut().enumerate() {
@@ -758,10 +854,10 @@ fn graph_route(
     }
     let start = index(source);
     let end = index(target);
-    let mut distance = vec![u64::MAX; nodes];
+    let mut distance = vec![(u64::MAX, u64::MAX); nodes];
     let mut previous = vec![usize::MAX; nodes];
-    let mut queue = BinaryHeap::from([Reverse((0_u64, start))]);
-    distance[start] = 0;
+    let mut queue = BinaryHeap::from([Reverse(((0_u64, 0_u64), start))]);
+    distance[start] = (0, 0);
     while let Some(Reverse((cost, i))) = queue.pop() {
         if i == end {
             break;
@@ -784,12 +880,16 @@ fn graph_route(
             let a = point(i);
             let b = point(next);
             let delta = a.distance(b) * costs.multiplier(a, b);
+            let clearance = a.distance(b) * overlap(a, b) * 10_000.0;
             #[expect(
                 clippy::cast_possible_truncation,
                 clippy::cast_sign_loss,
                 reason = "finite viewport distances quantized to 1/1024 reference pixel"
             )]
-            let candidate = cost + (delta * 1024.0).ceil() as u64;
+            let candidate = (
+                cost.0 + (clearance * 1024.0).ceil() as u64,
+                cost.1 + (delta * 1024.0).ceil() as u64,
+            );
             if candidate < distance[next] {
                 distance[next] = candidate;
                 previous[next] = i;
@@ -797,7 +897,7 @@ fn graph_route(
             }
         }
     }
-    if distance[end] == u64::MAX {
+    if distance[end] == (u64::MAX, u64::MAX) {
         return Err(RouteFailure::Disconnected);
     }
     let mut path = vec![target];
@@ -831,6 +931,86 @@ fn simplify_path(path: &[Vec2]) -> Vec<Vec2> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn even_a_shallow_avatar_overlap_loses_to_a_clear_route() {
+        let body = Disc {
+            point: Vec2::new(0.0, 14.99999),
+            radius: 15.0,
+        };
+        let bounds = Rect::from_center_size(body.point, Vec2::splat(2.0 * body.radius));
+        let a = Vec2::new(-100.0, 0.0);
+        let b = Vec2::new(100.0, 0.0);
+        assert!(slots::segment(a, b, bounds));
+        let path = Router::default().route(a, b, &[], &[body]).unwrap();
+        assert!(path.windows(2).all(|p| !slots::segment(p[0], p[1], bounds)));
+    }
+    #[test]
+    fn birth_slivers_cannot_form_a_closed_guard_ring() {
+        for inside in [99.9, 99.9999] {
+            let rectangles = [
+                Rect::from_corners(Vec2::splat(-100.0), Vec2::new(-inside, 100.0)),
+                Rect::from_corners(Vec2::new(inside, -100.0), Vec2::splat(100.0)),
+                Rect::from_corners(
+                    Vec2::new(-inside, inside),
+                    Vec2::new(inside, 100.0),
+                ),
+                Rect::from_corners(
+                    Vec2::new(-inside, -100.0),
+                    Vec2::new(inside, -inside),
+                ),
+                Rect::from_corners(Vec2::splat(-inside), Vec2::splat(inside)),
+            ];
+            let old: Vec<_> = rectangles
+                .iter()
+                .map(|r| {
+                    r.inflate(
+                        -(28.1_f32.min((r.size().min_element() * 0.5 - 0.1).max(0.0))),
+                    )
+                })
+                .collect();
+            let source = Vec2::new(-99.8, 0.0);
+            let target = Vec2::new(-200.0, 0.0);
+            assert!(matches!(
+                Router::default().route(source, target, &old, &[]),
+                Err(RouteFailure::Disconnected)
+            ));
+            let cores: Vec<_> = rectangles
+                .iter()
+                .map(|r| {
+                    interior(
+                        crate::layout::packing::Tile {
+                            low: r.min / HALF,
+                            high: r.max / HALF,
+                        },
+                        14.0,
+                    )
+                })
+                .collect();
+            let route = Router::default()
+                .cost_route(
+                    source,
+                    target,
+                    &cores,
+                    &[],
+                    Costs {
+                        content: &[],
+                        tiles: &rectangles,
+                        radius: 14.0,
+                    },
+                )
+                .unwrap();
+            assert!(
+                route
+                    .windows(2)
+                    .all(|p| cores.iter().all(|&r| !slots::segment(p[0], p[1], r)))
+            );
+        }
+        let collapsed = crate::layout::packing::Tile {
+            low: Vec2::ZERO,
+            high: Vec2::Y,
+        };
+        assert!(!in_guard(collapsed, 14.0, Vec2::new(0.0, 180.0)));
+    }
     #[test]
     fn edge_corridors_leave_a_central_guard_even_during_birth() {
         let tile = crate::layout::packing::Tile {
@@ -976,7 +1156,7 @@ mod tests {
                 .filter(|p| p[0].distance(p[1]) > 100.0)
                 .all(|p| p[0].y <= -99.9 && p[1].y <= -99.9)
         );
-        assert!(route.iter().any(|p| p.y < -100.0));
+        assert!(route.iter().any(|p| (p.y + 100.0).abs() < 0.001));
     }
     #[test]
     fn routes_prefer_content_clear_edges_but_accept_unavoidable_content() {
@@ -1207,6 +1387,11 @@ mod tests {
             point: Vec2::ZERO,
             radius: 15.0,
         };
+        let unavoidable = router
+            .route(Vec2::ZERO, Vec2::new(100.0, 0.0), &[], &[body])
+            .unwrap();
+        assert_eq!(unavoidable.first(), Some(&Vec2::ZERO));
+        assert_eq!(unavoidable.last(), Some(&Vec2::new(100.0, 0.0)));
         assert!(
             router
                 .route(Vec2::new(-15.0, 0.0), Vec2::new(-50.0, 0.0), &[], &[body])

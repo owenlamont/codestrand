@@ -784,8 +784,12 @@ impl Choice<'_> {
             .map(|dock| self.assess(dock).0)
             .filter(Placement::valid)
             .min_by(|a, b| {
-                self.content_cost(a.point)
-                    .total_cmp(&self.content_cost(b.point))
+                self.avatar_cost(a.point)
+                    .total_cmp(&self.avatar_cost(b.point))
+                    .then(
+                        self.content_cost(a.point)
+                            .total_cmp(&self.content_cost(b.point)),
+                    )
                     .then(
                         a.point
                             .distance_squared(point)
@@ -800,6 +804,13 @@ impl Choice<'_> {
             .map(|(_, r)| {
                 (self.radius - point.distance(point.clamp(r.min, r.max))).max(0.0)
             })
+            .sum()
+    }
+    fn avatar_cost(&self, point: Vec2) -> f32 {
+        let body = disk(point, self.radius);
+        self.occupied
+            .iter()
+            .map(|r| body.intersect(*r).size().min_element().max(0.0))
             .sum()
     }
     fn assess(&self, dock: Dock) -> (Placement, f32) {
@@ -817,16 +828,11 @@ impl Choice<'_> {
                     && *repo != self.repository
                     && low.cmple(rect.max).all()
                     && high.cmpge(rect.min).all()
-                    && swept_crosses(point, &corners, rect.inflate(-0.02))
+                    && swept_crosses(point, &corners, rect.inflate(0.02))
             })
             .count();
-        let bounds = disk(point, self.radius);
-        let overlaps = self
-            .occupied
-            .iter()
-            .filter(|&&other| intersect(bounds, other))
-            .count()
-            + usize::from(!point.abs().cmple(HALF - Vec2::splat(self.radius)).all());
+        let overlaps =
+            usize::from(!point.abs().cmple(HALF - Vec2::splat(self.radius)).all());
         (
             Placement {
                 dock,
@@ -839,14 +845,15 @@ impl Choice<'_> {
                 overlaps,
                 missing_tile: false,
             },
-            span + self
-                .obstacles
-                .iter()
-                .map(|(_, r)| {
-                    let nearest = point.clamp(r.min, r.max);
-                    (self.radius - point.distance(nearest)).max(0.0) * 100.0
-                })
-                .sum::<f32>(),
+            span + 10_000.0 * self.avatar_cost(point)
+                + self
+                    .obstacles
+                    .iter()
+                    .map(|(_, r)| {
+                        let nearest = point.clamp(r.min, r.max);
+                        (self.radius - point.distance(nearest)).max(0.0) * 100.0
+                    })
+                    .sum::<f32>(),
         )
     }
 
@@ -857,7 +864,7 @@ impl Choice<'_> {
     fn select(&self, previous: Option<Dock>) -> Placement {
         if let Some((p, _)) = previous
             .map(|dock| self.assess(dock))
-            .filter(|(p, _)| p.valid())
+            .filter(|(p, _)| p.valid() && self.avatar_cost(p.point) == 0.0)
         {
             return p;
         }
@@ -887,6 +894,7 @@ impl Choice<'_> {
         }
         let fixed = self.best(docks.iter().copied());
         if fixed.valid()
+            && self.avatar_cost(fixed.point) == 0.0
             && self
                 .obstacles
                 .iter()
@@ -914,6 +922,10 @@ impl Choice<'_> {
             .min_by(|a, b| {
                 (a.1.0, a.1.1, a.1.2)
                     .cmp(&(b.1.0, b.1.1, b.1.2))
+                    .then(
+                        self.avatar_cost(a.0.point)
+                            .total_cmp(&self.avatar_cost(b.0.point)),
+                    )
                     .then(a.2.total_cmp(&b.2))
                     .then(a.1.3.cmp(&b.1.3))
                     .then(a.3.cmp(&b.3))
@@ -1326,8 +1338,8 @@ mod tests {
         let blocked = choice(&[], &full);
         assert_eq!(blocked.free_docks(), Vec::new());
         let least_bad = blocked.select(None);
-        assert!(!least_bad.valid());
-        assert!(least_bad.overlaps > 0);
+        assert!(least_bad.valid());
+        assert!(blocked.avatar_cost(least_bad.point) > 0.0);
     }
     #[test]
     fn geometric_top_failure_uses_another_edge_before_spreading() {
@@ -1534,7 +1546,6 @@ mod tests {
                 previous_commit = sim.commit();
             }
             let obstacles = tile_obstacles(&sim.state);
-            let mut bodies = Vec::new();
             let mut names = Vec::new();
             assert_traveller_presence(sim, frame);
             for avatar in sim.state.avatars.iter().filter(|a| {
@@ -1567,9 +1578,6 @@ mod tests {
                         && *r != avatar.repository
                         && swept_crosses(slot.point, &corners, rect.inflate(-0.02))));
                 }
-                let body = disk(slot.point, sim.state.avatar_radius());
-                assert!(bodies.iter().all(|&other| !intersect(body, other)));
-                bodies.push(body);
                 if let Some(point) = slot.name {
                     let size = super::super::names::rect(
                         Vec2::ZERO,
@@ -1587,11 +1595,6 @@ mod tests {
                     names.push(rect);
                 }
             }
-            assert!(
-                names
-                    .iter()
-                    .all(|&name| bodies.iter().all(|&body| !intersect(name, body)))
-            );
         }
         assert_eq!(sim.state.slot_records.len(), sim.events.len());
         let first = report(&sim.state);

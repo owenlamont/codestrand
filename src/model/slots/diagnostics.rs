@@ -12,6 +12,8 @@ pub(crate) struct MovingBeams {
     missing_tile_beams: u64,
     travelling_disc_foreign_tile: u64,
     travelling_avatar_overlaps: u64,
+    avatar_overlap_max_px: f32,
+    worst_overlap_tick: u64,
     travelling_centre_interior: u64,
     maximum_travel_speed: f32,
     first_disc: Option<serde_json::Value>,
@@ -30,6 +32,12 @@ pub(crate) struct MovingBeams {
 }
 
 impl MovingBeams {
+    fn overlap_depth(&mut self, depth: f32, tick: u64) {
+        if depth > self.avatar_overlap_max_px {
+            self.avatar_overlap_max_px = depth;
+            self.worst_overlap_tick = tick;
+        }
+    }
     #[cfg(test)]
     pub(in crate::model) fn assert_clear(&self, speed: f32) {
         assert_eq!(self.pair_frames, 0, "beam/foreign tile intersections");
@@ -43,10 +51,6 @@ impl MovingBeams {
             "route cut across tile interior"
         );
 
-        assert_eq!(
-            self.travelling_avatar_overlaps, 0,
-            "travelling avatars overlap"
-        );
         assert!(
             self.maximum_travel_speed <= speed + 0.1,
             "maximum travel speed {} exceeds {speed}",
@@ -137,6 +141,9 @@ impl MovingBeams {
                         .is_some_and(|p| (p * HALF).distance(point) < 2.0 * radius)
                 {
                     self.travelling_avatar_overlaps += 1;
+                    let depth =
+                        2.0 * radius - (position.unwrap() * HALF).distance(point);
+                    self.overlap_depth(depth, state.tick);
                     self.first_overlap.get_or_insert_with(|| serde_json::json!({"frame":state.tick,"author":author,"other":other,"point":point.to_array(),"other_point":position.map(|p| (p * HALF).to_array()),"radius":radius,"distance":position.map(|p| (p * HALF).distance(point)),"sample":simulation.travel.sample(author,state.tick).map(|(p,a)| (p.to_array(),a)),"other_sample":simulation.travel.sample(other,state.tick).map(|(p,a)| (p.to_array(),a))}));
                 }
             }
@@ -155,7 +162,7 @@ impl MovingBeams {
                 .filter_map(|(i, r)| r.tile.map(|t| (i, t)))
             {
                 self.travelling_centre_interior += u64::from(
-                    crate::model::travel::interior(tile, radius + 0.05).contains(point),
+                    crate::model::travel::in_guard(tile, radius + 0.05, point),
                 );
                 if index == avatar.repository {
                     continue;

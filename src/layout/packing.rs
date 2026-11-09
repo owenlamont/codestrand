@@ -10,7 +10,7 @@ mod zoom;
 
 const BOUND: f32 = 2.5;
 pub(crate) const MINIMUM: Vec2 = Vec2::new(144.0, 64.0);
-const BIRTH_SECONDS: f32 = 0.75;
+pub(crate) const BIRTH_TICKS: u32 = 45;
 const ALLOCATION_TOLERANCE_PX: f32 = 0.1;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -531,7 +531,10 @@ impl Packing {
                                 .min(usize::try_from(a[i]).expect("bounded activation"))
                         });
                         let begin = if before_service {
-                            ready.saturating_sub(45)
+                            ready.saturating_sub(
+                                usize::try_from(BIRTH_TICKS)
+                                    .expect("birth ticks fit usize"),
+                            )
                         } else {
                             birth
                         };
@@ -551,7 +554,7 @@ impl Packing {
                             )
                             .max(crate::model::tick_seconds())
                         } else {
-                            BIRTH_SECONDS
+                            crate::model::tick_time(u64::from(BIRTH_TICKS))
                         };
                         let u = (elapsed / transition).min(1.0);
                         u * u * (3.0 - 2.0 * u)

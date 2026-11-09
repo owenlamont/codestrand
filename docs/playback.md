@@ -145,7 +145,7 @@ relative order. Splits clamp to a ground-aspect range of 1:2.5 to 2.5:1 and a
 before their first commit; births near the lead-in use the available lead-in time.
 Aspect and size clamps scale with presence during the transition. Tiles and shared
 gutters partition the whole inset field. `--gutter` sets the visible spacing in
-1280×720 reference pixels: default `4`, range `0`–`64`, including touching tiles at
+1280×720 reference pixels: default `4`, range `0`–`20`, including touching tiles at
 `0`. Avatars remain doubled through five repositories, then taper with a smoothstep
 curve to the original diameter at thirty. Crowd scaling also remains active.
 Avatar bodies and names prefer clear content rectangles, including repository labels
@@ -154,8 +154,9 @@ Different content shapes can leave space inside a uniformly fitted tile.
 
 Contributors first appear in a gutter slot above their repository, aligned with the
 projected mean of touched files. Switching repositories chooses the nearest valid edge
-instead of requiring a detour to the top. A valid slot survives consecutive commits to
-the same repository. Placement checks the touched files throughout service, including
+instead of requiring a detour to the top. A slot without avatar overlap survives
+consecutive commits while its beam and frame checks remain valid.
+Placement checks the touched files throughout service, including
 additions and deletions, for an open half-plane and beams crossing another repository
 or its label.
 Other edges provide fallback docks. Avatars spread along edges; names shrink to a readable
@@ -165,13 +166,15 @@ visible with their avatars. Portrait size accounts for perspective.
 Multi-repository avatars travel along tile edges, gutters and the frame margin.
 Routes stay within one portrait diameter of tile edges; central tile rectangles
 remain impassable, including during births. Content overlap is a soft cost, swept
-over each trip; avatar-to-avatar clearance remains hard. Routes stop at corners
-and accelerate to at most `--avatar-max-speed`
-reference pixels/second (default `480`, minimum `1`), with a 0.2-second acceleration ramp.
-Trips reserve clearance in commit order against timed positions. Disjoint routes can
-run concurrently; crossing routes can wait at a clear node. Moving gutters are sampled
-with explicit speed and acceleration checks. Beams end when their author
-departs or changes repository, cancelling their in-flight fragments together. Otherwise,
+over each trip. Avatar clearance is a stronger soft cost for routes and new slots:
+clear options win, and unavoidable crowd overlap is accepted after a bounded wait
+of up to 30 canonical ticks. Routes stop at corners and accelerate to at most
+`--avatar-max-speed` reference pixels/second (default `480`, minimum `1`), with a
+0.2-second acceleration ramp. Trips score timed positions in commit order. Disjoint
+routes can run concurrently. Moving gutters are sampled with explicit speed and
+acceleration checks; frame limits and tile central guards remain hard constraints.
+Beams end when their author departs or changes repository, cancelling in-flight
+fragments together. Otherwise,
 beams remain until the last emitted fragment arrives, then fade. When not travelling,
 after five inactive playback seconds contributors
 remain parked at their last slot while fading over 1.2 seconds. Faded contributors
@@ -190,8 +193,9 @@ Walking avatars remain visible during travel. With `--travel-cap none`, walking 
 also remain routed across long idle gaps instead of disappearing and re-entering at a
 different repository. After the last service, the normal inactivity fade still applies.
 Uncapped walking services trips in commit order and adds another second of waiting
-when an endpoint, tile or avatar window blocks a route. New repository tiles can finish
-appearing during the added wait before their first commit is applied. An uncapped plan
+when tile motion or insufficient travel time blocks a route. New repository tiles get
+a full 0.75-second birth window inside their added wait. Packing weights start
+approaching the upcoming service footprint during that wait. An uncapped plan
 that cannot find safe routes within the planning budgets reports an error instead of
 silently accepting a travel fade.
 Dormant contributors follow their previous repository's lane while waiting, so later
@@ -206,9 +210,11 @@ codestrand export frames --repositories-file repositories.toml \
 
 Planning starts from the first tick after the contributor's previous service, so gaps
 between that contributor's commits absorb travel before padding is needed. Padding is
-revalidated as the scene geometry changes: at most four passes for numeric caps and
-64 for `none`. An uncapped plan that cannot converge reports an error. Numeric caps
-apply to the accumulated wait per commit, including reserved waits.
+revalidated as the scene geometry changes: at most four passes for numeric caps.
+Uncapped padding grows until every walking trip completes, subject to the existing
+216,000-tick, 2,000,000-region-sample and 4,000,000-pose capture budgets. Each Dijkstra
+search is limited to 10,000 graph nodes. Numeric caps apply to accumulated waiting
+per commit, including reserved waits.
 
 The CPU `layout-quality --treemap` report records fallback and least-bad slots,
 live beam crossings, travelling disc intersections, route points and travel padding.

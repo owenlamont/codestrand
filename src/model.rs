@@ -401,29 +401,6 @@ impl Simulation {
         mappings: &Mappings,
         repositories: &[String],
     ) -> anyhow::Result<Self> {
-        let passes = if options.travel_cap == TravelCap::None {
-            64
-        } else {
-            4
-        };
-        Self::try_with_repository_passes(
-            events,
-            options,
-            theme,
-            mappings,
-            repositories,
-            passes,
-        )
-    }
-
-    fn try_with_repository_passes(
-        events: Vec<Event>,
-        options: &Options,
-        theme: &Theme,
-        mappings: &Mappings,
-        repositories: &[String],
-        passes: usize,
-    ) -> anyhow::Result<Self> {
         if repositories.is_empty() {
             return Ok(Self::build(
                 events,
@@ -438,7 +415,9 @@ impl Simulation {
         let mut simulation =
             Self::build(events.clone(), options, theme, mappings, &[], repositories);
         let mut padding = simulation.travel_padding(options);
-        for pass in 0..passes {
+        let mut pass = 0;
+        loop {
+            pass += 1;
             if padding.iter().any(|&(_, ticks)| ticks > 0) {
                 let schedule = Schedule::with_padding(
                     &events[options.selected_range(events.len())],
@@ -464,31 +443,14 @@ impl Simulation {
             simulation.plan_travel(options, &padding);
             eprintln!(
                 "travel_replan pass={} fades={} padding_seconds={}",
-                pass + 1,
+                pass,
                 simulation.travel.stats.faded,
                 simulation.travel.stats.padding_seconds
             );
             let adjusted = simulation.adjust_travel_padding(options, &padding);
-            let walking_fades = simulation.travel.stats.faded
-                - if options.bot_travel == BotTravel::Fade {
-                    simulation.travel.stats.bot_fades
-                } else {
-                    0
-                };
-            if adjusted == padding {
-                anyhow::ensure!(
-                    options.travel_cap != TravelCap::None || walking_fades == 0,
-                    "uncapped travel stalled at planning pass {} with {} fades remaining; shorten the history or increase avatar speed",
-                    pass + 1,
-                    walking_fades
-                );
-                break;
-            }
-            if pass + 1 == passes {
-                anyhow::ensure!(
-                    options.travel_cap != TravelCap::None,
-                    "uncapped travel did not converge within {passes} planning passes ({walking_fades} walking fades remaining); shorten the history or increase avatar speed"
-                );
+            if adjusted == padding
+                || (options.travel_cap != TravelCap::None && pass == 4)
+            {
                 break;
             }
             padding = adjusted;
@@ -620,8 +582,13 @@ impl Simulation {
         }
         for (index, event) in self.events.iter().enumerate() {
             let arrival = travel::seconds_ticks(self.schedule.starts[index], false);
-            activation[event.repository] = activation[event.repository]
-                .min(arrival.saturating_sub(self.schedule.padding(index)));
+            let padding = self.schedule.padding(index);
+            activation[event.repository] = activation[event.repository].min(
+                arrival
+                    .saturating_sub(padding)
+                    .saturating_add(crate::layout::packing::BIRTH_TICKS)
+                    .min(arrival),
+            );
         }
         let mut snapshots = Some(slots::Snapshots::default());
         for (_, file) in self.layout().files() {
@@ -649,6 +616,23 @@ impl Simulation {
                 .is_some_and(|cache| !cache.capture(&self.state))
             {
                 snapshots = None;
+            }
+        }
+        if uncapped {
+            for (index, event) in self.events.iter().enumerate() {
+                let arrival = usize::try_from(
+                    frames_for(self.schedule.starts[index], 60)
+                        .expect("bounded service tick"),
+                )
+                .expect("service tick fits usize");
+                let begin = arrival.saturating_sub(
+                    usize::try_from(self.schedule.padding(index))
+                        .expect("bounded padding"),
+                );
+                let files = samples[arrival][event.repository].files;
+                for row in &mut samples[begin..arrival] {
+                    row[event.repository].files = files;
+                }
             }
         }
         self.packing = crate::layout::packing::Packing::with_gutter(
@@ -2047,40 +2031,66 @@ mod tests {
 
     #[test]
     fn uncapped_short_history_has_no_silent_fades() {
-        let (events, labels) = short_repository_history(10);
-        let options = Options {
-            seconds_per_day: 0.2,
-            max_idle_seconds: 0.2,
-            travel_cap: TravelCap::None,
-            bot_travel: BotTravel::Walk,
-            ..Options::default()
-        };
-        match Simulation::try_with_repository_passes(
-            events,
-            &options,
-            &Theme::neon(),
-            &Mappings::default(),
-            &labels,
-            1,
-        ) {
-            Ok(mut simulation) => {
-                assert_eq!(simulation.travel.stats.faded, 0);
-                let mut audit = slots::diagnostics::MovingBeams::default();
-                for tick in 0..=frames_for(simulation.duration(), 60).unwrap() {
-                    simulation.advance_to(tick, 60);
-                    audit.observe(&simulation);
+        for count in [10, 30] {
+            let (events, labels) = short_repository_history(count);
+            let options = Options {
+                seconds_per_day: 0.2,
+                max_idle_seconds: 0.2,
+                travel_cap: TravelCap::None,
+                bot_travel: BotTravel::Walk,
+                ..Options::default()
+            };
+            let started = std::time::Instant::now();
+            let mut simulation = Simulation::try_with_repositories(
+                events,
+                &options,
+                &Theme::neon(),
+                &Mappings::default(),
+                &labels,
+            )
+            .unwrap();
+            eprintln!(
+                "DENSE_PLAN repositories={count} seconds={}",
+                started.elapsed().as_secs_f64()
+            );
+            assert_eq!(simulation.travel.stats.faded, 0);
+            let mut audit = slots::diagnostics::MovingBeams::default();
+            let mut checkpoints = Vec::new();
+            let frames = frames_for(simulation.duration(), 60).unwrap();
+            let mut previous_tiles = 0;
+            let mut last_birth = 0;
+            for tick in 0..=frames {
+                simulation.advance_to(tick, 60);
+                audit.observe(&simulation);
+                if tick % 60 == 0 {
+                    checkpoints
+                        .push((tick / 2, format!("{:?}", simulation.state.avatars)));
                 }
-                audit.assert_clear(options.avatar_max_speed);
+                let live_tiles = simulation
+                    .state
+                    .layout
+                    .repositories
+                    .iter()
+                    .filter(|r| r.tile.is_some())
+                    .count();
+                let born = live_tiles > previous_tiles;
+                if born {
+                    last_birth = tick;
+                }
+                previous_tiles = live_tiles;
+                if born || tick == last_birth + 15 || tick == frames {
+                    travel::assert_edge_connectivity(&simulation);
+                }
             }
-            Err(error) => assert!(
-                error.to_string().contains(
-                    "uncapped travel did not converge within 1 planning passes"
-                ),
-                "{error}"
-            ),
+            eprintln!("DENSE_AUDIT {}", serde_json::to_string(&audit).unwrap());
+            audit.assert_clear(options.avatar_max_speed);
+            simulation.advance_to(0, 30);
+            for (frame, avatars) in checkpoints {
+                simulation.advance_to(frame, 30);
+                assert_eq!(format!("{:?}", simulation.state.avatars), avatars);
+            }
         }
     }
-
     #[test]
     fn uncapped_default_bot_policy_allows_intentional_fades() {
         let events = (0..4)

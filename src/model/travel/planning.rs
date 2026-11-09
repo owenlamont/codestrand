@@ -1,6 +1,6 @@
 use super::{
     Capture, Costs, Disc, HALF, Pose, Rect, Route, Router, Trip, Vec2, fade_clearance,
-    seconds_ticks, tick_time,
+    tick_time,
 };
 
 impl Capture {
@@ -32,17 +32,12 @@ impl Capture {
         .iter()
         .flatten()
         .map(|t| super::interior(*t, radius))
+        .filter(|r| r.size().cmpgt(Vec2::ZERO).all())
         .collect()
     }
 }
 
-fn occupied(
-    capture: &Capture,
-    trips: &[Trip],
-    author: usize,
-    tick: u64,
-    point: Vec2,
-) -> Option<&'static str> {
+fn hard_clearance(capture: &Capture, tick: u64, point: Vec2) -> Option<&'static str> {
     let radius = capture.radius(tick);
     if point.abs().cmpgt(HALF - Vec2::splat(radius)).any() {
         return Some("frame_edge");
@@ -54,25 +49,45 @@ fn occupied(
     {
         return Some("moving_tile");
     }
+    None
+}
+
+fn timed_pose(
+    capture: &Capture,
+    trips: &[Trip],
+    author: usize,
+    tick: u64,
+) -> Option<(Vec2, bool)> {
+    let reserved = trips
+        .iter()
+        .find(|t| t.author == author && tick >= t.departure && tick < t.arrival);
+    reserved
+        .map(|t| {
+            let (point, alpha) = t.sample(tick);
+            (point, alpha > 0.0)
+        })
+        .or_else(|| capture.pose(author, tick).map(|p| (p.point, p.visible)))
+}
+
+fn avatar_overlap(
+    capture: &Capture,
+    trips: &[Trip],
+    author: usize,
+    tick: u64,
+    point: Vec2,
+) -> f32 {
+    let radius = capture.radius(tick);
+    let mut depth = 0.0;
     for other in 0..capture.poses.len() {
         if other == author {
             continue;
         }
-        let reserved = trips
-            .iter()
-            .find(|t| t.author == other && tick >= t.departure && tick < t.arrival);
-        let pose = reserved
-            .map(|t| {
-                let (point, alpha) = t.sample(tick);
-                (point, alpha > 0.0)
-            })
-            .or_else(|| capture.pose(other, tick).map(|p| (p.point, p.visible)));
-        if pose.is_some_and(|(p, visible)| visible && p.distance(point) < 2.0 * radius)
-        {
-            return Some("occupied_window");
+        let pose = timed_pose(capture, trips, other, tick);
+        if let Some((p, true)) = pose {
+            depth += (2.0 * radius - p.distance(point)).max(0.0);
         }
     }
-    None
+    depth
 }
 
 fn stationary(
@@ -113,50 +128,59 @@ fn stationary(
         .collect()
 }
 
+fn overlap_cost(capture: &Capture, prior: &[Trip], trip: &Trip) -> f32 {
+    (trip.departure..trip.arrival)
+        .map(|tick| {
+            let point = trip
+                .route
+                .point_at(tick - trip.departure)
+                .unwrap_or(trip.source);
+            avatar_overlap(capture, prior, trip.author, tick, point)
+        })
+        .sum()
+}
+
 fn reserve(capture: &Capture, prior: &[Trip], trip: &mut Trip) {
-    let mut delay = 0;
-    for index in 0..trip.route.legs.len() {
-        loop {
-            let leg = &trip.route.legs[index];
-            let begin = trip.departure + u64::from(seconds_ticks(leg.start, true));
-            let end = (trip.departure
-                + u64::from(seconds_ticks(leg.start + leg.duration, true)))
-            .min(trip.arrival - 1);
-            let collision = (begin..=end).find(|&t| {
-                occupied(
-                    capture,
-                    prior,
-                    trip.author,
-                    t,
-                    leg.sample(tick_time(t - trip.departure)),
-                )
-                .is_some()
-            });
-            if collision.is_none() {
-                break;
-            }
-            let wait_clear = (trip.departure..=begin.min(trip.arrival - 1)).all(|t| {
-                let point = trip
-                    .route
-                    .sample(tick_time(t - trip.departure))
-                    .unwrap_or(trip.source);
-                occupied(capture, prior, trip.author, t, point).is_none()
-            });
-            if !wait_clear || delay >= 30 {
-                break;
-            }
-            for leg in &mut trip.route.legs[index..] {
-                leg.start += 1.0 / 60.0;
-            }
-            trip.route.duration += 1.0 / 60.0;
-            delay += 1;
+    let original = trip.route.clone();
+    let mut best = original.clone();
+    let mut score = f32::INFINITY;
+    for delay in 0..=30_u32 {
+        trip.route = original.clone();
+        if !trip.route.track.is_empty() && delay > 0 {
+            break;
+        }
+        let wait = tick_time(u64::from(delay));
+        for leg in &mut trip.route.legs {
+            leg.start += wait;
+        }
+        trip.route.duration += wait;
+        if delay > 0 && trip.route.duration > tick_time(trip.arrival - trip.departure) {
+            break;
+        }
+        if (trip.departure..trip.arrival).any(|tick| {
+            let point = trip
+                .route
+                .point_at(tick - trip.departure)
+                .unwrap_or(trip.source);
+            hard_clearance(capture, tick, point).is_some()
+        }) {
+            continue;
+        }
+        let cost = overlap_cost(capture, prior, trip);
+        if cost < score {
+            score = cost;
+            best = trip.route.clone();
+        }
+        if cost == 0.0 {
+            break;
         }
     }
+    trip.route = best;
     trip.fade = trip.route.duration > tick_time(trip.arrival - trip.departure);
     for tick in trip.departure..trip.arrival {
         let (point, alpha) = trip.sample(tick);
         if alpha > 0.0
-            && let Some(reason) = occupied(capture, prior, trip.author, tick, point)
+            && let Some(reason) = hard_clearance(capture, tick, point)
         {
             trip.cutoff = Some(tick);
             trip.failure = Some(reason);
@@ -165,7 +189,6 @@ fn reserve(capture: &Capture, prior: &[Trip], trip: &mut Trip) {
         }
     }
 }
-
 pub(super) fn progress(trip: &Trip) -> f32 {
     (trip.departure..trip.arrival)
         .filter_map(|t| {
@@ -252,6 +275,23 @@ fn better(best: Trip, candidate: Trip) -> Trip {
 }
 
 impl Search<'_> {
+    fn prefer(&self, best: Trip, candidate: Trip) -> Trip {
+        if candidate.fade && !best.fade {
+            return best;
+        }
+        if !candidate.fade && best.fade {
+            return candidate;
+        }
+        if !best.fade {
+            if overlap_cost(self.capture, self.reservations, &candidate)
+                < overlap_cost(self.capture, self.reservations, &best)
+            {
+                return candidate;
+            }
+            return best;
+        }
+        better(best, candidate)
+    }
     fn geometry(&mut self, template: &Trip, epoch: u64, bodies: &[Disc]) -> Trip {
         let mut candidate = template.clone();
         let radius = (candidate.departure..=candidate.arrival)
@@ -302,14 +342,14 @@ impl Search<'_> {
                     .pose(template.author, tick)
                     .expect("existing contributor")
                     .point;
-                if occupied(
-                    self.capture,
-                    self.reservations,
-                    template.author,
-                    tick,
-                    point,
-                )
-                .is_some()
+                if hard_clearance(self.capture, tick, point).is_some()
+                    || avatar_overlap(
+                        self.capture,
+                        self.reservations,
+                        template.author,
+                        tick,
+                        point,
+                    ) > 0.0
                 {
                     blocked = true;
                 } else if blocked {
@@ -333,10 +373,12 @@ impl Search<'_> {
                 following.route = route;
                 following.failure = None;
                 reserve(self.capture, self.reservations, &mut following);
-                if !following.fade {
+                if !following.fade
+                    && overlap_cost(self.capture, self.reservations, &following) == 0.0
+                {
                     return following;
                 }
-                best = better(best, following);
+                best = self.prefer(best, following);
             }
             let bodies = stationary(
                 self.capture,
@@ -347,10 +389,12 @@ impl Search<'_> {
             );
             for epoch in [begin, begin.midpoint(at.arrival), at.arrival] {
                 let candidate = self.geometry(&at, epoch, &bodies);
-                if !candidate.fade {
+                if !candidate.fade
+                    && overlap_cost(self.capture, self.reservations, &candidate) == 0.0
+                {
                     return candidate;
                 }
-                best = better(best, candidate);
+                best = self.prefer(best, candidate);
             }
         }
         best
@@ -434,13 +478,11 @@ pub(super) fn trips(
                 best.departure,
                 best.source,
                 prior.radius.max(service.radius),
-                service.author,
             )
             .min(best.arrival - best.departure);
             for tick in best.departure..best.arrival {
                 let (p, a) = best.sample(tick);
-                if a > 0.0 && occupied(capture, &result, best.author, tick, p).is_some()
-                {
+                if a > 0.0 && hard_clearance(capture, tick, p).is_some() {
                     best.cutoff = Some(tick);
                     break;
                 }
@@ -455,6 +497,17 @@ pub(super) fn trips(
 mod tests {
     use super::super::{Service, slots};
     use super::*;
+
+    #[test]
+    fn an_occupied_source_is_a_cost_instead_of_an_impossible_endpoint() {
+        let mut capture = fixture();
+        capture.poses[1] = capture.poses[0].clone();
+        capture.services.retain(|service| service.author == 0);
+        let (walking, _) = trips(&capture, 240.0, crate::model::BotTravel::Walk, true);
+        assert_eq!(walking.len(), 1);
+        assert!(!walking[0].fade);
+        assert!(overlap_cost(&capture, &[], &walking[0]) > 0.0);
+    }
 
     #[test]
     fn walking_bots_use_the_same_reserved_routes_as_humans() {
@@ -575,25 +628,8 @@ mod tests {
         let (walking, _) = trips(&capture, 240.0, crate::model::BotTravel::Walk, true);
         assert_eq!(walking.len(), 1);
         assert!(!walking[0].fade);
-        assert!(walking[0].departure >= 990);
-        let mut template = walking[0].clone();
-        template.departure = template.free;
-        template.route = Route::default();
-        template.fade = true;
-        let mut router = Router::default();
-        assert!(
-            Search {
-                capture: &capture,
-                reservations: &[],
-                speed: 240.0,
-                router: &mut router,
-                wait_clearance: false
-            }
-            .run(&template)
-            .fade
-        );
+        assert_eq!(overlap_cost(&capture, &[], &walking[0]), 0.0);
     }
-
     #[test]
     fn uncapped_walks_do_not_turn_into_idle_reentries() {
         let mut capture = fixture();
