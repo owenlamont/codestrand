@@ -250,24 +250,14 @@ fn allocate(
             let pb = b.presence / states[index].presence;
             let child_interval = |child: &Feasible| {
                 let cross = size[1 - axis];
-                interval(&child.sizes, axis, cross)
-                    .or_else(|| {
-                        let low = child
-                            .sizes
-                            .iter()
-                            .map(|p| p[1 - axis])
-                            .fold(f32::INFINITY, f32::min);
-                        let high = child
-                            .sizes
-                            .iter()
-                            .map(|p| p[1 - axis])
-                            .fold(f32::NEG_INFINITY, f32::max);
-                        let clamped = cross.clamp(low, high);
-                        // Inverting a subpixel birth sliver amplifies cancellation in its tile edges.
-                        ((cross - clamped).abs() * stretch[1 - axis] < 0.001)
-                            .then(|| interval(&child.sizes, axis, clamped))
-                            .flatten()
-                    })
+                let (low, high) = outline::bounds(&child.sizes);
+                let clamped = cross.clamp(low[1 - axis], high[1 - axis]);
+                // Inverting a subpixel birth sliver amplifies cancellation in its tile edges.
+                assert!(
+                    (cross - clamped).abs() * stretch[1 - axis] < 0.001,
+                    "feasible child cross-section"
+                );
+                interval(&child.sizes, axis, clamped)
                     .expect("feasible child cross-section")
             };
             let (a0, a1) = child_interval(a);
@@ -276,7 +266,10 @@ fn allocate(
             let available = size[axis] - states[index].gap;
             let low = a0.max(available - b1);
             let high = a1.min(available - b0);
-            assert!(low <= high + 0.02, "infeasible split: {low} > {high}");
+            assert!(
+                low <= high + 0.02,
+                "infeasible split: {low} > {high}; node={index} axis={axis} size={size:?} stretch={stretch:?} pa={pa} pb={pb} a={a0},{a1} b={b0},{b1}"
+            );
             let share = available * a.weight / (a.weight + b.weight).max(1e-9);
             let extent = share.clamp(low.min(high), high);
             let mut near = tile;
@@ -329,14 +322,20 @@ fn allocated(
     Some(output)
 }
 
-fn insert(nodes: &mut Vec<Node>, repository: usize, weights: &[f32], aspects: &[f32]) {
+fn insert(
+    nodes: &mut Vec<Node>,
+    repository: usize,
+    weights: &[f32],
+    aspects: &[f32],
+    gutter_scale: f32,
+) {
     if nodes.is_empty() {
         nodes.push(Node::Repository(repository));
         return;
     }
     let mut best = None;
     let presence: Vec<_> = weights.iter().map(|&w| f32::from(w > 0.0)).collect();
-    let gap = gutters(presence.iter().sum());
+    let gap = gutters(presence.iter().sum()) * gutter_scale;
     let mut cached = vec![Feasible::default(); nodes.len()];
     feasibility(nodes, 0, weights, &presence, gap, &mut cached);
     let mut leaf = vec![Feasible::default()];
@@ -417,6 +416,7 @@ struct Placement {
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Packing {
+    gutter_scale: f32,
     nodes: Vec<Node>,
     regions: Arc<[Vec<RepositoryRegion>]>,
     samples: Arc<[Sample]>,
@@ -429,6 +429,7 @@ fn rotations(
     nodes: &[Node],
     regions: &[Vec<RepositoryRegion>],
     samples: &[Sample],
+    gutter_scale: f32,
 ) -> Vec<bool> {
     let mut scores = vec![[0.0; 2]; regions[0].len()];
     for tick in (0..regions.len()).step_by((regions.len() / 16).max(1)) {
@@ -437,7 +438,7 @@ fn rotations(
             nodes,
             &sample.weights,
             &sample.presence,
-            gutters(sample.presence.iter().sum()),
+            gutters(sample.presence.iter().sum()) * gutter_scale,
         )
         .expect("planned tiles remain feasible");
         for (i, tile) in placement
@@ -457,14 +458,28 @@ fn rotations(
 impl Packing {
     #[cfg(test)]
     pub(crate) fn build(regions: &[Vec<RepositoryRegion>]) -> Self {
-        Self::build_births(regions, false)
+        Self::build_births(regions, false, 1.0, None)
     }
 
+    #[cfg(test)]
     pub(crate) fn before_service(regions: &[Vec<RepositoryRegion>]) -> Self {
-        Self::build_births(regions, true)
+        Self::build_births(regions, true, 1.0, None)
     }
 
-    fn build_births(regions: &[Vec<RepositoryRegion>], before_service: bool) -> Self {
+    pub(crate) fn with_avatar_size(
+        regions: &[Vec<RepositoryRegion>],
+        scale: f32,
+        activation: Option<&[u32]>,
+    ) -> Self {
+        Self::build_births(regions, true, scale.max(1.0), activation)
+    }
+
+    fn build_births(
+        regions: &[Vec<RepositoryRegion>],
+        before_service: bool,
+        gutter_scale: f32,
+        activation: Option<&[u32]>,
+    ) -> Self {
         let started = std::time::Instant::now();
         let Some(first) = regions.first().filter(|r| !r.is_empty()) else {
             return Self::default();
@@ -483,20 +498,8 @@ impl Packing {
                 .get(position + 1)
                 .map_or(regions.len(), |&j| births[j].min(regions.len()))
                 .max(begin + 1);
-            let mut weights = vec![0.0; first.len()];
-            let mut aspects = vec![1.0; first.len()];
-            for (j, _) in born.iter().enumerate().filter(|(_, live)| **live) {
-                weights[j] = regions[begin..end]
-                    .iter()
-                    .map(|r| r[j].files.max(1.0).sqrt())
-                    .sum::<f32>()
-                    / crate::model::count_u32(
-                        u32::try_from(end - begin).expect("bounded timeline"),
-                    );
-                let size = regions[end - 1][j].high - regions[end - 1][j].low;
-                aspects[j] = (size.x / size.y.max(0.01)).max(0.01);
-            }
-            insert(&mut nodes, i, &weights, &aspects);
+            let (weights, aspects) = birth_weights(regions, &born, begin, end);
+            insert(&mut nodes, i, &weights, &aspects, gutter_scale);
         }
         let alpha = 1.0 - (-crate::model::tick_seconds() / 0.25).exp();
         let mut weights = vec![1.0; first.len()];
@@ -513,8 +516,12 @@ impl Packing {
                     .enumerate()
                     .map(|(i, _)| {
                         let birth = births[i];
+                        let ready = activation.map_or(birth, |a| {
+                            birth
+                                .min(usize::try_from(a[i]).expect("bounded activation"))
+                        });
                         let begin = if before_service {
-                            birth.saturating_sub(45)
+                            ready.saturating_sub(45)
                         } else {
                             birth
                         };
@@ -530,7 +537,7 @@ impl Packing {
                         );
                         let transition = if before_service {
                             crate::model::tick_time(
-                                u64::try_from(birth - begin).expect("bounded birth"),
+                                u64::try_from(ready - begin).expect("bounded birth"),
                             )
                             .max(crate::model::tick_seconds())
                         } else {
@@ -549,7 +556,7 @@ impl Packing {
                 }
             })
             .collect();
-        let rotated = rotations(&nodes, regions, &samples);
+        let rotated = rotations(&nodes, regions, &samples, gutter_scale);
         eprintln!(
             "treemap_plan_seconds={:.6} samples={} repositories={}",
             started.elapsed().as_secs_f64(),
@@ -557,6 +564,7 @@ impl Packing {
             first.len()
         );
         Self {
+            gutter_scale,
             nodes,
             regions: regions.to_vec().into(),
             samples: samples.into(),
@@ -676,7 +684,7 @@ impl Packing {
             &self.nodes,
             &sample.weights,
             &presence,
-            gutters(presence.iter().sum()),
+            gutters(presence.iter().sum()) * self.gutter_scale,
         )
         .expect("presence-scaled tiles remain feasible");
         self.regions[tick]
@@ -709,6 +717,28 @@ impl Packing {
     }
 }
 
+fn birth_weights(
+    regions: &[Vec<RepositoryRegion>],
+    born: &[bool],
+    begin: usize,
+    end: usize,
+) -> (Vec<f32>, Vec<f32>) {
+    let mut weights = vec![0.0; born.len()];
+    let mut aspects = vec![1.0; born.len()];
+    for (j, _) in born.iter().enumerate().filter(|(_, live)| **live) {
+        weights[j] = regions[begin..end]
+            .iter()
+            .map(|r| r[j].files.max(1.0).sqrt())
+            .sum::<f32>()
+            / crate::model::count_u32(
+                u32::try_from(end - begin).expect("bounded timeline"),
+            );
+        let size = regions[end - 1][j].high - regions[end - 1][j].low;
+        aspects[j] = (size.x / size.y.max(0.01)).max(0.01);
+    }
+    (weights, aspects)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -727,6 +757,17 @@ mod tests {
             }
         }
         assert!(packing.zoom[40][1] > 0.0);
+    }
+
+    #[test]
+    fn a_padded_birth_can_finish_before_the_waiting_contributor_arrives() {
+        let rows = fixture();
+        let mut activation = vec![u32::MAX; 30];
+        activation[3] = 30;
+        let normal = Packing::with_avatar_size(&rows, 2.0, None);
+        let waiting = Packing::with_avatar_size(&rows, 2.0, Some(&activation));
+        assert!(normal.sample(35).unwrap().0[3].tile.is_none());
+        assert!(waiting.sample(35).unwrap().0[3].tile.is_some());
     }
 
     #[test]
@@ -838,6 +879,49 @@ mod tests {
         assert_eq!(gutters(21.0), Vec2::new(14.0, 24.0));
         assert_eq!(gutters(30.0), Vec2::new(12.0, 16.0));
         assert_eq!(gutters(31.0), gutters(30.0));
+    }
+
+    #[test]
+    fn doubled_avatar_gutters_partition_five_and_thirty_repository_views() {
+        for count in [5, 30] {
+            let rows: Vec<_> = fixture()
+                .into_iter()
+                .map(|mut row| {
+                    row.truncate(count);
+                    row
+                })
+                .collect();
+            let shares: Vec<_> = [1.0, 2.0]
+                .into_iter()
+                .map(|scale| {
+                    let packing = Packing::with_avatar_size(&rows, scale, None);
+                    let row = packing
+                        .sample(u64::try_from(rows.len() - 1).unwrap())
+                        .unwrap()
+                        .0;
+                    let area = row
+                        .iter()
+                        .filter_map(|r| r.tile)
+                        .map(Tile::area)
+                        .sum::<f32>();
+                    assert_eq!(row.iter().filter(|r| r.tile.is_some()).count(), count);
+                    assert!(
+                        row.iter().filter_map(|r| r.tile).all(|t| t
+                            .pixels()
+                            .cmpge(MINIMUM - Vec2::splat(0.02))
+                            .all())
+                    );
+                    Tile::viewport().area() - area
+                })
+                .collect();
+            assert!(shares[1] > shares[0]);
+            eprintln!(
+                "GUTTER_SHARE repositories={count} before={} after={} viewport={}",
+                shares[0],
+                shares[1],
+                Tile::viewport().area()
+            );
+        }
     }
 
     #[test]

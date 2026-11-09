@@ -48,7 +48,7 @@ impl MovingBeams {
         if state.layout.repositories.is_empty() {
             return;
         }
-        let radius = 6.5 * state.avatar_scale + 1.0;
+        let radius = state.avatar_radius();
         let projected: Vec<_> = project(
             view_direction() * framing::DISTANCE,
             Vec3::ZERO,

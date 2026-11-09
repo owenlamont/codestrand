@@ -177,14 +177,21 @@ release their lane and reappear directly at their next slot, without a screen-wi
 through `3600`, or `none` to wait as long as the route needs). Available gaps between
 commits also count toward travel. If a capped trip
 cannot finish in time, the avatar moves along the safe route, fades out at the deadline
-and fades in at the destination. Blocked routes still fade across. Zero disables extra
+and fades in at the destination. Blocked capped routes fade across. Zero disables extra
 waiting. `--bot-travel fade` is the default; `--bot-travel walk` gives bots the same
 routing and waiting policy as humans. Bot classification uses an explicit `bot` override
 in `contributors.toml`, then a GitHub noreply login ending in `[bot]`, then the displayed
-name's `[bot]` suffix. Single-repository motion is unchanged.
+name's `[bot]` suffix. Travel policies apply to multi-repository playback.
 Walking avatars remain visible during travel. With `--travel-cap none`, walking trips
 also remain routed across long idle gaps instead of disappearing and re-entering at a
 different repository. After the last service, the normal inactivity fade still applies.
+Uncapped walking services trips in commit order and adds another second of waiting
+when an endpoint, tile or avatar window blocks a route. New repository tiles can finish
+appearing during the added wait before their first commit is applied. An uncapped plan
+that cannot find safe routes within the planning budgets reports an error instead of
+silently accepting a travel fade.
+Dormant contributors follow their previous repository's lane while waiting, so later
+tile growth cannot bury the starting point of their next uncapped trip.
 The caption holds the last applied date during waiting; heat, fragments and fades
 continue in presentation seconds.
 
@@ -196,7 +203,7 @@ codestrand export frames --repositories-file repositories.toml \
 Planning starts from the first tick after the contributor's previous service, so gaps
 between that contributor's commits absorb travel before padding is needed. Padding is
 revalidated as the scene geometry changes: at most four passes for numeric caps and
-16 for `none`. An uncapped plan that cannot converge reports an error. Numeric caps
+64 for `none`. An uncapped plan that cannot converge reports an error. Numeric caps
 apply to the accumulated wait per commit, including reserved waits.
 
 The CPU `layout-quality --treemap` report records fallback and least-bad slots,

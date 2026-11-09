@@ -177,6 +177,9 @@ struct Source {
     /// Maximum avatar travel speed in pixels/second at the 1280x720 reference size.
     #[arg(long, default_value_t = 480.0, value_parser = avatar_speed)]
     avatar_max_speed: f32,
+    /// Avatar disc diameter relative to the original size, in both playback modes (0.5–2).
+    #[arg(long, default_value_t = 2.0, value_parser = avatar_size)]
+    avatar_scale: f32,
     /// File heat half-life in canonical playback seconds.
     #[arg(long, default_value_t = 3.0, value_parser = positive_seconds)]
     heat_half_life: f32,
@@ -290,6 +293,7 @@ impl Source {
             travel_cap: self.travel_cap,
             bot_travel: self.bot_travel,
             avatar_max_speed: self.avatar_max_speed,
+            avatar_size: self.avatar_scale,
         };
         let names = if repositories.len() > 1 {
             repositories
@@ -353,6 +357,14 @@ fn avatar_speed(value: &str) -> Result<f32, String> {
     } else {
         Err("avatar speed must be at least one reference pixel/second".to_owned())
     }
+}
+
+fn avatar_size(value: &str) -> Result<f32, String> {
+    value
+        .parse::<f32>()
+        .ok()
+        .filter(|scale| (0.5..=2.0).contains(scale))
+        .ok_or_else(|| "avatar scale must be between 0.5 and 2".to_owned())
 }
 
 fn main() -> std::process::ExitCode {
@@ -623,6 +635,22 @@ mod tests {
             Cli::try_parse_from(["codestrand", "preview", "--max-idle-seconds", &cap])
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn avatar_scale_defaults_to_two_and_accepts_the_original_size() {
+        for (flags, expected) in [(vec![], 2.0), (vec!["--avatar-scale", "1"], 1.0)] {
+            let cli =
+                Cli::try_parse_from([vec!["codestrand", "preview"], flags].concat())
+                    .unwrap();
+            let Some(Command::Preview { source, .. }) = cli.command else {
+                panic!("preview")
+            };
+            assert_eq!(source.avatar_scale, expected);
+        }
+        for value in ["0", "-1", "NaN", "inf", "2.1"] {
+            assert!(avatar_size(value).is_err());
+        }
     }
 
     #[test]

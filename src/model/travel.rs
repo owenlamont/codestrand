@@ -277,7 +277,7 @@ fn capture(simulation: &mut Simulation) -> Capture {
     for frame in 0..=frames {
         simulation.advance_to(frame, 60);
         let state = &simulation.state;
-        capture.radii.push(6.5 * state.avatar_scale + 1.0);
+        capture.radii.push(state.avatar_radius());
         capture
             .tiles
             .push(state.layout.repositories.iter().map(|r| r.tile).collect());
@@ -309,7 +309,7 @@ fn capture(simulation: &mut Simulation) -> Capture {
                     .as_ref()
                     .expect("tile exists before service")
                     .point,
-                radius: 6.5 * state.avatar_scale + 1.0,
+                radius: state.avatar_radius(),
                 bot: contributor.is_bot(&simulation.events[event].author.email),
                 dock: avatar.slot.as_ref().expect("service slot").dock,
             });
@@ -380,6 +380,11 @@ impl Simulation {
                         .max(0.0),
                     true,
                 )
+            };
+            let needed = if options.travel_cap == super::TravelCap::None {
+                needed.max(60)
+            } else {
+                needed
             };
             let commit = self.offset + trip.commit;
             if let Some((_, ticks)) = result.iter_mut().find(|(i, _)| *i == commit) {
@@ -741,6 +746,42 @@ fn graph_route(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uncapped_blocked_routes_receive_another_wait_instead_of_fading() {
+        let mut sim = Simulation::new(
+            crate::timeline::synthetic(),
+            &super::super::Options::default(),
+            &crate::theme::Theme::neon(),
+            &crate::contributors::Mappings::default(),
+        );
+        sim.travel.trips.push(Trip {
+            author: 0,
+            commit: 0,
+            departure: 1,
+            arrival: 10,
+            destination: Vec2::X,
+            source: Vec2::ZERO,
+            fade_ticks: 0,
+            route: Route::default(),
+            fade: true,
+            bot: false,
+            source_repository: 0,
+            destination_repository: 1,
+            free: 1,
+            failure: Some("endpoint"),
+            cutoff: None,
+            proof: None,
+        });
+        let options = super::super::Options {
+            travel_cap: super::super::TravelCap::None,
+            ..Default::default()
+        };
+        assert_eq!(sim.adjust_travel_padding(&options, &[(0, 120)]), [(0, 180)]);
+        sim.travel.trips[0].route = Route::new(&[Vec2::ZERO, Vec2::X], 480.0);
+        sim.travel.trips[0].failure = Some("occupied_window");
+        assert_eq!(sim.adjust_travel_padding(&options, &[(0, 120)]), [(0, 180)]);
+    }
 
     #[test]
     fn a_new_commit_keeps_live_beams_in_the_same_repository() {

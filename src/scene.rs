@@ -283,17 +283,11 @@ struct Pools {
 
 fn app(simulation: Simulation, title: String) -> App {
     let mut app = App::new();
-    let multiple_repositories = !simulation.layout().repositories.is_empty();
     let label_system = labels
         .after(bevy::camera::CameraUpdateSystems)
         .after(bevy::transform::TransformSystems::Propagate)
-        .before(UiSystems::Prepare);
-    let label_system = if multiple_repositories {
-        label_system
-            .before(bevy::camera::visibility::VisibilitySystems::VisibilityPropagate)
-    } else {
-        label_system
-    };
+        .before(UiSystems::Prepare)
+        .before(bevy::camera::visibility::VisibilitySystems::VisibilityPropagate);
     let theme = simulation.theme().clone();
     app.insert_resource(ClearColor(theme.clear))
         .insert_resource(Playback(simulation))
@@ -1479,7 +1473,7 @@ fn sync_activity(
             transform.scale = Vec3::splat(
                 (presence
                     * simulation.scale()
-                    * simulation.avatar_scale()
+                    * simulation.avatar_disc_scale()
                     * avatar.projection_scale)
                     .max(0.001),
             );

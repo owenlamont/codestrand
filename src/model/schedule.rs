@@ -16,7 +16,6 @@ struct Service {
 }
 
 impl Schedule {
-    #[cfg(test)]
     pub(super) fn padding(&self, index: usize) -> u32 {
         self.services[index].padding
     }

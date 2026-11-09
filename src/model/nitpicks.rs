@@ -32,6 +32,27 @@ fn beam_finishes_the_last_emitted_flight_before_fading() {
 
 pub(super) fn assert_labels_and_beams(sim: &Simulation) {
     for avatar in sim.avatars().iter().filter(|a| a.presence > 0.0) {
+        if !sim.layout().repositories.is_empty() {
+            let point = project(
+                sim.state.focus + view_direction() * sim.state.distance,
+                sim.state.focus,
+                &[avatar.position],
+            )
+            .next()
+            .flatten()
+            .unwrap();
+            let radius = sim.state.avatar_radius();
+            let centre = Vec2::new((point.x + 1.0) * 640.0, (1.0 - point.y) * 360.0);
+            assert!(
+                centre.cmpge(Vec2::splat(radius)).all()
+                    && centre
+                        .cmple(Vec2::new(1280.0 - radius, 720.0 - radius))
+                        .all(),
+                "avatar disc clipped at {} for {}",
+                sim.seconds(),
+                avatar.name
+            );
+        }
         let label = sim.state.avatar_label(avatar);
         assert!(
             label.opacity > 0.0 && !label.text.is_empty(),
@@ -91,6 +112,9 @@ fn fragments_and_visible_names_survive_switches_seeks_and_rewind() {
         &Options {
             seconds_per_day: 0.2,
             max_idle_seconds: 0.1,
+            avatar_size: std::env::var("CODESTRAND_AVATAR_SCALE")
+                .ok()
+                .map_or(2.0, |v| v.parse().unwrap()),
             ..Default::default()
         },
         &Theme::neon(),

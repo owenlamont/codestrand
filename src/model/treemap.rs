@@ -207,7 +207,10 @@ mod tests {
             low: Vec2::new(0.0, full.low.y),
             ..full
         };
-        assert!((largest_empty(&[left, right]) - 24.0 / 720.0).abs() < 1e-6);
+        assert!(
+            (largest_empty(&[left, right]) - super::framing::MARGIN / 720.0).abs()
+                < 1e-6
+        );
         assert!(largest_empty(&[left]) > 0.45);
         assert_eq!(largest_empty(&[]), 1.0);
     }

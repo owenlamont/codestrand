@@ -207,6 +207,7 @@ struct Search<'a> {
     reservations: &'a [Trip],
     speed: f32,
     router: &'a mut Router,
+    wait_clearance: bool,
 }
 
 fn better(best: Trip, candidate: Trip) -> Trip {
@@ -248,11 +249,38 @@ impl Search<'_> {
 
     fn run(&mut self, template: &Trip) -> Trip {
         let mut best = template.clone();
-        for begin in [
+        let mut starts = vec![
             template.free,
             template.free.midpoint(template.arrival - 1),
             template.arrival - 1,
-        ] {
+        ];
+        if self.wait_clearance {
+            let mut blocked = false;
+            for tick in template.free..template.arrival {
+                let point = self
+                    .capture
+                    .pose(template.author, tick)
+                    .expect("existing contributor")
+                    .point;
+                if occupied(
+                    self.capture,
+                    self.reservations,
+                    template.author,
+                    tick,
+                    point,
+                )
+                .is_some()
+                {
+                    blocked = true;
+                } else if blocked {
+                    starts.push(tick);
+                    break;
+                }
+            }
+        }
+        starts.sort_unstable();
+        starts.dedup();
+        for begin in starts {
             let mut at = template.clone();
             at.departure = begin;
             at.source = self
@@ -296,7 +324,7 @@ pub(super) fn trips(
     keep_idle: bool,
 ) -> (Vec<Trip>, usize) {
     let mut previous = vec![None; capture.poses.len()];
-    let mut result = Vec::new();
+    let mut result = Vec::<Trip>::new();
     let mut router = Router::default();
     for (commit, service) in capture.services.iter().enumerate() {
         let Some(prior) = previous[service.author]
@@ -312,7 +340,12 @@ pub(super) fn trips(
         {
             continue;
         }
-        let free = (prior.tick + 1).min(service.tick - 1);
+        let mut free = (prior.tick + 1).min(service.tick - 1);
+        if keep_idle {
+            free = free
+                .max(capture.services[commit - 1].tick)
+                .min(service.tick - 1);
+        }
         let source = capture
             .pose(service.author, free)
             .expect("existing contributor")
@@ -336,11 +369,17 @@ pub(super) fn trips(
             proof: None,
         };
         if !service.bot || bots == crate::model::BotTravel::Walk {
+            let reservations = if keep_idle {
+                &result[result.partition_point(|t| t.arrival <= free)..]
+            } else {
+                &result[..]
+            };
             best = Search {
                 capture,
-                reservations: &result,
+                reservations,
                 speed,
                 router: &mut router,
+                wait_clearance: keep_idle,
             }
             .run(&best);
         }
@@ -446,6 +485,71 @@ mod tests {
         assert_eq!(trips[1].departure, 21);
         assert!(trips.iter().all(|t| !t.fade));
         assert!(trips[1].departure < trips[0].arrival);
+    }
+
+    #[test]
+    fn uncapped_departure_uses_a_cleared_window_between_coarse_candidates() {
+        let source = Vec2::new(-100.0, -60.0);
+        let target = Vec2::new(100.0, -60.0);
+        let capture = Capture {
+            services: [
+                (0, 0, 10, source),
+                (1, 1, 600, source),
+                (0, 2, 1200, target),
+            ]
+            .into_iter()
+            .map(|(author, repository, tick, point)| super::super::Service {
+                author,
+                repository,
+                tick,
+                point,
+                radius: 7.5,
+                bot: false,
+                dock: slots::Dock::middle_top(),
+            })
+            .collect(),
+            poses: (0..2)
+                .map(|author| {
+                    (0..=1200)
+                        .map(|tick| Pose {
+                            tick,
+                            point: if author == 0 && tick == 1200 {
+                                target
+                            } else {
+                                source
+                            },
+                            visible: if author == 0 {
+                                tick < 400 || tick == 1200
+                            } else {
+                                (600..990).contains(&tick)
+                            },
+                        })
+                        .collect()
+                })
+                .collect(),
+            tiles: vec![vec![]; 1201],
+            radii: vec![7.5; 1201],
+        };
+        let (walking, _) = trips(&capture, 240.0, crate::model::BotTravel::Walk, true);
+        assert_eq!(walking.len(), 1);
+        assert!(!walking[0].fade);
+        assert!(walking[0].departure >= 990);
+        let mut template = walking[0].clone();
+        template.departure = template.free;
+        template.route = Route::default();
+        template.fade = true;
+        let mut router = Router::default();
+        assert!(
+            Search {
+                capture: &capture,
+                reservations: &[],
+                speed: 240.0,
+                router: &mut router,
+                wait_clearance: false
+            }
+            .run(&template)
+            .fade
+        );
     }
 
     #[test]

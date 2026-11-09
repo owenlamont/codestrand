@@ -56,6 +56,7 @@ pub(super) struct Options {
     pub travel_cap: TravelCap,
     pub bot_travel: BotTravel,
     pub avatar_max_speed: f32,
+    pub avatar_size: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize)]
@@ -74,7 +75,7 @@ impl TravelCap {
 
     fn blocked_ticks(self) -> u32 {
         match self {
-            Self::None => 0,
+            Self::None => 60,
             Self::Seconds(_) => self.ticks(),
         }
     }
@@ -110,6 +111,7 @@ impl Default for Options {
             travel_cap: TravelCap::Seconds(0.4),
             bot_travel: BotTravel::Fade,
             avatar_max_speed: 480.0,
+            avatar_size: 2.0,
         }
     }
 }
@@ -287,6 +289,8 @@ struct State {
     distance: f32,
     geometry: Geometry,
     avatar_scale: f32,
+    avatar_size: f32,
+    uncapped_travel: bool,
     slot_records: BTreeMap<usize, slots::Record>,
 }
 
@@ -409,7 +413,7 @@ impl Simulation {
             Self::build(events.clone(), options, theme, mappings, &[], repositories);
         let mut padding = simulation.travel_padding(options);
         let passes = if options.travel_cap == TravelCap::None {
-            16
+            64
         } else {
             4
         };
@@ -437,6 +441,12 @@ impl Simulation {
                 );
             }
             simulation.plan_travel(options, &padding);
+            eprintln!(
+                "travel_replan pass={} fades={} padding_seconds={}",
+                pass + 1,
+                simulation.travel.stats.faded,
+                simulation.travel.stats.padding_seconds
+            );
             let adjusted = simulation.adjust_travel_padding(options, &padding);
             if adjusted == padding {
                 break;
@@ -444,7 +454,7 @@ impl Simulation {
             if pass + 1 == passes {
                 anyhow::ensure!(
                     options.travel_cap != TravelCap::None,
-                    "uncapped travel did not converge within 16 planning passes; shorten the history or increase avatar speed"
+                    "uncapped travel did not converge within 64 planning passes; shorten the history or increase avatar speed"
                 );
                 break;
             }
@@ -501,6 +511,8 @@ impl Simulation {
             distance: 12.0,
             geometry: theme.geometry(),
             avatar_scale: 1.0,
+            avatar_size: options.avatar_size,
+            uncapped_travel: options.travel_cap == TravelCap::None,
             slot_records: BTreeMap::new(),
         };
         for event in &events[..start] {
@@ -553,13 +565,29 @@ impl Simulation {
             travel: travel::Plan::default(),
         };
         if !repositories.is_empty() {
-            let snapshots = simulation.plan_repositories(prior_active);
+            let snapshots = simulation
+                .plan_repositories(prior_active, options.travel_cap == TravelCap::None);
             simulation.plan_avatar_envelopes(snapshots);
         }
         simulation
     }
 
-    fn plan_repositories(&mut self, mut active: Vec<bool>) -> Option<slots::Snapshots> {
+    fn plan_repositories(
+        &mut self,
+        mut active: Vec<bool>,
+        uncapped: bool,
+    ) -> Option<slots::Snapshots> {
+        let mut activation = vec![u32::MAX; active.len()];
+        for (repository, live) in active.iter().enumerate() {
+            if *live {
+                activation[repository] = 0;
+            }
+        }
+        for (index, event) in self.events.iter().enumerate() {
+            let arrival = travel::seconds_ticks(self.schedule.starts[index], false);
+            activation[event.repository] = activation[event.repository]
+                .min(arrival.saturating_sub(self.schedule.padding(index)));
+        }
         let mut snapshots = Some(slots::Snapshots::default());
         for (_, file) in self.layout().files() {
             active[self.layout().dir(file.dir).repository] = true;
@@ -588,7 +616,11 @@ impl Simulation {
                 snapshots = None;
             }
         }
-        self.packing = crate::layout::packing::Packing::before_service(&samples);
+        self.packing = crate::layout::packing::Packing::with_avatar_size(
+            &samples,
+            self.state.avatar_size,
+            uncapped.then_some(activation.as_slice()),
+        );
         self.state = self.initial.clone();
         self.state.region_depth = framing::depth_bound();
         if let Some((regions, offsets, scales)) = self.packing.sample(0) {
@@ -796,8 +828,13 @@ impl Simulation {
         self.state.scale()
     }
 
+    #[cfg(test)]
     pub(super) fn avatar_scale(&self) -> f32 {
         self.state.avatar_scale
+    }
+
+    pub(super) fn avatar_disc_scale(&self) -> f32 {
+        self.state.avatar_scale * self.state.avatar_size
     }
 
     pub(super) fn commit(&self) -> usize {
@@ -1076,6 +1113,10 @@ impl Simulation {
 }
 
 impl State {
+    fn avatar_radius(&self) -> f32 {
+        6.5 * self.avatar_scale * self.avatar_size + 1.0
+    }
+
     fn avatar_targets(&self, now: f32) -> Vec<Vec3> {
         let right = Vec3::new(view_direction().z, 0.0, -view_direction().x).normalize();
         let unit = 2.0 * self.distance * std::f32::consts::FRAC_PI_8.tan() / 720.0;
@@ -1407,7 +1448,7 @@ impl State {
         let eye = focus + view_direction() * distance;
         let line =
             screen_bounds(eye, focus, tops).1.y.max(-0.8) + 2.0 * AVATAR_CLEARANCE;
-        let scale = (1.0 + distance / 60.0) * self.avatar_scale;
+        let scale = (1.0 + distance / 60.0) * self.avatar_scale * self.avatar_size;
         self.avatars
             .iter()
             .filter(|avatar| avatar.presence > 0.0)
@@ -1437,8 +1478,10 @@ impl State {
         let eye = focus + view_direction() * distance;
         let forward = -view_direction();
         let up = forward.cross(Vec3::Y).normalize().cross(forward);
-        let radius =
-            self.geometry.avatar_radius * (1.0 + distance / 60.0) * self.avatar_scale;
+        let radius = self.geometry.avatar_radius
+            * (1.0 + distance / 60.0)
+            * self.avatar_scale
+            * self.avatar_size;
         let base = Vec3::new(avatar.position.x, 0.0, avatar.position.z);
         let solve = |offset: Vec3, target: f32| {
             let slope = target * std::f32::consts::FRAC_PI_8.tan();
@@ -2357,7 +2400,7 @@ mod tests {
         let highest = screen_bounds(eye, state.focus, &tops).1.y;
         for avatar in state.avatars.iter().filter(|avatar| avatar.presence > 0.0) {
             let radius =
-                state.geometry.avatar_radius * sim.scale() * sim.avatar_scale();
+                state.geometry.avatar_radius * sim.scale() * sim.avatar_disc_scale();
             let corners = box_corners(Vec3::splat(-radius), Vec3::splat(radius))
                 .map(|corner| avatar.position + corner);
             let projected: Vec<_> = project(eye, state.focus, &corners)

@@ -336,9 +336,9 @@ impl State {
     pub(super) fn place_slots(&mut self, envelopes: &[Envelope], now: f32) {
         let gap = crate::layout::packing::gutters(count(
             self.layout.repositories.iter().filter(|r| r.live).count(),
-        ));
+        )) * self.avatar_size.max(1.0);
         let obstacles = obstacles(self);
-        let radius = 6.5 * self.avatar_scale + 1.0;
+        let radius = self.avatar_radius();
         let name_scale = self.name_scale();
         let mut occupied: Vec<Rect> = Vec::new();
         for avatar in &mut self.avatars {
@@ -346,6 +346,11 @@ impl State {
                 && let Some(slot) = &mut avatar.slot
             {
                 slot.name = None;
+                if self.uncapped_travel
+                    && let Some(tile) = self.layout.repositories[avatar.repository].tile
+                {
+                    slot.point = slot.dock.point(tile, gap);
+                }
                 if avatar.slot_presence > 0.0 {
                     occupied.push(disk(slot.point, radius));
                 }
@@ -450,7 +455,7 @@ impl State {
                 )
                 .next()
                 .flatten()
-                .map(|p| disk(p * HALF, 6.5 * self.avatar_scale + 1.0))
+                .map(|p| disk(p * HALF, self.avatar_radius()))
             })
             .collect();
         let mut order: Vec<_> = (0..self.avatars.len()).collect();
@@ -1021,7 +1026,7 @@ mod tests {
             .filter(|d| d.length_squared() > 0.0)
             .map(Vec3::normalize)
             .collect();
-        for scale in [0.75, 1.0] {
+        for scale in [0.5_f32, 0.75, 1.0, 1.5, 2.0] {
             for point in [
                 Vec2::new(-620.0, -350.0),
                 Vec2::new(620.0, -350.0),
@@ -1049,7 +1054,7 @@ mod tests {
                     } else {
                         5.0
                     })
-                    .x
+                    .x * scale.max(1.0)
             );
         }
     }
@@ -1415,7 +1420,7 @@ mod tests {
                         && *r != avatar.repository
                         && swept_crosses(slot.point, &corners, *rect)));
                 }
-                let body = disk(slot.point, 6.5 * sim.state.avatar_scale + 1.0);
+                let body = disk(slot.point, sim.state.avatar_radius());
                 assert!(bodies.iter().all(|&other| !intersect(body, other)));
                 bodies.push(body);
                 if let Some(point) = slot.name {

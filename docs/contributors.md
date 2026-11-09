@@ -52,6 +52,12 @@ Remote overrides require an HTTPS URL without credentials.
 ## Contributor avatars
 
 Contributors stay above the file plane and move between repository service lanes.
+`--avatar-scale` controls disc diameter relative to the original size: default `2`,
+range `0.5`–`2`. The default doubles portraits in both single- and multi-repository
+playback; single-repository pixels therefore change too. Use `--avatar-scale 1` for
+the original disc diameter. Name fonts retain their existing readability policy.
+Multi-repository inner gutters scale with the disc above `1`; the outer margin is
+48 reference pixels so a doubled portrait fits between a tile and the frame edge.
 Visible avatars keep their names, including during travel and idle fade-out.
 Crowded playback shrinks avatars and names; small groups retain their normal size.
 Names first shrink to a minimum of 12 pixels at the reference 1280×720 viewport,

@@ -2,7 +2,7 @@ use bevy::math::Vec2;
 
 const WIDTH: usize = 160;
 const HEIGHT: usize = 90;
-const MARGIN: usize = 3;
+const MARGIN: usize = 6;
 
 fn interval(points: &[Vec2], y: f32) -> (f32, f32) {
     let mut low = f32::INFINITY;
@@ -81,7 +81,10 @@ pub(super) fn largest(polygons: &[Vec<Vec2>]) -> f32 {
         }
     }
     crate::model::count_u32(u32::try_from(largest).expect("bounded pixel grid"))
-        / 12_936.0
+        / crate::model::count_u32(
+            u32::try_from((WIDTH - 2 * MARGIN) * (HEIGHT - 2 * MARGIN))
+                .expect("bounded pixel grid"),
+        )
 }
 
 #[cfg(test)]
@@ -90,6 +93,10 @@ mod tests {
 
     #[test]
     fn detects_a_missing_half_and_rejects_a_filled_view() {
+        assert_eq!(
+            f32::from(u16::try_from(MARGIN * 8).unwrap()),
+            crate::model::framing::MARGIN
+        );
         let t = crate::layout::packing::Tile::viewport();
         assert!(largest(&[t.corners().to_vec()]) < 0.025);
         let half = crate::layout::outline::rectangle(t.low, Vec2::new(0.0, t.high.y));
