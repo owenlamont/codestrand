@@ -6,6 +6,7 @@ use super::{RepositoryRegion, outline};
 use crate::model::framing;
 
 mod fit;
+mod zoom;
 
 const BOUND: f32 = 2.5;
 pub(crate) const MINIMUM: Vec2 = Vec2::new(144.0, 64.0);
@@ -421,6 +422,7 @@ pub(crate) struct Packing {
     samples: Arc<[Sample]>,
     rotated: Vec<bool>,
     placements: Arc<[OnceLock<Vec<Placement>>]>,
+    zoom: Arc<[Vec<f32>]>,
 }
 
 fn rotations(
@@ -560,7 +562,24 @@ impl Packing {
             samples: samples.into(),
             rotated,
             placements: (0..regions.len()).map(|_| OnceLock::new()).collect(),
+            zoom: Arc::default(),
         }
+        .plan_zoom()
+    }
+
+    fn plan_zoom(mut self) -> Self {
+        let mut scales: Vec<Vec<_>> = (0..self.regions.len())
+            .map(|tick| {
+                self.fit(tick, None)
+                    .iter()
+                    .zip(&self.regions[tick])
+                    .map(|(p, r)| if r.live { p.scale } else { 0.0 })
+                    .collect()
+            })
+            .collect();
+        zoom::plan(&mut scales);
+        self.zoom = scales.into();
+        self
     }
 
     pub(crate) fn sample(
@@ -671,8 +690,15 @@ impl Packing {
                 let fitted = tile.map(|tile| {
                     fit::anchored(tile, &shape, r.height, Vec2::splat(0.5))
                 });
-                let origin = fitted.map_or(Vec2::ZERO, |f| f.origin);
-                let scale = fitted.map_or(0.0, |f| f.scale);
+                let raw_scale = fitted.map_or(0.0, |f| f.scale);
+                let scale = self
+                    .zoom
+                    .get(tick)
+                    .map_or(raw_scale, |row| row[i].min(raw_scale));
+                let (low, high) = outline::bounds(&shape);
+                let origin = fitted.map_or(Vec2::ZERO, |f| {
+                    f.origin + (low + high) * 0.5 * (raw_scale - scale)
+                });
                 Placement {
                     tile,
                     origin,
@@ -686,6 +712,22 @@ impl Packing {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_birth_tiles_do_not_constrain_later_content_zoom() {
+        let rows = fixture();
+        let packing = Packing::before_service(&rows);
+        for (tick, row) in rows.iter().enumerate() {
+            for (i, region) in row.iter().enumerate().filter(|(_, r)| !r.live) {
+                assert_eq!(
+                    packing.zoom[tick][i], 0.0,
+                    "unborn {} at {tick}",
+                    region.label
+                );
+            }
+        }
+        assert!(packing.zoom[40][1] > 0.0);
+    }
 
     #[test]
     fn cached_fits_match_fresh_fits_after_seek_and_presence_changes() {

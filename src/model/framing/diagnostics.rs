@@ -31,10 +31,19 @@ fn realistic_history_has_stable_framing_and_uniform_icons_at_sixty_hz() {
     );
     let mut previous = [None; 5];
     let mut deltas = [Vec2::ZERO; 5];
+    let mut previous_scales = [None; 5];
     for frame in 0..=frames_for(sim.duration(), 60).unwrap() {
         sim.advance_to(frame, 60);
-        let (regions, _, _) = sim.packing.sample(u64::from(frame)).unwrap();
+        let (regions, _, scales) = sim.packing.sample(u64::from(frame)).unwrap();
         for (i, region) in regions.iter().enumerate().filter(|(_, r)| r.live) {
+            if let Some(before) = previous_scales[i].filter(|_| scales[i] > 0.0) {
+                let ratio: f32 = scales[i] / before;
+                assert!(
+                    ratio.ln().abs() * 60.0 <= 0.1201,
+                    "zoom rate at {frame}/{i}"
+                );
+            }
+            previous_scales[i] = (scales[i] > 0.0).then_some(scales[i]);
             let centre = framing::project_ground((region.low + region.high) * 0.5)
                 * framing::VIEWPORT
                 * 0.5;

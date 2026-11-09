@@ -18,6 +18,8 @@ pub(crate) mod framing;
 mod measurement;
 mod names;
 #[cfg(test)]
+mod nitpicks;
+#[cfg(test)]
 mod pacing_tests;
 pub(crate) mod quality;
 pub(crate) mod schedule;
@@ -32,6 +34,8 @@ pub(super) const PREVIEW_FPS: u16 = 30;
 const LEAD_IN: f32 = 0.5;
 const TAIL: f32 = 2.5;
 const PULSE_SECONDS: f32 = 1.3;
+const FRAGMENT_SPEED: f32 = 1.1;
+const FRAGMENT_FLIGHT: f32 = 1.0 / FRAGMENT_SPEED;
 const ADD_DELAY: f32 = 0.2;
 const DELETE_DELAY: f32 = 0.6;
 const MIN_AVATAR_HEIGHT: f32 = 3.2;
@@ -96,6 +100,29 @@ struct Pulse {
 }
 
 impl Pulse {
+    fn fragments(
+        &self,
+        age: f32,
+        envelope: f32,
+        from: Vec3,
+        to: Vec3,
+        target: Target,
+        change: (u32, bool),
+    ) -> impl Iterator<Item = Fragment> {
+        let (lines, rising) = change;
+        diff_fragments(age, envelope, from, to, lines, rising)
+            .enumerate()
+            .filter(move |(piece, _)| self.fragment_arrives(age, *piece, lines))
+            .map(move |(_, fragment)| fragment.with_beam(self.author, target))
+    }
+    fn fragment_arrives(&self, age: f32, piece: usize, lines: u32) -> bool {
+        let pieces = lines.bit_width().min(3);
+        let offset = count_u32(u32::try_from(piece).expect("three fragments"))
+            / count_u32(pieces);
+        let launch =
+            ((age * FRAGMENT_SPEED + offset).floor() - offset) / FRAGMENT_SPEED;
+        launch + FRAGMENT_FLIGHT <= self.end - self.start - 0.3 + 0.00001
+    }
     fn samples_for(
         &self,
         target: Target,
@@ -168,12 +195,29 @@ pub(super) struct Beam {
 }
 
 pub(super) struct Fragment {
+    #[cfg(test)]
+    beam: Option<(usize, Target)>,
     pub position: Vec3,
     pub rising: bool,
     pub sample_detail: f32,
     pub alpha: f32,
     pub scale: f32,
     pub sample: Option<crate::diff_samples::Sample>,
+}
+
+impl Fragment {
+    fn with_beam(self, author: usize, target: Target) -> Self {
+        #[cfg(not(test))]
+        let _ = (author, target);
+        #[cfg(test)]
+        let result = Self {
+            beam: Some((author, target)),
+            ..self
+        };
+        #[cfg(not(test))]
+        let result = self;
+        result
+    }
 }
 
 /// Placement priority, highest first, when labels would overlap on screen.
@@ -739,6 +783,9 @@ impl Simulation {
         let mut newest = BTreeMap::new();
         let mut remaining = crate::diff_samples::PER_COMMIT;
         for (pulse_index, pulse) in self.state.pulses.iter().enumerate().rev() {
+            if !self.pulse_beams_visible(pulse) {
+                continue;
+            }
             let age = now - pulse.start;
             let envelope = envelope(age, pulse.end - pulse.start);
             if envelope <= 0.0 {
@@ -766,7 +813,14 @@ impl Simulation {
                 };
                 for (count, rising) in [(insertions, false), (removals, true)] {
                     fragments.extend(attach_samples(
-                        diff_fragments(age, envelope, from, to, count, rising),
+                        pulse.fragments(
+                            age,
+                            envelope,
+                            from,
+                            to,
+                            target,
+                            (count, rising),
+                        ),
                         pulse.samples_for(target, rising).filter(|_| current),
                         &mut remaining,
                         sample_detail,
@@ -1058,7 +1112,7 @@ impl State {
         self.pulses.retain_mut(|pulse| {
             let keep = pulse.author != author || Some(index) == previous;
             if pulse.author == author {
-                pulse.end = pulse.end.min(start + 0.3);
+                pulse.end = pulse.end.min(start + FRAGMENT_FLIGHT + 0.3);
             }
             index += 1;
             keep
@@ -1068,7 +1122,7 @@ impl State {
             repository: event.repository,
             touched: self.avatars[author].touched.clone(),
             start,
-            end: start + PULSE_SECONDS,
+            end: start + PULSE_SECONDS + FRAGMENT_FLIGHT,
             author,
             targets,
             aggregated,
@@ -1427,13 +1481,16 @@ fn diff_fragments(
 ) -> impl Iterator<Item = Fragment> {
     let pieces = lines.bit_width().min(3);
     (0..pieces).map(move |piece| {
-        let phase = (age * 1.1 + count_u32(piece) / count_u32(pieces)).fract();
+        let phase =
+            (age * FRAGMENT_SPEED + count_u32(piece) / count_u32(pieces)).fract();
         let position = if rising {
             to + Vec3::new(0.15, 0.2 + phase * 2.2, -0.1)
         } else {
             from.lerp(to + Vec3::Y * 0.2, phase)
         };
         Fragment {
+            #[cfg(test)]
+            beam: None,
             position,
             rising,
             sample_detail: 1.0,
@@ -1672,7 +1729,7 @@ mod tests {
         sim.advance_to(102, 60);
         let faded = sim.diff_lines().pop().unwrap();
         assert!(faded.alpha > 0.0 && faded.alpha < line.alpha);
-        sim.advance_to(120, 60);
+        sim.advance_to(180, 60);
         assert!(sim.diff_lines().is_empty());
         sim.advance_to(45, 60);
         let replayed = sim.diff_lines().pop().unwrap();
@@ -2125,7 +2182,10 @@ mod tests {
         sim.advance_to(36, 60);
         assert_eq!(sim.commit(), 2);
         assert_eq!(sim.state.pulses.len(), 2);
-        assert!(sim.state.pulses[0].end <= sim.state.pulses[1].start + 0.3);
+        assert!(
+            sim.state.pulses[0].end
+                <= sim.state.pulses[1].start + FRAGMENT_FLIGHT + 0.3
+        );
     }
 
     #[test]

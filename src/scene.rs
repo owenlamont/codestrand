@@ -1674,7 +1674,14 @@ fn place_labels(
             .iter()
             .filter(|(label, ..)| label.kind == model::LabelKind::Repository)
             .count();
-    wanted.retain(|(label, ..)| label.opacity > 0.001);
+    wanted.retain(|(label, ..)| {
+        label.opacity
+            > if label.kind == model::LabelKind::Avatar {
+                0.0
+            } else {
+                0.001
+            }
+    });
     wanted.sort_by(|(a, ..), (b, ..)| {
         a.kind
             .cmp(&b.kind)

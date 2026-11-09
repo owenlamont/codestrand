@@ -432,16 +432,20 @@ impl State {
         })
     }
 
-    pub(super) fn place_slot_names(&mut self, dt: f32) {
-        let obstacles = obstacles(self);
+    pub(super) fn place_slot_names(&mut self, _dt: f32) {
+        let obstacles = if self.layout.repositories.is_empty() {
+            Vec::new()
+        } else {
+            obstacles(self)
+        };
         let bodies: Vec<_> = self
             .avatars
             .iter()
             .filter(|a| a.presence > 0.0)
             .filter_map(|a| {
                 project(
-                    view_direction() * framing::DISTANCE,
-                    Vec3::ZERO,
+                    self.focus + view_direction() * self.distance,
+                    self.focus,
                     &[a.position],
                 )
                 .next()
@@ -462,35 +466,182 @@ impl State {
         let mut placed: Vec<Rect> = Vec::new();
         for index in order {
             let avatar = &self.avatars[index];
-            let bounds = self.slot_name_point(avatar).zip(avatar.slot.as_ref()).map(
-                |(p, slot)| {
-                    let size = super::names::rect(
-                        Vec2::ZERO,
-                        &slot.text,
-                        self.name_scale(),
-                        self.geometry.label_height,
-                    )
-                    .size();
-                    Rect::from_corners(p - Vec2::Y * size.y, p + Vec2::X * size.x)
-                },
-            );
-            let selected = avatar.presence > 0.0
-                && bounds.is_some_and(|rect| {
-                    rect.min.cmpge(-HALF).all()
-                        && rect.max.cmple(HALF).all()
-                        && !name_obstacles(&obstacles, avatar.repository)
-                            .any(|other| intersect(rect, other.inflate(-HALO)))
-                        && !bodies
-                            .iter()
-                            .chain(&placed)
-                            .any(|&other| intersect(rect, other))
-                });
-            if selected {
-                placed.push(bounds.unwrap());
+            let body = project(
+                self.focus + view_direction() * self.distance,
+                self.focus,
+                &[avatar.position],
+            )
+            .next()
+            .flatten()
+            .map(|p| p * HALF);
+            let base = self.name_scale();
+            let blocked: Vec<_> = name_obstacles(&obstacles, avatar.repository)
+                .map(|r| r.inflate(-HALO))
+                .chain(bodies.iter().copied())
+                .chain(placed.iter().copied())
+                .collect();
+            let placement = body.filter(|_| avatar.presence > 0.0).and_then(|body| {
+                persistent_name(
+                    body,
+                    &avatar.name,
+                    base,
+                    self.geometry.label_height,
+                    avatar.name_visibility.placement.as_ref(),
+                    &blocked,
+                )
+            });
+            if let Some((_, rect)) = &placement {
+                placed.push(*rect);
             }
-            self.avatars[index].name_visibility.step(selected, dt);
+            let visibility = &mut self.avatars[index].name_visibility;
+            visibility.visible = placement.is_some();
+            visibility.opacity = f32::from(u8::from(placement.is_some()));
+            visibility.placement = placement.map(|(name, _)| name);
         }
     }
+}
+
+fn persistent_name(
+    body: Vec2,
+    name: &str,
+    base: f32,
+    height: f32,
+    previous: Option<&super::names::Placement>,
+    blocked: &[Rect],
+) -> Option<(super::names::Placement, Rect)> {
+    let minimum = (12.0 / height).min(base);
+    let free = |rect: Rect| {
+        rect.min.cmpge(-HALF + Vec2::splat(0.5)).all()
+            && rect.max.cmple(HALF - Vec2::splat(0.5)).all()
+            && blocked.iter().all(|&other| !intersect(rect, other))
+    };
+    let size =
+        |text: &str, scale| super::names::rect(Vec2::ZERO, text, scale, height).size();
+    if let Some(previous) =
+        previous.filter(|p| p.text == name && p.scale <= base && p.scale >= minimum)
+    {
+        let point = previous.point + body - previous.body;
+        let size = size(name, previous.scale);
+        let rect =
+            Rect::from_corners(point - Vec2::Y * size.y, point + Vec2::X * size.x);
+        if free(rect) {
+            return Some((
+                super::names::Placement {
+                    point,
+                    body,
+                    ..previous.clone()
+                },
+                rect,
+            ));
+        }
+    }
+    let candidates = |text: &str, scale: f32, lanes: bool| {
+        let size = size(text, scale);
+        (0..=u8::from(lanes) * 24).flat_map(move |lane| {
+            let dy = f32::from(lane.div_ceil(2))
+                * (size.y + 2.0)
+                * if lane % 2 == 0 { 1.0 } else { -1.0 };
+            [0.0, -24.0, 24.0, -48.0, 48.0, -96.0, 96.0]
+                .into_iter()
+                .take(if lanes { 7 } else { 1 })
+                .flat_map(move |dx| {
+                    [
+                        body + Vec2::new(12.0 + dx, size.y * 0.5 + dy),
+                        body + Vec2::new(-12.0 - size.x + dx, size.y * 0.5 + dy),
+                    ]
+                })
+                .map(move |point| {
+                    (
+                        point,
+                        Rect::from_corners(
+                            point - Vec2::Y * size.y,
+                            point + Vec2::X * size.x,
+                        ),
+                    )
+                })
+        })
+    };
+    let scales =
+        [base, base * 0.9, base * 0.8, base * 0.7, minimum].map(|s| s.max(minimum));
+    for lanes in [false, true] {
+        for scale in scales {
+            if let Some((point, rect)) =
+                candidates(name, scale, lanes).find(|(_, r)| free(*r))
+            {
+                return Some((
+                    super::names::Placement {
+                        point,
+                        body,
+                        text: name.to_owned(),
+                        scale,
+                    },
+                    rect,
+                ));
+            }
+        }
+    }
+    if let Some((point, rect)) = free_lane(body, size(name, minimum), blocked) {
+        return Some((
+            super::names::Placement {
+                point,
+                body,
+                text: name.to_owned(),
+                scale: minimum,
+            },
+            rect,
+        ));
+    }
+    for length in (1..name.chars().count().min(240)).rev() {
+        let text = format!("{}…", name.chars().take(length).collect::<String>());
+        if let Some((point, rect)) =
+            candidates(&text, minimum, true).find(|(_, r)| free(*r))
+        {
+            return Some((
+                super::names::Placement {
+                    point,
+                    body,
+                    text,
+                    scale: minimum,
+                },
+                rect,
+            ));
+        }
+    }
+    None
+}
+
+fn free_lane(body: Vec2, size: Vec2, blocked: &[Rect]) -> Option<(Vec2, Rect)> {
+    let xs = [-HALF.x + 0.5, HALF.x - size.x - 0.5, body.x + 12.0]
+        .into_iter()
+        .chain(
+            blocked
+                .iter()
+                .flat_map(|r| [r.min.x - size.x - 0.01, r.max.x + 0.01]),
+        )
+        .collect::<Vec<_>>();
+    let ys = [-HALF.y + size.y + 0.5, HALF.y - 0.5, body.y + size.y * 0.5]
+        .into_iter()
+        .chain(
+            blocked
+                .iter()
+                .flat_map(|r| [r.min.y - 0.01, r.max.y + size.y + 0.01]),
+        );
+    ys.flat_map(|y| xs.iter().map(move |&x| Vec2::new(x, y)))
+        .map(|point| {
+            (
+                point,
+                Rect::from_corners(point - Vec2::Y * size.y, point + Vec2::X * size.x),
+            )
+        })
+        .filter(|(_, r)| {
+            r.min.cmpge(-HALF + Vec2::splat(0.5)).all()
+                && r.max.cmple(HALF - Vec2::splat(0.5)).all()
+                && blocked.iter().all(|&other| !intersect(*r, other))
+        })
+        .min_by(|(a, _), (b, _)| {
+            a.distance_squared(body)
+                .total_cmp(&b.distance_squared(body))
+        })
 }
 
 struct Choice<'a> {
@@ -726,6 +877,29 @@ impl Choice<'_> {
 impl State {
     pub(super) fn avatar_label(&self, avatar: &super::Avatar) -> super::Label {
         let multi = !self.layout.repositories.is_empty();
+        if let Some(name) = &avatar.name_visibility.placement {
+            let position = if multi {
+                world(name.point)
+            } else {
+                let eye = self.focus + view_direction() * self.distance;
+                let forward = (self.focus - eye).normalize();
+                let right = forward.cross(Vec3::Y).normalize();
+                let up = right.cross(forward);
+                let depth = (avatar.position - eye).dot(forward);
+                let half_height = depth * std::f32::consts::FRAC_PI_8.tan();
+                eye + forward * depth
+                    + right * (name.point.x / HALF.x * half_height * 16.0 / 9.0)
+                    + up * (name.point.y / HALF.y * half_height)
+            };
+            return super::Label {
+                position,
+                text: name.text.clone(),
+                kind: super::LabelKind::Avatar,
+                scale: name.scale,
+                opacity: avatar.presence,
+                priority: avatar.activity,
+            };
+        }
         super::Label {
             position: if multi {
                 self.slot_name_point(avatar).map_or(avatar.position, world)
@@ -1143,6 +1317,7 @@ mod tests {
         serde_json::Value::Array(sim.state.avatars.iter().map(|a| serde_json::json!({
             "commit":a.commit,"repository":a.repository,"position":a.position.to_array(),"velocity":a.velocity.to_array(),
             "name_opacity":a.name_visibility.opacity,"name_visible":a.name_visibility.visible,
+            "placement":a.name_visibility.placement.as_ref().map(|p| serde_json::json!({"point":p.point.to_array(),"body":p.body.to_array(),"text":p.text,"scale":p.scale})),
             "slot":a.slot.as_ref().map(|s| serde_json::json!({"edge":s.dock.edge,"fraction":s.dock.fraction,"point":s.point.to_array(),"name":s.name.map(|p| p.to_array()),"text":s.text,"valid":s.valid()}))
         })).collect())
     }
@@ -1153,6 +1328,7 @@ mod tests {
         let mut previous_commit = usize::MAX;
         for frame in 0..=frames {
             sim.advance_to(frame, 60);
+            super::super::nitpicks::assert_labels_and_beams(sim);
             moving.observe(sim);
             validate_envelopes(sim);
             if sim.commit() != previous_commit {

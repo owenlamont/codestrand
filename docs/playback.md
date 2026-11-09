@@ -117,6 +117,10 @@ Live repositories share the inset viewport inside a 24-pixel frame margin. The
 contributor band. Tile weights follow eased square roots of live file counts;
 empty active repositories retain weight one. Each repository keeps file identity,
 local layout and one uniform scale, with a fixed quarter-turn chosen for its history.
+Content zoom anticipates the next five playback seconds of growth. A precomputed rate
+limit keeps log-scale change below 0.12 per second in either direction (about 11.3%
+shrink or 12.7% growth). A larger future contraction can start the adjustment earlier;
+the chosen scale never exceeds the tile's current safe fit.
 
 A newcomer splits one existing tile or subtree. Other repositories retain their
 relative order. Splits clamp to a ground-aspect range of 1:2.5 to 2.5:1 and a
@@ -136,8 +140,9 @@ instead of requiring a detour to the top. A valid slot survives consecutive comm
 the same repository. Placement checks the touched files throughout service, including
 additions and deletions, for an open half-plane and beams crossing another repository
 or its label.
-Other edges provide fallback docks. Avatars spread along edges; short names occupy clear
-lanes and yield when no safe name placement fits. Portrait size accounts for perspective.
+Other edges provide fallback docks. Avatars spread along edges; names shrink to a readable
+minimum, then move to free nearby lanes before truncating as a last resort. Names remain
+visible with their avatars. Portrait size accounts for perspective.
 
 Multi-repository avatars travel through gutters and the frame margin. Routes avoid
 the full avatar disc, stop at corners and accelerate to at most `--avatar-max-speed`
@@ -145,7 +150,9 @@ reference pixels/second (default `480`, minimum `1`), with a 0.2-second accelera
 Trips reserve clearance in commit order against timed positions. Disjoint routes can
 run concurrently; crossing routes can wait at a clear node. Moving gutters are sampled
 with explicit speed and acceleration checks. Beams end when their author
-departs or changes repository. After five inactive playback seconds, contributors
+departs or changes repository, cancelling their in-flight fragments together. Otherwise,
+beams remain until the last emitted fragment arrives, then fade. After five inactive
+playback seconds, contributors
 remain parked at their last slot while fading over 1.2 seconds. Faded contributors
 release their lane and reappear directly at their next slot, without a screen-wide trip.
 
