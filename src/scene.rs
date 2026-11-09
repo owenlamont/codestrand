@@ -421,25 +421,7 @@ fn setup(world: &mut World) {
     world.resource_mut::<Pools>().grid = grid;
     world.insert_resource(palette);
     let repository_labels = world.resource::<Playback>().0.layout().repositories.len();
-    for _ in 0..LABELS + repository_labels {
-        world.spawn((
-            Text::new(""),
-            TextFont::from_font_size(14.0),
-            TextColor(theme.label),
-            BackgroundColor::default(),
-            BorderColor::default(),
-            Node {
-                position_type: PositionType::Absolute,
-                padding: UiRect::axes(px(3.0), px(1.0)),
-                ..default()
-            },
-            theme.label_shadow,
-            ZIndex::default(),
-            Visibility::Hidden,
-            UiTargetCamera(camera),
-            Label,
-        ));
-    }
+    grow_labels(world, LABELS + repository_labels, &theme, camera);
     for _ in 0..crate::diff_samples::PER_COMMIT {
         world.spawn((
             Text::new(""),
@@ -1670,16 +1652,53 @@ fn ground(point: Vec2) -> Vec3 {
     Vec3::new(point.x, 0.0, point.y)
 }
 
+fn grow_labels(world: &mut World, needed: usize, theme: &Theme, camera: Entity) {
+    let existing = world
+        .query_filtered::<Entity, With<Label>>()
+        .iter(world)
+        .count();
+    if existing >= needed {
+        return;
+    }
+    let font = world
+        .query_filtered::<&TextFont, With<Label>>()
+        .iter(world)
+        .next()
+        .cloned()
+        .unwrap_or_else(|| TextFont::from_font_size(14.0));
+    for _ in existing..needed {
+        world.spawn((
+            Text::new(""),
+            font.clone(),
+            TextColor(theme.label),
+            BackgroundColor(theme.label_background()),
+            theme.label_border(),
+            Node {
+                position_type: PositionType::Absolute,
+                padding: UiRect::axes(px(3.0), px(1.0)),
+                border: UiRect::all(px(
+                    if theme.label_style == crate::theme::LabelStyle::Bevelled {
+                        2.0
+                    } else {
+                        0.0
+                    },
+                )),
+                ..default()
+            },
+            theme.label_shadow,
+            ZIndex::default(),
+            Visibility::Hidden,
+            UiTargetCamera(camera),
+            Label,
+        ));
+    }
+}
+
 fn place_labels(
     mut wanted: Vec<(model::Label, Vec2, f32)>,
     height: f32,
     viewport: Vec2,
 ) -> Vec<(model::Label, Vec2, f32)> {
-    let capacity = LABELS
-        + wanted
-            .iter()
-            .filter(|(label, ..)| label.kind == model::LabelKind::Repository)
-            .count();
     wanted.retain(|(label, ..)| {
         label.opacity
             > if label.kind == model::LabelKind::Avatar {
@@ -1695,7 +1714,15 @@ fn place_labels(
     });
     let mut placed: Vec<Rect> = Vec::new();
     let mut chosen = Vec::new();
+    let mut optional = 0;
     for (label, point, distance) in wanted {
+        let limited = matches!(
+            label.kind,
+            model::LabelKind::Landmark | model::LabelKind::Activity
+        );
+        if limited && optional == LABELS {
+            continue;
+        }
         let rect = model::label_rect(point, &label.text, label.scale, height);
         if rect.min.x < 0.0
             || rect.min.y < 0.0
@@ -1707,10 +1734,8 @@ fn place_labels(
             continue;
         }
         placed.push(rect);
+        optional += usize::from(limited);
         chosen.push((label, point, distance));
-        if chosen.len() == capacity {
-            break;
-        }
     }
     chosen.sort_by(|(a, _, a_distance), (b, _, b_distance)| {
         let a_avatar = a.kind == model::LabelKind::Avatar;
@@ -1868,6 +1893,7 @@ fn labels(world: &mut World) {
     if world.contains_resource::<styling::Styles>() {
         styling::leaders(world, &points, &theme, camera_entity);
     }
+    grow_labels(world, chosen.len(), &theme, camera_entity);
     sync_labels(world, chosen, &theme);
     caption::update(world, &caption);
     let mut query = world.query_filtered::<&mut Text, With<Caption>>();
@@ -3066,9 +3092,44 @@ mod tests {
             )
         }));
         let chosen = place_labels(wanted, 20.0, Vec2::new(1280.0, 720.0));
-        assert_eq!(chosen.len(), LABELS);
+        assert_eq!(chosen.len(), LABELS + 1);
         assert_eq!(chosen[0].0.text, "0");
-        assert_eq!(chosen[LABELS - 1].0.text, (LABELS - 1).to_string());
+        assert_eq!(chosen[LABELS].0.text, LABELS.to_string());
+        let mut world = World::new();
+        let camera = world.spawn_empty().id();
+        let theme = Theme::neon();
+        grow_labels(&mut world, LABELS, &theme, camera);
+        grow_labels(&mut world, chosen.len(), &theme, camera);
+        sync_labels(&mut world, chosen, &theme);
+        let visible: Vec<_> = world
+            .query_filtered::<(&Text, &Visibility), With<Label>>()
+            .iter(&world)
+            .filter(|(_, visibility)| **visibility != Visibility::Hidden)
+            .map(|(text, _)| text.0.clone())
+            .collect();
+        assert_eq!(visible.len(), LABELS + 1);
+        assert!(visible.contains(&LABELS.to_string()));
+    }
+
+    #[test]
+    fn optional_labels_keep_their_own_bounded_allowance() {
+        let wanted = (0..100_u16)
+            .map(|i| {
+                projected_label(
+                    "x",
+                    model::LabelKind::Activity,
+                    Vec2::new(
+                        10.0 + f32::from(i % 20) * 60.0,
+                        100.0 + f32::from(i / 20) * 40.0,
+                    ),
+                    1.0,
+                )
+            })
+            .collect();
+        assert_eq!(
+            place_labels(wanted, 20.0, Vec2::new(1280.0, 720.0)).len(),
+            LABELS
+        );
     }
 
     #[test]
