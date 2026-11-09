@@ -123,8 +123,8 @@ enum Command {
     reason = "each bool is an independent clap switch"
 )]
 struct Source {
-    /// Multi-repository caption colour treatment; single-repository playback is unchanged.
-    #[arg(long, value_enum, default_value = "chip")]
+    /// Multi-repository caption colour treatment.
+    #[arg(long, value_enum, default_value = "bar")]
     caption_style: model::caption::Style,
     /// Local repository to play; repeat for a shared timeline; synthetic when omitted.
     #[arg(long)]

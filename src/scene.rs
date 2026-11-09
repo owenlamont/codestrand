@@ -448,22 +448,13 @@ fn setup(world: &mut World) {
 fn setup_caption(world: &mut World, camera: Entity, repository_labels: usize) {
     if repository_labels > 0 {
         heading(world, camera, "CODESTRAND", 24.0, 0.0, 18.0);
-        caption::setup(world, camera);
-        return;
-    }
-    let title = world.resource::<Title>().0.clone();
-    let caption_y = if repository_labels > 0 {
-        heading(world, camera, "CODESTRAND", 24.0, 0.0, 18.0);
-        698.0
     } else {
+        let title = world.resource::<Title>().0.clone();
         heading(world, camera, "CODESTRAND", 28.0, 28.0, 30.0);
         heading(world, camera, &title, 28.0, 68.0, 16.0);
-        668.0
-    };
-    let caption = heading(world, camera, " ", 28.0, caption_y, 14.0);
-    world.entity_mut(caption).insert(Caption);
+    }
+    caption::setup(world, camera);
 }
-
 fn repository_glass_material(theme: &Theme, index: usize) -> StandardMaterial {
     StandardMaterial {
         base_color: theme.glass[index % theme.glass.len()]
@@ -1850,13 +1841,6 @@ fn labels(world: &mut World) {
     let (camera, transform) = (camera.clone(), *transform);
     diff_samples(world, &camera, &transform);
     let playback = world.resource::<Playback>();
-    let mut caption = playback.0.caption();
-    caption.push_str("  |  ");
-    caption.push_str(playback.0.theme().name.title());
-    if let Some(camera) = world.get_resource::<PreviewCamera>() {
-        caption.push_str("  |  ");
-        caption.push_str(&camera.caption());
-    }
     let geometry = playback.0.theme();
     let lod = &world.resource::<Pools>().lod;
     let wanted = playback
@@ -1895,13 +1879,7 @@ fn labels(world: &mut World) {
     }
     grow_labels(world, chosen.len(), &theme, camera_entity);
     sync_labels(world, chosen, &theme);
-    caption::update(world, &caption);
-    let mut query = world.query_filtered::<&mut Text, With<Caption>>();
-    if let Ok(mut text) = query.single_mut(world)
-        && text.0 != caption
-    {
-        text.0 = caption;
-    }
+    caption::update(world);
 }
 
 fn diff_samples(world: &mut World, camera: &Camera, transform: &GlobalTransform) {

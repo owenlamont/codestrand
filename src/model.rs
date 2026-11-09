@@ -716,6 +716,7 @@ impl Simulation {
         self.total
     }
 
+    #[cfg(test)]
     pub(super) fn caption(&self) -> String {
         let Some(event) = self
             .schedule

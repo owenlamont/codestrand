@@ -7,9 +7,76 @@ use crate::timeline::Event;
     Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum, serde::Serialize,
 )]
 pub(crate) enum Style {
-    #[default]
     Chip,
+    #[default]
     Bar,
+}
+
+pub(crate) const FONT_SIZE: f32 = 14.0;
+// Embedded Fira Mono has 600-unit advances at 1,000 units per em.
+pub(crate) const ADVANCE: f32 = FONT_SIZE * 0.6;
+pub(crate) const SEPARATOR_WIDTH: f32 = ADVANCE * 3.0;
+
+#[derive(Clone, Copy, Resource)]
+pub(crate) struct Columns {
+    pub widths: [usize; 6],
+    pub multi: bool,
+}
+
+impl Columns {
+    pub(crate) fn new(sim: &Simulation) -> Self {
+        let longest = |field: usize| {
+            sim.events
+                .iter()
+                .map(|event| match field {
+                    0 => super::date(event.seconds).chars().count(),
+                    2 => event
+                        .contributor
+                        .as_ref()
+                        .expect("resolved contributor")
+                        .name
+                        .chars()
+                        .count(),
+                    _ => unreachable!(),
+                })
+                .max()
+                .unwrap_or(0)
+        };
+        Self {
+            widths: [
+                longest(0),
+                sim.layout()
+                    .repositories
+                    .iter()
+                    .map(|r| r.label.chars().count())
+                    .max()
+                    .unwrap_or(0),
+                longest(2),
+                format!("commit {} / {}", sim.total, sim.total).len(),
+                "0.125x".len(),
+                crate::theme::ThemeName::ALL
+                    .iter()
+                    .map(|t| t.title().chars().count())
+                    .max()
+                    .expect("available themes"),
+            ],
+            multi: !sim.layout().repositories.is_empty(),
+        }
+    }
+
+    pub(crate) fn layout(self) -> Vec<(usize, f32, f32)> {
+        let mut left = 28.0;
+        let mut columns = Vec::new();
+        for (index, width) in self.widths.into_iter().enumerate() {
+            if index == 1 && !self.multi {
+                continue;
+            }
+            let width = super::count(width) * ADVANCE + 8.0;
+            columns.push((index, left, width));
+            left += width + SEPARATOR_WIDTH;
+        }
+        columns
+    }
 }
 
 const HOLD: u64 = 48;
@@ -63,6 +130,33 @@ pub(crate) fn background(colour: Color) -> LinearRgba {
 }
 
 impl Simulation {
+    pub(crate) fn caption_fields(&self) -> [String; 6] {
+        let event = self
+            .schedule
+            .applied(self.state.tick)
+            .checked_sub(1)
+            .and_then(|i| self.events.get(i));
+        [
+            event.map_or_else(String::new, |e| super::date(e.seconds)),
+            self.caption_repository()
+                .map_or_else(String::new, |(_, r)| r.to_owned()),
+            event.map_or_else(String::new, |e| {
+                e.contributor
+                    .as_ref()
+                    .expect("resolved contributor")
+                    .name
+                    .clone()
+            }),
+            format!(
+                "commit {:>digits$} / {}",
+                self.commit(),
+                self.total,
+                digits = self.total.to_string().len()
+            ),
+            format!("{}x", self.playback_multiplier),
+            self.theme.name.title().to_owned(),
+        ]
+    }
     pub(crate) fn caption_repository(&self) -> Option<(usize, &str)> {
         let event = self
             .schedule
@@ -107,11 +201,18 @@ mod tests {
     #[ignore = "requires local repositories and caption diagnostic output path"]
     fn local_caption_audit() {
         let (mut sim, _) = super::super::nitpicks::local_simulation();
+        let columns = Columns::new(&sim);
         sim.caption_style = Style::Bar;
         let mut commits = Vec::new();
         let mut previous = 0;
         for frame in 0..=frames_for(sim.duration(), 60).unwrap() {
             sim.advance_to(frame, 60);
+            assert!(
+                sim.caption_fields()
+                    .iter()
+                    .zip(columns.widths)
+                    .all(|(text, width)| text.chars().count() <= width)
+            );
             if sim.commit() != previous {
                 let (repo, name) = sim.caption_repository().unwrap();
                 commits.push(serde_json::json!({"frame":frame,"seconds":f64::from(frame)/60.0,"commit":sim.commit(),"repository":repo,"name":name,"caption":sim.caption()}));
@@ -123,7 +224,7 @@ mod tests {
             .iter()
             .map(|t| serde_json::json!({"frame":t.tick,"from":t.from,"to":t.to}))
             .collect();
-        let result = serde_json::json!({"commits":commits,"transitions":transitions});
+        let result = serde_json::json!({"commits":commits,"transitions":transitions,"column_characters":columns.widths,"layout":columns.layout()});
         std::fs::write(
             std::env::var("CODESTRAND_CAPTION_AUDIT").unwrap(),
             serde_json::to_vec_pretty(&result).unwrap(),

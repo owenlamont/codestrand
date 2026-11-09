@@ -296,7 +296,7 @@ pub(super) fn apply(world: &mut World, theme: &Theme) {
             .map(|(_, handle)| handle.clone())
             .unwrap_or_default();
         for (mut text, snippet) in world
-            .query::<(&mut TextFont, Option<&super::DiffSample>)>().iter_mut(world)
+            .query_filtered::<(&mut TextFont, Option<&super::DiffSample>), Without<super::caption::CaptionText>>().iter_mut(world)
         {
             text.font = if snippet.is_some() {
                 code_font.clone()
