@@ -27,9 +27,17 @@ mod theme;
 mod timeline;
 
 fn terminal_escape(value: &str) -> String {
+    escape_except(value, &[])
+}
+
+fn terminal_escape_layout(value: &str) -> String {
+    escape_except(value, &['\n', '\t'])
+}
+
+fn escape_except(value: &str, kept: &[char]) -> String {
     let mut escaped = String::with_capacity(value.len());
     for character in value.chars() {
-        if (character.is_control() && !matches!(character, '\n' | '\t'))
+        if (character.is_control() && !kept.contains(&character))
             || matches!(character, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
         {
             escaped.extend(character.escape_default());
@@ -45,8 +53,17 @@ mod terminal_tests {
     #[test]
     fn multiline_diagnostics_keep_layout_and_escape_controls() {
         assert_eq!(
-            super::terminal_escape("error:\n\ttip\r\u{1b}[31m\u{202e}"),
+            super::terminal_escape_layout("error:\n\ttip\r\u{1b}[31m\u{202e}"),
             "error:\n\ttip\\r\\u{1b}[31m\\u{202e}"
+        );
+    }
+
+    #[test]
+    fn error_chains_cannot_forge_lines() {
+        let error = anyhow::anyhow!("bad path a\nError: forged\tx").context("import");
+        assert_eq!(
+            super::terminal_escape(&format!("{error:#}")),
+            "import: bad path a\\nError: forged\\tx"
         );
     }
 
@@ -244,7 +261,7 @@ fn main() -> std::process::ExitCode {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
             if let Some(usage) = error.downcast_ref::<clap::Error>() {
-                eprint!("{}", terminal_escape(&usage.to_string()));
+                eprint!("{}", terminal_escape_layout(&usage.to_string()));
                 std::process::ExitCode::from(2)
             } else {
                 eprintln!("Error: {}", terminal_escape(&format!("{error:#}")));
