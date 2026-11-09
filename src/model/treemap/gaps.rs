@@ -2,7 +2,7 @@ use bevy::math::Vec2;
 
 const WIDTH: usize = 160;
 const HEIGHT: usize = 90;
-const MARGIN: usize = 6;
+const MARGIN: usize = 3;
 
 fn interval(points: &[Vec2], y: f32) -> (f32, f32) {
     let mut low = f32::INFINITY;

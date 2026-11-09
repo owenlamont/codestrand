@@ -12,10 +12,19 @@ pub(crate) struct MovingBeams {
     missing_tile_beams: u64,
     travelling_disc_foreign_tile: u64,
     travelling_avatar_overlaps: u64,
+    travelling_centre_interior: u64,
     maximum_travel_speed: f32,
     first_disc: Option<serde_json::Value>,
     first_overlap: Option<serde_json::Value>,
     observed_beams: u64,
+    avatar_content_frames: u64,
+    name_content_frames: u64,
+    avatar_content_max_px: f32,
+    name_content_max_px: f32,
+    worst_avatar_tick: u64,
+    worst_name_tick: u64,
+    visible_avatar_frames: u64,
+    visible_name_frames: u64,
     #[serde(skip)]
     previous: std::collections::BTreeMap<usize, (u64, bevy::math::Vec2, bool)>,
 }
@@ -30,9 +39,10 @@ impl MovingBeams {
         );
         assert_eq!(self.missing_tile_beams, 0, "beam before tile birth");
         assert_eq!(
-            self.travelling_disc_foreign_tile, 0,
-            "travelling disc inside foreign tile"
+            self.travelling_centre_interior, 0,
+            "route cut across tile interior"
         );
+
         assert_eq!(
             self.travelling_avatar_overlaps, 0,
             "travelling avatars overlap"
@@ -43,12 +53,59 @@ impl MovingBeams {
             self.maximum_travel_speed
         );
     }
+    fn observe_content(
+        &mut self,
+        state: &crate::model::State,
+        avatar: &crate::model::Avatar,
+        point: bevy::math::Vec2,
+        radius: f32,
+        content: &[(usize, Rect)],
+    ) {
+        if avatar.presence > 0.0 {
+            self.visible_avatar_frames += 1;
+            let depth = content
+                .iter()
+                .map(|(_, r)| {
+                    (radius - point.distance(point.clamp(r.min, r.max))).max(0.0)
+                })
+                .fold(0.0_f32, f32::max);
+            self.avatar_content_frames += u64::from(depth > 0.001);
+            if depth > self.avatar_content_max_px {
+                self.avatar_content_max_px = depth;
+                self.worst_avatar_tick = state.tick;
+            }
+            if let Some(name) = &avatar.name_visibility.placement {
+                self.visible_name_frames += 1;
+                let bounds = Rect::from_corners(
+                    name.point
+                        - bevy::math::Vec2::Y
+                            * (state.geometry.label_height * name.scale + 4.0),
+                    name.point
+                        + bevy::math::Vec2::X
+                            * (8.0
+                                + 8.6
+                                    * crate::model::count(name.text.chars().count())
+                                    * name.scale),
+                );
+                let depth = content
+                    .iter()
+                    .map(|(_, r)| bounds.intersect(*r).size().min_element().max(0.0))
+                    .fold(0.0_f32, f32::max);
+                self.name_content_frames += u64::from(depth > 0.001);
+                if depth > self.name_content_max_px {
+                    self.name_content_max_px = depth;
+                    self.worst_name_tick = state.tick;
+                }
+            }
+        }
+    }
     fn observe_avatars(&mut self, simulation: &Simulation) {
         let state = &simulation.state;
         if state.layout.repositories.is_empty() {
             return;
         }
         let radius = state.avatar_radius();
+        let content = super::content_obstacles(state);
         let projected: Vec<_> = project(
             view_direction() * framing::DISTANCE,
             Vec3::ZERO,
@@ -59,6 +116,7 @@ impl MovingBeams {
             let Some(point) = projected[author].map(|p| p * HALF) else {
                 continue;
             };
+            self.observe_content(state, avatar, point, radius, &content);
             let moving = avatar.presence > 0.0
                 && simulation.travel.travelling(author, state.tick);
             if let Some((before, position, was_moving)) =
@@ -75,7 +133,6 @@ impl MovingBeams {
             for (other, position) in projected.iter().enumerate().skip(author + 1) {
                 if avatar.presence > 0.0
                     && state.avatars[other].presence > 0.0
-                    && (moving || simulation.travel.travelling(other, state.tick))
                     && position
                         .is_some_and(|p| (p * HALF).distance(point) < 2.0 * radius)
                 {
@@ -97,6 +154,11 @@ impl MovingBeams {
                 .enumerate()
                 .filter_map(|(i, r)| r.tile.map(|t| (i, t)))
             {
+                self.travelling_centre_interior += u64::from(
+                    Rect::from_corners(tile.low * HALF, tile.high * HALF)
+                        .inflate(-0.15)
+                        .contains(point),
+                );
                 if index == avatar.repository {
                     continue;
                 }

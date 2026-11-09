@@ -11,7 +11,7 @@ pub(crate) const VIEWPORT: Vec2 = Vec2::new(1280.0, 720.0);
 pub(crate) const GLASS_BOTTOM: f32 = -0.1;
 pub(crate) const GLASS_TOP: f32 = 1.1;
 pub(crate) const LABEL_Y: f32 = 1.6;
-pub(crate) const MARGIN: f32 = 48.0;
+pub(crate) const MARGIN: f32 = 24.0;
 pub(crate) const DISTANCE: f32 = 60.0;
 
 pub(crate) fn unproject(point: Vec2) -> Vec2 {

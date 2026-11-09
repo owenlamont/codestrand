@@ -144,11 +144,12 @@ relative order. Splits clamp to a ground-aspect range of 1:2.5 to 2.5:1 and a
 144-by-64-pixel readable floor at 1280 by 720. Births ease for up to 0.75 playback seconds
 before their first commit; births near the lead-in use the available lead-in time.
 Aspect and size clamps scale with presence during the transition. Tiles and shared
-gutters partition the whole inset field. Gutters start at 32 pixels between stacked
-tiles and 16 pixels between side-by-side tiles. Above twelve live repositories,
-gutters shrink continuously to 16 and 12 pixels respectively at thirty repositories.
-Avatar bodies and names shrink with the gutter budget. Names may overlay their own
-tile, but avoid foreign tiles, repository labels and other contributors.
+gutters partition the whole inset field. `--gutter` sets the visible spacing in
+1280×720 reference pixels: default `4`, range `0`–`64`, including touching tiles at
+`0`. Avatars remain doubled through five repositories, then taper with a smoothstep
+curve to the original diameter at thirty. Crowd scaling also remains active.
+Avatar bodies and names prefer clear content rectangles, including repository labels
+and a small margin, but may overlap content near tile edges when space is tight.
 Different content shapes can leave space inside a uniformly fitted tile.
 
 Contributors first appear in a gutter slot above their repository, aligned with the
@@ -161,8 +162,10 @@ Other edges provide fallback docks. Avatars spread along edges; names shrink to 
 minimum, then move to free nearby lanes before truncating as a last resort. Names remain
 visible with their avatars. Portrait size accounts for perspective.
 
-Multi-repository avatars travel through gutters and the frame margin. Routes avoid
-the full avatar disc, stop at corners and accelerate to at most `--avatar-max-speed`
+Multi-repository avatars travel along tile edges, gutters and the frame margin.
+Route centres stay outside tile interiors. Content overlap is a soft cost, swept
+over each trip; avatar-to-avatar clearance remains hard. Routes stop at corners
+and accelerate to at most `--avatar-max-speed`
 reference pixels/second (default `480`, minimum `1`), with a 0.2-second acceleration ramp.
 Trips reserve clearance in commit order against timed positions. Disjoint routes can
 run concurrently; crossing routes can wait at a clear node. Moving gutters are sampled

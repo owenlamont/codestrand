@@ -180,6 +180,9 @@ struct Source {
     /// Avatar disc diameter relative to the original size, in both playback modes (0.5–2).
     #[arg(long, default_value_t = 2.0, value_parser = avatar_size)]
     avatar_scale: f32,
+    /// Visible spacing between repository tiles in reference pixels (0–20).
+    #[arg(long, default_value_t = 4.0, value_parser = gutter_pixels)]
+    gutter: f32,
     /// File heat half-life in canonical playback seconds.
     #[arg(long, default_value_t = 3.0, value_parser = positive_seconds)]
     heat_half_life: f32,
@@ -294,6 +297,7 @@ impl Source {
             bot_travel: self.bot_travel,
             avatar_max_speed: self.avatar_max_speed,
             avatar_size: self.avatar_scale,
+            gutter: self.gutter,
         };
         let names = if repositories.len() > 1 {
             repositories
@@ -473,8 +477,27 @@ fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn gutter_pixels(value: &str) -> Result<f32, String> {
+    let pixels: f32 = value.parse().map_err(|_| "gutter must be a number")?;
+    if pixels.is_finite() && (0.0..=20.0).contains(&pixels) {
+        Ok(pixels)
+    } else {
+        Err("gutter must be between 0 and 20 pixels".into())
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn gutter_accepts_zero_and_rejects_nonfinite_or_out_of_range_values() {
+        for value in ["0", "4", "20"] {
+            assert!(super::gutter_pixels(value).is_ok());
+        }
+        for value in ["-1", "21", "NaN", "inf", "bad"] {
+            assert!(super::gutter_pixels(value).is_err());
+        }
+    }
+
     use super::*;
 
     #[test]

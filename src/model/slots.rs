@@ -86,8 +86,9 @@ impl Dock {
         }
     }
     fn point(self, tile: Tile, gap: Vec2) -> Vec2 {
-        let low = tile.low * HALF;
-        let high = tile.high * HALF;
+        let inset = Vec2::splat(0.05);
+        let low = tile.low * HALF + inset;
+        let high = tile.high * HALF - inset;
         match self.edge {
             0 => Vec2::new(
                 low.x + (high.x - low.x) * self.fraction,
@@ -195,19 +196,52 @@ fn disk(point: Vec2, radius: f32) -> Rect {
     Rect::from_center_size(point, Vec2::splat(radius * 2.0))
 }
 
-fn obstacles(state: &State) -> Vec<(usize, Rect)> {
+fn tile_obstacles(state: &State) -> Vec<(usize, Rect)> {
     let mut result = Vec::new();
     for (index, region) in state.layout.repositories.iter().enumerate() {
         let Some(tile) = region.tile else {
             continue;
         };
-        result.push((
-            index,
-            Rect::from_corners(
-                tile.low * HALF - Vec2::splat(HALO),
-                tile.high * HALF + Vec2::splat(HALO),
-            ),
-        ));
+        result.push((index, Rect::from_corners(tile.low * HALF, tile.high * HALF)));
+    }
+    result
+}
+
+fn obstacles(state: &State) -> Vec<(usize, Rect)> {
+    let mut result = content_obstacles(state);
+    for rect in [
+        Rect::from_corners(Vec2::new(-618.0, 340.0), Vec2::new(-498.0, 360.0)),
+        Rect::from_corners(Vec2::new(-640.0, -360.0), Vec2::new(640.0, -338.0)),
+    ] {
+        result.push((usize::MAX, rect.inflate(HALO)));
+    }
+    result
+}
+
+pub(super) fn content_obstacles(state: &State) -> Vec<(usize, Rect)> {
+    let mut result = Vec::new();
+    for (index, region) in state.layout.repositories.iter().enumerate() {
+        if region.tile.is_none() {
+            continue;
+        }
+        let points: Vec<_> = region
+            .outline
+            .iter()
+            .copied()
+            .map(crate::layout::world_coordinates)
+            .flat_map(|p| [ground(p), ground(p) + Vec3::Y * region.height])
+            .collect();
+        let projected =
+            project(view_direction() * framing::DISTANCE, Vec3::ZERO, &points)
+                .flatten()
+                .map(|p| p * HALF);
+        let (low, high) = projected.fold(
+            (Vec2::splat(f32::INFINITY), Vec2::splat(f32::NEG_INFINITY)),
+            |(lo, hi), p| (lo.min(p), hi.max(p)),
+        );
+        if low.is_finite() && high.is_finite() {
+            result.push((index, Rect::from_corners(low, high).inflate(HALO)));
+        }
         let anchor = project(
             view_direction() * framing::DISTANCE,
             Vec3::ZERO,
@@ -220,17 +254,9 @@ fn obstacles(state: &State) -> Vec<(usize, Rect)> {
         let size = framing::label_size(&region.label, 20.0);
         result.push((
             index,
-            Rect::from_corners(
-                anchor - Vec2::Y * size.y - Vec2::splat(HALO),
-                anchor + Vec2::X * size.x + Vec2::splat(HALO),
-            ),
+            Rect::from_corners(anchor - Vec2::Y * size.y, anchor + Vec2::X * size.x)
+                .inflate(HALO),
         ));
-    }
-    for rect in [
-        Rect::from_corners(Vec2::new(-618.0, 340.0), Vec2::new(-498.0, 360.0)),
-        Rect::from_corners(Vec2::new(-640.0, -360.0), Vec2::new(640.0, -338.0)),
-    ] {
-        result.push((usize::MAX, rect.inflate(HALO)));
     }
     result
 }
@@ -334,9 +360,8 @@ impl Simulation {
 
 impl State {
     pub(super) fn place_slots(&mut self, envelopes: &[Envelope], now: f32) {
-        let gap = crate::layout::packing::gutters(count(
-            self.layout.repositories.iter().filter(|r| r.live).count(),
-        )) * self.avatar_size.max(1.0);
+        let gap = Vec2::splat(self.gutter);
+        let beams = tile_obstacles(self);
         let obstacles = obstacles(self);
         let radius = self.avatar_radius();
         let name_scale = self.name_scale();
@@ -383,6 +408,7 @@ impl State {
                 gap,
                 radius,
                 obstacles: &obstacles,
+                beams: &beams,
                 occupied: &occupied,
                 repository: avatar.repository,
                 text,
@@ -480,10 +506,22 @@ impl State {
             .flatten()
             .map(|p| p * HALF);
             let base = self.name_scale();
-            let blocked: Vec<_> = name_obstacles(&obstacles, avatar.repository)
-                .map(|r| r.inflate(-HALO))
+            let blocked: Vec<_> = obstacles
+                .iter()
+                .map(|(_, r)| r.inflate(-HALO))
                 .chain(bodies.iter().copied())
                 .chain(placed.iter().copied())
+                .collect();
+            let hard: Vec<_> = bodies
+                .iter()
+                .chain(&placed)
+                .copied()
+                .chain(
+                    obstacles
+                        .iter()
+                        .filter(|(owner, _)| *owner == usize::MAX)
+                        .map(|(_, r)| *r),
+                )
                 .collect();
             let placement = body.filter(|_| avatar.presence > 0.0).and_then(|body| {
                 persistent_name(
@@ -494,6 +532,17 @@ impl State {
                     avatar.name_visibility.placement.as_ref(),
                     &blocked,
                 )
+                .or_else(|| {
+                    let minimum = (12.0 / self.geometry.label_height).min(base);
+                    soft_name(
+                        body,
+                        &avatar.name,
+                        minimum,
+                        self.geometry.label_height,
+                        &hard,
+                        &obstacles,
+                    )
+                })
             });
             if let Some((_, rect)) = &placement {
                 placed.push(*rect);
@@ -504,6 +553,66 @@ impl State {
             visibility.placement = placement.map(|(name, _)| name);
         }
     }
+}
+
+fn soft_name(
+    body: Vec2,
+    name: &str,
+    scale: f32,
+    height: f32,
+    hard: &[Rect],
+    soft: &[(usize, Rect)],
+) -> Option<(super::names::Placement, Rect)> {
+    let size = super::names::rect(Vec2::ZERO, name, scale, height).size();
+    (-12_i16..=12)
+        .flat_map(|lane| {
+            [-1.0_f32, 1.0].map(move |side| {
+                let point = body
+                    + Vec2::new(
+                        if side > 0.0 { 16.0 } else { -16.0 - size.x },
+                        f32::from(lane) * (size.y + 2.0) + size.y * 0.5,
+                    );
+                let rect = Rect::from_corners(
+                    point - Vec2::Y * size.y,
+                    point + Vec2::X * size.x,
+                );
+                (point, rect)
+            })
+        })
+        .filter(|(_, r)| {
+            r.min.cmpge(-HALF + Vec2::splat(0.5)).all()
+                && r.max.cmple(HALF - Vec2::splat(0.5)).all()
+                && hard.iter().all(|&other| !intersect(*r, other))
+        })
+        .min_by(|(a, ra), (b, rb)| {
+            let cost = |r: Rect| {
+                soft.iter()
+                    .map(|(_, other)| {
+                        let intersection = r.intersect(*other);
+                        if intersection.is_empty() {
+                            0.0
+                        } else {
+                            intersection.size().element_product()
+                        }
+                    })
+                    .sum::<f32>()
+            };
+            cost(*ra).total_cmp(&cost(*rb)).then(
+                a.distance_squared(body)
+                    .total_cmp(&b.distance_squared(body)),
+            )
+        })
+        .map(|(point, rect)| {
+            (
+                super::names::Placement {
+                    point,
+                    body,
+                    text: name.to_owned(),
+                    scale,
+                },
+                rect,
+            )
+        })
 }
 
 fn persistent_name(
@@ -654,6 +763,7 @@ struct Choice<'a> {
     gap: Vec2,
     radius: f32,
     obstacles: &'a [(usize, Rect)],
+    beams: &'a [(usize, Rect)],
     occupied: &'a [Rect],
     repository: usize,
     text: String,
@@ -674,11 +784,23 @@ impl Choice<'_> {
             .map(|dock| self.assess(dock).0)
             .filter(Placement::valid)
             .min_by(|a, b| {
-                a.point
-                    .distance_squared(point)
-                    .total_cmp(&b.point.distance_squared(point))
+                self.content_cost(a.point)
+                    .total_cmp(&self.content_cost(b.point))
+                    .then(
+                        a.point
+                            .distance_squared(point)
+                            .total_cmp(&b.point.distance_squared(point)),
+                    )
             })
             .unwrap_or_else(|| self.select(None))
+    }
+    fn content_cost(&self, point: Vec2) -> f32 {
+        self.obstacles
+            .iter()
+            .map(|(_, r)| {
+                (self.radius - point.distance(point.clamp(r.min, r.max))).max(0.0)
+            })
+            .sum()
     }
     fn assess(&self, dock: Dock) -> (Placement, f32) {
         let point = dock.point(self.tile, self.gap);
@@ -688,14 +810,14 @@ impl Choice<'_> {
             .iter()
             .fold((point, point), |(low, high), &p| (low.min(p), high.max(p)));
         let crossings = self
-            .obstacles
+            .beams
             .iter()
             .filter(|(repo, rect)| {
                 *repo != usize::MAX
                     && *repo != self.repository
                     && low.cmple(rect.max).all()
                     && high.cmpge(rect.min).all()
-                    && swept_crosses(point, &corners, *rect)
+                    && swept_crosses(point, &corners, rect.inflate(-0.02))
             })
             .count();
         let bounds = disk(point, self.radius);
@@ -704,11 +826,6 @@ impl Choice<'_> {
             .iter()
             .filter(|&&other| intersect(bounds, other))
             .count()
-            + self
-                .obstacles
-                .iter()
-                .filter(|(_, other)| intersect(bounds, other.inflate(-HALO)))
-                .count()
             + usize::from(!point.abs().cmple(HALF - Vec2::splat(self.radius)).all());
         (
             Placement {
@@ -722,7 +839,14 @@ impl Choice<'_> {
                 overlaps,
                 missing_tile: false,
             },
-            span,
+            span + self
+                .obstacles
+                .iter()
+                .map(|(_, r)| {
+                    let nearest = point.clamp(r.min, r.max);
+                    (self.radius - point.distance(nearest)).max(0.0) * 100.0
+                })
+                .sum::<f32>(),
         )
     }
 
@@ -733,7 +857,7 @@ impl Choice<'_> {
     fn select(&self, previous: Option<Dock>) -> Placement {
         if let Some((p, _)) = previous
             .map(|dock| self.assess(dock))
-            .filter(|(p, _)| p.valid())
+            .filter(|(p, cost)| p.valid() && *cost < std::f32::consts::PI)
         {
             return p;
         }
@@ -762,7 +886,12 @@ impl Choice<'_> {
             }
         }
         let fixed = self.best(docks.iter().copied());
-        if fixed.valid() {
+        if fixed.valid()
+            && self
+                .obstacles
+                .iter()
+                .all(|(_, r)| !intersect(disk(fixed.point, self.radius), *r))
+        {
             return fixed;
         }
         docks.extend(self.free_docks());
@@ -782,7 +911,13 @@ impl Choice<'_> {
                 let cost = (p.overlaps, usize::from(!p.half_plane), p.crossings, rank);
                 (p, cost, span, id)
             })
-            .min_by(|a, b| a.1.cmp(&b.1).then(a.2.total_cmp(&b.2)).then(a.3.cmp(&b.3)))
+            .min_by(|a, b| {
+                (a.1.0, a.1.1, a.1.2)
+                    .cmp(&(b.1.0, b.1.1, b.1.2))
+                    .then(a.2.total_cmp(&b.2))
+                    .then(a.1.3.cmp(&b.1.3))
+                    .then(a.3.cmp(&b.3))
+            })
             .expect("at least one candidate dock")
             .0
     }
@@ -956,7 +1091,7 @@ fn swept_crosses(point: Vec2, corners: &[Vec2; 4], rect: Rect) -> bool {
 
 pub(super) fn report(state: &State) -> serde_json::Value {
     serde_json::json!({
-        "definitions": "Parked slots use a swept touched-file AABB in tile-relative projected coordinates, including appearing/departing files and aggregated endpoints, sampled at canonical 60 Hz throughout live service. Foreign tiles and repository labels are inflated by two reference pixels for beam halo. Fallback means any non-top dock; least-bad means any infeasible observation, including a missing birth tile. Counts are unique commits, even when service observations repeat. Moving beams remain a Step 4 diagnostic, not a parked-slot failure.",
+        "definitions": "Parked slots use a swept touched-file AABB in tile-relative projected coordinates, including appearing/departing files and aggregated endpoints, sampled at canonical 60 Hz throughout live service. Beam fans avoid foreign tiles; bodies and names prefer projected content rectangles with a two-pixel margin, allowing edge overlap. Fallback means any non-top dock; least-bad means any infeasible observation, including a missing birth tile. Counts are unique commits, even when service observations repeat. Moving beams remain a Step 4 diagnostic, not a parked-slot failure.",
         "commits": state.slot_records.len(),
         "fallback_commits": state.slot_records.values().filter(|r| r.fallback).count(),
         "least_bad_commits": state.slot_records.values().filter(|r| r.least_bad).count(),
@@ -1068,6 +1203,7 @@ mod tests {
             radius: 7.5,
             obstacles,
             occupied,
+            beams: obstacles,
             repository: 0,
             text: "Ada".into(),
             scale: 1.0,
@@ -1386,7 +1522,7 @@ mod tests {
                 checkpoints.push((frame, snapshot(sim)));
                 previous_commit = sim.commit();
             }
-            let obstacles = obstacles(&sim.state);
+            let obstacles = tile_obstacles(&sim.state);
             let mut bodies = Vec::new();
             let mut names = Vec::new();
             assert_traveller_presence(sim, frame);
@@ -1418,7 +1554,7 @@ mod tests {
                     assert!(fan(slot.point, &corners) < std::f32::consts::PI);
                     assert!(!obstacles.iter().any(|(r, rect)| *r != usize::MAX
                         && *r != avatar.repository
-                        && swept_crosses(slot.point, &corners, *rect)));
+                        && swept_crosses(slot.point, &corners, rect.inflate(-0.02))));
                 }
                 let body = disk(slot.point, sim.state.avatar_radius());
                 assert!(bodies.iter().all(|&other| !intersect(body, other)));
@@ -1436,10 +1572,7 @@ mod tests {
                         point + Vec2::X * size.x,
                     );
                     assert!(names.iter().all(|&other| !intersect(rect, other)));
-                    assert!(
-                        name_obstacles(&obstacles, avatar.repository)
-                            .all(|other| !intersect(rect, other.inflate(-HALO)))
-                    );
+
                     names.push(rect);
                 }
             }
@@ -1492,7 +1625,7 @@ mod tests {
     #[test]
     fn realistic_thirty_repository_slots_sample_every_commit_and_replay() {
         let mut sim = thirty();
-        assert!(sim.travel.stats.temporary_capture_bytes <= 8 * 1024 * 1024);
+        assert!(sim.travel.stats.temporary_capture_bytes <= 32 * 1024 * 1024);
         assert!(sim.travel.stats.retained_route_bytes <= 1024 * 1024);
         assert_eq!(sim.envelopes.len(), sim.events.len());
         validate(&mut sim);

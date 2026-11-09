@@ -16,13 +16,13 @@ impl Capture {
             .min(self.radii.len() - 1)]
     }
 
-    fn tiles(&self, tick: u64, radius: f32) -> Vec<Rect> {
+    fn tiles(&self, tick: u64, _radius: f32) -> Vec<Rect> {
         self.tiles[usize::try_from(tick)
             .expect("bounded tick")
             .min(self.tiles.len() - 1)]
         .iter()
         .flatten()
-        .map(|t| Rect::from_corners(t.low * HALF, t.high * HALF).inflate(radius))
+        .map(|t| Rect::from_corners(t.low * HALF, t.high * HALF).inflate(-0.1))
         .collect()
     }
 }
@@ -38,11 +38,7 @@ fn occupied(
     if point.abs().cmpgt(HALF - Vec2::splat(radius)).any() {
         return Some("frame_edge");
     }
-    if capture
-        .tiles(tick, 0.0)
-        .iter()
-        .any(|r| point.distance(point.clamp(r.min, r.max)) <= radius + 0.0002)
-    {
+    if capture.tiles(tick, 0.0).iter().any(|r| r.contains(point)) {
         return Some("moving_tile");
     }
     for other in 0..capture.poses.len() {
@@ -202,6 +198,28 @@ fn follow_gutter(capture: &Capture, trip: &Trip, speed: f32) -> Option<Route> {
     })
 }
 
+fn swept_content(capture: &Capture, begin: u64, end: u64, radius: f32) -> Vec<Rect> {
+    let mut bounds = std::collections::BTreeMap::<usize, Rect>::new();
+    for tick in begin..=end {
+        let Some(row) = capture
+            .content
+            .get(usize::try_from(tick).expect("bounded tick"))
+        else {
+            continue;
+        };
+        for &(repository, rect) in row {
+            bounds
+                .entry(repository)
+                .and_modify(|bound| {
+                    bound.min = bound.min.min(rect.min);
+                    bound.max = bound.max.max(rect.max);
+                })
+                .or_insert(rect);
+        }
+    }
+    bounds.into_values().map(|r| r.inflate(radius)).collect()
+}
+
 struct Search<'a> {
     capture: &'a Capture,
     reservations: &'a [Trip],
@@ -223,15 +241,20 @@ fn better(best: Trip, candidate: Trip) -> Trip {
 impl Search<'_> {
     fn geometry(&mut self, template: &Trip, epoch: u64, bodies: &[Disc]) -> Trip {
         let mut candidate = template.clone();
-        let radius = self
-            .capture
-            .radius(candidate.departure)
-            .min(self.capture.radius(candidate.arrival));
+        let radius = (candidate.departure..=candidate.arrival)
+            .map(|tick| self.capture.radius(tick))
+            .fold(0.0_f32, f32::max);
         let tiles = self.capture.tiles(epoch, radius + 0.0002);
-        match self
-            .router
-            .route(candidate.source, candidate.destination, &tiles, bodies)
-        {
+        let content =
+            swept_content(self.capture, candidate.departure, candidate.arrival, radius);
+        match self.router.cost_route(
+            candidate.source,
+            candidate.destination,
+            &tiles,
+            bodies,
+            &content,
+            radius,
+        ) {
             Ok(points) => {
                 candidate.failure = None;
                 candidate.route = Route::new(&points, self.speed);
@@ -472,6 +495,7 @@ mod tests {
                 .collect(),
             tiles: vec![vec![]; 121],
             radii: vec![7.5; 121],
+            content: Vec::new(),
         }
     }
 
@@ -529,6 +553,7 @@ mod tests {
                 .collect(),
             tiles: vec![vec![]; 1201],
             radii: vec![7.5; 1201],
+            content: Vec::new(),
         };
         let (walking, _) = trips(&capture, 240.0, crate::model::BotTravel::Walk, true);
         assert_eq!(walking.len(), 1);

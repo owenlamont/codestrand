@@ -57,6 +57,7 @@ pub(super) struct Options {
     pub bot_travel: BotTravel,
     pub avatar_max_speed: f32,
     pub avatar_size: f32,
+    pub gutter: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize)]
@@ -112,6 +113,7 @@ impl Default for Options {
             bot_travel: BotTravel::Fade,
             avatar_max_speed: 480.0,
             avatar_size: 2.0,
+            gutter: 4.0,
         }
     }
 }
@@ -290,6 +292,7 @@ struct State {
     geometry: Geometry,
     avatar_scale: f32,
     avatar_size: f32,
+    gutter: f32,
     uncapped_travel: bool,
     slot_records: BTreeMap<usize, slots::Record>,
 }
@@ -511,7 +514,9 @@ impl Simulation {
             distance: 12.0,
             geometry: theme.geometry(),
             avatar_scale: 1.0,
-            avatar_size: options.avatar_size,
+            avatar_size: options.avatar_size
+                * repository_avatar_factor(repositories.len()),
+            gutter: options.gutter,
             uncapped_travel: options.travel_cap == TravelCap::None,
             slot_records: BTreeMap::new(),
         };
@@ -616,9 +621,9 @@ impl Simulation {
                 snapshots = None;
             }
         }
-        self.packing = crate::layout::packing::Packing::with_avatar_size(
+        self.packing = crate::layout::packing::Packing::with_gutter(
             &samples,
-            self.state.avatar_size,
+            self.state.gutter,
             uncapped.then_some(activation.as_slice()),
         );
         self.state = self.initial.clone();
@@ -1731,8 +1736,27 @@ pub(super) fn preview_frame(elapsed: Duration, fps: u16) -> u32 {
     u32::try_from(frame).unwrap_or(u32::MAX)
 }
 
+fn repository_avatar_factor(repositories: usize) -> f32 {
+    let t = ((count(repositories) - 5.0) / 25.0).clamp(0.0, 1.0);
+    1.0 - 0.5 * t * t * (3.0 - 2.0 * t)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn repository_size_taper_preserves_small_portraits_and_halves_at_thirty() {
+        assert_eq!(super::repository_avatar_factor(1), 1.0);
+        assert_eq!(super::repository_avatar_factor(5), 1.0);
+        assert_eq!(super::repository_avatar_factor(30), 0.5);
+        assert_eq!(super::repository_avatar_factor(300), 0.5);
+        for count in 5..30 {
+            assert!(
+                super::repository_avatar_factor(count)
+                    > super::repository_avatar_factor(count + 1)
+            );
+        }
+    }
+
     #[test]
     fn overlapping_commits_show_only_the_latest_samples_for_each_file() {
         let mut events = crate::timeline::synthetic();

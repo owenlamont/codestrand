@@ -156,6 +156,9 @@ pub(super) fn local_simulation() -> (Simulation, Vec<crate::repositories::Reposi
                 .map_or(Options::default().travel_cap, |value| {
                     crate::travel_seconds(&value).unwrap()
                 }),
+            gutter: std::env::var("CODESTRAND_GUTTER")
+                .ok()
+                .map_or(4.0, |v| v.parse().unwrap()),
             bot_travel: if std::env::var("CODESTRAND_BOT_TRAVEL").as_deref()
                 == Ok("walk")
             {

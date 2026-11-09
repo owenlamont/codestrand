@@ -32,6 +32,18 @@ struct Capture {
     poses: Vec<Vec<Pose>>,
     tiles: Vec<Vec<Option<crate::layout::packing::Tile>>>,
     radii: Vec<f32>,
+    content: Vec<Vec<(usize, Rect)>>,
+}
+
+impl Capture {
+    fn content_bytes(&self) -> usize {
+        self.content.capacity() * std::mem::size_of::<Vec<(usize, Rect)>>()
+            + self
+                .content
+                .iter()
+                .map(|row| row.capacity() * std::mem::size_of::<(usize, Rect)>())
+                .sum::<usize>()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -271,6 +283,7 @@ fn capture(simulation: &mut Simulation) -> Capture {
         poses: Vec::new(),
         tiles: Vec::new(),
         radii: Vec::new(),
+        content: Vec::new(),
     };
     let mut seen = 0;
     let mut poses = 0;
@@ -278,6 +291,7 @@ fn capture(simulation: &mut Simulation) -> Capture {
         simulation.advance_to(frame, 60);
         let state = &simulation.state;
         capture.radii.push(state.avatar_radius());
+        capture.content.push(slots::content_obstacles(state));
         capture
             .tiles
             .push(state.layout.repositories.iter().map(|r| r.tile).collect());
@@ -338,8 +352,9 @@ fn fade_clearance(
             .expect("bounded fade tick")
             .min(capture.tiles.len() - 1)];
         let tile_collision = row.iter().flatten().any(|tile| {
-            point.distance(point.clamp(tile.low * HALF, tile.high * HALF))
-                <= radius + 0.01
+            Rect::from_corners(tile.low * HALF, tile.high * HALF)
+                .inflate(-0.1)
+                .contains(point)
         });
         let avatar_collision = capture
             .poses
@@ -501,11 +516,12 @@ impl Simulation {
                 .count(),
             bot_fades: trips.iter().filter(|t| t.bot && t.fade).count(),
             max_speed: options.avatar_max_speed,
-            temporary_capture_bytes: capture
-                .poses
-                .iter()
-                .map(|p| p.capacity() * std::mem::size_of::<Pose>())
-                .sum::<usize>()
+            temporary_capture_bytes: capture.content_bytes()
+                + capture
+                    .poses
+                    .iter()
+                    .map(|p| p.capacity() * std::mem::size_of::<Pose>())
+                    .sum::<usize>()
                 + capture
                     .tiles
                     .iter()
@@ -587,12 +603,25 @@ impl RouteFailure {
 }
 
 impl Router {
+    #[cfg(test)]
     fn route(
         &mut self,
         source: Vec2,
         target: Vec2,
         obstacles: &[Rect],
         bodies: &[Disc],
+    ) -> Result<Vec<Vec2>, RouteFailure> {
+        self.cost_route(source, target, obstacles, bodies, &[], 5.8)
+    }
+
+    fn cost_route(
+        &mut self,
+        source: Vec2,
+        target: Vec2,
+        obstacles: &[Rect],
+        bodies: &[Disc],
+        content: &[Rect],
+        radius: f32,
     ) -> Result<Vec<Vec2>, RouteFailure> {
         let changed = self.tiles.len() != obstacles.len()
             || self.tiles.iter().zip(obstacles).any(|(a, b)| {
@@ -606,7 +635,8 @@ impl Router {
             self.tiles = obstacles.to_vec();
             self.epochs += 1;
         }
-        let mut axes = [vec![-634.2, 634.2], vec![-354.2, 354.2]];
+        let limit = HALF - Vec2::splat(radius + 0.001);
+        let mut axes = [vec![-limit.x, limit.x], vec![-limit.y, limit.y]];
         add_axes(&mut axes, obstacles);
         add_axes(
             &mut axes,
@@ -617,19 +647,15 @@ impl Router {
         );
         axes[0].extend([source.x, target.x]);
         axes[1].extend([source.y, target.y]);
-        graph_route(source, target, obstacles, bodies, axes)
+        add_axes(&mut axes, content);
+        graph_route(source, target, obstacles, bodies, content, axes, limit)
     }
 }
 
 fn add_axes(axes: &mut [Vec<f32>; 2], obstacles: &[Rect]) {
-    let limit = HALF - Vec2::splat(5.8);
     for r in obstacles {
         for (axis, values) in axes.iter_mut().enumerate() {
-            values.extend(
-                [r.min[axis] - 0.01, r.max[axis] + 0.01]
-                    .into_iter()
-                    .filter(|v| v.abs() <= limit[axis]),
-            );
+            values.extend([r.min[axis] - 0.01, r.max[axis] + 0.01]);
         }
     }
 }
@@ -639,9 +665,10 @@ fn graph_route(
     target: Vec2,
     obstacles: &[Rect],
     bodies: &[Disc],
+    content: &[Rect],
     mut axes: [Vec<f32>; 2],
+    limit: Vec2,
 ) -> Result<Vec<Vec2>, RouteFailure> {
-    let limit = HALF - Vec2::splat(5.8);
     if [source, target].iter().any(|p| {
         p.abs().cmpgt(limit).any()
             || obstacles.iter().any(|r| r.contains(*p))
@@ -659,10 +686,13 @@ fn graph_route(
                 body.point.distance(a + delta * t) < body.radius
             })
     };
-    if clear(source, target) {
+    if clear(source, target)
+        && !content.iter().any(|&r| slots::segment(source, target, r))
+    {
         return Ok(vec![source, target]);
     }
-    for values in &mut axes {
+    for (axis, values) in axes.iter_mut().enumerate() {
+        values.retain(|v| v.abs() <= limit[axis]);
         values.sort_by(f32::total_cmp);
         values.dedup();
     }
@@ -706,7 +736,10 @@ fn graph_route(
             if !clear(point(i), point(next)) {
                 continue;
             }
-            let delta = point(i).distance(point(next));
+            let a = point(i);
+            let b = point(next);
+            let penalty = content.iter().filter(|&&r| slots::segment(a, b, r)).count();
+            let delta = a.distance(b) * (1.0 + 100.0 * super::count(penalty));
             #[expect(
                 clippy::cast_possible_truncation,
                 clippy::cast_sign_loss,
@@ -730,22 +763,74 @@ fn graph_route(
         path.push(point(node));
     }
     path.reverse();
-    let mut simplified = vec![source];
+    Ok(simplify_path(&path, clear, content))
+}
+
+fn simplify_path(
+    path: &[Vec2],
+    clear: impl Fn(Vec2, Vec2) -> bool,
+    content: &[Rect],
+) -> Vec<Vec2> {
+    let mut simplified = vec![path[0]];
     let mut i = 0;
     while i + 1 < path.len() {
         let next = (i + 1..path.len())
             .rev()
-            .find(|&j| clear(path[i], path[j]))
-            .expect("connected path");
+            .find(|&j| {
+                clear(path[i], path[j])
+                    && !content.iter().any(|&r| slots::segment(path[i], path[j], r))
+            })
+            .unwrap_or(i + 1);
         simplified.push(path[next]);
         i = next;
     }
-    Ok(simplified)
+    simplified
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn routing_uses_the_full_portrait_radius_at_the_frame_edge() {
+        let mut router = Router::default();
+        let wall = Rect::from_corners(Vec2::new(-20.0, -350.0), Vec2::new(20.0, 350.0));
+        let a = Vec2::new(-100.0, 0.0);
+        let b = Vec2::new(100.0, 0.0);
+        assert!(router.cost_route(a, b, &[wall], &[], &[], 14.0).is_err());
+        let route = router.cost_route(a, b, &[wall], &[], &[], 5.8).unwrap();
+        assert!(
+            route
+                .iter()
+                .all(|p| p.abs().cmple(HALF - Vec2::splat(5.8)).all())
+        );
+        let wall = wall.inflate(-20.0);
+        let route = router.cost_route(a, b, &[wall], &[], &[], 14.0).unwrap();
+        assert!(
+            route
+                .iter()
+                .all(|p| p.abs().cmple(HALF - Vec2::splat(14.0)).all())
+        );
+    }
+    #[test]
+    fn routes_prefer_content_clear_edges_but_accept_unavoidable_content() {
+        let mut router = Router::default();
+        let content = Rect::from_center_size(Vec2::ZERO, Vec2::splat(40.0));
+        let source = Vec2::new(-100.0, 0.0);
+        let target = Vec2::new(100.0, 0.0);
+        let route = router
+            .cost_route(source, target, &[], &[], &[content], 14.0)
+            .unwrap();
+        assert!(
+            route
+                .windows(2)
+                .all(|p| !slots::segment(p[0], p[1], content))
+        );
+        let unavoidable = router
+            .cost_route(Vec2::ZERO, target, &[], &[], &[content], 14.0)
+            .unwrap();
+        assert_eq!(unavoidable[0], Vec2::ZERO);
+        assert_eq!(*unavoidable.last().unwrap(), target);
+    }
 
     #[test]
     fn uncapped_blocked_routes_receive_another_wait_instead_of_fading() {

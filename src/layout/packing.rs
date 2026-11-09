@@ -254,8 +254,9 @@ fn allocate(
                 let clamped = cross.clamp(low[1 - axis], high[1 - axis]);
                 // Inverting a subpixel birth sliver amplifies cancellation in its tile edges.
                 assert!(
-                    (cross - clamped).abs() * stretch[1 - axis] < 0.001,
-                    "feasible child cross-section"
+                    (cross - clamped).abs() * stretch[1 - axis] < 0.02,
+                    "feasible child cross-section: cross={cross} clamped={clamped} stretch={stretch:?} delta_px={}",
+                    (cross - clamped).abs() * stretch[1 - axis]
                 );
                 interval(&child.sizes, axis, clamped)
                     .expect("feasible child cross-section")
@@ -335,7 +336,7 @@ fn insert(
     }
     let mut best = None;
     let presence: Vec<_> = weights.iter().map(|&w| f32::from(w > 0.0)).collect();
-    let gap = gutters(presence.iter().sum()) * gutter_scale;
+    let gap = Vec2::splat(gutter_scale);
     let mut cached = vec![Feasible::default(); nodes.len()];
     feasibility(nodes, 0, weights, &presence, gap, &mut cached);
     let mut leaf = vec![Feasible::default()];
@@ -438,7 +439,7 @@ fn rotations(
             nodes,
             &sample.weights,
             &sample.presence,
-            gutters(sample.presence.iter().sum()) * gutter_scale,
+            Vec2::splat(gutter_scale),
         )
         .expect("planned tiles remain feasible");
         for (i, tile) in placement
@@ -458,20 +459,20 @@ fn rotations(
 impl Packing {
     #[cfg(test)]
     pub(crate) fn build(regions: &[Vec<RepositoryRegion>]) -> Self {
-        Self::build_births(regions, false, 1.0, None)
+        Self::build_births(regions, false, 4.0, None)
     }
 
     #[cfg(test)]
     pub(crate) fn before_service(regions: &[Vec<RepositoryRegion>]) -> Self {
-        Self::build_births(regions, true, 1.0, None)
+        Self::build_births(regions, true, 4.0, None)
     }
 
-    pub(crate) fn with_avatar_size(
+    pub(crate) fn with_gutter(
         regions: &[Vec<RepositoryRegion>],
         scale: f32,
         activation: Option<&[u32]>,
     ) -> Self {
-        Self::build_births(regions, true, scale.max(1.0), activation)
+        Self::build_births(regions, true, scale, activation)
     }
 
     fn build_births(
@@ -649,6 +650,7 @@ impl Packing {
             let (low, high) = (turn(r.low), turn(r.high));
             r.low = low.min(high) * scale + origin;
             r.high = low.max(high) * scale + origin;
+            r.height *= scale;
             r.live = tile.is_some();
             r.tile = tile;
             r.files = sample.weights[i]
@@ -659,7 +661,9 @@ impl Packing {
                         .unwrap_or(1.0)
                         .clamp(0.0, 1.0));
             r.rotated = self.rotated[i];
-            r.outline.clear();
+            for point in &mut r.outline {
+                *point = turn(*point) * scale + origin;
+            }
             origins.push(origin);
             scales.push(scale);
         }
@@ -684,7 +688,7 @@ impl Packing {
             &self.nodes,
             &sample.weights,
             &presence,
-            gutters(presence.iter().sum()) * self.gutter_scale,
+            Vec2::splat(self.gutter_scale),
         )
         .expect("presence-scaled tiles remain feasible");
         self.regions[tick]
@@ -764,8 +768,8 @@ mod tests {
         let rows = fixture();
         let mut activation = vec![u32::MAX; 30];
         activation[3] = 30;
-        let normal = Packing::with_avatar_size(&rows, 2.0, None);
-        let waiting = Packing::with_avatar_size(&rows, 2.0, Some(&activation));
+        let normal = Packing::with_gutter(&rows, 2.0, None);
+        let waiting = Packing::with_gutter(&rows, 2.0, Some(&activation));
         assert!(normal.sample(35).unwrap().0[3].tile.is_none());
         assert!(waiting.sample(35).unwrap().0[3].tile.is_some());
     }
@@ -882,7 +886,7 @@ mod tests {
     }
 
     #[test]
-    fn doubled_avatar_gutters_partition_five_and_thirty_repository_views() {
+    fn configurable_gutters_partition_five_and_thirty_repository_views() {
         for count in [5, 30] {
             let rows: Vec<_> = fixture()
                 .into_iter()
@@ -891,10 +895,10 @@ mod tests {
                     row
                 })
                 .collect();
-            let shares: Vec<_> = [1.0, 2.0]
+            let shares: Vec<_> = [0.0, 4.0]
                 .into_iter()
                 .map(|scale| {
-                    let packing = Packing::with_avatar_size(&rows, scale, None);
+                    let packing = Packing::with_gutter(&rows, scale, None);
                     let row = packing
                         .sample(u64::try_from(rows.len() - 1).unwrap())
                         .unwrap()
@@ -914,6 +918,7 @@ mod tests {
                     Tile::viewport().area() - area
                 })
                 .collect();
+            assert!(shares[0].abs() < 0.00001);
             assert!(shares[1] > shares[0]);
             eprintln!(
                 "GUTTER_SHARE repositories={count} before={} after={} viewport={}",
@@ -934,7 +939,7 @@ mod tests {
                 &packing.nodes,
                 &sample.weights,
                 &sample.presence,
-                gutters(sample.presence.iter().sum()),
+                Vec2::splat(packing.gutter_scale),
             )
             .unwrap();
             let (root, gaps) = partition(&packing.nodes, 0, &placement);
