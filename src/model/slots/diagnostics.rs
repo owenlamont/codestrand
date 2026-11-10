@@ -5,6 +5,9 @@ use bevy::math::{Rect, Vec3};
 
 #[derive(Default, Serialize)]
 pub(crate) struct MovingBeams {
+    pub label_label_pairs: u64,
+    pub label_joint_avoidable_frames: u64,
+    pub label_joint_exhausted_frames: u64,
     pub parked_close_pairs: u64,
     pub label_nearest_violations: u64,
     pub label_parked_violations: u64,
@@ -250,6 +253,51 @@ impl MovingBeams {
             );
         }
     }
+    fn observe_label_pairs(&mut self, state: &crate::model::State) {
+        let before = self.label_label_pairs;
+        self.label_joint_exhausted_frames += u64::from(
+            state
+                .avatars
+                .iter()
+                .any(|a| a.presence > 0.0 && a.name_visibility.joint_exhausted),
+        );
+        let labels: Vec<_> = state
+            .avatars
+            .iter()
+            .filter(|a| a.presence > 0.0)
+            .filter_map(|a| a.name_visibility.placement.as_ref())
+            .map(|name| {
+                let size = crate::model::names::rect(
+                    bevy::math::Vec2::ZERO,
+                    &name.text,
+                    name.scale,
+                    state.geometry.label_height,
+                )
+                .size();
+                Rect::from_corners(
+                    name.point - bevy::math::Vec2::Y * size.y,
+                    name.point + bevy::math::Vec2::X * size.x,
+                )
+            })
+            .collect();
+        for (i, rect) in labels.iter().enumerate() {
+            self.label_label_pairs += u64::try_from(
+                labels[i + 1..]
+                    .iter()
+                    .filter(|other| !rect.intersect(**other).is_empty())
+                    .count(),
+            )
+            .expect("bounded avatars");
+        }
+        self.label_joint_avoidable_frames += u64::from(
+            self.label_label_pairs > before
+                && state
+                    .avatars
+                    .iter()
+                    .filter(|a| a.presence > 0.0)
+                    .all(|a| a.name_visibility.joint_clear),
+        );
+    }
     fn observe_avatars(&mut self, simulation: &Simulation) {
         let state = &simulation.state;
         if state.layout.repositories.is_empty() {
@@ -343,6 +391,7 @@ impl MovingBeams {
             return;
         }
         self.observe_avatars(simulation);
+        self.observe_label_pairs(state);
         for (pulse, target) in state
             .pulses
             .iter()

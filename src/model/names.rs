@@ -25,6 +25,8 @@ pub(crate) fn rect(point: Vec2, text: &str, scale: f32, height: f32) -> Rect {
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct Visibility {
+    pub joint_exhausted: bool,
+    pub joint_clear: bool,
     pub opacity: f32,
     pub visible: bool,
     pub placement: Option<Placement>,
