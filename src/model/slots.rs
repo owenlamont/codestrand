@@ -808,9 +808,15 @@ impl LabelSpace<'_> {
             + goal_cost[0]
             + goal_cost[1] * 1e6
             + goal_cost[2]
-            + motion
-                .previous
-                .map_or(0.0, |p| (angular_velocity - p.angular_velocity).abs());
+            + motion.previous.map_or(0.0, |p| {
+                let distance = |a: f32, b: f32| {
+                    (a - b + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)
+                        - std::f32::consts::PI
+                };
+                (angular_velocity - p.angular_velocity).abs()
+                    + distance(target, p.angle).abs() * 5_000.0
+                    + distance(angle, p.angle).abs() * 50_000.0
+            });
         (
             labels::Candidate {
                 angle,

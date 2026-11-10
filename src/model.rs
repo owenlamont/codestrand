@@ -318,6 +318,7 @@ pub(super) struct Simulation {
     theme: Theme,
     travel: travel::Plan,
     visual_updates: bool,
+    title_forecast: Vec<Vec<Option<bevy::math::Rect>>>,
 }
 
 impl Simulation {
@@ -470,6 +471,7 @@ impl Simulation {
         }
         simulation.caption_plan =
             caption::plan(&simulation.schedule, &simulation.events);
+        simulation.plan_titles();
         Ok(simulation)
     }
 
@@ -549,11 +551,7 @@ impl Simulation {
         }
         (state.focus, state.distance) = state.fit();
         let total = events.len();
-        let prior_active = (0..repositories.len())
-            .map(|repository| {
-                events[..start].iter().any(|e| e.repository == repository)
-            })
-            .collect();
+        let prior_active = prior_activity(&events[..start], repositories.len());
         events.truncate(end);
         events.drain(..start);
         let mut simulation = Self {
@@ -574,6 +572,7 @@ impl Simulation {
             theme: theme.clone(),
             travel: travel::Plan::default(),
             visual_updates: true,
+            title_forecast: Vec::new(),
         };
         if !repositories.is_empty() {
             let snapshots = simulation
@@ -1787,6 +1786,12 @@ pub(super) fn preview_frame(elapsed: Duration, fps: u16) -> u32 {
 fn repository_avatar_factor(repositories: usize) -> f32 {
     let t = ((count(repositories) - 5.0) / 25.0).clamp(0.0, 1.0);
     1.0 - 0.5 * t * t * (3.0 - 2.0 * t)
+}
+
+fn prior_activity(events: &[Event], count: usize) -> Vec<bool> {
+    (0..count)
+        .map(|repository| events.iter().any(|e| e.repository == repository))
+        .collect()
 }
 
 #[cfg(test)]

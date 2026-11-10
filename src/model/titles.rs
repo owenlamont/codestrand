@@ -66,8 +66,6 @@ pub(super) fn obstacles(sim: &Simulation) -> Vec<(usize, Rect)> {
 pub(super) struct Title {
     pub point: Vec2,
     target: Vec2,
-    content: Rect,
-    tile: Rect,
     pub size: Vec2,
     pub scale: f32,
 }
@@ -91,19 +89,40 @@ fn clamp(point: Vec2, size: Vec2, tile: Rect) -> Vec2 {
     let low = tile.min + Vec2::Y * size.y;
     point.clamp(low, (tile.max - Vec2::X * size.x).max(low))
 }
+fn title_tile(tile: crate::layout::packing::Tile, label_height: f32) -> Rect {
+    let tile = Rect::from_corners(tile.low * HALF, tile.high * HALF).inflate(-2.0);
+    tile.inflate(-(16.0 + label_height + 8.0).min(tile.size().min_element() / 6.0))
+}
+fn clear(
+    point: Vec2,
+    size: Vec2,
+    tile: Rect,
+    blocked: impl Iterator<Item = Rect>,
+    rays: &[(Vec2, Vec2)],
+) -> bool {
+    let rect = Rect::from_corners(point - Vec2::Y * size.y, point + Vec2::X * size.x)
+        .inflate(4.0);
+    clamp(point, size, tile).distance(point) <= 0.1
+        && !blocked.into_iter().any(|r| area(rect, r) > 0.0)
+        && !rays
+            .iter()
+            .any(|(a, b)| super::slots::segment(*a, *b, rect))
+}
 fn select(
     size: Vec2,
     tile: Rect,
     content: Rect,
     blocked: &[Rect],
-    texts: &[Rect],
     rays: &[(Vec2, Vec2)],
+    future: &[Rect],
+    previous: Option<Vec2>,
 ) -> Vec2 {
     let middle = content.center().x - size.x * 0.5;
     let below = clamp(Vec2::new(middle, content.min.y - 24.0), size, tile);
     let above = clamp(Vec2::new(middle, content.max.y + size.y + 8.0), size, tile);
     [below, above]
         .into_iter()
+        .chain(previous.map(|p| clamp(p, size, tile)))
         .chain((0..=6_u8).flat_map(|x| {
             (0..=4_u8).map(move |y| {
                 let low = tile.min + Vec2::Y * size.y;
@@ -121,13 +140,27 @@ fn select(
                     point + Vec2::X * size.x,
                 );
                 (
-                    texts.iter().filter(|r| area(rect, **r) > 0.0).count(),
+                    blocked.iter().filter(|r| area(rect, **r) > 0.0).count(),
                     blocked.iter().map(|r| area(rect, *r)).sum::<f32>(),
                     super::count(
                         rays.iter()
                             .filter(|(a, b)| super::slots::segment(*a, *b, rect))
                             .count(),
                     ),
+                    future
+                        .iter()
+                        .map(|r| area(rect.inflate(4.0), *r))
+                        .sum::<f32>()
+                        + previous.map_or(0.0, |p| point.distance(p) * 100.0),
+                    -future
+                        .iter()
+                        .map(|r| {
+                            let delta = (r.min - rect.max)
+                                .max(rect.min - r.max)
+                                .max(Vec2::ZERO);
+                            delta.length().min(80.0)
+                        })
+                        .fold(80.0_f32, f32::min),
                     point.distance_squared(below),
                 )
             };
@@ -137,6 +170,8 @@ fn select(
                 .then(a.1.total_cmp(&b.1))
                 .then(a.2.total_cmp(&b.2))
                 .then(a.3.total_cmp(&b.3))
+                .then(a.4.total_cmp(&b.4))
+                .then(a.5.total_cmp(&b.5))
         })
         .expect("title candidates")
 }
@@ -219,6 +254,53 @@ fn move_clear(
     clamp(point + desired.clamp_length_max(480.0 * dt), size, tile)
 }
 impl Simulation {
+    pub(super) fn plan_titles(&mut self) {
+        self.visual_updates = false;
+        self.state = self.initial.clone();
+        let frames = super::frames_for(self.duration(), 60).expect("bounded schedule");
+        for frame in (0..=frames + 15).step_by(15) {
+            self.advance_to(frame, 60);
+            let count = self.state.layout.repositories.len();
+            let mut bounds = vec![None::<Rect>; count * 2];
+            for (owner, rect) in obstacles(self) {
+                bounds[owner] = Some(bounds[owner].map_or(rect, |r| {
+                    Rect::from_corners(r.min.min(rect.min), r.max.max(rect.max))
+                }));
+            }
+            for (index, repository) in self.state.layout.repositories.iter().enumerate()
+            {
+                bounds[count + index] = repository
+                    .tile
+                    .map(|t| title_tile(t, self.state.geometry.label_height));
+            }
+            self.title_forecast.push(bounds);
+        }
+        self.state = self.initial.clone();
+        self.visual_updates = true;
+    }
+    fn title_horizon(&self, index: usize, tile: Rect, size: Vec2) -> (Vec<Rect>, Rect) {
+        let start = usize::try_from(self.state.tick / 15).expect("bounded tick");
+        let future: Vec<_> = self
+            .title_forecast
+            .iter()
+            .skip(start)
+            .take(17)
+            .filter_map(|row| row[index])
+            .collect();
+        let stable_tile = self
+            .title_forecast
+            .iter()
+            .skip(start)
+            .take(17)
+            .filter_map(|row| row[self.state.layout.repositories.len() + index])
+            .fold(tile, |a, b| a.intersect(b));
+        let stable_tile = if stable_tile.size().cmpge(size + Vec2::splat(8.0)).all() {
+            stable_tile
+        } else {
+            tile
+        };
+        (future, stable_tile)
+    }
     pub(super) fn place_titles(&mut self, dt: f32) {
         if self.state.layout.repositories.is_empty() {
             return;
@@ -229,21 +311,9 @@ impl Simulation {
             .iter()
             .map(|b| (screen(self, b.from), screen(self, b.to)))
             .collect();
-        let names: Vec<_> = self
-            .labels_for_detail(|_| true)
-            .iter()
-            .filter(|l| l.kind != super::LabelKind::Repository)
-            .map(|l| label_bounds(self, l))
-            .chain(super::caption::frame_text_rects())
-            .collect();
         for (index, region) in self.state.layout.repositories.iter().enumerate() {
             let Some(tile) = region.tile else { continue };
-            let tile =
-                Rect::from_corners(tile.low * HALF, tile.high * HALF).inflate(-2.0);
-            let inset =
-                (self.state.avatar_radius() + self.state.geometry.label_height + 8.0)
-                    .min(tile.size().min_element() / 6.0);
-            let tile = tile.inflate(-inset);
+            let tile = title_tile(tile, self.state.geometry.label_height);
             if tile.size().min_element() <= 8.0 {
                 self.state.titles.remove(&index);
                 continue;
@@ -276,32 +346,41 @@ impl Simulation {
                 .reduce(|a, b| Rect::from_corners(a.min.min(b.min), a.max.max(b.max)))
                 .unwrap_or(tile);
             let previous = self.state.titles.get(&index);
+            let (future, stable_tile) = self.title_horizon(index, tile, size);
             let changed = previous.is_none_or(|p| {
-                (p.content.min - content.min).abs().max_element() > 8.0
-                    || (p.content.max - content.max).abs().max_element() > 8.0
-                    || (p.tile.min - tile.min).abs().max_element() > 2.0
-                    || (p.tile.max - tile.max).abs().max_element() > 2.0
-                    || names.iter().any(|r| {
-                        area(p.rect(), *r) > 0.0
-                            && area(
-                                Rect::from_corners(
-                                    p.target - Vec2::Y * size.y,
-                                    p.target + Vec2::X * size.x,
-                                )
-                                .inflate(4.0),
-                                *r,
-                            ) > 0.0
-                    })
+                !clear(
+                    p.target,
+                    size,
+                    stable_tile,
+                    own.iter().chain(future.iter().take(5)).copied(),
+                    &rays,
+                )
             });
-            let target = if changed {
-                select(size, tile, content, &own, &names, &rays)
+            let selected = if changed {
+                select(
+                    size,
+                    stable_tile,
+                    content,
+                    &own,
+                    &rays,
+                    &future,
+                    previous.map(|p| p.target),
+                )
             } else {
                 previous.expect("existing stable title").target
             };
+            let target = previous.map_or(selected, |p| {
+                if clamp(p.target, size, tile).distance(p.target) <= 0.1
+                    && selected.distance(p.target) < 12.0
+                {
+                    p.target
+                } else {
+                    selected
+                }
+            });
             let point = previous.map_or(target, |p| {
                 move_clear(p.point, target, size, tile, content, dt)
             });
-            let signature = previous.filter(|_| !changed);
             self.state.titles.insert(
                 index,
                 Title {
@@ -309,8 +388,6 @@ impl Simulation {
                     target,
                     size,
                     scale,
-                    content: signature.map_or(content, |p| p.content),
-                    tile: signature.map_or(tile, |p| p.tile),
                 },
             );
         }
@@ -321,12 +398,27 @@ impl Simulation {
 mod tests {
     use super::*;
     #[test]
+    fn title_stays_put_while_content_moves_clear_of_it() {
+        let tile = Rect::from_corners(Vec2::splat(-200.0), Vec2::splat(200.0));
+        let size = Vec2::new(100.0, 24.0);
+        let point = Vec2::new(-50.0, -100.0);
+        for x in -60_i16..60 {
+            let content = Rect::from_center_size(
+                Vec2::new(f32::from(x), 50.0),
+                Vec2::splat(50.0),
+            );
+            assert!(clear(point, size, tile, std::iter::once(content), &[]));
+        }
+        let collision = Rect::from_center_size(point, Vec2::splat(10.0));
+        assert!(!clear(point, size, tile, std::iter::once(collision), &[]));
+    }
+    #[test]
     fn title_is_centred_below_clear_content_and_inside_its_tile() {
         let tile = Rect::from_corners(Vec2::splat(-200.0), Vec2::splat(200.0));
         let content =
             Rect::from_corners(Vec2::new(-80.0, -20.0), Vec2::new(80.0, 100.0));
         let size = Vec2::new(100.0, 24.0);
-        let point = select(size, tile, content, &[content], &[], &[]);
+        let point = select(size, tile, content, &[content], &[], &[], None);
         let rect =
             Rect::from_corners(point - Vec2::Y * size.y, point + Vec2::X * size.x);
         assert!(rect.center().x.abs() < 0.001);
@@ -341,10 +433,10 @@ mod tests {
         let content =
             Rect::from_corners(Vec2::new(-80.0, -20.0), Vec2::new(80.0, 100.0));
         let size = Vec2::new(100.0, 24.0);
-        let first = select(size, tile, content, &[content], &[], &[]);
+        let first = select(size, tile, content, &[content], &[], &[], None);
         let occupied =
             Rect::from_corners(first - Vec2::Y * size.y, first + Vec2::X * size.x);
-        let moved = select(size, tile, content, &[content], &[occupied], &[]);
+        let moved = select(size, tile, content, &[content, occupied], &[], &[], None);
         assert_eq!(
             area(
                 Rect::from_corners(moved - Vec2::Y * size.y, moved + Vec2::X * size.x),
