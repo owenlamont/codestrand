@@ -46,7 +46,10 @@ pub(super) fn assert_labels_and_beams(sim: &Simulation) {
             assert!(
                 centre.cmpge(Vec2::splat(radius)).all()
                     && centre
-                        .cmple(Vec2::new(1280.0 - radius, 720.0 - radius))
+                        .cmple(Vec2::new(
+                            1280.0 - radius,
+                            caption::MULTI_TOP - caption::BUFFER - radius
+                        ))
                         .all(),
                 "avatar disc clipped at {} for {}",
                 sim.seconds(),
@@ -82,6 +85,12 @@ pub(super) fn assert_labels_and_beams(sim: &Simulation) {
             sim.seconds(),
             avatar.name
         );
+        if !sim.layout().repositories.is_empty() {
+            assert!(
+                bounds.max.y <= caption::MULTI_TOP - caption::BUFFER,
+                "label covers buffered caption: {bounds:?}"
+            );
+        }
     }
     let beams = sim.beams();
     for fragment in sim.fragments() {
@@ -187,6 +196,9 @@ pub(super) fn local_simulation() -> (Simulation, Vec<crate::repositories::Reposi
 #[ignore = "requires local repository manifest and diagnostic output path"]
 fn local_nitpick_measurements() {
     let (mut sim, repos) = local_simulation();
+    if std::env::var_os("CODESTRAND_CAPTION_AUDIT").is_some() {
+        return caption_measurements(sim);
+    }
     let mut previous = vec![None::<f32>; repos.len()];
     let mut rates = vec![0.0_f32; repos.len()];
     let mut rate_frames = vec![0; repos.len()];
@@ -257,6 +269,54 @@ fn local_nitpick_measurements() {
     let result = serde_json::json!({"tiles":repos.iter().enumerate().map(|(i,r)| serde_json::json!({"name":r.name(),"max_log_zoom_per_second":rates[i],"frame":rate_frames[i]})).collect::<Vec<_>>(),"label_avatar_frames":labels,"orphan_frames":orphans,"orphan_fragment_frames":missing_fragments});
     std::fs::write(
         std::env::var("CODESTRAND_NITPICKS").unwrap(),
+        serde_json::to_vec_pretty(&result).unwrap(),
+    )
+    .unwrap();
+}
+
+fn caption_measurements(mut sim: Simulation) {
+    let duration = sim.duration();
+    let frames = (frames_for(duration, 10).unwrap() + 24) * 6;
+    let bar = bevy::math::Rect::from_corners(
+        Vec2::new(-640.0, -360.0),
+        Vec2::new(640.0, caption::BOTTOM),
+    );
+    let (mut discs, mut labels, mut travelling) = (0_u64, 0_u64, 0_u64);
+    let mut peak = (0.0_f32, 0_u32, 0_usize);
+    let mut service_ticks = vec![0_u64; sim.events.len()];
+    for frame in 0..=frames {
+        sim.advance_to(frame, 60);
+        for pulse in &sim.state.pulses {
+            if service_ticks[pulse.commit] == 0 {
+                service_ticks[pulse.commit] = sim.state.tick;
+            }
+        }
+        for (index, avatar) in sim
+            .state
+            .avatars
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| a.presence > 0.0)
+        {
+            let point = titles::screen(&sim, avatar.position);
+            let depth = sim.state.avatar_radius()
+                - point.distance(point.clamp(bar.min, bar.max));
+            discs += u64::from(depth > 0.0);
+            travelling +=
+                u64::from(depth > 0.0 && sim.travel.travelling(index, sim.state.tick));
+            if depth > peak.0 {
+                peak = (depth, frame, sim.state.next_event);
+            }
+            let label = sim.state.avatar_label(avatar);
+            labels += u64::from(
+                label.opacity > 0.0
+                    && !titles::label_bounds(&sim, &label).intersect(bar).is_empty(),
+            );
+        }
+    }
+    let result = serde_json::json!({"duration":duration,"video_frames":frames/6+1,"samples":frames+1,"disc_intersections":discs,"travelling_disc_intersections":travelling,"label_intersections":labels,"peak_disc_depth":peak.0,"peak_tick":peak.1,"peak_commit":peak.2,"service_ticks":service_ticks,"travel":sim.travel.report()});
+    std::fs::write(
+        std::env::var("CODESTRAND_CAPTION_AUDIT").unwrap(),
         serde_json::to_vec_pretty(&result).unwrap(),
     )
     .unwrap();

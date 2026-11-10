@@ -3,7 +3,7 @@ use std::sync::{Arc, OnceLock};
 use bevy::math::{FloatExt, Vec2};
 
 use super::{RepositoryRegion, outline};
-use crate::model::framing;
+use crate::model::{caption, framing};
 
 mod fit;
 mod zoom;
@@ -23,7 +23,10 @@ impl Tile {
     pub(crate) fn viewport() -> Self {
         let limit = Vec2::ONE - Vec2::splat(2.0 * framing::MARGIN) / framing::VIEWPORT;
         Self {
-            low: -limit,
+            low: Vec2::new(
+                -limit.x,
+                (caption::BOTTOM + framing::MARGIN) * 2.0 / framing::VIEWPORT.y,
+            ),
             high: limit,
         }
     }
@@ -481,7 +484,10 @@ fn gutter_cells(nodes: &[Node], placement: &[Placement]) -> Vec<Option<Tile>> {
         nodes,
         0,
         Tile {
-            low: -limit,
+            low: Vec2::new(
+                -limit.x,
+                (caption::BOTTOM + 16.0) * 2.0 / framing::VIEWPORT.y,
+            ),
             high: limit,
         },
         placement,
@@ -976,7 +982,7 @@ mod tests {
                     row
                 })
                 .collect();
-            let shares: Vec<_> = [0.0, 4.0]
+            let shares: Vec<_> = [0.0, 4.0, 20.0]
                 .into_iter()
                 .map(|scale| {
                     let packing = Packing::with_gutter(&rows, scale, None);
@@ -990,6 +996,11 @@ mod tests {
                         .map(Tile::area)
                         .sum::<f32>();
                     assert_eq!(row.iter().filter(|r| r.tile.is_some()).count(), count);
+                    assert!(row.iter().filter_map(|r| r.gutter).all(|t| t.low.y
+                        * framing::VIEWPORT.y
+                        * 0.5
+                        - 14.0
+                        >= caption::BOTTOM));
                     assert!(
                         row.iter().filter_map(|r| r.tile).all(|t| t
                             .pixels()
@@ -1001,6 +1012,7 @@ mod tests {
                 .collect();
             assert!(shares[0].abs() < 0.00001);
             assert!(shares[1] > shares[0]);
+            assert!(shares[2] > shares[1]);
             eprintln!(
                 "GUTTER_SHARE repositories={count} before={} after={} viewport={}",
                 shares[0],

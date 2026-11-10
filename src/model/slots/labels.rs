@@ -88,7 +88,6 @@ pub(super) fn forecast_clip(
     future: &[bevy::math::Vec2],
     emergency: bool,
 ) -> f32 {
-    let limit = super::HALF - bevy::math::Vec2::splat(16.0);
     let mut maximum = 0.0_f32;
     for &body in future {
         (angle, velocity) = steer(
@@ -99,12 +98,7 @@ pub(super) fn forecast_clip(
             emergency,
         );
         let rect = tangent_rect(body, size, distance, angle);
-        let outside = (rect.min + limit)
-            .min(bevy::math::Vec2::ZERO)
-            .length_squared()
-            + (rect.max - limit)
-                .max(bevy::math::Vec2::ZERO)
-                .length_squared();
+        let outside = crate::model::caption::outside(rect, 16.0);
         maximum = maximum.max(outside);
     }
     maximum
@@ -383,5 +377,16 @@ mod tests {
         );
         assert!(clear <= 0.001);
         assert!(clipped > 100.0);
+    }
+
+    #[test]
+    fn caption_buffer_rejects_an_attachment_that_fits_the_window() {
+        let body = Vec2::new(0.0, crate::model::caption::BOTTOM + 16.0);
+        let size = Vec2::new(236.0, 24.0);
+        let down = tangent_rect(body, size, 15.333_333, -0.1);
+        let up = tangent_rect(body, size, 15.333_333, std::f32::consts::FRAC_PI_2);
+        assert!(down.min.y > -359.5);
+        assert!(crate::model::caption::outside(down, 0.5) > 0.0);
+        assert_eq!(crate::model::caption::outside(up, 0.5), 0.0);
     }
 }

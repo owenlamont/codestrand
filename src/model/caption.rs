@@ -15,8 +15,17 @@ pub(crate) enum Style {
 pub(crate) const FONT_SIZE: f32 = 14.0;
 pub(crate) const MULTI_TOP: f32 = 698.0;
 pub(crate) const BAR_HEIGHT: f32 = 22.0;
+pub(crate) const BUFFER: f32 = 4.0;
+pub(crate) const BOTTOM: f32 = 360.0 - MULTI_TOP + BUFFER;
 pub(crate) const HEADING_LEFT: f32 = 24.0;
 pub(crate) const HEADING_SIZE: f32 = 18.0;
+
+pub(super) fn outside(rect: Rect, margin: f32) -> f32 {
+    let low = Vec2::new(-640.0 + margin, BOTTOM + margin);
+    let high = Vec2::new(640.0 - margin, 360.0 - margin);
+    (rect.min - low).min(Vec2::ZERO).length_squared()
+        + (rect.max - high).max(Vec2::ZERO).length_squared()
+}
 
 pub(super) fn frame_text_rects() -> [Rect; 2] {
     [
@@ -29,7 +38,7 @@ pub(super) fn frame_text_rects() -> [Rect; 2] {
         ),
         Rect::from_corners(
             Vec2::new(-640.0, 360.0 - MULTI_TOP - BAR_HEIGHT),
-            Vec2::new(640.0, 360.0 - MULTI_TOP),
+            Vec2::new(640.0, BOTTOM),
         ),
     ]
 }

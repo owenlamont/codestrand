@@ -24,10 +24,16 @@ fn interval(points: &[Vec2], y: f32) -> (f32, f32) {
 }
 
 pub(super) fn largest(polygons: &[Vec<Vec2>]) -> f32 {
+    let bottom = (MARGIN..HEIGHT - MARGIN)
+        .find(|&row| {
+            -1.0 + 2.0 * f32::from(u16::try_from(row).expect("grid row")) / 90.0
+                >= crate::layout::packing::Tile::viewport().low.y - 1e-7
+        })
+        .expect("viewport spans grid rows");
     let mut occupied = [false; WIDTH * HEIGHT];
     for polygon in polygons.iter().filter(|p| p.len() >= 3) {
         let (low, high) = crate::layout::outline::bounds(polygon);
-        for row in MARGIN..HEIGHT - MARGIN {
+        for row in bottom..HEIGHT - MARGIN {
             let y =
                 -1.0 + 2.0 * f32::from(u16::try_from(row).expect("grid row")) / 90.0;
             if y < low.y - 1e-7 || y + 2.0 / 90.0 > high.y + 1e-7 {
@@ -56,7 +62,7 @@ pub(super) fn largest(polygons: &[Vec<Vec2>]) -> f32 {
     let mut heights = [0_usize; WIDTH];
     let mut largest = 0_usize;
     let mut stack = Vec::with_capacity(WIDTH);
-    for row in MARGIN..HEIGHT - MARGIN {
+    for row in bottom..HEIGHT - MARGIN {
         stack.clear();
         for col in MARGIN..=WIDTH - MARGIN {
             let height = if col == WIDTH - MARGIN {
@@ -82,7 +88,7 @@ pub(super) fn largest(polygons: &[Vec<Vec2>]) -> f32 {
     }
     crate::model::count_u32(u32::try_from(largest).expect("bounded pixel grid"))
         / crate::model::count_u32(
-            u32::try_from((WIDTH - 2 * MARGIN) * (HEIGHT - 2 * MARGIN))
+            u32::try_from((WIDTH - 2 * MARGIN) * (HEIGHT - MARGIN - bottom))
                 .expect("bounded pixel grid"),
         )
 }

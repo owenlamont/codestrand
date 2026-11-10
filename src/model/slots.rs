@@ -641,7 +641,10 @@ impl State {
                                 * (f32::from(step) * 4.0 * super::tick_seconds())
                                     .min(1.0))
                         .clamp(
-                            -HALF + Vec2::splat(space.radius),
+                            Vec2::new(
+                                -HALF.x + space.radius,
+                                super::caption::BOTTOM + space.radius,
+                            ),
                             HALF - Vec2::splat(space.radius),
                         )
                     })
@@ -862,12 +865,7 @@ impl LabelSpace<'_> {
                 .max(Vec2::ZERO)
                 .element_product()
         };
-        let outside = (rect.min + HALF - Vec2::splat(0.5))
-            .min(Vec2::ZERO)
-            .length_squared()
-            + (rect.max - HALF + Vec2::splat(0.5))
-                .max(Vec2::ZERO)
-                .length_squared();
+        let outside = super::caption::outside(rect, 0.5);
         [
             outside * 1e8,
             conflicts,
@@ -1012,8 +1010,10 @@ impl Choice<'_> {
                     && swept_crosses(point, &corners, rect.inflate(0.02))
             })
             .count();
-        let overlaps =
-            usize::from(!point.abs().cmple(HALF - Vec2::splat(self.radius)).all());
+        let overlaps = usize::from(
+            !point.abs().cmple(HALF - Vec2::splat(self.radius)).all()
+                || point.y - self.radius < super::caption::BOTTOM,
+        );
         (
             Placement {
                 dock,

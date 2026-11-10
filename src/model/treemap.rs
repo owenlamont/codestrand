@@ -157,7 +157,7 @@ pub(crate) fn run(
     serde_json::to_writer(
         &mut *writer,
         &serde_json::json!({"definitions":
-        "All areas are fractions of the full 1280x720 frame. Glass tiles are disjoint screen rectangles inside the 24 px margin, separated by shared gutters. Largest empty rectangle is the exact maximum axis-aligned rectangle outside their union, including the margin. Content is the projected ground-plane AABB of current directory discs and file positions padded by their rendered size; not glyph ink or opaque pixel occupancy. Content fill divides content-envelope area by tile area; overall fill is area weighted. The first repository owns the empty lead-in tile. Weights are eased square roots of live file counts; empty active repositories retain weight one until archived. Samples include every canonical 1/60 second. Content AABBs are clipped to their own tiles; actual footprints may use trapezoid corners. Content largest-empty rectangles use fully covered cells on a 160x90 grid inside the 24 px margin, with 8 px boundary uncertainty."}),
+        "All areas are fractions of the full 1280x720 frame. Glass tiles are disjoint screen rectangles inside the 24 px margin plus the caption reservation below, separated by shared gutters. Largest empty rectangle is the exact maximum axis-aligned rectangle outside their union, including the margin. Content is the projected ground-plane AABB of current directory discs and file positions padded by their rendered size; not glyph ink or opaque pixel occupancy. Content fill divides content-envelope area by tile area; overall fill is area weighted. The first repository owns the empty lead-in tile. Weights are eased square roots of live file counts; empty active repositories retain weight one until archived. Samples include every canonical 1/60 second. Content AABBs are clipped to their own tiles; actual footprints may use trapezoid corners. Content largest-empty rectangles use fully covered cells on a 160x90 grid inside the usable tile viewport, excluding the caption reservation, with 8 px boundary uncertainty."}),
     )?;
     writeln!(writer)?;
     let frames = super::frames_for(simulation.duration(), 60)?;
@@ -208,7 +208,7 @@ mod tests {
             ..full
         };
         assert!(
-            (largest_empty(&[left, right]) - super::framing::MARGIN / 720.0).abs()
+            (largest_empty(&[left, right]) - f32::midpoint(1.0, full.low.y)).abs()
                 < 1e-6
         );
         assert!(largest_empty(&[left]) > 0.45);

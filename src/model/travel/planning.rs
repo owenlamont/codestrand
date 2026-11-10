@@ -28,6 +28,7 @@ fn hard_clearance(capture: &Capture, tick: u64, point: Vec2) -> bool {
         .abs()
         .cmple(HALF - Vec2::splat(capture.radius(tick)))
         .all()
+        && point.y - capture.radius(tick) >= super::super::caption::BOTTOM
         && !capture.tiles[usize::try_from(tick)
             .expect("bounded tick")
             .min(capture.tiles.len() - 1)]
