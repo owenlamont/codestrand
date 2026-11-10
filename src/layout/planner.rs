@@ -14,6 +14,7 @@ pub(super) const RELEASE_RADIUS: f32 = 0.05;
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct Plan {
+    pub(super) parts: Vec<(usize, Plan)>,
     samples: Arc<[Vec<Vec2>]>,
     footprints: Arc<[Vec<Vec2>]>,
     pub(super) time: f32,
@@ -33,6 +34,10 @@ enum Region {
 }
 
 impl Plan {
+    pub(super) fn add_part(&mut self, base: usize, plan: Self) {
+        self.seconds += plan.seconds;
+        self.parts.push((base, plan));
+    }
     fn new(layout: &mut Layout, events: &[Event], starts: &[f32]) -> Self {
         for event in events {
             for change in &event.changes {
@@ -86,6 +91,7 @@ impl Plan {
             })
             .collect::<Vec<_>>();
         Self {
+            parts: Vec::new(),
             samples: samples.into(),
             footprints: footprints.into(),
             time: 0.0,
@@ -96,16 +102,53 @@ impl Plan {
     }
 
     pub(super) fn position(&self, dir: usize) -> Option<Vec2> {
+        if !self.parts.is_empty() {
+            let (offset, plan) =
+                self.parts.iter().rev().find(|(offset, _)| *offset <= dir)?;
+            return plan.at(dir - offset, self.time);
+        }
+        self.at(dir, self.time)
+    }
+
+    fn at(&self, dir: usize, time: f32) -> Option<Vec2> {
         let row = self.samples.get(dir)?;
-        Some(interpolate(row, self.time, self.step))
+        Some(interpolate(row, time, self.step))
+    }
+
+    fn place(&self, time: f32, dirs: &mut [super::Dir]) {
+        if self.parts.is_empty() {
+            assert_eq!(dirs.len(), self.samples.len(), "planned directories");
+            let sample = interpolator(time, self.step, self.samples[0].len());
+            for (dir, row) in dirs.iter_mut().zip(self.samples.iter()) {
+                dir.position = sample(row);
+            }
+        } else {
+            for (index, (base, plan)) in self.parts.iter().enumerate() {
+                let end = self.parts.get(index + 1).map_or(dirs.len(), |p| p.0);
+                plan.place(time, &mut dirs[*base..end]);
+            }
+        }
+    }
+
+    fn footprint(&self, dir: usize, time: f32) -> Vec2 {
+        if let Some((offset, plan)) =
+            self.parts.iter().rev().find(|(offset, _)| *offset <= dir)
+        {
+            return plan.footprint(dir - offset, time);
+        }
+        interpolate(&self.footprints[dir], time, self.step)
     }
 }
 
 fn interpolate(row: &[Vec2], time: f32, step: f32) -> Vec2 {
+    interpolator(time, step, row.len())(row)
+}
+
+fn interpolator(time: f32, step: f32, length: usize) -> impl Fn(&[Vec2]) -> Vec2 {
     let at = (time.max(0.0) / step).floor();
     let index = usize::try_from(std::time::Duration::from_secs_f32(at).as_secs())
         .unwrap_or(usize::MAX)
-        .min(row.len() - 1);
+        .min(length - 1);
     let fraction = ((time
         - model::count_u32(u32::try_from(index).expect("sample index fits u32"))
             * step)
@@ -121,14 +164,16 @@ fn interpolate(row: &[Vec2], time: f32, step: f32) -> Vec2 {
     let controls = [
         index.saturating_sub(1),
         index,
-        (index + 1).min(row.len() - 1),
-        (index + 2).min(row.len() - 1),
+        (index + 1).min(length - 1),
+        (index + 2).min(length - 1),
     ];
-    controls
-        .into_iter()
-        .zip(weights)
-        .map(|(index, weight)| row[index] * (weight / 6.0))
-        .sum()
+    move |row| {
+        controls
+            .into_iter()
+            .zip(weights)
+            .map(|(index, weight)| row[index] * (weight / 6.0))
+            .sum()
+    }
 }
 
 fn occupancy(
@@ -517,15 +562,18 @@ impl Layout {
     pub(crate) fn forecast(&self) -> Vec<(Vec2, f32)> {
         let mut centres = vec![Vec2::ZERO; self.dirs.len()];
         let mut points = Vec::new();
-        for (index, row) in self.plan.footprints.iter().enumerate() {
-            let footprint = interpolate(row, self.plan.time, self.plan.step);
+        for index in 0..self.dirs.len() {
+            let footprint = self.plan.footprint(index, self.plan.time);
             let dir = &self.dirs[index];
             let centre = dir.parent.map_or(dir.position, |parent| {
                 centres[parent].lerp(dir.position, footprint.y.clamp(0.0, 1.0))
             });
             centres[index] = centre;
-            if footprint.x > 0.0001 {
-                points.push((centre, footprint.x));
+            if footprint.x > 0.0001
+                && (self.repositories.is_empty()
+                    || self.repositories[dir.repository].live)
+            {
+                points.push((centre, footprint.x * dir.scale));
             }
         }
         points
@@ -568,11 +616,8 @@ impl Layout {
     pub(super) fn relax(&mut self, dt: f32) {
         self.plan.time += dt;
 
+        self.plan.place(self.plan.time, &mut self.dirs);
         for (index, dir) in self.dirs.iter_mut().enumerate() {
-            dir.position = self
-                .plan
-                .position(index)
-                .expect("planned directories have trajectories");
             let target = if index != 0 && dir.files == 0 && dir.children == 0 {
                 0.0
             } else {
@@ -593,6 +638,36 @@ mod tests {
         timeline::{FileChange, Identity, Kind},
     };
 
+    #[test]
+    fn batched_splines_match_individual_directory_samples_exactly() {
+        let histories = (0..3)
+            .map(|repository| {
+                let mut events = crate::timeline::synthetic();
+                crate::repositories::namespace(&mut events, repository);
+                events
+            })
+            .collect();
+        let events = crate::repositories::merge(histories);
+        let starts = model::schedule::Schedule::new(&events, 0.5, 1.0).starts;
+        let combined = Layout::scheduled_repositories(
+            &events,
+            &starts,
+            &["First".into(), "Second".into(), "Third".into()],
+        );
+        for mut layout in [Layout::planned(&crate::timeline::synthetic()), combined] {
+            for tick in [0, 1, 13, 90, 1000, 10_000, 90, 1] {
+                layout.plan.time = model::tick_time(tick);
+                let expected: Vec<_> = (0..layout.dirs.len())
+                    .map(|index| layout.plan.position(index).unwrap())
+                    .collect();
+                layout.plan.place(layout.plan.time, &mut layout.dirs);
+                let actual: Vec<_> =
+                    layout.dirs.iter().map(|dir| dir.position).collect();
+                assert_eq!(actual, expected);
+            }
+        }
+    }
+
     fn event(seconds: i64, changes: &[(&str, Kind)]) -> Event {
         Event {
             seconds,
@@ -600,6 +675,7 @@ mod tests {
                 name: b"Ada".to_vec(),
                 email: Vec::new(),
             },
+            repository: 0,
             contributor: None,
             commit: String::new(),
             changes: changes
@@ -984,6 +1060,7 @@ mod probes {
                 name: b"Ada".to_vec(),
                 email: Vec::new(),
             },
+            repository: 0,
             contributor: None,
             commit: String::new(),
             changes: changes
@@ -1171,6 +1248,7 @@ mod rate_probe {
                     name: b"Ada".to_vec(),
                     email: Vec::new(),
                 },
+                repository: 0,
                 contributor: None,
                 commit: String::new(),
                 changes: paths

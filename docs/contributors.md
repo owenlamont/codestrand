@@ -15,6 +15,7 @@ emails = ["owen@personal.example", "owen@work.example"]
 github = "owenlamont"           # optional GitHub login
 gitlab = "owenlamont"           # optional GitLab.com username
 gravatar = "owen@avatar.example" # optional Gravatar email
+bot = false                   # optional bot classification override
 # avatar = "portraits/owen.png"  # optional local path or HTTPS URL; overrides lookups
 ```
 
@@ -24,6 +25,12 @@ displayed with the name from the last commit in playback order. Commits without 
 are grouped by author name. A missing default file is fine; an explicit missing file,
 unknown key or malformed TOML is an error. Edits take effect on cache hits; original
 authors and repository history remain unchanged.
+
+`bot = true` marks automation and `bot = false` marks a human, overriding automatic
+detection even after a display-name change. Without an override, a parsed GitHub noreply
+login ending in `[bot]` identifies a bot; a displayed name ending in `[bot]` is the
+fallback. `[bot]` elsewhere in a name does not match. Bot avatars fade between
+repositories by default; use `--bot-travel walk` to route them like humans.
 
 Configuration is limited to 1 MiB before parsing, 4,096 contributors, 4,096 total email
 aliases, and 4,096 bytes per string. Expanded alias payloads may total at most 16 MiB.
@@ -44,12 +51,22 @@ Remote overrides require an HTTPS URL without credentials.
 
 ## Contributor avatars
 
-Contributors keep a fixed height band above the file plane. Crowded playback smoothly
-shrinks avatars and names; small groups retain their normal size. When names overlap,
-recent commits raise a contributor's priority. Lower-priority names fade out, then need
-sustained clearance before fading back in. Some overlap during fades is intentional.
+Contributors stay above the file plane and move between repository service lanes.
+`--avatar-scale` controls disc diameter relative to the original size: default `2`,
+range `0.5`–`2`. The default doubles portraits in both single- and multi-repository
+playback; single-repository pixels therefore change too. Use `--avatar-scale 1` for
+the original small-group disc diameter. Above five repositories a smoothstep taper
+reduces the selected size to half at thirty repositories. Name fonts retain their
+existing readability policy. `--gutter` independently controls visible tile spacing
+(default `4` reference pixels, `0` allowed); the outer margin is 24 pixels.
+Visible avatars keep their names, including during travel and idle fade-out.
+Crowded playback shrinks avatars and names; small groups retain their normal size.
+Names first shrink to a minimum of 12 pixels at the reference 1280×720 viewport,
+then try nearby free lane positions. Truncation is the last resort when the full name
+cannot fit at the minimum size. Names prefer to avoid every repository’s content
+rectangle and labels, with edge overlap permitted when no clear lane fits.
 Name placement uses the default fitted view, including when preview is orbited or zoomed.
-Playback time drives crowd scaling and fades, so export speed does not change them.
+Playback time drives crowd scaling and placement, so export speed does not change them.
 
 Preview and export stay offline by default: local overrides and cached portraits are
 used, with the coloured sphere as the fallback. Add `--fetch-avatars` to either command

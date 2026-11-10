@@ -8,9 +8,6 @@ use crate::{
     model::{self, Avatar},
 };
 
-const MIN_PITCH: f32 = 0.05;
-const MAX_PITCH: f32 = std::f32::consts::FRAC_PI_2 - 0.05;
-
 #[derive(Debug, PartialEq)]
 enum Mode {
     Fit,
@@ -109,8 +106,6 @@ impl PreviewCamera {
             }
             Mode::Free | Mode::Follow { .. } => {
                 self.yaw -= input.orbit.x * 0.004;
-                self.pitch =
-                    (self.pitch + input.orbit.y * 0.004).clamp(MIN_PITCH, MAX_PITCH);
                 self.distance =
                     (self.distance * (-input.zoom * 0.12).exp()).clamp(1.0, 20_000.0);
                 if let Mode::Follow { key, .. } = &self.mode {
@@ -205,6 +200,7 @@ mod tests {
                     name: name.as_bytes().to_vec(),
                     email: email.as_bytes().to_vec(),
                 },
+                repository: 0,
                 contributor: None,
                 commit: String::new(),
                 seconds: 0,
@@ -267,10 +263,10 @@ mod tests {
     }
 
     #[test]
-    fn orbit_clamps_above_floor_and_below_pole() {
+    fn orbit_preserves_the_default_pitch() {
         let view = (Vec3::ZERO, 10.0);
         let mut camera = PreviewCamera::new(view);
-        for (motion, pitch) in [(-10000.0, MIN_PITCH), (10000.0, MAX_PITCH)] {
+        for motion in [-10000.0, 10000.0] {
             camera.update(
                 &Input {
                     orbit: Vec2::new(0.0, motion),
@@ -280,7 +276,7 @@ mod tests {
                 &[],
                 0.1,
             );
-            assert_eq!(camera.pitch, pitch);
+            assert_eq!(camera.pitch, model::view_direction().y.asin());
             let (eye, focus) = camera.pose();
             assert!(eye.y > 0.0);
             assert!(eye.distance(focus) > 9.99);

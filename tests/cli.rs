@@ -1,7 +1,44 @@
 #![forbid(unsafe_code)]
 #![deny(clippy::all, clippy::pedantic)]
 
-use std::process::Command;
+use std::{fmt::Write as _, process::Command};
+
+#[test]
+fn repository_limit_is_checked_before_import_or_contributor_loading() {
+    let scratch = tempfile::tempdir().unwrap();
+    for index in 0..60 {
+        std::fs::create_dir(scratch.path().join(format!("repo-{index}"))).unwrap();
+    }
+    let manifest = scratch.path().join("repos.toml");
+    for flags in [0, 30] {
+        let mut text = String::new();
+        for i in flags..60 {
+            writeln!(text, "[[repositories]]\npath='repo-{i}'").unwrap();
+        }
+        std::fs::write(&manifest, text).unwrap();
+        let destination = scratch.path().join(format!("quality-{flags}.jsonl"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_codestrand"));
+        command
+            .arg("layout-quality")
+            .arg(&destination)
+            .arg("--repositories-file")
+            .arg(&manifest)
+            .arg("--contributors")
+            .arg(scratch.path().join("missing.toml"))
+            .arg("--no-cache");
+        for index in 0..flags {
+            command
+                .arg("--repository")
+                .arg(scratch.path().join(format!("repo-{index}")));
+        }
+        let output = command.output().unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success());
+        assert!(stderr.contains("at most 30 repositories"), "{stderr}");
+        assert!(!stderr.contains("repository="), "{stderr}");
+        assert!(!destination.exists());
+    }
+}
 
 #[test]
 fn usage_error_preserves_clap_layout_and_exit_status() {

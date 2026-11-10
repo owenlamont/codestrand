@@ -16,6 +16,9 @@ struct Service {
 }
 
 impl Schedule {
+    pub(super) fn padding(&self, index: usize) -> u32 {
+        self.services[index].padding
+    }
     #[cfg(test)]
     pub(crate) fn new(events: &[Event], rate: f32, idle: f32) -> Self {
         Self::with_padding(events, rate, idle, |_| 0)

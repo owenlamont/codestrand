@@ -30,6 +30,7 @@ const LABELS: usize = 72;
 const GRID_LINES: i16 = 20;
 const AVATAR_LAYER: usize = 1;
 
+mod caption;
 mod lod;
 mod styling;
 
@@ -62,6 +63,9 @@ struct Caption;
 
 #[derive(Component)]
 struct PortraitDisc;
+
+#[derive(Component)]
+struct RepositoryGlass(usize);
 
 #[derive(Component)]
 struct FileVisual {
@@ -251,7 +255,7 @@ impl DirectoryHues {
         for index in self.slots.len()..layout.dir_count() {
             let slot = match layout.dir(index).parent {
                 None => 0,
-                Some(0) => {
+                Some(parent) if layout.dir(parent).parent.is_none() => {
                     let slot = self.top_levels;
                     self.top_levels += 1;
                     slot
@@ -279,6 +283,11 @@ struct Pools {
 
 fn app(simulation: Simulation, title: String) -> App {
     let mut app = App::new();
+    let label_system = labels
+        .after(bevy::camera::CameraUpdateSystems)
+        .after(bevy::transform::TransformSystems::Propagate)
+        .before(UiSystems::Prepare)
+        .before(bevy::camera::visibility::VisibilitySystems::VisibilityPropagate);
     let theme = simulation.theme().clone();
     app.insert_resource(ClearColor(theme.clear))
         .insert_resource(Playback(simulation))
@@ -288,18 +297,12 @@ fn app(simulation: Simulation, title: String) -> App {
         .add_systems(Update, animate)
         .add_systems(
             PostUpdate,
-            (sync_avatar_camera, face_portraits)
+            (sync_avatar_camera, face_portraits, face_file_glyphs)
                 .chain()
                 .before(bevy::camera::CameraUpdateSystems)
                 .before(bevy::transform::TransformSystems::Propagate),
         )
-        .add_systems(
-            PostUpdate,
-            labels
-                .after(bevy::camera::CameraUpdateSystems)
-                .after(bevy::transform::TransformSystems::Propagate)
-                .before(UiSystems::Prepare),
-        );
+        .add_systems(PostUpdate, label_system);
     app
 }
 
@@ -389,6 +392,7 @@ fn setup(world: &mut World) {
     ));
     let theme = world.resource::<Playback>().0.theme().clone();
     let palette = Palette::new(world, &theme);
+    repository_regions(world);
     world.spawn((
         Mesh3d(palette.glyph_mesh.clone()),
         MeshMaterial3d(palette.floor.clone()),
@@ -410,25 +414,8 @@ fn setup(world: &mut World) {
         .collect();
     world.resource_mut::<Pools>().grid = grid;
     world.insert_resource(palette);
-    for _ in 0..LABELS {
-        world.spawn((
-            Text::new(""),
-            TextFont::from_font_size(14.0),
-            TextColor(theme.label),
-            BackgroundColor::default(),
-            BorderColor::default(),
-            Node {
-                position_type: PositionType::Absolute,
-                padding: UiRect::axes(px(3.0), px(1.0)),
-                ..default()
-            },
-            theme.label_shadow,
-            ZIndex::default(),
-            Visibility::Hidden,
-            UiTargetCamera(camera),
-            Label,
-        ));
-    }
+    let repository_labels = world.resource::<Playback>().0.layout().repositories.len();
+    grow_labels(world, LABELS + repository_labels, &theme, camera);
     for _ in 0..crate::diff_samples::PER_COMMIT {
         world.spawn((
             Text::new(""),
@@ -447,15 +434,105 @@ fn setup(world: &mut World) {
             DiffSample,
         ));
     }
-    let title = world.resource::<Title>().0.clone();
-    heading(world, camera, "CODESTRAND", 28.0, 28.0, 30.0);
-    heading(world, camera, &title, 28.0, 68.0, 16.0);
-    let caption = heading(world, camera, " ", 28.0, 668.0, 14.0);
-    world.entity_mut(caption).insert(Caption);
+    setup_caption(world, camera, repository_labels);
     world.init_resource::<Assets<Font>>();
     styling::setup(world, &theme);
 }
 
+fn setup_caption(world: &mut World, camera: Entity, repository_labels: usize) {
+    if repository_labels > 0 {
+        heading(
+            world,
+            camera,
+            "CODESTRAND",
+            crate::model::caption::HEADING_LEFT,
+            0.0,
+            crate::model::caption::HEADING_SIZE,
+        );
+    } else {
+        let title = world.resource::<Title>().0.clone();
+        heading(world, camera, "CODESTRAND", 28.0, 28.0, 30.0);
+        heading(world, camera, &title, 28.0, 68.0, 16.0);
+    }
+    caption::setup(world, camera);
+}
+fn repository_glass_material(theme: &Theme, index: usize) -> StandardMaterial {
+    StandardMaterial {
+        base_color: theme.glass[index % theme.glass.len()]
+            .base_color
+            .with_alpha(0.055),
+        alpha_mode: AlphaMode::Blend,
+        unlit: true,
+        cull_mode: None,
+        ..default()
+    }
+}
+fn recolor_repository_regions(world: &mut World, theme: &Theme) {
+    let regions: Vec<_> = world
+        .query::<(&RepositoryGlass, &MeshMaterial3d<StandardMaterial>)>()
+        .iter(world)
+        .map(|(region, material)| (region.0, material.0.clone()))
+        .collect();
+    let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
+    for (index, handle) in regions {
+        *materials
+            .get_mut(&handle)
+            .expect("repository glass material") =
+            repository_glass_material(theme, index);
+    }
+}
+
+fn glass_positions(region: &crate::layout::RepositoryRegion) -> Vec<[f32; 3]> {
+    let corners = region
+        .tile
+        .map_or([Vec2::ZERO; 4], crate::layout::packing::Tile::corners)
+        .map(|point| {
+            crate::layout::world_coordinates(model::framing::unproject_at(
+                point,
+                model::framing::GLASS_BOTTOM,
+            ))
+        });
+    [0, 1, 2, 0, 2, 3]
+        .map(|i| [corners[i].x, model::framing::GLASS_BOTTOM, corners[i].y])
+        .to_vec()
+}
+
+fn repository_regions(world: &mut World) {
+    let simulation = &world.resource::<Playback>().0;
+    if !matches!(
+        simulation.repository_boundary,
+        crate::repositories::Boundary::Glass
+    ) {
+        return;
+    }
+    let regions = simulation.layout().repositories.clone();
+    for (index, region) in regions.iter().enumerate() {
+        let material =
+            repository_glass_material(world.resource::<Playback>().0.theme(), index);
+        let material = world
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(material);
+        let mesh = Mesh::new(
+            bevy::render::render_resource::PrimitiveTopology::TriangleList,
+            RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
+        )
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, glass_positions(region))
+        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0, 1.0, 0.0]; 6]);
+        let mesh = world.resource_mut::<Assets<Mesh>>().add(mesh);
+        world.spawn((
+            RepositoryGlass(index),
+            Mesh3d(mesh),
+            MeshMaterial3d(material),
+            Transform::IDENTITY,
+            bevy::camera::visibility::NoFrustumCulling,
+            if region.live {
+                Visibility::Visible
+            } else {
+                Visibility::Hidden
+            },
+        ));
+    }
+}
 fn heading(
     world: &mut World,
     camera: Entity,
@@ -708,6 +785,7 @@ pub(super) fn switch_theme(world: &mut World, name: crate::theme::ThemeName) {
                 };
         }
     });
+    recolor_repository_regions(world, &theme);
     world.insert_resource(ClearColor(theme.clear));
     if world.contains_resource::<styling::Styles>() {
         styling::apply(world, &theme);
@@ -796,8 +874,13 @@ fn preview_camera(world: &mut World, mut drag_from: Local<Option<Vec2>>) {
     }
     let dt = world.resource::<Time<Real>>().delta_secs();
     world.resource_scope(|world, mut camera: Mut<PreviewCamera>| {
+        let projection = camera_projection(world);
         let simulation = &world.resource::<Playback>().0;
-        camera.update(&input, simulation.view(), simulation.avatars(), dt);
+        let view = projection.map_or_else(
+            || simulation.view(),
+            |(fov, viewport)| simulation.view_for_projection(fov, viewport),
+        );
+        camera.update(&input, view, simulation.avatars(), dt);
         let (eye, focus) = camera.pose();
         let mut query = world.query_filtered::<&mut Transform, With<SceneCamera>>();
         if let Ok(mut transform) = query.single_mut(world) {
@@ -820,6 +903,7 @@ pub(super) fn animate(world: &mut World) {
                 sync_files(world, &palette, &mut pools, simulation);
                 sync_structure(world, &palette, &mut pools, simulation);
                 sync_activity(world, &palette, &mut pools, simulation);
+                sync_repository_regions(world, simulation);
                 place_camera(world, simulation);
             });
         });
@@ -867,6 +951,27 @@ fn sync_lod(world: &mut World, pools: &mut Pools, simulation: &Simulation) {
     );
 }
 
+fn sync_repository_regions(world: &mut World, simulation: &Simulation) {
+    let mut query = world.query::<(&RepositoryGlass, &Mesh3d, &mut Visibility)>();
+    let updates: Vec<_> = query
+        .iter_mut(world)
+        .map(|(RepositoryGlass(index), mesh, mut visibility)| {
+            let region = &simulation.layout().repositories[*index];
+            *visibility = if region.live {
+                Visibility::Visible
+            } else {
+                Visibility::Hidden
+            };
+            (mesh.0.clone(), glass_positions(region))
+        })
+        .collect();
+    let mut meshes = world.resource_mut::<Assets<Mesh>>();
+    for (handle, positions) in updates {
+        if let Some(mut mesh) = meshes.get_mut(&handle) {
+            mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+        }
+    }
+}
 fn sync_files(
     world: &mut World,
     palette: &Palette,
@@ -903,6 +1008,17 @@ fn sync_files(
         let position = Vec3::new(file.position.x, 0.0, file.position.y);
         if let Some(mut transform) = world.get_mut::<Transform>(entity) {
             transform.translation = position;
+            transform.rotation = Quat::from_rotation_y(
+                if layout
+                    .repositories
+                    .get(layout.dir(file.dir).repository)
+                    .is_some_and(|r| r.rotated)
+                {
+                    -std::f32::consts::FRAC_PI_2
+                } else {
+                    0.0
+                },
+            );
             transform.scale =
                 Vec3::splat(file.visible_presence(layout.dir(file.dir)) * detail);
         }
@@ -1125,12 +1241,12 @@ fn sync_structure(
                 return None;
             }
             let parent = layout.dir(dir.parent?);
+            let width = simulation.theme().directory_edge_width(dir.depth) * dir.scale;
             Some((
                 ground(parent.position) - Vec3::Y * 0.05,
                 ground(dir.position) - Vec3::Y * 0.05,
                 palette.directory(pools.hues.slots[index], dir.depth),
-                simulation.theme().directory_edge_width(dir.depth)
-                    * dir.parent.map_or(1.0, |parent| pools.lod.detail[parent]),
+                width * dir.parent.map_or(1.0, |parent| pools.lod.detail[parent]),
             ))
         })
         .flat_map(|(from, to, material, width)| {
@@ -1180,7 +1296,8 @@ fn sync_structure(
                 Transform::from_translation(ground(dir.position) - Vec3::Y * 0.05)
                     .with_scale(
                         simulation.theme().directory_node_scale
-                            * pools.lod.detail[index],
+                            * pools.lod.detail[index]
+                            * dir.scale,
                     );
         }
         set_visible(world, *entity, pools.lod.detail[index] > 0.0);
@@ -1361,7 +1478,11 @@ fn sync_activity(
         {
             transform.translation = avatar.position;
             transform.scale = Vec3::splat(
-                (presence * simulation.scale() * simulation.avatar_scale()).max(0.001),
+                (presence
+                    * simulation.scale()
+                    * simulation.avatar_disc_scale()
+                    * avatar.projection_scale)
+                    .max(0.001),
             );
         }
         set_visible(world, entity, presence > 0.0);
@@ -1422,13 +1543,26 @@ fn sync_fragments(
 }
 
 fn place_camera(world: &mut World, simulation: &Simulation) {
-    let (focus, distance) = simulation.view();
+    let (focus, distance) = camera_projection(world).map_or_else(
+        || simulation.view(),
+        |(fov, viewport)| simulation.view_for_projection(fov, viewport),
+    );
     let mut query = world.query_filtered::<&mut Transform, With<SceneCamera>>();
     if let Ok(mut transform) = query.single_mut(world) {
         *transform =
             Transform::from_translation(focus + model::view_direction() * distance)
                 .looking_at(focus, Vec3::Y);
     }
+}
+
+fn camera_projection(world: &mut World) -> Option<(f32, Vec2)> {
+    let mut query = world.query_filtered::<(&Camera, &Projection), With<SceneCamera>>();
+    query.single(world).ok().and_then(|(camera, projection)| {
+        let Projection::Perspective(projection) = projection else {
+            return None;
+        };
+        Some((projection.fov, camera.logical_viewport_size()?))
+    })
 }
 
 fn grow<'a>(
@@ -1510,11 +1644,61 @@ fn ground(point: Vec2) -> Vec3 {
     Vec3::new(point.x, 0.0, point.y)
 }
 
+fn grow_labels(world: &mut World, needed: usize, theme: &Theme, camera: Entity) {
+    let existing = world
+        .query_filtered::<Entity, With<Label>>()
+        .iter(world)
+        .count();
+    if existing >= needed {
+        return;
+    }
+    let font = world
+        .query_filtered::<&TextFont, With<Label>>()
+        .iter(world)
+        .next()
+        .cloned()
+        .unwrap_or_else(|| TextFont::from_font_size(14.0));
+    for _ in existing..needed {
+        world.spawn((
+            Text::new(""),
+            font.clone(),
+            TextColor(theme.label),
+            BackgroundColor(theme.label_background()),
+            theme.label_border(),
+            Node {
+                position_type: PositionType::Absolute,
+                padding: UiRect::axes(px(3.0), px(1.0)),
+                border: UiRect::all(px(
+                    if theme.label_style == crate::theme::LabelStyle::Bevelled {
+                        2.0
+                    } else {
+                        0.0
+                    },
+                )),
+                ..default()
+            },
+            theme.label_shadow,
+            ZIndex::default(),
+            Visibility::Hidden,
+            UiTargetCamera(camera),
+            Label,
+        ));
+    }
+}
+
 fn place_labels(
     mut wanted: Vec<(model::Label, Vec2, f32)>,
     height: f32,
+    viewport: Vec2,
 ) -> Vec<(model::Label, Vec2, f32)> {
-    wanted.retain(|(label, ..)| label.opacity > 0.001);
+    wanted.retain(|(label, ..)| {
+        label.opacity
+            > if label.kind == model::LabelKind::Avatar {
+                0.0
+            } else {
+                0.001
+            }
+    });
     wanted.sort_by(|(a, ..), (b, ..)| {
         a.kind
             .cmp(&b.kind)
@@ -1522,22 +1706,28 @@ fn place_labels(
     });
     let mut placed: Vec<Rect> = Vec::new();
     let mut chosen = Vec::new();
+    let mut optional = 0;
     for (label, point, distance) in wanted {
+        let limited = matches!(
+            label.kind,
+            model::LabelKind::Landmark | model::LabelKind::Activity
+        );
+        if limited && optional == LABELS {
+            continue;
+        }
         let rect = model::label_rect(point, &label.text, label.scale, height);
         if rect.min.x < 0.0
             || rect.min.y < 0.0
-            || rect.max.x > 1280.0
-            || rect.max.y > 720.0
+            || rect.max.x > viewport.x
+            || rect.max.y > viewport.y
             || (label.kind != model::LabelKind::Avatar
                 && placed.iter().any(|other| !other.intersect(rect).is_empty()))
         {
             continue;
         }
         placed.push(rect);
+        optional += usize::from(limited);
         chosen.push((label, point, distance));
-        if chosen.len() == LABELS {
-            break;
-        }
     }
     chosen.sort_by(|(a, _, a_distance), (b, _, b_distance)| {
         let a_avatar = a.kind == model::LabelKind::Avatar;
@@ -1652,13 +1842,6 @@ fn labels(world: &mut World) {
     let (camera, transform) = (camera.clone(), *transform);
     diff_samples(world, &camera, &transform);
     let playback = world.resource::<Playback>();
-    let mut caption = playback.0.caption();
-    caption.push_str("  |  ");
-    caption.push_str(playback.0.theme().name.title());
-    if let Some(camera) = world.get_resource::<PreviewCamera>() {
-        caption.push_str("  |  ");
-        caption.push_str(&camera.caption());
-    }
     let geometry = playback.0.theme();
     let lod = &world.resource::<Pools>().lod;
     let wanted = playback
@@ -1678,7 +1861,11 @@ fn labels(world: &mut World) {
             let distance = transform.translation().distance_squared(anchor);
             Some((label, point, distance))
         });
-    let chosen = place_labels(wanted.collect(), geometry.label_height);
+    let chosen = place_labels(
+        wanted.collect(),
+        geometry.label_height,
+        camera.logical_viewport_size().unwrap_or_default(),
+    );
     let theme = geometry.clone();
     let points: Vec<_> = chosen
         .iter()
@@ -1691,13 +1878,9 @@ fn labels(world: &mut World) {
     if world.contains_resource::<styling::Styles>() {
         styling::leaders(world, &points, &theme, camera_entity);
     }
+    grow_labels(world, chosen.len(), &theme, camera_entity);
     sync_labels(world, chosen, &theme);
-    let mut query = world.query_filtered::<&mut Text, With<Caption>>();
-    if let Ok(mut text) = query.single_mut(world)
-        && text.0 != caption
-    {
-        text.0 = caption;
-    }
+    caption::update(world);
 }
 
 fn diff_samples(world: &mut World, camera: &Camera, transform: &GlobalTransform) {
@@ -1828,9 +2011,72 @@ fn face_portraits(world: &mut World) {
     }
 }
 
+pub(crate) fn glyph_rotation(parent: Quat, camera: Quat) -> Quat {
+    // Cancel repository orientation before applying the shared camera-facing basis.
+    parent.inverse() * camera
+}
+
+fn face_file_glyphs(world: &mut World) {
+    let Ok(camera) = world
+        .query_filtered::<&Transform, With<SceneCamera>>()
+        .single(world)
+        .map(|transform| transform.rotation)
+    else {
+        return;
+    };
+    let glyphs: Vec<_> = world
+        .query::<(&FileVisual, &Transform)>()
+        .iter(world)
+        .map(|(visual, transform)| {
+            (visual.glyph, glyph_rotation(transform.rotation, camera))
+        })
+        .collect();
+    for (entity, rotation) in glyphs {
+        world
+            .get_mut::<Transform>(entity)
+            .expect("file glyph transform")
+            .rotation = rotation;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_glyphs_face_the_camera_after_repository_rotation_and_theme_reset() {
+        let mut world = World::new();
+        world.init_resource::<Assets<Mesh>>();
+        world.init_resource::<Assets<Image>>();
+        world.init_resource::<Assets<StandardMaterial>>();
+        let theme = Theme::neon();
+        let palette = Palette::new(&mut world, &theme);
+        let parent = spawn_file(&mut world, &palette, &theme, 0);
+        let glyph = world.get::<FileVisual>(parent).unwrap().glyph;
+        let camera = Transform::from_translation(model::view_direction() * 60.0)
+            .looking_at(Vec3::ZERO, Vec3::Y);
+        world.spawn((SceneCamera, camera));
+        for turn in [0.0, -std::f32::consts::FRAC_PI_2] {
+            world.get_mut::<Transform>(parent).unwrap().rotation =
+                Quat::from_rotation_y(turn);
+            *world.get_mut::<Transform>(glyph).unwrap() = theme.file_glyph_transform;
+            face_file_glyphs(&mut world);
+            let parent = world.get::<Transform>(parent).unwrap();
+            let child = world.get::<Transform>(glyph).unwrap();
+            assert!(
+                (parent.rotation * child.rotation).abs_diff_eq(camera.rotation, 1e-6)
+            );
+            assert_eq!(child.scale, theme.file_glyph_transform.scale);
+            for point in [Vec3::new(-0.5, -0.5, 0.0), Vec3::new(0.5, -0.5, 0.0)] {
+                assert!(
+                    (parent.to_matrix() * child.to_matrix())
+                        .transform_point3(point)
+                        .y
+                        > 0.0
+                );
+            }
+        }
+    }
 
     fn assert_sample_layout(world: &World, text: Entity, pixels: f32) {
         assert_eq!(
@@ -1896,6 +2142,116 @@ mod tests {
         assert_eq!(sizes, std::collections::HashSet::from([14.0_f32.to_bits()]));
     }
 
+    #[test]
+    fn rendered_glass_vertices_project_to_the_partition_throughout_playback() {
+        use bevy::camera::{CameraProjection, PerspectiveProjection};
+        let histories = (0..3)
+            .map(|index| {
+                let mut events = crate::timeline::synthetic();
+                for event in &mut events {
+                    event.seconds += i64::try_from(index).unwrap() * 86_400 * 4;
+                }
+                crate::repositories::namespace(&mut events, index);
+                events
+            })
+            .collect();
+        let mut simulation = Simulation::with_repositories(
+            crate::repositories::merge(histories),
+            &model::Options {
+                seconds_per_day: 0.05,
+                max_idle_seconds: 0.1,
+                ..default()
+            },
+            &Theme::neon(),
+            &crate::contributors::Mappings::default(),
+            &["One".into(), "Two".into(), "Three".into()],
+        );
+        simulation.repository_boundary = crate::repositories::Boundary::Glass;
+        let mut world = World::new();
+        world.init_resource::<Assets<Mesh>>();
+        world.init_resource::<Assets<StandardMaterial>>();
+        world.insert_resource(Playback(simulation));
+        repository_regions(&mut world);
+        let mut simulation = world.remove_resource::<Playback>().unwrap().0;
+        let projection = PerspectiveProjection {
+            fov: model::framing::FOV,
+            aspect_ratio: 16.0 / 9.0,
+            ..default()
+        };
+        let camera = Transform::from_translation(
+            model::view_direction() * model::framing::DISTANCE,
+        )
+        .looking_at(Vec3::ZERO, Vec3::Y);
+        let clip = projection.get_clip_from_view() * camera.to_matrix().inverse();
+        for frame in
+            (0..model::frames_for(simulation.duration(), 60).unwrap()).step_by(7)
+        {
+            simulation.advance_to(frame, 60);
+            sync_repository_regions(&mut world, &simulation);
+            let mut query = world.query::<(&RepositoryGlass, &Mesh3d, &Visibility)>();
+            for (glass, mesh, visibility) in query.iter(&world) {
+                let region = &simulation.layout().repositories[glass.0];
+                assert_eq!(*visibility == Visibility::Visible, region.live);
+                let Some(tile) = region.tile else {
+                    continue;
+                };
+                let mesh = world.resource::<Assets<Mesh>>().get(&mesh.0).unwrap();
+                let bevy::mesh::VertexAttributeValues::Float32x3(vertices) =
+                    mesh.attribute(Mesh::ATTRIBUTE_POSITION).unwrap()
+                else {
+                    panic!("glass positions");
+                };
+                let expected = tile.corners();
+                for (vertex, index) in vertices.iter().zip([0, 1, 2, 0, 2, 3]) {
+                    let projected = clip.project_point3(Vec3::from_array(*vertex));
+                    assert!((projected.truncate() - expected[index]).length() < 2e-6);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn repository_glass_follows_every_theme_without_moving_regions() {
+        let mut events = crate::timeline::synthetic();
+        crate::repositories::namespace(&mut events, 0);
+        let mut simulation = Simulation::with_repositories(
+            events,
+            &model::Options::default(),
+            &Theme::neon(),
+            &crate::contributors::Mappings::default(),
+            &["first".into(), "second".into()],
+        );
+        simulation.repository_boundary = crate::repositories::Boundary::Glass;
+        let mut world = World::new();
+        world.insert_resource(Playback(simulation));
+        world.insert_resource(SceneTarget(Handle::<Image>::default().into()));
+        world.insert_resource(Title("test".into()));
+        world.init_resource::<Pools>();
+        world.init_resource::<Assets<Mesh>>();
+        world.init_resource::<Assets<Image>>();
+        world.init_resource::<Assets<StandardMaterial>>();
+        setup(&mut world);
+        let (entity, transform, handle) = world
+            .query_filtered::<(Entity, &Transform, &MeshMaterial3d<StandardMaterial>), With<RepositoryGlass>>()
+            .iter(&world)
+            .next()
+            .map(|(entity, transform, material)| (entity, *transform, material.0.clone()))
+            .unwrap();
+        for name in crate::theme::ThemeName::ALL {
+            switch_theme(&mut world, name);
+            let theme = name.build();
+            let material = world
+                .resource::<Assets<StandardMaterial>>()
+                .get(&handle)
+                .unwrap();
+            assert_eq!(
+                material.base_color,
+                theme.glass[0].base_color.with_alpha(0.055)
+            );
+            assert_eq!(material.alpha_mode, AlphaMode::Blend);
+            assert_eq!(world.get::<Transform>(entity), Some(&transform));
+        }
+    }
     #[test]
     fn preview_switch_loads_uncached_art_off_thread_before_applying_theme() {
         bevy::tasks::AsyncComputeTaskPool::get_or_init(bevy::tasks::TaskPool::new);
@@ -2103,6 +2459,7 @@ mod tests {
         events.truncate(2);
         crate::contributors::Mappings::default().apply(&mut events);
         events[0].contributor = Some(crate::contributors::Contributor {
+            bot: None,
             key: crate::contributors::Key::Config(0),
             name: "Portrait".to_owned(),
             accounts: default(),
@@ -2618,6 +2975,7 @@ mod tests {
                 projected_label("far", model::LabelKind::Avatar, point, 25.0),
             ],
             20.0,
+            Vec2::new(1280.0, 720.0),
         );
         assert_eq!(
             chosen
@@ -2626,6 +2984,32 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["far", "near"]
         );
+        assert_eq!(chosen[0].1, chosen[1].1);
+    }
+
+    #[test]
+    fn repository_labels_use_viewport_bounds_and_hide_offscreen_anchors() {
+        let chosen = place_labels(
+            vec![
+                projected_label(
+                    "outside",
+                    model::LabelKind::Repository,
+                    Vec2::new(-10.0, 100.0),
+                    1.0,
+                ),
+                projected_label(
+                    "inside",
+                    model::LabelKind::Repository,
+                    Vec2::new(1400.0, 800.0),
+                    1.0,
+                ),
+            ],
+            20.0,
+            Vec2::new(1920.0, 1080.0),
+        );
+        assert_eq!(chosen.len(), 1);
+        assert_eq!(chosen[0].0.text, "inside");
+        assert_eq!(chosen[0].1, Vec2::new(1400.0, 800.0));
     }
 
     #[test]
@@ -2657,6 +3041,7 @@ mod tests {
                 ),
             ],
             20.0,
+            Vec2::new(1280.0, 720.0),
         );
         assert_eq!(
             chosen
@@ -2679,14 +3064,52 @@ mod tests {
             projected_label(
                 &index.to_string(),
                 model::LabelKind::Avatar,
-                Vec2::splat(100.0),
+                Vec2::new(
+                    10.0 + f32::from(u16::try_from(index % 16).unwrap()) * 70.0,
+                    100.0 + f32::from(u16::try_from(index / 16).unwrap()) * 30.0,
+                ),
                 1.0,
             )
         }));
-        let chosen = place_labels(wanted, 20.0);
-        assert_eq!(chosen.len(), LABELS);
+        let chosen = place_labels(wanted, 20.0, Vec2::new(1280.0, 720.0));
+        assert_eq!(chosen.len(), LABELS + 1);
         assert_eq!(chosen[0].0.text, "0");
-        assert_eq!(chosen[LABELS - 1].0.text, (LABELS - 1).to_string());
+        assert_eq!(chosen[LABELS].0.text, LABELS.to_string());
+        let mut world = World::new();
+        let camera = world.spawn_empty().id();
+        let theme = Theme::neon();
+        grow_labels(&mut world, LABELS, &theme, camera);
+        grow_labels(&mut world, chosen.len(), &theme, camera);
+        sync_labels(&mut world, chosen, &theme);
+        let visible: Vec<_> = world
+            .query_filtered::<(&Text, &Visibility), With<Label>>()
+            .iter(&world)
+            .filter(|(_, visibility)| **visibility != Visibility::Hidden)
+            .map(|(text, _)| text.0.clone())
+            .collect();
+        assert_eq!(visible.len(), LABELS + 1);
+        assert!(visible.contains(&LABELS.to_string()));
+    }
+
+    #[test]
+    fn optional_labels_keep_their_own_bounded_allowance() {
+        let wanted = (0..100_u16)
+            .map(|i| {
+                projected_label(
+                    "x",
+                    model::LabelKind::Activity,
+                    Vec2::new(
+                        10.0 + f32::from(i % 20) * 60.0,
+                        100.0 + f32::from(i / 20) * 40.0,
+                    ),
+                    1.0,
+                )
+            })
+            .collect();
+        assert_eq!(
+            place_labels(wanted, 20.0, Vec2::new(1280.0, 720.0)).len(),
+            LABELS
+        );
     }
 
     #[test]
@@ -2891,6 +3314,7 @@ mod tests {
                     name: b"Ada".to_vec(),
                     email: b"ada@example.invalid".to_vec(),
                 },
+                repository: 0,
                 contributor: None,
                 commit: String::new(),
                 seconds: 86_400 * i64::try_from(index).expect("small fixture"),
@@ -3069,6 +3493,7 @@ mod tests {
                     name: b"Ada".to_vec(),
                     email: b"ada@example.invalid".to_vec(),
                 },
+                repository: 0,
                 contributor: None,
                 commit: String::new(),
                 seconds: 0,
@@ -3085,6 +3510,7 @@ mod tests {
                     name: b"Ada".to_vec(),
                     email: b"ada@example.invalid".to_vec(),
                 },
+                repository: 0,
                 contributor: None,
                 commit: String::new(),
                 seconds: 86_400,

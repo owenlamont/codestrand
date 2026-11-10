@@ -241,17 +241,17 @@ pub(crate) fn run(
     let mut interval = NetMovement::default();
     let mut interval_commit = simulation.commit();
     let mut per_commit_net = BTreeMap::new();
-    let mut overlapped_frames = 0;
-    let mut worst_pairs = 0;
-    let mut pair_frames = 0_u64;
+    let (mut overlapped_frames, mut worst_pairs, mut pair_frames) = (0, 0, 0_u64);
     let mut diameter_sum = 0.0;
     let mut observations = 0.0;
     let mut minimum = f64::INFINITY;
     let mut extent_sum = 0.0;
     let mut file_clearance = FileClearance::default();
     let mut visible_file_clearance = FileClearance::default();
+    let mut moving_beams = super::slots::diagnostics::MovingBeams::default();
     for frame in 0..=frames {
         simulation.advance_to(frame, 60);
+        moving_beams.observe(simulation);
         progress(frame, frames, simulation.commit());
         let commit = simulation.commit();
         let layout = simulation.layout();
@@ -308,6 +308,7 @@ pub(crate) fn run(
         &mut *writer,
         &serde_json::json!({
             "summary": {
+                "moving_beams": moving_beams, "avatar_slots": super::slots::report(&simulation.state),
                 "frames": frames + 1, "overlapped_frames": overlapped_frames,
                 "worst_pairs": worst_pairs, "pair_frames": pair_frames,
                 "file_clearance": file_clearance,
@@ -418,6 +419,7 @@ mod tests {
                 name: b"Ada".to_vec(),
                 email: Vec::new(),
             },
+            repository: 0,
             contributor: None,
             commit: String::new(),
             seconds: 0,

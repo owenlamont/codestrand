@@ -25,85 +25,34 @@ pub(crate) fn rect(point: Vec2, text: &str, scale: f32, height: f32) -> Rect {
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct Visibility {
+    pub joint_exhausted: bool,
+    pub joint_clear: bool,
     pub opacity: f32,
     pub visible: bool,
-    clear: f32,
-    fade: f32,
+    pub placement: Option<Placement>,
 }
 
-impl Visibility {
-    pub fn step(&mut self, selected: bool, dt: f32) {
-        if selected {
-            self.clear += dt;
-            if self.clear >= 0.35 {
-                self.visible = true;
-            }
-        } else {
-            self.clear = 0.0;
-            self.visible = false;
-        }
-        let direction = if self.visible { 1.0 } else { -1.0 };
-        self.fade = (self.fade + direction * dt / 0.25).clamp(0.0, 1.0);
-        self.opacity = self.fade * self.fade * (3.0 - 2.0 * self.fade);
-    }
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct Placement {
+    pub point: Vec2,
+    pub body: Vec2,
+    pub angle: f32,
+    pub angular_velocity: f32,
+    pub commit: usize,
+    pub text: String,
+    pub scale: f32,
 }
 
 impl super::State {
-    pub(super) fn place_names(&mut self, dt: f32) {
-        let positions: Vec<_> = self
-            .avatars
-            .iter()
-            .map(|avatar| avatar.position + self.geometry.avatar_label_offset)
-            .collect();
-        let eye = self.focus + super::view_direction() * self.distance;
-        let mut candidates: Vec<_> = super::project(eye, self.focus, &positions)
-            .enumerate()
-            .filter_map(|(index, point)| {
-                let avatar = &self.avatars[index];
-                (avatar.presence > 0.0).then_some((index, point?))
-            })
-            .map(|(index, point)| {
-                let point = Vec2::new((point.x + 1.0) * 640.0, (1.0 - point.y) * 360.0);
-                let avatar = &self.avatars[index];
-                let bounds = rect(
-                    point,
-                    &avatar.name,
-                    self.avatar_scale,
-                    self.geometry.label_height,
-                );
-                (
-                    index,
-                    bounds,
-                    avatar.activity
-                        * if avatar.name_visibility.visible {
-                            1.25
-                        } else {
-                            1.0
-                        },
-                )
-            })
-            .collect();
-        candidates.sort_by(|a, b| b.2.total_cmp(&a.2).then(a.0.cmp(&b.0)));
-        let mut placed = Vec::new();
-        let mut selected = vec![false; self.avatars.len()];
-        for (index, bounds, _) in candidates {
-            if placed.len() < 72
-                && bounds.min.cmpge(Vec2::ZERO).all()
-                && bounds.max.cmple(Vec2::new(1280.0, 720.0)).all()
-                && !placed
-                    .iter()
-                    .any(|other: &Rect| !other.intersect(bounds).is_empty())
-            {
-                selected[index] = true;
-                placed.push(bounds);
-            }
-        }
-        for (avatar, selected) in self.avatars.iter_mut().zip(selected) {
-            avatar.name_visibility.step(selected, dt);
-        }
+    pub(super) fn place_names(
+        &mut self,
+        dt: f32,
+        travel: &super::travel::Plan,
+        texts: &[Rect],
+    ) {
+        self.place_slot_names(dt, travel, texts);
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -130,30 +79,16 @@ mod tests {
     }
 
     #[test]
-    fn recent_activity_wins_collisions_and_priority_changes_crossfade() {
+    fn every_visible_avatar_keeps_a_label_when_crowded() {
         let mut sim = simulation();
-        sim.advance_to(120, 60);
-        for avatar in &mut sim.state.avatars {
-            avatar.position = sim.state.focus;
-            avatar.presence = 1.0;
-            avatar.activity = 1.0;
+        for frame in 0..300 {
+            sim.advance_to(frame, 60);
+            for avatar in sim.avatars().iter().filter(|a| a.presence > 0.0) {
+                let label = sim.state.avatar_label(avatar);
+                assert!(label.opacity > 0.0 && !label.text.is_empty());
+            }
         }
-        sim.state.avatars[7].activity = 10.0;
-        for _ in 0..120 {
-            sim.state.place_names(1.0 / 60.0);
-        }
-        assert!(sim.state.avatars[7].name_visibility.opacity > 0.99);
-        assert!(sim.state.avatars[0].name_visibility.opacity < 0.001);
-        sim.state.avatars[0].activity = 20.0;
-        sim.state.place_names(1.0 / 60.0);
-        assert!(sim.state.avatars[7].name_visibility.opacity > 0.9);
-        for _ in 0..120 {
-            sim.state.place_names(1.0 / 60.0);
-        }
-        assert!(sim.state.avatars[0].name_visibility.opacity > 0.99);
-        assert!(sim.state.avatars[7].name_visibility.opacity < 0.001);
     }
-
     #[test]
     fn crowd_state_replays_at_different_frame_rates_and_after_rewind() {
         let mut sim = simulation();
@@ -169,6 +104,7 @@ mod tests {
                             avatar.height_band,
                             avatar.activity,
                             avatar.name_visibility.opacity,
+                            avatar.name_visibility.placement.clone(),
                         )
                     })
                     .collect::<Vec<_>>(),
@@ -203,42 +139,5 @@ mod tests {
         assert!(bands.iter().all(|band| (0.0..=0.28).contains(band)));
         assert!(bands.contains(&0.0));
         assert!(bands.iter().any(|band| *band > 0.25));
-    }
-
-    #[test]
-    fn collisions_fade_and_repeated_clearance_is_required_to_reappear() {
-        let mut visibility = Visibility::default();
-        for _ in 0..120 {
-            visibility.step(true, 1.0 / 60.0);
-        }
-        assert!(visibility.opacity > 0.99);
-        visibility.step(false, 1.0 / 60.0);
-        assert!(visibility.opacity > 0.9);
-        for _ in 0..120 {
-            visibility.step(true, 1.0 / 60.0);
-            visibility.step(false, 1.0 / 60.0);
-        }
-        assert!(!visibility.visible);
-        assert!(visibility.opacity < 0.001);
-        for _ in 0..120 {
-            visibility.step(true, 1.0 / 60.0);
-        }
-        assert!(visibility.visible);
-        assert!(visibility.opacity > 0.99);
-    }
-
-    #[test]
-    fn full_label_pool_replacements_finish_fading_before_new_names_appear() {
-        let mut old = Visibility::default();
-        let mut new = Visibility::default();
-        for _ in 0..120 {
-            old.step(true, 1.0 / 60.0);
-        }
-        for _ in 0..120 {
-            old.step(false, 1.0 / 60.0);
-            new.step(true, 1.0 / 60.0);
-            assert!(old.opacity == 0.0 || new.opacity == 0.0);
-        }
-        assert_eq!(new.opacity, 1.0);
     }
 }

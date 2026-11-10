@@ -23,21 +23,22 @@ impl Territories {
         if self.revision == Some(layout.revision()) {
             return;
         }
-        let first = self.owners.len().max(1);
+        let first = self.owners.len();
         self.owners.resize(layout.dir_count(), 0);
         self.radii.clear();
         self.radii.resize(layout.dir_count(), 1.0);
         for index in first..layout.dir_count() {
-            let parent = layout.dir(index).parent.expect("non-root directory");
-            self.owners[index] = if parent == 0 {
-                index
-            } else {
-                self.owners[parent]
-            };
+            self.owners[index] = layout.dir(index).parent.map_or(index, |parent| {
+                if layout.dir(parent).parent.is_none() {
+                    index
+                } else {
+                    self.owners[parent]
+                }
+            });
         }
         for (_, file) in layout.files() {
             let owner = self.owners[file.dir];
-            if owner != 0 {
+            if layout.dir(owner).parent.is_some() {
                 self.radii[owner] = self.radii[owner]
                     .max(file.position.distance(layout.dir(owner).position));
             }
@@ -295,7 +296,7 @@ pub(super) fn apply(world: &mut World, theme: &Theme) {
             .map(|(_, handle)| handle.clone())
             .unwrap_or_default();
         for (mut text, snippet) in world
-            .query::<(&mut TextFont, Option<&super::DiffSample>)>().iter_mut(world)
+            .query_filtered::<(&mut TextFont, Option<&super::DiffSample>), Without<super::caption::CaptionText>>().iter_mut(world)
         {
             text.font = if snippet.is_some() {
                 code_font.clone()
@@ -429,7 +430,11 @@ fn territories(
         let dirs: Vec<_> = simulation
             .layout()
             .dirs()
-            .filter(|(_, dir)| dir.parent == Some(0))
+            .filter(|(_, dir)| {
+                dir.parent.is_some_and(|parent| {
+                    simulation.layout().dir(parent).parent.is_none()
+                })
+            })
             .collect();
         grow(
             world,
@@ -760,6 +765,58 @@ mod tests {
         owner
     }
 
+    #[test]
+    fn territories_keep_ownership_inside_each_repository() {
+        let histories = (0..2)
+            .map(|repository| {
+                let mut events = crate::timeline::synthetic();
+                crate::repositories::namespace(&mut events, repository);
+                events
+            })
+            .collect();
+        let mut simulation = Simulation::with_repositories(
+            crate::repositories::merge(histories),
+            &crate::model::Options::default(),
+            &ThemeName::Atlas.build(),
+            &crate::contributors::Mappings::default(),
+            &["first".into(), "second".into()],
+        );
+        simulation.advance_to(
+            crate::model::frames_for(simulation.duration(), 60).unwrap(),
+            60,
+        );
+        let layout = simulation.layout();
+        let mut cache = Territories::default();
+        cache.update(layout);
+        for (_, file) in layout.files() {
+            let mut expected = file.dir;
+            while let Some(parent) = layout
+                .dir(expected)
+                .parent
+                .filter(|&parent| layout.dir(parent).parent.is_some())
+            {
+                expected = parent;
+            }
+            assert_eq!(cache.owners[file.dir], expected);
+            assert_eq!(
+                layout.dir(expected).repository,
+                layout.dir(file.dir).repository
+            );
+            if layout.dir(expected).parent.is_some() {
+                assert!(
+                    cache.radii[expected]
+                        >= file.position.distance(layout.dir(expected).position)
+                );
+            }
+        }
+        assert_eq!(
+            layout
+                .dirs()
+                .filter(|(_, dir)| dir.parent.is_none())
+                .count(),
+            2
+        );
+    }
     #[test]
     fn territory_cache_tracks_nested_moves_and_reuses_unchanged_layouts() {
         let mut layout = crate::layout::Layout::planned_paths(

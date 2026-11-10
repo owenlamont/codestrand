@@ -64,3 +64,21 @@ as one coordinated event connecting a developer to all affected files. Keep the
 scene mostly planar with avatars above it. Drive export from explicit frame times,
 not wall-clock rendering speed. Prototype visual readability before expanding scope.
 Explore steady neon glow without strobing; visual effects must preserve readability.
+
+### Motion budget
+
+Motion must earn its place: it should show history, not decoration.
+
+- Spend motion on content: rays, heat and file changes are what viewers watch.
+- Move avatars only to serve a commit, by the shortest gutter path. Never wander,
+  wait or detour.
+- Spread avatars committing to one repository around its tile rather than bunching
+  them, even at some travel cost.
+- Never park or commit with an avatar on top of another visible avatar; brief
+  overlap while travelling is acceptable.
+- Hold text still. Names and titles move only to avoid imminent occlusion, rarely,
+  planned ahead to minimise changes.
+- Keep whole-view motion such as camera and tile reflow slow and rare to avoid
+  motion sickness.
+- Too little motion is dull; inefficient or excessive motion looks wrong. Judge new
+  animation in an exported movie, not by its metrics alone.

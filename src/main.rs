@@ -22,6 +22,7 @@ mod export;
 mod history;
 mod layout;
 mod model;
+mod repositories;
 mod scene;
 mod theme;
 mod timeline;
@@ -78,7 +79,7 @@ mod terminal_tests {
     }
 }
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use clap::{CommandFactory, Parser, Subcommand};
 
@@ -98,6 +99,8 @@ enum Command {
         source: Source,
         /// Write per-tick measurements and a summary as JSON Lines.
         output: PathBuf,
+        #[arg(long)]
+        treemap: bool,
     },
     /// Inspect local history as JSON; merge changes compare against the first parent.
     Inspect {
@@ -137,9 +140,22 @@ enum Command {
     reason = "each bool is an independent clap switch"
 )]
 struct Source {
-    /// Local repository to play; a built-in synthetic history plays when omitted.
+    /// Multi-repository caption colour treatment.
+    #[arg(long, value_enum, default_value = "bar")]
+    caption_style: model::caption::Style,
+    /// Local repository to play; repeat for a shared timeline; synthetic when omitted.
     #[arg(long)]
-    repository: Option<PathBuf>,
+    repository: Vec<PathBuf>,
+    /// TOML repository list; relative paths resolve beside the TOML file.
+    #[arg(long)]
+    repositories_file: Option<PathBuf>,
+    /// Repository boundary treatment for multiple repositories.
+    #[arg(long, value_enum, default_value = "glass")]
+    repository_boundary: repositories::Boundary,
+    /// Permanent repository labels at file level or between files and avatars.
+    #[arg(long, value_enum, default_value = "raised")]
+    repository_label_plane: repositories::LabelPlane,
+    /// Revision resolved independently in every repository.
     #[arg(long, default_value = "HEAD")]
     revision: String,
     /// Skip history and avatar cache reads and writes.
@@ -169,6 +185,21 @@ struct Source {
     /// Maximum canonical timeline seconds between commits, compressing idle gaps.
     #[arg(long, default_value_t = 1.0, value_parser = idle_seconds)]
     max_idle_seconds: f32,
+    /// Maximum extra seconds per walking trip; none waits for the route, zero never waits.
+    #[arg(long, default_value = "0.4", value_parser = travel_seconds)]
+    travel_cap: model::TravelCap,
+    /// Bot travel policy: fade across or walk the shortest gutter route.
+    #[arg(long, value_enum, default_value = "fade")]
+    bot_travel: model::BotTravel,
+    /// Maximum avatar travel speed in pixels/second at the 1280x720 reference size.
+    #[arg(long, default_value_t = 480.0, value_parser = avatar_speed)]
+    avatar_max_speed: f32,
+    /// Avatar disc diameter relative to the original size, in both playback modes (0.5–2).
+    #[arg(long, default_value_t = 2.0, value_parser = avatar_size)]
+    avatar_scale: f32,
+    /// Visible spacing between repository tiles in reference pixels (0–20).
+    #[arg(long, default_value_t = 4.0, value_parser = gutter_pixels)]
+    gutter: f32,
     /// File heat half-life in canonical playback seconds.
     #[arg(long, default_value_t = 3.0, value_parser = positive_seconds)]
     heat_half_life: f32,
@@ -177,28 +208,48 @@ struct Source {
 impl Source {
     fn events(
         &self,
-        cache_root: Option<&Path>,
-    ) -> Result<Vec<timeline::Event>, history::Error> {
-        let mut events = match &self.repository {
-            Some(path) => {
-                cache::load(path, &self.revision, cache_root.filter(|_| !self.no_cache))
+        cache_root: Option<&std::path::Path>,
+        repositories: &[repositories::Repository],
+    ) -> anyhow::Result<Vec<timeline::Event>> {
+        let mut histories = Vec::new();
+        for (index, repository) in repositories.iter().enumerate() {
+            let started = std::time::Instant::now();
+            let mut events = cache::load(
+                &repository.path,
+                &self.revision,
+                cache_root.filter(|_| !self.no_cache),
+            )?;
+            eprintln!(
+                "repository={} import_seconds={:.6} events={}",
+                terminal_escape(&repository.name()),
+                started.elapsed().as_secs_f64(),
+                events.len()
+            );
+            if repositories.len() > 1 {
+                repositories::namespace(&mut events, index);
             }
-            None => Ok(timeline::synthetic()),
-        }?;
-        if self.no_diff_samples {
-            for change in events.iter_mut().flat_map(|event| &mut event.changes) {
-                change.samples.clear();
+            if self.no_diff_samples {
+                for change in events.iter_mut().flat_map(|event| &mut event.changes) {
+                    change.samples.clear();
+                }
             }
+            histories.push(events);
         }
-        Ok(events)
+        Ok(if repositories.is_empty() {
+            timeline::synthetic()
+        } else if repositories.len() == 1 {
+            histories.pop().expect("one repository")
+        } else {
+            repositories::merge(histories)
+        })
     }
 
-    fn load(&self) -> anyhow::Result<(model::Simulation, String)> {
-        let mappings = contributors::load(self.contributors.as_deref())?;
-        let mut events = self.events(cache::root().as_deref())?;
-        mappings.apply(&mut events);
-        let remote = self.repository.as_deref().and_then(avatars::repository);
-        let fetch = self.fetch_avatars && self.repository.is_some();
+    fn resolve_avatars(
+        &self,
+        events: &mut [timeline::Event],
+        repositories: &[repositories::Repository],
+    ) {
+        let fetch = self.fetch_avatars && !repositories.is_empty();
         let mut resolver = avatars::Resolver::new(
             fetch.then(avatars::Http::new),
             cache::root().filter(|_| !self.no_cache),
@@ -210,20 +261,48 @@ impl Source {
         let end = self.commits.map_or(events.len(), |count| {
             start.saturating_add(count).min(events.len())
         });
-        resolver.resolve(&mut events[start..end], remote.as_deref());
-        let (events, title) = match &self.repository {
-            Some(path) => {
-                let name = path
-                    .canonicalize()
-                    .ok()
-                    .and_then(|path| {
-                        path.file_name()
-                            .map(|name| name.to_string_lossy().into_owned())
-                    })
-                    .unwrap_or_else(|| path.display().to_string());
-                (events, name)
+        if repositories.is_empty() {
+            resolver.resolve(&mut events[start..end], None);
+        }
+        for (index, repository) in repositories.iter().enumerate() {
+            let remote = avatars::repository(&repository.path);
+            if repositories.len() == 1 {
+                resolver.resolve(&mut events[start..end], remote.as_deref());
+                return;
             }
-            None => (events, "Synthetic history".to_owned()),
+            let indices: Vec<_> = (start..end)
+                .filter(|&at| events[at].repository == index)
+                .collect();
+            let mut selected: Vec<_> =
+                indices.iter().map(|&at| events[at].clone()).collect();
+            resolver.resolve(&mut selected, remote.as_deref());
+            for (at, event) in indices.into_iter().zip(selected) {
+                events[at] = event;
+            }
+        }
+    }
+
+    fn load(&self) -> anyhow::Result<(model::Simulation, String)> {
+        let repositories =
+            repositories::inputs(&self.repository, self.repositories_file.as_deref())?;
+        anyhow::ensure!(
+            repositories.len() <= repositories::MAX_REPOSITORIES,
+            "multi-repository playback supports at most {} repositories (received {})",
+            repositories::MAX_REPOSITORIES,
+            repositories.len()
+        );
+        let mappings = contributors::load(self.contributors.as_deref())?;
+        let mut events = self.events(cache::root().as_deref(), &repositories)?;
+        mappings.apply(&mut events);
+        self.resolve_avatars(&mut events, &repositories);
+        let title = if repositories.is_empty() {
+            "Synthetic history".to_owned()
+        } else {
+            repositories
+                .iter()
+                .map(repositories::Repository::name)
+                .collect::<Vec<_>>()
+                .join(" | ")
         };
         let options = model::Options {
             heat_half_life: self.heat_half_life,
@@ -231,11 +310,35 @@ impl Source {
             max_idle_seconds: self.max_idle_seconds,
             start: self.start,
             commits: self.commits,
+            travel_cap: self.travel_cap,
+            bot_travel: self.bot_travel,
+            avatar_max_speed: self.avatar_max_speed,
+            avatar_size: self.avatar_scale,
+            gutter: self.gutter,
         };
-        Ok((
-            model::Simulation::new(events, &options, &theme::Theme::neon(), &mappings),
-            title,
-        ))
+        let names = if repositories.len() > 1 {
+            repositories
+                .iter()
+                .map(repositories::Repository::name)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let mut simulation = if names.is_empty() {
+            model::Simulation::new(events, &options, &theme::Theme::neon(), &mappings)
+        } else {
+            model::Simulation::try_with_repositories(
+                events,
+                &options,
+                &theme::Theme::neon(),
+                &mappings,
+                &names,
+            )?
+        };
+        simulation.repository_boundary = self.repository_boundary;
+        simulation.caption_style = self.caption_style;
+        simulation.repository_label_plane = self.repository_label_plane;
+        Ok((simulation, title))
     }
 }
 
@@ -254,6 +357,35 @@ fn idle_seconds(value: &str) -> Result<f32, String> {
         );
     }
     Ok(seconds)
+}
+
+fn travel_seconds(value: &str) -> Result<model::TravelCap, String> {
+    if value == "none" {
+        return Ok(model::TravelCap::None);
+    }
+    let seconds = value.parse::<f32>().map_err(|e| e.to_string())?;
+    if seconds.is_finite() && (0.0..=3600.0).contains(&seconds) {
+        Ok(model::TravelCap::Seconds(seconds))
+    } else {
+        Err("travel cap must be none or finite seconds between 0 and 3600".to_owned())
+    }
+}
+
+fn avatar_speed(value: &str) -> Result<f32, String> {
+    let speed = positive_seconds(value)?;
+    if speed >= 1.0 {
+        Ok(speed)
+    } else {
+        Err("avatar speed must be at least one reference pixel/second".to_owned())
+    }
+}
+
+fn avatar_size(value: &str) -> Result<f32, String> {
+    value
+        .parse::<f32>()
+        .ok()
+        .filter(|scale| (0.5..=2.0).contains(scale))
+        .ok_or_else(|| "avatar scale must be between 0.5 and 2".to_owned())
 }
 
 fn main() -> std::process::ExitCode {
@@ -281,7 +413,11 @@ fn run() -> anyhow::Result<()> {
         }
     };
     match cli.command {
-        Some(Command::LayoutQuality { source, output }) => {
+        Some(Command::LayoutQuality {
+            source,
+            output,
+            treemap,
+        }) => {
             let started = std::time::Instant::now();
             let (mut simulation, _) = source.load()?;
             eprintln!("load_plan_seconds={:.6}", started.elapsed().as_secs_f64());
@@ -300,7 +436,11 @@ fn run() -> anyhow::Result<()> {
                 }),
             )?;
             std::io::Write::write_all(&mut writer, b"\n")?;
-            model::quality::run(&mut simulation, &mut writer)?;
+            if treemap {
+                model::treemap::run(&mut simulation, &mut writer)?;
+            } else {
+                model::quality::run(&mut simulation, &mut writer)?;
+            }
             std::io::Write::flush(&mut writer)?;
             eprintln!(
                 "replay_report_seconds={:.6}",
@@ -354,8 +494,27 @@ fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn gutter_pixels(value: &str) -> Result<f32, String> {
+    let pixels: f32 = value.parse().map_err(|_| "gutter must be a number")?;
+    if pixels.is_finite() && (0.0..=20.0).contains(&pixels) {
+        Ok(pixels)
+    } else {
+        Err("gutter must be between 0 and 20 pixels".into())
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn gutter_accepts_zero_and_rejects_nonfinite_or_out_of_range_values() {
+        for value in ["0", "4", "20"] {
+            assert!(super::gutter_pixels(value).is_ok());
+        }
+        for value in ["-1", "21", "NaN", "inf", "bad"] {
+            assert!(super::gutter_pixels(value).is_err());
+        }
+    }
+
     use super::*;
 
     #[test]
@@ -434,6 +593,41 @@ mod tests {
     }
 
     #[test]
+    fn cli_combines_repeated_repositories_and_a_manifest() {
+        let cli = Cli::try_parse_from([
+            "codestrand",
+            "preview",
+            "--repository",
+            "first",
+            "--repository",
+            "second",
+            "--repositories-file",
+            "repos.toml",
+            "--repository-boundary",
+            "glass",
+            "--repository-label-plane",
+            "raised",
+        ])
+        .unwrap();
+        let Some(Command::Preview { source, .. }) = cli.command else {
+            panic!("preview")
+        };
+        assert_eq!(
+            source.repository,
+            [PathBuf::from("first"), PathBuf::from("second")]
+        );
+        assert_eq!(source.repositories_file, Some(PathBuf::from("repos.toml")));
+        assert!(matches!(
+            source.repository_boundary,
+            repositories::Boundary::Glass
+        ));
+        assert!(matches!(
+            source.repository_label_plane,
+            repositories::LabelPlane::Raised
+        ));
+    }
+
+    #[test]
     fn cli_selects_registered_themes_for_preview_and_export() {
         for name in ["neon", "phosphor"] {
             let cli = Cli::try_parse_from(["codestrand", "preview", "--theme", name])
@@ -480,6 +674,50 @@ mod tests {
         assert!(
             Cli::try_parse_from(["codestrand", "preview", "--max-idle-seconds", &cap])
                 .is_ok()
+        );
+    }
+
+    #[test]
+    fn avatar_scale_defaults_to_two_and_accepts_the_original_size() {
+        for (flags, expected) in [(vec![], 2.0), (vec!["--avatar-scale", "1"], 1.0)] {
+            let cli =
+                Cli::try_parse_from([vec!["codestrand", "preview"], flags].concat())
+                    .unwrap();
+            let Some(Command::Preview { source, .. }) = cli.command else {
+                panic!("preview")
+            };
+            assert_eq!(source.avatar_scale, expected);
+        }
+        for value in ["0", "-1", "NaN", "inf", "2.1"] {
+            assert!(avatar_size(value).is_err());
+        }
+    }
+
+    #[test]
+    fn cli_accepts_uncapped_travel_and_walking_bots_but_rejects_invalid_limits() {
+        let cli = Cli::try_parse_from([
+            "codestrand",
+            "preview",
+            "--travel-cap",
+            "none",
+            "--bot-travel",
+            "walk",
+        ])
+        .unwrap();
+        let Some(Command::Preview { source, .. }) = cli.command else {
+            panic!("preview")
+        };
+        assert_eq!(source.travel_cap, model::TravelCap::None);
+        assert_eq!(source.bot_travel, model::BotTravel::Walk);
+        for value in ["NaN", "inf", "-1", "3601", "unlimited"] {
+            assert!(
+                Cli::try_parse_from(["codestrand", "preview", "--travel-cap", value])
+                    .is_err()
+            );
+        }
+        assert_eq!(
+            travel_seconds("3600").unwrap(),
+            model::TravelCap::Seconds(3600.0)
         );
     }
 }
