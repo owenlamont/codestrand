@@ -318,7 +318,7 @@ pub(super) struct Simulation {
     theme: Theme,
     travel: travel::Plan,
     visual_updates: bool,
-    title_forecast: Vec<Vec<Option<bevy::math::Rect>>>,
+    title_plan: Vec<Vec<u8>>,
 }
 
 impl Simulation {
@@ -420,7 +420,7 @@ impl Simulation {
             Self::build(events.clone(), options, theme, mappings, &[], repositories);
         let mut padding = simulation.travel_padding(options);
         let mut pass = 0;
-        let mut compacted = false;
+        let mut compactions = 0;
         loop {
             pass += 1;
             if pass > 1 || padding.iter().any(|&(_, ticks)| ticks > 0) {
@@ -436,6 +436,7 @@ impl Simulation {
                     },
                 );
                 Self::check_schedule(&events, options, repositories.len(), &schedule)?;
+                let preferences = std::mem::take(&mut simulation.travel).preferences();
                 simulation = Self::build(
                     events.clone(),
                     options,
@@ -444,6 +445,7 @@ impl Simulation {
                     &padding,
                     repositories,
                 );
+                simulation.travel = preferences;
             }
             simulation.plan_travel(options, &padding);
             eprintln!(
@@ -459,15 +461,21 @@ impl Simulation {
                 padding = adjusted;
                 continue;
             }
-            if compacted {
+            if compactions > 0 {
+                let refined = simulation.refine_service_slots(options, &padding);
+                if refined != padding {
+                    padding = refined;
+                    continue;
+                }
+                if compactions == 1 && options.travel_cap == TravelCap::None {
+                    compactions = 2;
+                    padding = simulation.compact_travel_padding(options, &padding);
+                    continue;
+                }
                 break;
             }
-            compacted = true;
-            let tighter = simulation.compact_travel_padding(options, &padding);
-            if tighter == padding {
-                break;
-            }
-            padding = tighter;
+            compactions = 1;
+            padding = simulation.compact_travel_padding(options, &padding);
         }
         simulation.caption_plan =
             caption::plan(&simulation.schedule, &simulation.events);
@@ -572,7 +580,7 @@ impl Simulation {
             theme: theme.clone(),
             travel: travel::Plan::default(),
             visual_updates: true,
-            title_forecast: Vec::new(),
+            title_plan: Vec::new(),
         };
         if !repositories.is_empty() {
             let snapshots = simulation
@@ -749,7 +757,7 @@ impl Simulation {
         };
         state.avatar_scale += (scale - state.avatar_scale) * (1.0 - (-dt / 0.6).exp());
         if !state.layout.repositories.is_empty() {
-            state.place_slots_planned(&self.envelopes, now, &self.travel.docks);
+            state.place_slots_planned(&self.envelopes, now, &self.travel);
         }
         let targets = singleton_targets.unwrap_or_else(|| {
             state
@@ -1049,27 +1057,33 @@ impl Simulation {
             .iter()
             .enumerate()
             .filter(|(_, r)| r.live)
-            .filter_map(|(index, region)| {
+            .flat_map(|(index, region)| {
                 let height = match self.repository_label_plane {
                     crate::repositories::LabelPlane::Files => 0.15,
                     crate::repositories::LabelPlane::Raised => framing::LABEL_Y,
                 };
-                let (position, scale) = if region.tile.is_some() {
-                    let title = self.state.titles.get(&index)?;
-                    (title.position(height), title.scale)
+                let positions: Vec<_> = if region.tile.is_some() {
+                    self.state
+                        .titles
+                        .get(&index)
+                        .into_iter()
+                        .flat_map(|t| t.positions(height).map(|(p, a)| (p, t.scale, a)))
+                        .collect()
                 } else {
                     let mut point = framing::label_position(region);
                     point.y = height;
-                    (point, 1.0)
+                    vec![(point, 1.0, 1.0)]
                 };
-                Some(Label {
-                    position,
-                    text: region.label.clone(),
-                    kind: LabelKind::Repository,
-                    scale,
-                    opacity: 1.0,
-                    priority: 0.0,
-                })
+                positions
+                    .into_iter()
+                    .map(move |(position, scale, opacity)| Label {
+                        position,
+                        text: region.label.clone(),
+                        kind: LabelKind::Repository,
+                        scale,
+                        opacity,
+                        priority: 0.0,
+                    })
             })
     }
     pub(super) fn labels_for_detail(

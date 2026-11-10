@@ -4,6 +4,7 @@ use bevy::math::{Rect, Vec2};
 use serde::Serialize;
 
 use super::{Simulation, frames_for, slots, tick_time};
+mod occupancy;
 mod planning;
 use planning::trips;
 
@@ -234,10 +235,19 @@ pub(super) struct Statistics {
 pub(super) struct Plan {
     trips: Vec<Trip>,
     pub(super) docks: Vec<Option<slots::Dock>>,
+    pub(super) replanning: bool,
+    pub(super) occupancy: Vec<Vec<(u8, Rect)>>,
     pub stats: Statistics,
 }
 
 impl Plan {
+    pub(super) fn preferences(self) -> Self {
+        Self {
+            docks: self.docks,
+            occupancy: self.occupancy,
+            ..Self::default()
+        }
+    }
     pub fn report(&self) -> serde_json::Value {
         serde_json::json!({"statistics":self.stats,"trips":self.trips.iter().map(|t| serde_json::json!({"author":t.author,"commit":t.commit,"bot":t.bot,"source_repository":t.source_repository,"destination_repository":t.destination_repository,"free":tick_time(t.free),"slack":tick_time(t.arrival-t.free),"departure":tick_time(t.departure),"service":tick_time(t.arrival),"fade":t.fade,"failure":t.failure,"proof":t.proof,"source":t.source.to_array(),"target":t.destination.to_array(),"visible_distance":planning::progress(t),"travel_seconds":t.route.duration,"points":t.route.points()})).collect::<Vec<_>>()})
     }
@@ -316,6 +326,17 @@ impl Trip {
     }
 }
 
+pub(super) fn committing_overlap(
+    a: Vec2,
+    b: Vec2,
+    diameter: f32,
+    visible: [bool; 2],
+    applying: [bool; 2],
+) -> bool {
+    visible.into_iter().all(|v| v)
+        && applying.into_iter().any(|v| v)
+        && a.distance(b) < diameter
+}
 fn fade_opacity(remaining: u64, duration: u64) -> f32 {
     (tick_time(remaining.saturating_sub(1)) / tick_time(duration.max(1))).min(1.0)
 }
@@ -331,7 +352,12 @@ fn capture(simulation: &mut Simulation) -> Capture {
         gutters: Vec::new(),
     };
     let visual_updates = simulation.visual_updates;
-    let docks = std::mem::take(&mut simulation.travel.docks);
+    let docks = if simulation.travel.occupancy.is_empty() {
+        std::mem::take(&mut simulation.travel.docks)
+    } else {
+        simulation.travel.docks.clone()
+    };
+    simulation.travel.replanning = true;
     simulation.visual_updates = false;
     let mut seen = 0;
     let mut poses = 0;
@@ -395,6 +421,7 @@ fn capture(simulation: &mut Simulation) -> Capture {
     simulation.restart();
     simulation.visual_updates = visual_updates;
     simulation.travel.docks = docks;
+    simulation.travel.replanning = false;
     eprintln!(
         "travel_capture_seconds={:.6} frames={} poses={poses}",
         started.elapsed().as_secs_f64(),
@@ -639,6 +666,8 @@ impl Simulation {
             trips,
             docks,
             stats,
+            replanning: false,
+            occupancy: std::mem::take(&mut self.travel.occupancy),
         };
     }
 }

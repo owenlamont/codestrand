@@ -425,6 +425,8 @@ mod tests {
         let plan = Plan {
             trips,
             docks: Vec::new(),
+            replanning: false,
+            occupancy: Vec::new(),
             stats: Statistics::default(),
         };
         assert!(plan.sample(0, 69).is_none());
@@ -444,6 +446,8 @@ mod tests {
         let plan = Plan {
             trips,
             docks: Vec::new(),
+            replanning: false,
+            occupancy: Vec::new(),
             stats: Statistics::default(),
         };
         assert!(!plan.travelling(0, 90));
@@ -456,6 +460,8 @@ mod tests {
         let expected = Plan {
             trips,
             docks: Vec::new(),
+            replanning: false,
+            occupancy: Vec::new(),
             stats: Statistics::default(),
         }
         .report();
@@ -469,6 +475,8 @@ mod tests {
             Plan {
                 trips,
                 docks: Vec::new(),
+                replanning: false,
+                occupancy: Vec::new(),
                 stats: Statistics::default()
             }
             .report()
@@ -485,6 +493,8 @@ mod tests {
         let plan = Plan {
             trips,
             docks: Vec::new(),
+            replanning: false,
+            occupancy: Vec::new(),
             stats: Statistics::default(),
         };
         assert!(!plan.travelling(0, 11));

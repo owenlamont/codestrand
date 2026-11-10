@@ -16,8 +16,6 @@ pub(crate) struct MovingBeams {
     pub label_clipped_frames: u64,
     pub label_violation_examples: Vec<serde_json::Value>,
     pub label_gap_max: f32,
-    #[serde(skip)]
-    label_gaps: Vec<f32>,
     pair_frames: u64,
     endpoint_inside_foreign: u64,
     origin_inside_foreign: u64,
@@ -46,14 +44,6 @@ pub(crate) struct MovingBeams {
 }
 
 impl MovingBeams {
-    #[cfg(test)]
-    pub fn label_gap_p95(&self) -> f32 {
-        let mut gaps = self.label_gaps.clone();
-        gaps.sort_by(f32::total_cmp);
-        gaps.get(gaps.len().saturating_sub(1) * 95 / 100)
-            .copied()
-            .unwrap_or(0.0)
-    }
     fn overlap_depth(&mut self, depth: f32, tick: u64) {
         if depth > self.avatar_overlap_max_px {
             self.avatar_overlap_max_px = depth;
@@ -221,7 +211,6 @@ impl MovingBeams {
         if let Some(name) = &avatar.name_visibility.placement {
             let gap = distance(bounds(name));
             self.label_gap_max = self.label_gap_max.max(gap);
-            self.label_gaps.push(gap);
             let rect = bounds(name);
             self.label_clipped_frames += u64::from(
                 rect.min.cmplt(-HALF + bevy::math::Vec2::splat(0.25)).any()

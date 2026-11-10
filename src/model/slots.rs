@@ -16,7 +16,7 @@ use crate::layout::packing::Tile;
 const HALF: Vec2 = Vec2::new(640.0, 360.0);
 const HALO: f32 = 2.0;
 
-const TRAVEL_WEIGHT: f32 = 100_000.0;
+const TRAVEL_WEIGHT: f32 = 200_000.0;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(super) struct Envelope {
@@ -389,13 +389,58 @@ impl Simulation {
 impl State {
     #[cfg(test)]
     pub(super) fn place_slots(&mut self, envelopes: &[Envelope], now: f32) {
-        self.place_slots_planned(envelopes, now, &[]);
+        self.place_slots_planned(envelopes, now, &super::travel::Plan::default());
+    }
+    fn slot_peers(
+        &self,
+        index: usize,
+        plan: &super::travel::Plan,
+        choosing: bool,
+    ) -> Vec<(Vec2, u8, Vec2)> {
+        if !choosing {
+            return Vec::new();
+        }
+        let contents = content_obstacles(self);
+        let repository = self.avatars[index].repository;
+        let tile = self.layout.repositories[repository]
+            .tile
+            .expect("visible service tile");
+        let centre = contents
+            .iter()
+            .find(|(owner, _)| *owner == repository)
+            .map_or((tile.low + tile.high) * HALF * 0.5, |(_, r)| r.center());
+        self.avatars
+            .iter()
+            .enumerate()
+            .filter(|(i, a)| {
+                *i != index
+                    && a.repository == repository
+                    && a.presence > 0.0
+                    && !plan.travelling(*i, self.tick)
+            })
+            .filter_map(|(_, a)| {
+                a.slot.as_ref().map(|s| (s.point, s.dock.edge, centre))
+            })
+            .collect()
+    }
+    fn retained_slots(&self, now: f32, radius: f32) -> Vec<Option<Rect>> {
+        self.avatars
+            .iter()
+            .map(|avatar| {
+                if now - avatar.last_active >= super::AVATAR_IDLE {
+                    return None;
+                }
+                let slot = avatar.slot.as_ref()?;
+                let tile = self.layout.repositories[avatar.repository].gutter?;
+                Some(disk(slot.dock.on_network(tile), radius))
+            })
+            .collect()
     }
     pub(super) fn place_slots_planned(
         &mut self,
         envelopes: &[Envelope],
         now: f32,
-        docks: &[Option<Dock>],
+        plan: &super::travel::Plan,
     ) {
         let gap = Vec2::splat(self.gutter);
         let beams = tile_obstacles(self);
@@ -424,18 +469,7 @@ impl State {
         let mut order: Vec<_> = (0..self.avatars.len())
             .filter(|&i| now - self.avatars[i].last_active < super::AVATAR_IDLE)
             .collect();
-        let retained: Vec<_> = self
-            .avatars
-            .iter()
-            .map(|avatar| {
-                if now - avatar.last_active >= super::AVATAR_IDLE {
-                    return None;
-                }
-                let slot = avatar.slot.as_ref()?;
-                let tile = self.layout.repositories[avatar.repository].gutter?;
-                Some(disk(slot.dock.on_network(tile), radius))
-            })
-            .collect();
+        let retained = self.retained_slots(now, radius);
         occupied.extend(retained.iter().flatten().copied());
         order.sort_by(|&a, &b| {
             self.avatars[b]
@@ -452,21 +486,30 @@ impl State {
             let avatar = &self.avatars[index];
             let commit = avatar.commit;
             let envelope = envelopes[commit].clone();
-            let record = self.slot_records.entry(commit).or_default();
-            record.observations += 1;
+            self.slot_records.entry(commit).or_default().observations += 1;
             let Some(tile) = self.layout.repositories[avatar.repository].tile else {
+                let record = self.slot_records.entry(commit).or_default();
                 record.least_bad = true;
                 record.missing_tile = true;
                 self.avatars[index].slot = None;
                 continue;
             };
             let text = short_name(&avatar.name, name_scale, tile.pixels().x - 24.0);
+            let choosing = avatar.slot.as_ref().is_none_or(|s| s.commit != commit);
+            let future = plan.reserved(
+                commit,
+                self.layout.repositories[avatar.repository].gutter,
+                choosing,
+            );
+            let peers = self.slot_peers(index, plan, choosing);
             let choice = Choice {
                 tile,
                 gutter: self.layout.repositories[avatar.repository].gutter,
                 gap,
                 radius,
                 beams: &beams,
+                peers: &peers,
+                future: &future,
                 occupied: &occupied,
                 repository: avatar.repository,
                 text,
@@ -483,9 +526,11 @@ impl State {
                         .map_or(point, |t| dock.on_network(t))
                 }),
                 commit,
-                docks.get(commit).copied().flatten(),
+                plan.docks.get(commit).copied().flatten(),
+                !plan.replanning,
             );
             chosen.commit = commit;
+            let record = self.slot_records.entry(commit).or_default();
             record.fallback |= chosen.dock.edge != 0;
             record.least_bad |= !chosen.valid();
             record.half_plane_failures += u32::from(!chosen.half_plane);
@@ -910,6 +955,8 @@ struct Choice<'a> {
     radius: f32,
     beams: &'a [(usize, Rect)],
     occupied: &'a [Rect],
+    peers: &'a [(Vec2, u8, Vec2)],
+    future: &'a [Rect],
     repository: usize,
     text: String,
     scale: f32,
@@ -925,16 +972,39 @@ impl Choice<'_> {
         origin: Option<Vec2>,
         commit: usize,
         planned: Option<Dock>,
+        locked: bool,
     ) -> Placement {
-        if let Some(dock) = planned {
-            return self.assess(dock).0;
+        if !locked && let Some(parked) = previous {
+            let selected = self.assess(parked.dock).0;
+            if parked.commit == commit
+                || (planned.is_some()
+                    && selected.valid()
+                    && self.reserved_cost(selected.point) <= 0.001)
+            {
+                return selected;
+            }
         }
+        if let Some(dock) = planned {
+            let selected = self.assess(dock).0;
+            if locked
+                || (selected.valid() && self.reserved_cost(selected.point) <= 0.001)
+            {
+                return selected;
+            }
+        }
+        let occupied_origin = previous
+            .filter(|s| {
+                s.commit != commit && self.avatar_cost(self.point(s.dock)) > 0.001
+            })
+            .map(|s| self.point(s.dock));
         let previous = previous
             .filter(|s| {
                 s.commit == commit || self.avatar_cost(self.point(s.dock)) <= 0.001
             })
             .map(|s| s.dock);
-        origin.map_or_else(|| self.select(previous), |p| self.nearest(p))
+        origin
+            .or(occupied_origin)
+            .map_or_else(|| self.select(previous), |p| self.nearest(p))
     }
     fn point(&self, dock: Dock) -> Vec2 {
         self.gutter.map_or_else(
@@ -958,16 +1028,15 @@ impl Choice<'_> {
                     point, slot.point, self.cells, self.speed,
                 );
                 let ray = self.ray_cost(slot.point);
-                let cost = ray + TRAVEL_WEIGHT * seconds;
+                let cost = ray
+                    + TRAVEL_WEIGHT * seconds
+                    + self.spread_cost(slot.point, slot.dock.edge)
+                    + self.spacing_cost(slot.point) * 1_000.0;
                 (slot, cost)
             })
             .min_by(|a, b| {
                 self.avatar_cost(a.0.point)
                     .total_cmp(&self.avatar_cost(b.0.point))
-                    .then(
-                        self.spacing_cost(a.0.point)
-                            .total_cmp(&self.spacing_cost(b.0.point)),
-                    )
                     .then(a.1.total_cmp(&b.1))
                     .then(
                         a.0.point
@@ -981,6 +1050,27 @@ impl Choice<'_> {
         self.occupied
             .iter()
             .map(|r| (self.radius * 2.0 - point.distance(r.center())).max(0.0))
+            .sum::<f32>()
+            + self.reserved_cost(point)
+    }
+    fn reserved_cost(&self, point: Vec2) -> f32 {
+        self.future
+            .iter()
+            .map(|r| (point - r.min).min(r.max - point).min_element().max(0.0))
+            .sum::<f32>()
+    }
+    fn spread_cost(&self, point: Vec2, edge: u8) -> f32 {
+        self.peers
+            .iter()
+            .map(|(other, side, centre)| {
+                let separation = (point - *centre)
+                    .normalize_or_zero()
+                    .dot((*other - *centre).normalize_or_zero())
+                    .clamp(-1.0, 1.0)
+                    .acos();
+                1_000.0 * (1.0 - separation / std::f32::consts::PI)
+                    + if edge == *side { 1_000.0 } else { 0.0 }
+            })
             .sum()
     }
     fn ray_cost(&self, point: Vec2) -> f32 {
@@ -1102,12 +1192,14 @@ impl Choice<'_> {
                             .total_cmp(&self.avatar_cost(b.0.point)),
                     )
                     .then(
-                        self.spacing_cost(a.0.point)
-                            .total_cmp(&self.spacing_cost(b.0.point)),
-                    )
-                    .then(
-                        self.ray_cost(a.0.point)
-                            .total_cmp(&self.ray_cost(b.0.point)),
+                        (self.ray_cost(a.0.point)
+                            + self.spread_cost(a.0.point, a.0.dock.edge)
+                            + self.spacing_cost(a.0.point) * 1_000.0)
+                            .total_cmp(
+                                &(self.ray_cost(b.0.point)
+                                    + self.spread_cost(b.0.point, b.0.dock.edge)
+                                    + self.spacing_cost(b.0.point) * 1_000.0),
+                            ),
                     )
                     .then(a.1.3.cmp(&b.1.3))
                     .then(a.2.total_cmp(&b.2))
@@ -1138,12 +1230,13 @@ impl Choice<'_> {
             let mut blocked: Vec<_> = self
                 .occupied
                 .iter()
-                .copied()
-                .filter(|r| {
-                    origin[cross] + self.radius > r.min[cross]
-                        && origin[cross] - self.radius < r.max[cross]
+                .map(|r| (r, self.radius))
+                .chain(self.future.iter().map(|r| (r, 0.0)))
+                .filter(|(r, margin)| {
+                    origin[cross] + margin > r.min[cross]
+                        && origin[cross] - margin < r.max[cross]
                 })
-                .map(|r| (r.min[axis] - self.radius, r.max[axis] + self.radius))
+                .map(|(r, margin)| (r.min[axis] - margin, r.max[axis] + margin))
                 .collect();
             blocked.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
             let mut cursor = low;
@@ -1283,6 +1376,35 @@ mod tests {
     use crate::{contributors::Mappings, model::Options, theme::Theme};
 
     #[test]
+    fn replanning_keeps_a_new_dock_for_the_whole_commit() {
+        let chooser = choice(&[], &[]);
+        let mut parked = chooser.select(None);
+        parked.commit = 7;
+        let old = Dock {
+            edge: 3,
+            fraction: 0.5,
+        };
+        assert_ne!(parked.dock, old);
+        assert_eq!(
+            chooser.pick(Some(&parked), None, 8, Some(old), false).dock,
+            parked.dock
+        );
+        assert_eq!(
+            chooser.pick(Some(&parked), None, 7, Some(old), false).dock,
+            parked.dock
+        );
+    }
+    #[test]
+    fn spread_prefers_an_opposite_fan_and_edge() {
+        let peers = [(Vec2::new(-100.0, 0.0), 3, Vec2::ZERO)];
+        let mut chooser = choice(&[], &[]);
+        chooser.peers = &peers;
+        assert!(
+            chooser.spread_cost(Vec2::new(-100.0, 0.0), 3)
+                > chooser.spread_cost(Vec2::new(100.0, 0.0), 1)
+        );
+    }
+    #[test]
     fn arrival_prefers_a_clear_disc_over_the_nearest_occupied_slot() {
         let first = choice(&[], &[]).select(None);
         let occupied = [disk(first.point, 7.5)];
@@ -1415,6 +1537,8 @@ mod tests {
             gap: Vec2::new(16.0, 32.0),
             radius: 7.5,
             occupied,
+            peers: &[],
+            future: &[],
             beams: obstacles,
             cells: &[],
             speed: 480.0,
@@ -1831,107 +1955,6 @@ mod tests {
         }
         eprintln!("SLOT_SUMMARY {summary}");
         moving.assert_clear(sim.travel.stats.max_speed);
-    }
-
-    #[test]
-    #[ignore = "requires local repositories and diagnostic path"]
-    fn local_travel_activity_audit() {
-        let started = std::time::Instant::now();
-        let (mut sim, _) = super::super::nitpicks::local_simulation();
-        let planning = started.elapsed().as_secs_f64();
-        let nominal = super::super::Schedule::new(&sim.events, 1.0, 0.1);
-        let frames = super::super::frames_for(sim.duration(), 60).unwrap();
-        let mut idle = 0_u64;
-        let mut animation = 0_u64;
-        let mut motion = 0_u64;
-        let mut previous = Vec::<(usize, Vec3, Option<Dock>)>::new();
-        let mut lane_changes = 0_u64;
-        let mut lane_moves = 0_u64;
-        let mut animated = vec![0_u64; sim.events.len()];
-        let mut services = Vec::new();
-        let mut seen = 0;
-        let mut moving = diagnostics::MovingBeams::default();
-        for frame in 0..=frames {
-            sim.advance_to(frame, 60);
-            moving.observe(&sim);
-            let active = !sim.beams().is_empty() || !sim.fragments().is_empty();
-            let mut moved = false;
-            for (index, avatar) in sim.state.avatars.iter().enumerate() {
-                if let Some(&(commit, point, dock)) = previous.get(index) {
-                    lane_changes += u64::from(
-                        commit == avatar.commit
-                            && dock != avatar.slot.as_ref().map(|s| s.dock)
-                            && avatar.presence > 0.0,
-                    );
-                    let changed = point.distance(avatar.position) > 0.00001;
-                    moved |= changed && avatar.presence > 0.0;
-                    lane_moves += u64::from(
-                        changed
-                            && commit == avatar.commit
-                            && avatar.presence > 0.0
-                            && !sim.travel.travelling(index, sim.state.tick),
-                    );
-                }
-            }
-            previous = sim
-                .state
-                .avatars
-                .iter()
-                .map(|a| (a.commit, a.position, a.slot.as_ref().map(|s| s.dock)))
-                .collect();
-            for pulse in &sim.state.pulses {
-                if sim.pulse_beams_visible(pulse)
-                    && super::super::envelope(
-                        sim.seconds() - pulse.start,
-                        pulse.end - pulse.start,
-                    ) > 0.0
-                    && pulse
-                        .targets
-                        .iter()
-                        .any(|&(target, ..)| sim.state.point(target).is_some())
-                {
-                    animated[pulse.commit] += 1;
-                }
-            }
-            for commit in seen..sim.state.next_event {
-                let contributor = sim.events[commit].contributor.as_ref().unwrap();
-                services.push(serde_json::json!({"commit":commit,"tick":frame,"author":sim.state.authors[&contributor.key],"nominal":nominal.starts[commit]}));
-            }
-            seen = sim.state.next_event;
-            idle += u64::from(!active && !moved);
-            animation += u64::from(active);
-            motion += u64::from(moved);
-        }
-        let value = serde_json::json!({"duration":sim.duration(),"plan_seconds":planning,
-            "frames":frames+1,"idle_frames":idle,"animation_frames":animation,
-            "motion_frames":motion,"lane_move_frames":lane_moves,"lane_changes":lane_changes,
-            "commits_without_animation":animated.iter().filter(|&&a| a==0).count(),
-            "animation_frame_counts":animated,"brief_commits_100ms":animated.iter().filter(|&&n|n>0 && n<=6).count(),"services":services,"travel":sim.travel.report(),
-            "label_gap_p95":moving.label_gap_p95(),"moving_beams":moving});
-        std::fs::write(
-            std::env::var("CODESTRAND_TRAVEL_DIAGNOSTIC").unwrap(),
-            serde_json::to_vec_pretty(&value).unwrap(),
-        )
-        .unwrap();
-    }
-
-    #[test]
-    #[ignore = "requires local five-repository manifest and travel diagnostic path"]
-    fn local_uncapped_travel_and_bot_classification() {
-        let started = std::time::Instant::now();
-        let (mut sim, _) = super::super::nitpicks::local_simulation();
-        let mut seen = std::collections::HashSet::new();
-        let contributors: Vec<_> = sim.events.iter().filter_map(|event| {
-            let c = event.contributor.as_ref().unwrap();
-            seen.insert(c.key.clone()).then(|| serde_json::json!({"name":c.name,"email":String::from_utf8_lossy(&event.author.email),"rule":c.bot_rule(&event.author.email),"bot":c.is_bot(&event.author.email)}))
-        }).collect();
-        let report = serde_json::json!({"duration":sim.duration(),"plan_seconds":started.elapsed().as_secs_f64(),"contributors":contributors,"travel":sim.travel.report()});
-        std::fs::write(
-            std::env::var("CODESTRAND_TRAVEL_DIAGNOSTIC").unwrap(),
-            serde_json::to_vec_pretty(&report).unwrap(),
-        )
-        .unwrap();
-        validate(&mut sim);
     }
 
     #[test]
