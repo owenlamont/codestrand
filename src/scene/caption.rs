@@ -51,9 +51,13 @@ pub(super) fn setup(world: &mut World, camera: Entity) {
             Node {
                 position_type: PositionType::Absolute,
                 left: px(0.0),
-                top: px(if columns.multi { 698.0 } else { 668.0 }),
+                top: px(if columns.multi {
+                    crate::model::caption::MULTI_TOP
+                } else {
+                    668.0
+                }),
                 width: percent(100.0),
-                height: px(22.0),
+                height: px(crate::model::caption::BAR_HEIGHT),
                 ..default()
             },
             BackgroundColor(Color::NONE),

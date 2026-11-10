@@ -227,7 +227,7 @@ pub(super) struct Avatar {
     name_visibility: names::Visibility,
     commit: usize,
     slot: Option<slots::Placement>,
-    slot_origin: Option<Vec2>,
+    slot_origin: Option<(usize, slots::Dock, Vec2)>,
 }
 
 pub(super) struct Beam {
@@ -295,6 +295,7 @@ struct State {
     geometry: Geometry,
     avatar_scale: f32,
     avatar_size: f32,
+    avatar_max_speed: f32,
     gutter: f32,
     slot_records: BTreeMap<usize, slots::Record>,
     titles: BTreeMap<usize, titles::Title>,
@@ -522,6 +523,7 @@ impl Simulation {
             avatar_scale: 1.0,
             avatar_size: options.avatar_size
                 * repository_avatar_factor(repositories.len()),
+            avatar_max_speed: options.avatar_max_speed,
             gutter: options.gutter,
             slot_records: BTreeMap::new(),
             titles: BTreeMap::new(),
@@ -549,12 +551,11 @@ impl Simulation {
         }
         (state.focus, state.distance) = state.fit();
         let total = events.len();
-        let mut prior_active = vec![false; repositories.len()];
-        for event in &events[..start] {
-            if let Some(active) = prior_active.get_mut(event.repository) {
-                *active = true;
-            }
-        }
+        let prior_active = (0..repositories.len())
+            .map(|repository| {
+                events[..start].iter().any(|e| e.repository == repository)
+            })
+            .collect();
         events.truncate(end);
         events.drain(..start);
         let mut simulation = Self {
@@ -751,12 +752,7 @@ impl Simulation {
         };
         state.avatar_scale += (scale - state.avatar_scale) * (1.0 - (-dt / 0.6).exp());
         if !state.layout.repositories.is_empty() {
-            let docks = if self.visual_updates {
-                self.travel.docks.as_slice()
-            } else {
-                &[]
-            };
-            state.place_slots_planned(&self.envelopes, now, docks);
+            state.place_slots_planned(&self.envelopes, now, &self.travel.docks);
         }
         let targets = singleton_targets.unwrap_or_else(|| {
             state
@@ -803,7 +799,14 @@ impl Simulation {
         state.place_view(dt);
         if self.visual_updates {
             self.place_titles(dt);
-            self.state.place_names(dt, &self.travel);
+            let texts: Vec<_> = self
+                .labels_for_detail(|_| true)
+                .iter()
+                .filter(|l| l.kind != LabelKind::Avatar)
+                .map(|l| titles::label_bounds(self, l))
+                .chain(caption::frame_text_rects())
+                .collect();
+            self.state.place_names(dt, &self.travel, &texts);
         }
     }
 
@@ -1284,7 +1287,10 @@ impl State {
 
         let avatar = &mut self.avatars[author];
         if avatar.repository != event.repository {
-            avatar.slot_origin = avatar.slot.take().map(|s| s.point);
+            avatar.slot_origin = avatar
+                .slot
+                .take()
+                .map(|s| (avatar.repository, s.dock, s.point));
         }
         avatar.repository = event.repository;
         avatar.commit = self.next_event;

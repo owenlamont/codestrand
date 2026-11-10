@@ -245,7 +245,9 @@ fn search(
                 .pose(template.author, begin)
                 .expect("existing author")
                 .dock;
-            if dock.on_network(source_tile).distance(template.destination) < 0.001 {
+            if dock.on_network(source_tile).distance(template.destination)
+                < super::NETWORK_EPSILON
+            {
                 best.fade = false;
                 best.route = Route::default();
                 best.failure = None;

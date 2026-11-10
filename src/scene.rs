@@ -441,7 +441,14 @@ fn setup(world: &mut World) {
 
 fn setup_caption(world: &mut World, camera: Entity, repository_labels: usize) {
     if repository_labels > 0 {
-        heading(world, camera, "CODESTRAND", 24.0, 0.0, 18.0);
+        heading(
+            world,
+            camera,
+            "CODESTRAND",
+            crate::model::caption::HEADING_LEFT,
+            0.0,
+            crate::model::caption::HEADING_SIZE,
+        );
     } else {
         let title = world.resource::<Title>().0.clone();
         heading(world, camera, "CODESTRAND", 28.0, 28.0, 30.0);

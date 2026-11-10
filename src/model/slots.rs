@@ -16,6 +16,19 @@ use crate::layout::packing::Tile;
 const HALF: Vec2 = Vec2::new(640.0, 360.0);
 const HALO: f32 = 2.0;
 
+#[cfg(test)]
+pub(super) fn angular_limit() -> f32 {
+    labels::EMERGENCY_SPEED
+}
+
+fn travel_weight() -> f32 {
+    #[cfg(test)]
+    if let Ok(value) = std::env::var("CODESTRAND_TRAVEL_WEIGHT") {
+        return value.parse().expect("numeric local audit weight");
+    }
+    100_000.0
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(super) struct Envelope {
     low: Vec2,
@@ -128,7 +141,6 @@ pub(super) struct Placement {
     pub dock: Dock,
     pub commit: usize,
     pub point: Vec2,
-    pub name: Option<Vec2>,
     pub text: String,
     pub half_plane: bool,
     pub crossings: usize,
@@ -222,18 +234,6 @@ fn tile_obstacles(state: &State) -> Vec<(usize, Rect)> {
     result
 }
 
-#[cfg(test)]
-fn obstacles(state: &State) -> Vec<(usize, Rect)> {
-    let mut result = content_obstacles(state);
-    for rect in [
-        Rect::from_corners(Vec2::new(-618.0, 340.0), Vec2::new(-498.0, 360.0)),
-        Rect::from_corners(Vec2::new(-640.0, -360.0), Vec2::new(640.0, -338.0)),
-    ] {
-        result.push((usize::MAX, rect.inflate(HALO)));
-    }
-    result
-}
-
 pub(super) fn content_obstacles(state: &State) -> Vec<(usize, Rect)> {
     let mut result = Vec::new();
     for (index, region) in state.layout.repositories.iter().enumerate() {
@@ -301,19 +301,6 @@ fn short_name(name: &str, scale: f32, width: f32) -> String {
     text
 }
 
-#[cfg(test)]
-fn name_obstacles(
-    obstacles: &[(usize, Rect)],
-    owner: usize,
-) -> impl Iterator<Item = &Rect> {
-    let own_tile = obstacles
-        .iter()
-        .position(|(repository, _)| *repository == owner);
-    obstacles
-        .iter()
-        .enumerate()
-        .filter_map(move |(index, (_, rect))| (Some(index) != own_tile).then_some(rect))
-}
 fn place_point(point: Vec3, rotated: bool, scale: f32, origin: Vec2) -> Vec3 {
     let local = Vec2::new(point.x, point.z);
     let local = if rotated { local.perp() } else { local };
@@ -423,8 +410,13 @@ impl State {
     ) {
         let gap = Vec2::splat(self.gutter);
         let beams = tile_obstacles(self);
-        #[cfg(test)]
-        let obstacles = obstacles(self);
+        let cells: Vec<_> = self
+            .layout
+            .repositories
+            .iter()
+            .filter_map(|r| r.gutter)
+            .map(|t| Rect::from_corners(t.low * HALF, t.high * HALF))
+            .collect();
         let radius = self.avatar_radius();
         let name_scale = self.name_scale();
         let mut occupied: Vec<Rect> = Vec::new();
@@ -432,7 +424,6 @@ impl State {
             if now - avatar.last_active >= super::AVATAR_IDLE
                 && let Some(slot) = &mut avatar.slot
             {
-                slot.name = None;
                 if let Some(tile) = self.layout.repositories[avatar.repository].gutter {
                     slot.point = slot.dock.on_network(tile);
                 }
@@ -486,18 +477,22 @@ impl State {
                 gutter: self.layout.repositories[avatar.repository].gutter,
                 gap,
                 radius,
-                #[cfg(test)]
-                obstacles: &obstacles,
                 beams: &beams,
                 occupied: &occupied,
                 repository: avatar.repository,
                 text,
                 scale: name_scale,
                 envelope,
+                cells: &cells,
+                speed: self.avatar_max_speed,
             };
             let mut chosen = choice.pick(
                 avatar.slot.as_ref(),
-                avatar.slot_origin,
+                avatar.slot_origin.map(|(repository, dock, point)| {
+                    self.layout.repositories[repository]
+                        .gutter
+                        .map_or(point, |t| dock.on_network(t))
+                }),
                 commit,
                 docks.get(commit).copied().flatten(),
             );
@@ -531,20 +526,19 @@ impl State {
             .map(|p| disk(*p, self.avatar_radius()))
             .collect();
         let beams = tile_obstacles(self);
-        #[cfg(test)]
-        let obstacles = obstacles(self);
         let choice = Choice {
             tile,
             gutter: self.layout.repositories[avatar.repository].gutter,
             gap: Vec2::splat(self.gutter),
             radius: self.avatar_radius(),
-            obstacles: &obstacles,
             beams: &beams,
             occupied: &occupied,
             repository: avatar.repository,
             text: avatar.name.clone(),
             scale: self.name_scale(),
             envelope: envelope.clone(),
+            cells: &[],
+            speed: self.avatar_max_speed,
         };
         let selected = choice.select(None);
         selected.valid() && choice.avatar_cost(selected.point) <= 0.001
@@ -556,23 +550,6 @@ impl State {
             } else {
                 0.95
             }
-    }
-
-    pub(super) fn slot_name_point(&self, avatar: &super::Avatar) -> Option<Vec2> {
-        let slot = avatar.slot.as_ref()?;
-        let point = project(
-            self.focus + view_direction() * self.distance,
-            self.focus,
-            &[avatar.position],
-        )
-        .next()
-        .flatten()?
-            * HALF;
-        Some(if point.distance(slot.point) <= 12.0 {
-            slot.name?
-        } else {
-            slot.name? + point - slot.point
-        })
     }
 
     fn name_bodies(&self) -> Vec<Option<Vec2>> {
@@ -620,14 +597,57 @@ impl State {
             })
             .collect()
     }
+    fn label_emergency(
+        &self,
+        index: usize,
+        motion: &Rotation<'_>,
+        texts: &[Rect],
+    ) -> bool {
+        motion.previous.is_some_and(|p| {
+            let mut threats = texts.to_vec();
+            threats.extend(
+                self.avatars
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, a)| *i != index && a.presence > 0.0)
+                    .filter_map(|(_, a)| a.name_visibility.placement.as_ref())
+                    .map(|n| {
+                        let size = super::names::rect(
+                            Vec2::ZERO,
+                            &n.text,
+                            n.scale,
+                            self.geometry.label_height,
+                        )
+                        .size();
+                        Rect::from_corners(
+                            n.point - Vec2::Y * size.y,
+                            n.point + Vec2::X * size.x,
+                        )
+                    }),
+            );
+            motion.future.iter().take(12).any(|&point| {
+                let rect = labels::tangent_rect(
+                    point,
+                    motion.size,
+                    self.avatar_radius() + 4.0 / 3.0,
+                    p.angle,
+                )
+                .inflate(12.0);
+                !rect.min.cmpge(-HALF).all()
+                    || !rect.max.cmple(HALF).all()
+                    || threats.iter().any(|r| !rect.intersect(*r).is_empty())
+            })
+        })
+    }
     fn label_domains(
         &self,
         bodies: &[Option<Vec2>],
         travel: &super::travel::Plan,
         dt: f32,
+        texts: &[Rect],
     ) -> (Vec<usize>, Vec<Vec<labels::Candidate>>) {
         let mut obstacles = tile_obstacles(self);
-        obstacles.extend(self.titles.values().map(|title| (usize::MAX, title.rect())));
+        obstacles.extend(texts.iter().map(|&rect| (usize::MAX, rect)));
         let rays = self.name_rays(bodies, travel);
         let space = LabelSpace {
             bodies,
@@ -678,6 +698,7 @@ impl State {
                 dt,
                 future: &future,
             };
+            let emergency = self.label_emergency(index, &rotation, texts);
             let mut targets: Vec<_> = (0..32_u8)
                 .map(|i| f32::from(i) * std::f32::consts::TAU / 32.0)
                 .collect();
@@ -697,7 +718,14 @@ impl State {
             targets.extend(previous.map(|p| p.angle));
             let scored = targets
                 .into_iter()
-                .map(|target| space.candidate(index, target, &rotation))
+                .flat_map(|target| {
+                    std::iter::once(space.candidate(index, target, &rotation, false))
+                        .chain(
+                            emergency.then(|| {
+                                space.candidate(index, target, &rotation, true)
+                            }),
+                        )
+                })
                 .collect();
             let candidates = eligible_angles(scored);
             authors.push(index);
@@ -705,14 +733,19 @@ impl State {
         }
         (authors, domains)
     }
-    pub(super) fn place_slot_names(&mut self, dt: f32, travel: &super::travel::Plan) {
+    pub(super) fn place_slot_names(
+        &mut self,
+        dt: f32,
+        travel: &super::travel::Plan,
+        texts: &[Rect],
+    ) {
         for avatar in self.avatars.iter_mut().filter(|a| a.presence <= 0.0) {
             avatar.name_visibility.placement = None;
             avatar.name_visibility.visible = false;
             avatar.name_visibility.opacity = 0.0;
         }
         let bodies = self.name_bodies();
-        let (authors, domains) = self.label_domains(&bodies, travel, dt);
+        let (authors, domains) = self.label_domains(&bodies, travel, dt, texts);
         let assignment = labels::solve(&domains);
         for ((index, candidates), choice) in
             authors.into_iter().zip(domains).zip(assignment.choices)
@@ -742,23 +775,29 @@ fn eligible_angles(
     let best = scored
         .iter()
         .map(|(_, c)| *c)
-        .min_by(|a, b| {
-            a[0].total_cmp(&b[0])
-                .then(a[1].total_cmp(&b[1]))
-                .then(a[2].total_cmp(&b[2]))
-        })
+        .min_by(|a, b| a[0].total_cmp(&b[0]).then(a[1].total_cmp(&b[1])))
         .expect("continuous angle samples");
+    let safe_forecast = scored.iter().any(|(_, c)| {
+        c[0].total_cmp(&best[0]).is_eq()
+            && c[1].total_cmp(&best[1]).is_eq()
+            && c[2] <= 0.0001
+    });
     let mut candidates: Vec<_> = scored
         .into_iter()
         .filter(|(_, c)| {
             c[0].total_cmp(&best[0]).is_eq()
                 && c[1].total_cmp(&best[1]).is_eq()
-                && c[2].total_cmp(&best[2]).is_eq()
+                && (!safe_forecast || c[2] <= 0.0001)
         })
         .map(|(candidate, _)| candidate)
         .collect();
-    candidates
-        .sort_by(|a, b| a.soft.total_cmp(&b.soft).then(a.angle.total_cmp(&b.angle)));
+    candidates.sort_by(|a, b| {
+        a.text_pairs
+            .cmp(&b.text_pairs)
+            .then(a.text_area.total_cmp(&b.text_area))
+            .then(a.soft.total_cmp(&b.soft))
+            .then(a.angle.total_cmp(&b.angle))
+    });
     candidates
         .dedup_by(|a, b| a.angle.to_bits() == b.angle.to_bits() && a.goal == b.goal);
     candidates
@@ -784,9 +823,10 @@ impl LabelSpace<'_> {
         index: usize,
         target: f32,
         motion: &Rotation<'_>,
+        emergency: bool,
     ) -> (labels::Candidate, [f32; 4]) {
         let (angle, angular_velocity) = motion.previous.map_or((target, 0.0), |p| {
-            labels::advance(p.angle, p.angular_velocity, target, motion.dt)
+            labels::steer(p.angle, p.angular_velocity, target, motion.dt, emergency)
         });
         let distance = self.radius + self.margin;
         let rect = labels::tangent_rect(motion.body, motion.size, distance, angle);
@@ -800,8 +840,12 @@ impl LabelSpace<'_> {
             motion.size,
             distance,
             motion.future,
+            emergency,
         );
+        let text = self.text_cost(rect);
         let soft = cost[2]
+            + clip * 1e8
+            + f32::from(u8::from(emergency)) * 0.01
             + goal_cost[0]
             + goal_cost[1] * 1e6
             + goal_cost[2]
@@ -814,10 +858,23 @@ impl LabelSpace<'_> {
                 angular_velocity,
                 rect,
                 goal,
+                text_pairs: text.0,
+                text_area: text.1,
+                goal_text_pairs: self.text_cost(goal).0,
                 soft,
             },
             [cost[0], cost[1], clip, soft],
         )
+    }
+    fn text_cost(&self, rect: Rect) -> (usize, f32) {
+        self.obstacles
+            .iter()
+            .filter(|(owner, _)| *owner == usize::MAX)
+            .map(|(_, r)| rect.intersect(*r))
+            .filter(|r| !r.is_empty())
+            .fold((0, 0.0), |(pairs, area), r| {
+                (pairs + 1, area + r.size().element_product())
+            })
     }
     fn cost(&self, index: usize, rect: Rect) -> [f32; 3] {
         let foreign = self
@@ -863,10 +920,10 @@ impl LabelSpace<'_> {
                 + self
                     .obstacles
                     .iter()
-                    .filter(|(r, _)| *r != self.avatars[index].repository)
-                    .map(|(owner, r)| {
-                        area(*r) * if *owner == usize::MAX { 10_000.0 } else { 1.0 }
+                    .filter(|(r, _)| {
+                        *r != usize::MAX && *r != self.avatars[index].repository
                     })
+                    .map(|(_, r)| area(*r))
                     .sum::<f32>()
                 + count(
                     self.rays
@@ -891,14 +948,14 @@ struct Choice<'a> {
     gutter: Option<Tile>,
     gap: Vec2,
     radius: f32,
-    #[cfg(test)]
-    obstacles: &'a [(usize, Rect)],
     beams: &'a [(usize, Rect)],
     occupied: &'a [Rect],
     repository: usize,
     text: String,
     scale: f32,
     envelope: Envelope,
+    cells: &'a [Rect],
+    speed: f32,
 }
 
 impl Choice<'_> {
@@ -936,21 +993,33 @@ impl Choice<'_> {
             }))
             .map(|dock| self.assess(dock).0)
             .filter(Placement::valid)
+            .map(|slot| {
+                let seconds = super::travel::slot_seconds(
+                    point, slot.point, self.cells, self.speed,
+                );
+                let ray = self.ray_cost(slot.point);
+                let cost = if travel_weight().is_infinite() {
+                    seconds
+                } else {
+                    ray + travel_weight() * seconds
+                };
+                (slot, cost)
+            })
             .min_by(|a, b| {
-                self.avatar_cost(a.point)
-                    .total_cmp(&self.avatar_cost(b.point))
+                self.avatar_cost(a.0.point)
+                    .total_cmp(&self.avatar_cost(b.0.point))
                     .then(
-                        self.spacing_cost(a.point)
-                            .total_cmp(&self.spacing_cost(b.point)),
+                        self.spacing_cost(a.0.point)
+                            .total_cmp(&self.spacing_cost(b.0.point)),
                     )
-                    .then(self.ray_cost(a.point).total_cmp(&self.ray_cost(b.point)))
+                    .then(a.1.total_cmp(&b.1))
                     .then(
-                        a.point
+                        a.0.point
                             .distance_squared(point)
-                            .total_cmp(&b.point.distance_squared(point)),
+                            .total_cmp(&b.0.point.distance_squared(point)),
                     )
             })
-            .unwrap_or_else(|| self.select(None))
+            .map_or_else(|| self.select(None), |(slot, _)| slot)
     }
     fn avatar_cost(&self, point: Vec2) -> f32 {
         self.occupied
@@ -998,7 +1067,6 @@ impl Choice<'_> {
                 dock,
                 commit: usize::MAX,
                 point,
-                name: None,
                 text: self.text.clone(),
                 half_plane: self.envelope.samples > 0
                     && span < std::f32::consts::PI - 1e-5,
@@ -1151,37 +1219,6 @@ impl Choice<'_> {
             fraction: (value - origin) / span,
         })
     }
-    #[cfg(test)]
-    fn name_rect(&self, point: Vec2, label_height: f32) -> Option<Rect> {
-        if self.text.is_empty() {
-            return None;
-        }
-        let height = label_height * self.scale + 4.0;
-        let width = self.width();
-        let x = (point.x + self.radius + 3.0).clamp(
-            self.tile.low.x * HALF.x,
-            (self.tile.high.x * HALF.x - width).max(self.tile.low.x * HALF.x),
-        );
-        [
-            (x, point.y + height * 0.5),
-            (point.x - self.radius - 3.0 - width, point.y + height * 0.5),
-            (x, point.y + self.radius + height + 2.0),
-            (x, point.y - self.radius - 2.0),
-        ]
-        .into_iter()
-        .map(|(x, top)| {
-            let top = top.clamp(-HALF.y + height + 0.5, HALF.y - 0.5);
-            Rect::from_corners(Vec2::new(x, top - height), Vec2::new(x + width, top))
-        })
-        .find(|rect| {
-            rect.min.cmpge(-HALF).all()
-                && !intersect(*rect, disk(point, self.radius))
-                && rect.max.cmple(HALF).all()
-                && !name_obstacles(self.obstacles, self.repository)
-                    .any(|other| intersect(*rect, other.inflate(-HALO)))
-                && !self.occupied.iter().any(|&other| intersect(*rect, other))
-        })
-    }
 }
 
 impl State {
@@ -1212,7 +1249,7 @@ impl State {
         }
         super::Label {
             position: if multi {
-                self.slot_name_point(avatar).map_or(avatar.position, world)
+                avatar.position
             } else {
                 avatar.position + self.geometry.avatar_label_offset
             },
@@ -1419,9 +1456,10 @@ mod tests {
             },
             gap: Vec2::new(16.0, 32.0),
             radius: 7.5,
-            obstacles,
             occupied,
             beams: obstacles,
+            cells: &[],
+            speed: 480.0,
             repository: 0,
             text: "Ada".into(),
             scale: 1.0,
@@ -1436,25 +1474,33 @@ mod tests {
     }
 
     #[test]
-    fn narrow_gutter_names_can_cover_own_tile_but_never_foreign_tiles_or_labels() {
-        let tile = Rect::from_corners(Vec2::splat(-200.0), Vec2::splat(200.0));
-        let label = Rect::from_center_size(Vec2::new(-160.0, 180.0), Vec2::splat(20.0));
-        let foreign =
-            Rect::from_corners(Vec2::new(212.0, -200.0), Vec2::new(400.0, 200.0));
-        let obstacles = [
-            (0, tile.inflate(HALO)),
-            (0, label.inflate(HALO)),
-            (1, foreign.inflate(HALO)),
-        ];
-        let mut choice = choice(&obstacles, &[]);
-        choice.gap = Vec2::new(12.0, 16.0);
-        choice.radius = 4.25;
-        choice.scale = 0.5;
-        let point = Vec2::new(0.0, 116.0);
-        let name = choice.name_rect(point, 20.0).unwrap();
-        assert!(intersect(name, tile));
-        assert!(!intersect(name, label));
-        assert!(!intersect(name, foreign));
+    fn travel_seconds_can_outweigh_a_distant_ray_saving() {
+        let cells = [Rect::from_corners(
+            Vec2::new(-200.0, -124.0),
+            Vec2::new(200.0, 124.0),
+        )];
+        let mut chooser = choice(&[], &[]);
+        chooser.cells = &cells;
+        chooser.gutter = Some(Tile {
+            low: cells[0].min / HALF,
+            high: cells[0].max / HALF,
+        });
+        chooser.envelope.rays = Arc::new(vec![Vec2::ONE; 100]);
+        let source = Vec2::new(-200.0, -124.0);
+        let far = chooser.select(None);
+        let near = chooser.nearest(source);
+        assert!(near.point.distance(source) < 50.0);
+        assert!(chooser.ray_cost(near.point) > chooser.ray_cost(far.point));
+        let near_time =
+            super::super::travel::slot_seconds(source, near.point, &cells, 480.0);
+        let far_time =
+            super::super::travel::slot_seconds(source, far.point, &cells, 480.0);
+        assert!(
+            near_time < far_time,
+            "near {:?} {near_time}, far {:?} {far_time}",
+            near.point,
+            far.point
+        );
     }
 
     #[test]
@@ -1568,24 +1614,6 @@ mod tests {
         assert_eq!(selected.crossings, 0);
         assert_ne!(selected.dock, choice(&[], &[]).select(None).dock);
     }
-    #[test]
-    fn separates_parked_bodies_and_name_lanes_and_bounds_long_names() {
-        let first = choice(&[], &[]).select(None);
-        let mut occupied = vec![disk(first.point, 7.5)];
-        let name = choice(&[], &occupied).name_rect(first.point, 20.0).unwrap();
-        occupied.push(name);
-        let next = choice(&[], &occupied).select(None);
-        assert!(next.valid());
-        assert!(!intersect(disk(next.point, 7.5), occupied[0]));
-        if let Some(name2) = choice(&[], &occupied).name_rect(next.point, 20.0) {
-            assert!(!intersect(name, name2));
-        }
-        let text =
-            short_name("A contributor with a very long display name", 1.0, 112.0);
-        assert!(text.ends_with("..."));
-        assert!(8.0 + 8.6 * count(text.chars().count()) <= 112.0);
-    }
-
     #[test]
     fn newcomers_cannot_take_a_retained_parking_slot() {
         let mut events = vec![crate::timeline::synthetic().remove(0)];
@@ -1729,7 +1757,7 @@ mod tests {
             "commit":a.commit,"repository":a.repository,"position":a.position.to_array(),"velocity":a.velocity.to_array(),
             "name_opacity":a.name_visibility.opacity,"name_visible":a.name_visibility.visible,
             "placement":a.name_visibility.placement.as_ref().map(|p| serde_json::json!({"point":p.point.to_array(),"body":p.body.to_array(),"text":p.text,"scale":p.scale})),
-            "slot":a.slot.as_ref().map(|s| serde_json::json!({"edge":s.dock.edge,"fraction":s.dock.fraction,"point":s.point.to_array(),"name":s.name.map(|p| p.to_array()),"text":s.text,"valid":s.valid()}))
+            "slot":a.slot.as_ref().map(|s| serde_json::json!({"edge":s.dock.edge,"fraction":s.dock.fraction,"point":s.point.to_array(),"text":s.text,"valid":s.valid()}))
         })).collect())
     }
     fn assert_traveller_presence(sim: &Simulation, frame: u32) {
@@ -1793,7 +1821,6 @@ mod tests {
                 previous_commit = sim.commit();
             }
             let obstacles = tile_obstacles(&sim.state);
-            let mut names = Vec::new();
             assert_traveller_presence(sim, frame);
             for avatar in sim.state.avatars.iter().filter(|a| {
                 sim.seconds() - a.last_active < super::super::AVATAR_IDLE
@@ -1824,22 +1851,6 @@ mod tests {
                     assert!(!obstacles.iter().any(|(r, rect)| *r != usize::MAX
                         && *r != avatar.repository
                         && swept_crosses(slot.point, &corners, rect.inflate(-0.02))));
-                }
-                if let Some(point) = slot.name {
-                    let size = super::super::names::rect(
-                        Vec2::ZERO,
-                        &slot.text,
-                        sim.state.name_scale(),
-                        sim.state.geometry.label_height,
-                    )
-                    .size();
-                    let rect = Rect::from_corners(
-                        point - Vec2::Y * size.y,
-                        point + Vec2::X * size.x,
-                    );
-                    assert!(names.iter().all(|&other| !intersect(rect, other)));
-
-                    names.push(rect);
                 }
             }
         }

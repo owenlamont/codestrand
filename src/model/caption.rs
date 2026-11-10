@@ -13,6 +13,26 @@ pub(crate) enum Style {
 }
 
 pub(crate) const FONT_SIZE: f32 = 14.0;
+pub(crate) const MULTI_TOP: f32 = 698.0;
+pub(crate) const BAR_HEIGHT: f32 = 22.0;
+pub(crate) const HEADING_LEFT: f32 = 24.0;
+pub(crate) const HEADING_SIZE: f32 = 18.0;
+
+pub(super) fn frame_text_rects() -> [Rect; 2] {
+    [
+        Rect::from_corners(
+            Vec2::new(HEADING_LEFT - 640.0, 360.0 - BAR_HEIGHT),
+            Vec2::new(
+                HEADING_LEFT - 640.0 + 10.0 * HEADING_SIZE * 0.6 + 4.0,
+                360.0,
+            ),
+        ),
+        Rect::from_corners(
+            Vec2::new(-640.0, 360.0 - MULTI_TOP - BAR_HEIGHT),
+            Vec2::new(640.0, 360.0 - MULTI_TOP),
+        ),
+    ]
+}
 // Embedded Fira Mono has 600-unit advances at 1,000 units per em.
 pub(crate) const ADVANCE: f32 = FONT_SIZE * 0.6;
 pub(crate) const SEPARATOR_WIDTH: f32 = ADVANCE * 3.0;

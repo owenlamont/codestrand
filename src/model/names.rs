@@ -44,8 +44,13 @@ pub(super) struct Placement {
 }
 
 impl super::State {
-    pub(super) fn place_names(&mut self, dt: f32, travel: &super::travel::Plan) {
-        self.place_slot_names(dt, travel);
+    pub(super) fn place_names(
+        &mut self,
+        dt: f32,
+        travel: &super::travel::Plan,
+        texts: &[Rect],
+    ) {
+        self.place_slot_names(dt, travel, texts);
     }
 }
 #[cfg(test)]

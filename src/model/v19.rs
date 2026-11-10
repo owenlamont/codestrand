@@ -6,6 +6,8 @@ fn local_v19_audit() {
     let started = std::time::Instant::now();
     let (mut sim, _) = nitpicks::local_simulation();
     let planning = started.elapsed().as_secs_f64();
+    let plan_only = std::env::var_os("CODESTRAND_PLAN_ONLY").is_some();
+    sim.visual_updates = !plan_only;
     let frames = frames_for(sim.duration(), 60).unwrap();
     let mut label_rays = 0_u64;
     let mut label_pairs = 0_u64;
@@ -13,12 +15,31 @@ fn local_v19_audit() {
     let mut motion = Motion::default();
     let mut label_clipped = 0_u64;
     let mut own_nearest = 0_u64;
+    let mut clip_cases = Vec::new();
     let mut service_ticks = vec![0_u64; sim.events.len()];
     let mut ray_lengths = vec![0.0_f32; sim.events.len()];
     let mut ray_counts = vec![0_u32; sim.events.len()];
     let mut fade_motion = 0_u64;
     for frame in 0..=frames {
         sim.advance_to(frame, 60);
+        for pulse in &sim.state.pulses {
+            if ray_counts[pulse.commit] > 0 {
+                continue;
+            }
+            service_ticks[pulse.commit] = sim.state.tick;
+            let from = titles::screen(&sim, sim.state.avatars[pulse.author].position);
+            for &id in &pulse.touched {
+                if let Some(to) = sim.state.point(Target::File(id)) {
+                    ray_lengths[pulse.commit] +=
+                        from.distance(titles::screen(&sim, to));
+                    ray_counts[pulse.commit] += 1;
+                }
+            }
+        }
+        if plan_only {
+            continue;
+        }
+
         let rays: Vec<_> = sim
             .beams()
             .iter()
@@ -33,6 +54,9 @@ fn local_v19_audit() {
         let content = titles::obstacles(&sim);
         let (clipped, nearest) = label_constraints(&sim, &names);
         label_clipped += clipped;
+        if clipped > 0 && clip_cases.len() < 8 {
+            clip_cases.push(clip_case(&sim, &names));
+        }
         own_nearest += nearest;
         title_overlaps.observe(&sim, &labels, &content, &names);
         for (i, rect) in names.iter().enumerate() {
@@ -51,20 +75,6 @@ fn local_v19_audit() {
             .unwrap();
         }
         motion.observe(&sim);
-        for pulse in &sim.state.pulses {
-            if ray_counts[pulse.commit] > 0 {
-                continue;
-            }
-            service_ticks[pulse.commit] = sim.state.tick;
-            let from = titles::screen(&sim, sim.state.avatars[pulse.author].position);
-            for &id in &pulse.touched {
-                if let Some(to) = sim.state.point(Target::File(id)) {
-                    ray_lengths[pulse.commit] +=
-                        from.distance(titles::screen(&sim, to));
-                    ray_counts[pulse.commit] += 1;
-                }
-            }
-        }
         fade_motion += sim.travel.faded_motion_samples(sim.state.tick);
     }
     let measured: Vec<_> = ray_lengths
@@ -73,18 +83,24 @@ fn local_v19_audit() {
         .filter(|(_, n)| **n > 0)
         .map(|(length, n)| *length / count(usize::try_from(*n).unwrap()))
         .collect();
-    let value = serde_json::json!({"duration":sim.duration(),"label_clipped_frames":label_clipped,"own_nearest_violations":own_nearest,"service_ticks":service_ticks,"planning_seconds":planning,"frames":frames+1,"label_ray_pairs":label_rays,"label_label_pairs":label_pairs,"parked_disc_pairs":motion.disc_pairs,"worst_park_tick":motion.worst_park_tick,"title_content_pairs":title_overlaps.files+title_overlaps.directories,"title_file_pairs":title_overlaps.files,"title_directory_pairs":title_overlaps.directories,"mean_total_ray_length_per_commit":ray_lengths.iter().sum::<f32>()/count(measured.len().max(1)),"title_avatar_pairs":title_overlaps.avatars,"angle_jump_samples":motion.jumps,"park_cases":motion.park_cases,"max_angle_delta":motion.max_angle,"max_angular_acceleration":motion.max_acceleration,"mean_ray_length_per_commit":measured.iter().sum::<f32>()/count(measured.len().max(1)),"measured_commits":measured.len(),"faded_motion_samples":fade_motion,"travel":sim.travel.report()});
+    let value = serde_json::json!({"duration":sim.duration(),"clip_cases":clip_cases,"label_clipped_frames":label_clipped,"own_nearest_violations":own_nearest,"service_ticks":service_ticks,"planning_seconds":planning,"frames":frames+1,"label_ray_pairs":label_rays,"label_label_pairs":label_pairs,"parked_disc_pairs":motion.disc_pairs,"worst_park_tick":motion.worst_park_tick,"title_content_pairs":title_overlaps.files+title_overlaps.directories,"title_file_pairs":title_overlaps.files,"title_directory_pairs":title_overlaps.directories,"mean_total_ray_length_per_commit":ray_lengths.iter().sum::<f32>()/count(measured.len().max(1)),"frame_text_pairs":title_overlaps.frame_texts,"other_text_pairs":title_overlaps.other_texts,"title_avatar_pairs":title_overlaps.avatars,"angle_jump_samples":motion.jumps,"park_cases":motion.park_cases,"max_angle_delta":motion.max_angle,"max_angular_acceleration":motion.max_acceleration,"mean_ray_length_per_commit":measured.iter().sum::<f32>()/count(measured.len().max(1)),"measured_commits":measured.len(),"faded_motion_samples":fade_motion,"travel":sim.travel.report()});
     std::fs::write(
         std::env::var("CODESTRAND_V19_AUDIT").unwrap(),
         serde_json::to_vec_pretty(&value).unwrap(),
     )
     .unwrap();
 }
+
+fn clip_case(sim: &Simulation, names: &[bevy::math::Rect]) -> serde_json::Value {
+    serde_json::json!({"tick":sim.state.tick,"bounds":names.iter().map(|r|[r.min.to_array(),r.max.to_array()]).collect::<Vec<_>>(),"avatars":sim.state.avatars.iter().filter(|a|a.presence>0.0).map(|a|serde_json::json!({"name":a.name,"body":titles::screen(sim,a.position).to_array(),"placement":a.name_visibility.placement.as_ref().map(|p|(p.angle,p.angular_velocity))})).collect::<Vec<_>>()})
+}
 #[derive(Default)]
 struct TitleOverlaps {
     files: u64,
     directories: u64,
     avatars: u64,
+    frame_texts: u64,
+    other_texts: u64,
 }
 impl TitleOverlaps {
     fn observe(
@@ -94,6 +110,25 @@ impl TitleOverlaps {
         content: &[(usize, bevy::math::Rect)],
         names: &[bevy::math::Rect],
     ) {
+        for name in names {
+            self.frame_texts += u64::try_from(
+                caption::frame_text_rects()
+                    .iter()
+                    .filter(|r| !name.intersect(**r).is_empty())
+                    .count(),
+            )
+            .unwrap();
+            self.other_texts += u64::try_from(
+                labels
+                    .iter()
+                    .filter(|l| l.kind != LabelKind::Avatar)
+                    .filter(|l| {
+                        !name.intersect(titles::label_bounds(sim, l)).is_empty()
+                    })
+                    .count(),
+            )
+            .unwrap();
+        }
         let file_count = sim
             .state
             .layout
@@ -233,7 +268,7 @@ impl Motion {
                     let delta = angle_delta(theta - before);
                     self.max_angle = self.max_angle.max(delta.abs());
                     self.jumps +=
-                        u64::from(delta.abs() > std::f32::consts::PI / 60.0 + 0.0001);
+                        u64::from(delta.abs() > slots::angular_limit() / 60.0 + 0.0001);
                     let speed = name.angular_velocity;
                     self.max_acceleration =
                         self.max_acceleration.max((speed - velocity).abs() * 60.0);

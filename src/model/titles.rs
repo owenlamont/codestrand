@@ -96,6 +96,7 @@ fn select(
     tile: Rect,
     content: Rect,
     blocked: &[Rect],
+    texts: &[Rect],
     rays: &[(Vec2, Vec2)],
 ) -> Vec2 {
     let middle = content.center().x - size.x * 0.5;
@@ -120,6 +121,7 @@ fn select(
                     point + Vec2::X * size.x,
                 );
                 (
+                    texts.iter().filter(|r| area(rect, **r) > 0.0).count(),
                     blocked.iter().map(|r| area(rect, *r)).sum::<f32>(),
                     super::count(
                         rays.iter()
@@ -131,9 +133,10 @@ fn select(
             };
             let a = cost(*a);
             let b = cost(*b);
-            a.0.total_cmp(&b.0)
+            a.0.cmp(&b.0)
                 .then(a.1.total_cmp(&b.1))
                 .then(a.2.total_cmp(&b.2))
+                .then(a.3.total_cmp(&b.3))
         })
         .expect("title candidates")
 }
@@ -227,29 +230,20 @@ impl Simulation {
             .map(|b| (screen(self, b.from), screen(self, b.to)))
             .collect();
         let names: Vec<_> = self
-            .state
-            .avatars
+            .labels_for_detail(|_| true)
             .iter()
-            .filter(|a| a.presence > 0.0)
-            .filter_map(|a| a.name_visibility.placement.as_ref())
-            .map(|n| {
-                let size = super::names::rect(
-                    Vec2::ZERO,
-                    &n.text,
-                    n.scale,
-                    self.state.geometry.label_height,
-                )
-                .size();
-                Rect::from_corners(
-                    n.point - Vec2::Y * size.y,
-                    n.point + Vec2::X * size.x,
-                )
-            })
+            .filter(|l| l.kind != super::LabelKind::Repository)
+            .map(|l| label_bounds(self, l))
+            .chain(super::caption::frame_text_rects())
             .collect();
         for (index, region) in self.state.layout.repositories.iter().enumerate() {
             let Some(tile) = region.tile else { continue };
             let tile =
                 Rect::from_corners(tile.low * HALF, tile.high * HALF).inflate(-2.0);
+            let inset =
+                (self.state.avatar_radius() + self.state.geometry.label_height + 8.0)
+                    .min(tile.size().min_element() / 6.0);
+            let tile = tile.inflate(-inset);
             if tile.size().min_element() <= 8.0 {
                 self.state.titles.remove(&index);
                 continue;
@@ -287,10 +281,20 @@ impl Simulation {
                     || (p.content.max - content.max).abs().max_element() > 8.0
                     || (p.tile.min - tile.min).abs().max_element() > 2.0
                     || (p.tile.max - tile.max).abs().max_element() > 2.0
+                    || names.iter().any(|r| {
+                        area(p.rect(), *r) > 0.0
+                            && area(
+                                Rect::from_corners(
+                                    p.target - Vec2::Y * size.y,
+                                    p.target + Vec2::X * size.x,
+                                )
+                                .inflate(4.0),
+                                *r,
+                            ) > 0.0
+                    })
             });
             let target = if changed {
-                let blocked: Vec<_> = own.iter().chain(&names).copied().collect();
-                select(size, tile, content, &blocked, &rays)
+                select(size, tile, content, &own, &names, &rays)
             } else {
                 previous.expect("existing stable title").target
             };
@@ -322,13 +326,32 @@ mod tests {
         let content =
             Rect::from_corners(Vec2::new(-80.0, -20.0), Vec2::new(80.0, 100.0));
         let size = Vec2::new(100.0, 24.0);
-        let point = select(size, tile, content, &[content], &[]);
+        let point = select(size, tile, content, &[content], &[], &[]);
         let rect =
             Rect::from_corners(point - Vec2::Y * size.y, point + Vec2::X * size.x);
         assert!(rect.center().x.abs() < 0.001);
         assert!(rect.max.y < content.min.y);
         assert!(area(rect, content) <= 0.001);
         assert!(rect.min.cmpge(tile.min).all() && rect.max.cmple(tile.max).all());
+    }
+
+    #[test]
+    fn title_prefers_free_text_space_over_its_default_position() {
+        let tile = Rect::from_corners(Vec2::splat(-200.0), Vec2::splat(200.0));
+        let content =
+            Rect::from_corners(Vec2::new(-80.0, -20.0), Vec2::new(80.0, 100.0));
+        let size = Vec2::new(100.0, 24.0);
+        let first = select(size, tile, content, &[content], &[], &[]);
+        let occupied =
+            Rect::from_corners(first - Vec2::Y * size.y, first + Vec2::X * size.x);
+        let moved = select(size, tile, content, &[content], &[occupied], &[]);
+        assert_eq!(
+            area(
+                Rect::from_corners(moved - Vec2::Y * size.y, moved + Vec2::X * size.x),
+                occupied
+            ),
+            0.0
+        );
     }
     #[test]
     fn title_motion_goes_around_content_instead_of_through_it() {

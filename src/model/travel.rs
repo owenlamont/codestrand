@@ -9,6 +9,7 @@ use planning::trips;
 
 const HALF: Vec2 = Vec2::new(640.0, 360.0);
 const MAX_POSES: usize = 4_000_000;
+const NETWORK_EPSILON: f32 = 0.01;
 
 pub(super) fn interior(tile: crate::layout::packing::Tile, radius: f32) -> Rect {
     let rect = Rect::from_corners(tile.low * HALF, tile.high * HALF);
@@ -261,10 +262,12 @@ impl Plan {
         .expect("bounded trips")
     }
     pub(super) fn forecast(&self, author: usize, tick: u64) -> Option<Vec<Vec2>> {
-        let trip = self
+        let trips: Vec<_> = self
             .trips
             .iter()
-            .find(|t| t.author == author && t.arrival > tick)?;
+            .filter(|t| t.author == author && t.arrival > tick)
+            .collect();
+        let trip = trips.first()?;
         if trip.fade || trip.departure > tick + 120 {
             return None;
         }
@@ -272,10 +275,13 @@ impl Plan {
             (1..=30_u64)
                 .map(|step| {
                     let sample = tick + step * 4;
-                    if sample < trip.departure {
+                    let Some(trip) = trips.iter().find(|t| t.arrival > sample) else {
+                        return trips.last().expect("future trip").destination;
+                    };
+                    if sample < trip.departure || trip.fade {
                         trip.source
                     } else {
-                        trip.sample(sample.min(trip.arrival - 1)).0
+                        trip.sample(sample).0
                     }
                 })
                 .collect(),
@@ -340,6 +346,7 @@ fn capture(simulation: &mut Simulation) -> Capture {
         gutters: Vec::new(),
     };
     let visual_updates = simulation.visual_updates;
+    let docks = std::mem::take(&mut simulation.travel.docks);
     simulation.visual_updates = false;
     let mut seen = 0;
     let mut poses = 0;
@@ -402,6 +409,7 @@ fn capture(simulation: &mut Simulation) -> Capture {
     }
     simulation.restart();
     simulation.visual_updates = visual_updates;
+    simulation.travel.docks = docks;
     eprintln!(
         "travel_capture_seconds={:.6} frames={} poses={poses}",
         started.elapsed().as_secs_f64(),
@@ -665,6 +673,19 @@ struct Router {
     epochs: usize,
 }
 
+pub(super) fn slot_seconds(
+    source: Vec2,
+    target: Vec2,
+    cells: &[Rect],
+    speed: f32,
+) -> f32 {
+    Router::default()
+        .route(source, target, cells)
+        .map_or(f32::INFINITY, |points| {
+            Route::new(&points, speed * 0.8).duration
+        })
+}
+
 #[derive(Debug)]
 enum RouteFailure {
     Endpoint,
@@ -706,7 +727,7 @@ impl Router {
                 if let Some(value) = cells
                     .iter()
                     .flat_map(|r| [r.min[axis], r.max[axis]])
-                    .filter(|v| (*v - point[axis]).abs() < 0.001)
+                    .filter(|v| (*v - point[axis]).abs() < NETWORK_EPSILON)
                     .min_by(|a, b| {
                         (a - point[axis]).abs().total_cmp(&(b - point[axis]).abs())
                     })
@@ -868,6 +889,23 @@ fn simplify_path(path: &[Vec2]) -> Vec<Vec2> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn projection_roundoff_does_not_create_a_false_endpoint_failure() {
+        let cells = [Rect::from_corners(
+            Vec2::new(-200.0, -100.0),
+            Vec2::new(200.0, 100.0),
+        )];
+        let target = Vec2::new(200.0, 50.0);
+        let points = Router::default()
+            .route(Vec2::new(199.998, 50.0), target, &cells)
+            .unwrap();
+        assert_eq!(points, [target]);
+        assert_eq!(
+            slot_seconds(Vec2::new(199.998, 50.0), target, &cells, 480.0),
+            0.0
+        );
+    }
     #[test]
     fn gutters_take_the_shortest_perimeter_instead_of_crossing_blank_tiles() {
         let cells = [
@@ -1102,5 +1140,41 @@ mod tests {
         }
         assert!(trip.sample(trip.departure).1 > trip.sample(trip.departure + 4).1);
         assert_eq!(trip.sample(trip.departure + 9).1, 0.0);
+    }
+
+    #[test]
+    fn label_forecast_sees_the_trip_after_an_imminent_arrival() {
+        let first = Trip {
+            author: 0,
+            commit: 0,
+            departure: 0,
+            arrival: 30,
+            source: Vec2::new(-100.0, 0.0),
+            destination: Vec2::ZERO,
+            route: Route::new(&[Vec2::new(-100.0, 0.0), Vec2::ZERO], 480.0),
+            fade: false,
+            bot: false,
+            fade_ticks: 9,
+            source_repository: 0,
+            destination_repository: 1,
+            free: 0,
+            failure: None,
+            cutoff: None,
+            proof: None,
+        };
+        let second = Trip {
+            commit: 1,
+            departure: 30,
+            arrival: 90,
+            source: Vec2::ZERO,
+            destination: Vec2::new(0.0, 200.0),
+            route: Route::new(&[Vec2::ZERO, Vec2::new(0.0, 200.0)], 480.0),
+            ..first.clone()
+        };
+        let plan = Plan {
+            trips: vec![first, second],
+            ..Default::default()
+        };
+        assert!(plan.forecast(0, 29).unwrap()[0].y > 0.0);
     }
 }
