@@ -16,18 +16,7 @@ use crate::layout::packing::Tile;
 const HALF: Vec2 = Vec2::new(640.0, 360.0);
 const HALO: f32 = 2.0;
 
-#[cfg(test)]
-pub(super) fn angular_limit() -> f32 {
-    labels::EMERGENCY_SPEED
-}
-
-fn travel_weight() -> f32 {
-    #[cfg(test)]
-    if let Ok(value) = std::env::var("CODESTRAND_TRAVEL_WEIGHT") {
-        return value.parse().expect("numeric local audit weight");
-    }
-    100_000.0
-}
+const TRAVEL_WEIGHT: f32 = 100_000.0;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(super) struct Envelope {
@@ -510,39 +499,6 @@ impl State {
 }
 
 impl State {
-    #[cfg(test)]
-    pub(super) fn clear_parking_option(
-        &self,
-        index: usize,
-        envelope: &Envelope,
-        others: &[Vec2],
-    ) -> bool {
-        let avatar = &self.avatars[index];
-        let Some(tile) = self.layout.repositories[avatar.repository].tile else {
-            return false;
-        };
-        let occupied: Vec<_> = others
-            .iter()
-            .map(|p| disk(*p, self.avatar_radius()))
-            .collect();
-        let beams = tile_obstacles(self);
-        let choice = Choice {
-            tile,
-            gutter: self.layout.repositories[avatar.repository].gutter,
-            gap: Vec2::splat(self.gutter),
-            radius: self.avatar_radius(),
-            beams: &beams,
-            occupied: &occupied,
-            repository: avatar.repository,
-            text: avatar.name.clone(),
-            scale: self.name_scale(),
-            envelope: envelope.clone(),
-            cells: &[],
-            speed: self.avatar_max_speed,
-        };
-        let selected = choice.select(None);
-        selected.valid() && choice.avatar_cost(selected.point) <= 0.001
-    }
     pub(super) fn name_scale(&self) -> f32 {
         self.avatar_scale
             * if self.layout.repositories.is_empty() {
@@ -998,11 +954,7 @@ impl Choice<'_> {
                     point, slot.point, self.cells, self.speed,
                 );
                 let ray = self.ray_cost(slot.point);
-                let cost = if travel_weight().is_infinite() {
-                    seconds
-                } else {
-                    ray + travel_weight() * seconds
-                };
+                let cost = ray + TRAVEL_WEIGHT * seconds;
                 (slot, cost)
             })
             .min_by(|a, b| {

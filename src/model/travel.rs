@@ -246,21 +246,6 @@ impl Plan {
         Some(trip.sample(tick))
     }
 
-    #[cfg(test)]
-    pub(super) fn faded_motion_samples(&self, tick: u64) -> u64 {
-        u64::try_from(
-            self.trips
-                .iter()
-                .filter(|t| {
-                    t.fade
-                        && t.active(t.author, tick)
-                        && t.sample(tick).1 > 0.0
-                        && t.sample(tick).0.distance(t.source) > 0.001
-                })
-                .count(),
-        )
-        .expect("bounded trips")
-    }
     pub(super) fn forecast(&self, author: usize, tick: u64) -> Option<Vec<Vec2>> {
         let trips: Vec<_> = self
             .trips

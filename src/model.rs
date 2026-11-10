@@ -27,8 +27,6 @@ pub(crate) mod schedule;
 mod slots;
 mod titles;
 mod travel;
-#[cfg(test)]
-mod v19;
 pub(super) use names::rect as label_rect;
 use schedule::Schedule;
 pub(crate) mod treemap;
