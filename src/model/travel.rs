@@ -232,6 +232,7 @@ pub(super) struct Statistics {
 #[derive(Default)]
 pub(super) struct Plan {
     trips: Vec<Trip>,
+    pub(super) docks: Vec<Option<slots::Dock>>,
     pub stats: Statistics,
 }
 
@@ -244,31 +245,41 @@ impl Plan {
         Some(trip.sample(tick))
     }
 
-    pub(super) fn departing(&self, author: usize, tick: u64) -> bool {
-        self.trips
-            .iter()
-            .any(|t| t.author == author && t.departure == tick)
+    #[cfg(test)]
+    pub(super) fn faded_motion_samples(&self, tick: u64) -> u64 {
+        u64::try_from(
+            self.trips
+                .iter()
+                .filter(|t| {
+                    t.fade
+                        && t.active(t.author, tick)
+                        && t.sample(tick).1 > 0.0
+                        && t.sample(tick).0.distance(t.source) > 0.001
+                })
+                .count(),
+        )
+        .expect("bounded trips")
     }
-    pub(super) fn label_boundary_cost(
-        &self,
-        author: usize,
-        tick: u64,
-        body: Vec2,
-        rect: Rect,
-    ) -> f32 {
-        let Some(trip) = self.trips.iter().find(|t| t.active(author, tick)) else {
-            return 0.0;
-        };
-        trip.route
-            .points()
+    pub(super) fn forecast(&self, author: usize, tick: u64) -> Option<Vec<Vec2>> {
+        let trip = self
+            .trips
             .iter()
-            .map(|p| {
-                let delta = Vec2::from_array(*p) - body;
-                ((rect.min + delta + HALF).min(Vec2::ZERO).length_squared()
-                    + (rect.max + delta - HALF).max(Vec2::ZERO).length_squared())
-                    * 1e9
-            })
-            .sum()
+            .find(|t| t.author == author && t.arrival > tick)?;
+        if trip.fade || trip.departure > tick + 120 {
+            return None;
+        }
+        Some(
+            (1..=30_u64)
+                .map(|step| {
+                    let sample = tick + step * 4;
+                    if sample < trip.departure {
+                        trip.source
+                    } else {
+                        trip.sample(sample.min(trip.arrival - 1)).0
+                    }
+                })
+                .collect(),
+        )
     }
     pub fn travelling(&self, author: usize, tick: u64) -> bool {
         self.trips.iter().any(|t| t.active(author, tick))
@@ -292,37 +303,24 @@ impl Trip {
     }
     fn sample(&self, tick: u64) -> (Vec2, f32) {
         let trip = self;
-        if let Some(cutoff) = trip.cutoff
-            && tick >= cutoff
-        {
+        if trip.fade {
+            if tick + 1 >= trip.arrival {
+                return (trip.source, 0.0);
+            }
+            let duration = trip
+                .fade_ticks
+                .clamp(1, 9)
+                .min((trip.arrival - trip.departure).max(1));
             return (
-                trip.route
-                    .point_at(cutoff.saturating_sub(trip.departure))
-                    .unwrap_or(trip.source),
-                0.0,
+                trip.source,
+                fade_opacity(duration.saturating_sub(tick - trip.departure), duration),
             );
-        }
-        let available = trip.arrival - trip.departure;
-        if !trip.fade {
-            return (
-                trip.route
-                    .point_at(tick - trip.departure)
-                    .unwrap_or(trip.destination),
-                1.0,
-            );
-        }
-        if trip.route.is_empty() {
-            let remaining = trip.fade_ticks.saturating_sub(tick - trip.departure);
-            return (trip.source, fade_opacity(remaining, trip.fade_ticks));
         }
         (
             trip.route
                 .point_at(tick - trip.departure)
-                .expect("nonempty route"),
-            fade_opacity(
-                trip.cutoff.unwrap_or(trip.arrival) - tick,
-                9.min(available / 2).max(1),
-            ),
+                .unwrap_or(trip.destination),
+            1.0,
         )
     }
 }
@@ -341,6 +339,8 @@ fn capture(simulation: &mut Simulation) -> Capture {
         radii: Vec::new(),
         gutters: Vec::new(),
     };
+    let visual_updates = simulation.visual_updates;
+    simulation.visual_updates = false;
     let mut seen = 0;
     let mut poses = 0;
     for frame in 0..=frames {
@@ -401,6 +401,7 @@ fn capture(simulation: &mut Simulation) -> Capture {
         seen = state.next_event;
     }
     simulation.restart();
+    simulation.visual_updates = visual_updates;
     eprintln!(
         "travel_capture_seconds={:.6} frames={} poses={poses}",
         started.elapsed().as_secs_f64(),
@@ -640,7 +641,12 @@ impl Simulation {
                 .map(|&(_, t)| tick_time(u64::from(t)))
                 .sum(),
         };
-        self.travel = Plan { trips, stats };
+        let docks = capture.services.iter().map(|s| Some(s.dock)).collect();
+        self.travel = Plan {
+            trips,
+            docks,
+            stats,
+        };
     }
 }
 
@@ -1070,5 +1076,31 @@ mod tests {
             }
             assert!(prior.distance(Vec2::splat(length)) < 0.001);
         }
+    }
+    #[test]
+    fn capped_fade_never_walks_a_partial_route() {
+        let trip = Trip {
+            author: 0,
+            commit: 0,
+            departure: 10,
+            arrival: 34,
+            destination: Vec2::new(500.0, 100.0),
+            source: Vec2::ZERO,
+            fade_ticks: 9,
+            route: Route::new(&[Vec2::ZERO, Vec2::new(500.0, 100.0)], 480.0),
+            fade: true,
+            bot: false,
+            source_repository: 0,
+            destination_repository: 1,
+            free: 10,
+            failure: None,
+            cutoff: Some(30),
+            proof: None,
+        };
+        for tick in trip.departure..trip.arrival {
+            assert_eq!(trip.sample(tick).0, trip.source);
+        }
+        assert!(trip.sample(trip.departure).1 > trip.sample(trip.departure + 4).1);
+        assert_eq!(trip.sample(trip.departure + 9).1, 0.0);
     }
 }

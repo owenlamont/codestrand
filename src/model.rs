@@ -25,7 +25,10 @@ mod pacing_tests;
 pub(crate) mod quality;
 pub(crate) mod schedule;
 mod slots;
+mod titles;
 mod travel;
+#[cfg(test)]
+mod v19;
 pub(super) use names::rect as label_rect;
 use schedule::Schedule;
 pub(crate) mod treemap;
@@ -294,6 +297,7 @@ struct State {
     avatar_size: f32,
     gutter: f32,
     slot_records: BTreeMap<usize, slots::Record>,
+    titles: BTreeMap<usize, titles::Title>,
 }
 
 /// Deterministic playback stepped at a fixed tick rate, independent of output frame rate.
@@ -314,6 +318,7 @@ pub(super) struct Simulation {
     state: State,
     theme: Theme,
     travel: travel::Plan,
+    visual_updates: bool,
 }
 
 impl Simulation {
@@ -519,6 +524,7 @@ impl Simulation {
                 * repository_avatar_factor(repositories.len()),
             gutter: options.gutter,
             slot_records: BTreeMap::new(),
+            titles: BTreeMap::new(),
         };
         for event in &events[..start] {
             let author = state.author(
@@ -568,6 +574,7 @@ impl Simulation {
             state,
             theme: theme.clone(),
             travel: travel::Plan::default(),
+            visual_updates: true,
         };
         if !repositories.is_empty() {
             let snapshots = simulation
@@ -744,7 +751,12 @@ impl Simulation {
         };
         state.avatar_scale += (scale - state.avatar_scale) * (1.0 - (-dt / 0.6).exp());
         if !state.layout.repositories.is_empty() {
-            state.place_slots(&self.envelopes, now);
+            let docks = if self.visual_updates {
+                self.travel.docks.as_slice()
+            } else {
+                &[]
+            };
+            state.place_slots_planned(&self.envelopes, now, docks);
         }
         let targets = singleton_targets.unwrap_or_else(|| {
             state
@@ -789,7 +801,10 @@ impl Simulation {
             }
         }
         state.place_view(dt);
-        state.place_names(dt, &self.travel);
+        if self.visual_updates {
+            self.place_titles(dt);
+            self.state.place_names(dt, &self.travel);
+        }
     }
 
     pub(super) fn theme(&self) -> &Theme {
@@ -1032,24 +1047,31 @@ impl Simulation {
             .layout
             .repositories
             .iter()
-            .filter(|region| region.live)
-            .map(|region| {
-                let mut position = framing::label_position(region);
-                position.y = match self.repository_label_plane {
+            .enumerate()
+            .filter(|(_, r)| r.live)
+            .filter_map(|(index, region)| {
+                let height = match self.repository_label_plane {
                     crate::repositories::LabelPlane::Files => 0.15,
                     crate::repositories::LabelPlane::Raised => framing::LABEL_Y,
                 };
-                Label {
+                let (position, scale) = if region.tile.is_some() {
+                    let title = self.state.titles.get(&index)?;
+                    (title.position(height), title.scale)
+                } else {
+                    let mut point = framing::label_position(region);
+                    point.y = height;
+                    (point, 1.0)
+                };
+                Some(Label {
                     position,
                     text: region.label.clone(),
                     kind: LabelKind::Repository,
-                    scale: 1.0,
+                    scale,
                     opacity: 1.0,
                     priority: 0.0,
-                }
+                })
             })
     }
-
     pub(super) fn labels_for_detail(
         &self,
         visible: impl Fn(usize) -> bool,

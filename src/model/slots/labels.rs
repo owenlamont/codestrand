@@ -2,8 +2,10 @@ use bevy::math::Rect;
 
 #[derive(Clone, Copy)]
 pub(super) struct Candidate {
-    pub attachment: u8,
+    pub angle: f32,
+    pub angular_velocity: f32,
     pub rect: Rect,
+    pub goal: Rect,
     pub soft: f32,
 }
 
@@ -13,11 +15,81 @@ pub(super) struct Assignment {
     pub clear: bool,
 }
 
+pub(super) const ANGULAR_SPEED: f32 = std::f32::consts::PI;
+pub(super) const ANGULAR_ACCELERATION: f32 = 4.0 * std::f32::consts::PI;
+
+pub(super) fn advance(angle: f32, velocity: f32, target: f32, dt: f32) -> (f32, f32) {
+    let error = (target - angle + std::f32::consts::PI)
+        .rem_euclid(std::f32::consts::TAU)
+        - std::f32::consts::PI;
+    let desired = error.signum()
+        * (2.0 * ANGULAR_ACCELERATION * error.abs())
+            .sqrt()
+            .min(ANGULAR_SPEED - 0.001)
+            .min(error.abs() * 6.0);
+    let velocity = desired.clamp(
+        velocity - (ANGULAR_ACCELERATION - 0.001) * dt,
+        velocity + (ANGULAR_ACCELERATION - 0.001) * dt,
+    );
+    (angle + velocity * dt, velocity)
+}
+
+pub(super) fn tangent_rect(
+    body: bevy::math::Vec2,
+    size: bevy::math::Vec2,
+    distance: f32,
+    angle: f32,
+) -> Rect {
+    let direction = bevy::math::Vec2::from_angle(angle);
+    let axis = direction.abs();
+    let half = size * 0.5;
+    let tx = (half.x + distance) / axis.x.max(1e-8);
+    let ty = (half.y + distance) / axis.y.max(1e-8);
+    let radius = if tx * axis.y <= half.y {
+        tx
+    } else if ty * axis.x <= half.x {
+        ty
+    } else {
+        let b = axis.dot(half);
+        b + (b * b - half.length_squared() + distance * distance)
+            .max(0.0)
+            .sqrt()
+    };
+    Rect::from_center_size(body + direction * radius, size)
+}
+pub(super) fn forecast_clip(
+    mut angle: f32,
+    mut velocity: f32,
+    target: f32,
+    size: bevy::math::Vec2,
+    distance: f32,
+    future: &[bevy::math::Vec2],
+) -> f32 {
+    let limit = super::HALF - bevy::math::Vec2::splat(16.0);
+    let mut maximum = 0.0_f32;
+    for &body in future {
+        (angle, velocity) =
+            advance(angle, velocity, target, 4.0 * super::super::tick_seconds());
+        let rect = tangent_rect(body, size, distance, angle);
+        let outside = (rect.min + limit)
+            .min(bevy::math::Vec2::ZERO)
+            .length_squared()
+            + (rect.max - limit)
+                .max(bevy::math::Vec2::ZERO)
+                .length_squared();
+        maximum = maximum.max(outside);
+    }
+    maximum
+}
 fn overlap(a: Rect, b: Rect) -> f32 {
     a.intersect(b)
         .size()
         .max(bevy::math::Vec2::ZERO)
         .element_product()
+}
+
+fn interacting(a: Candidate, b: Candidate) -> bool {
+    overlap(a.rect, b.rect) > 0.0 || overlap(a.goal, b.goal) > 0.0
 }
 
 pub(super) fn solve(domains: &[Vec<Candidate>]) -> Assignment {
@@ -38,9 +110,9 @@ pub(super) fn solve(domains: &[Vec<Candidate>]) -> Assignment {
             let node = component[cursor];
             for other in 0..domains.len() {
                 if !seen[other]
-                    && domains[node].iter().any(|a| {
-                        domains[other].iter().any(|b| overlap(a.rect, b.rect) > 0.0)
-                    })
+                    && domains[node]
+                        .iter()
+                        .any(|a| domains[other].iter().any(|b| interacting(*a, *b)))
                 {
                     seen[other] = true;
                     component.push(other);
@@ -54,11 +126,11 @@ pub(super) fn solve(domains: &[Vec<Candidate>]) -> Assignment {
             component: &component,
             selected: Vec::new(),
             best: vec![0; component.len()],
-            score: (usize::MAX, f32::INFINITY, f32::INFINITY),
+            score: (usize::MAX, f32::INFINITY, usize::MAX, f32::INFINITY),
             remaining: 4096,
             exhausted: false,
         };
-        let clear = search.visit((0, 0.0, 0.0));
+        let clear = search.visit((0, 0.0, 0, 0.0));
         for (&node, &choice) in component.iter().zip(&search.best) {
             result.choices[node] = choice;
         }
@@ -73,13 +145,13 @@ struct Search<'a> {
     component: &'a [usize],
     selected: Vec<usize>,
     best: Vec<usize>,
-    score: (usize, f32, f32),
+    score: (usize, f32, usize, f32),
     remaining: usize,
     exhausted: bool,
 }
 
 impl Search<'_> {
-    fn visit(&mut self, score: (usize, f32, f32)) -> bool {
+    fn visit(&mut self, score: (usize, f32, usize, f32)) -> bool {
         if score.0 > self.score.0 || (score.0 == self.score.0 && score.1 > self.score.1)
         {
             return false;
@@ -90,13 +162,14 @@ impl Search<'_> {
                 || score
                     .1
                     .total_cmp(&self.score.1)
-                    .then(score.2.total_cmp(&self.score.2))
+                    .then(score.2.cmp(&self.score.2))
+                    .then(score.3.total_cmp(&self.score.3))
                     .is_lt()
             {
                 self.score = score;
                 self.best.clone_from(&self.selected);
             }
-            return score.0 == 0;
+            return score.0 == 0 && score.2 == 0;
         }
         if self.remaining == 0 {
             self.exhausted = true;
@@ -106,7 +179,7 @@ impl Search<'_> {
         let node = self.component[depth];
         for choice in 0..self.domains[node].len() {
             let candidate = self.domains[node][choice];
-            let mut next = (score.0, score.1, score.2 + candidate.soft);
+            let mut next = (score.0, score.1, score.2, score.3 + candidate.soft);
             for (previous, &selected) in self.selected.iter().enumerate() {
                 let area = overlap(
                     candidate.rect,
@@ -114,6 +187,12 @@ impl Search<'_> {
                 );
                 next.0 += usize::from(area > 0.0);
                 next.1 += area;
+                next.2 += usize::from(
+                    overlap(
+                        candidate.goal,
+                        self.domains[self.component[previous]][selected].goal,
+                    ) > 0.0,
+                );
             }
             self.selected.push(choice);
             let clear = self.visit(next);
@@ -133,8 +212,10 @@ mod tests {
 
     fn candidate(x: f32) -> Candidate {
         Candidate {
-            attachment: 0,
+            angle: 0.0,
+            angular_velocity: 0.0,
             rect: Rect::from_center_size(Vec2::new(x, 0.0), Vec2::splat(2.0)),
+            goal: Rect::from_center_size(Vec2::new(x, 0.0), Vec2::splat(2.0)),
             soft: 0.0,
         }
     }
@@ -145,6 +226,18 @@ mod tests {
         let result = solve(&domains);
         assert_eq!(result.choices, [1, 0]);
         assert!(!result.exhausted);
+    }
+
+    #[test]
+    fn equal_next_poses_keep_separate_rotation_targets() {
+        let first = candidate(0.0);
+        let mut alternate = first;
+        alternate.goal = candidate(4.0).rect;
+        let mut second = candidate(8.0);
+        second.goal = first.goal;
+        let result = solve(&[vec![first, alternate], vec![second]]);
+        assert_eq!(result.choices, [1, 0]);
+        assert!(result.clear);
     }
 
     #[test]
@@ -171,5 +264,48 @@ mod tests {
         let result = solve(&domains);
         assert!(result.exhausted);
         assert_eq!(result.choices.len(), 16);
+    }
+    #[test]
+    fn rotation_is_tangent_and_has_bounded_speed_and_acceleration() {
+        let mut angle = 0.0;
+        let mut velocity = 0.0;
+        for _ in 0..180 {
+            let (next, speed) =
+                advance(angle, velocity, std::f32::consts::PI, 1.0 / 60.0);
+            assert!((next - angle).abs() <= ANGULAR_SPEED / 60.0 + 1e-6);
+            assert!((speed - velocity).abs() <= ANGULAR_ACCELERATION / 60.0 + 1e-6);
+            let rect =
+                tangent_rect(Vec2::ZERO, Vec2::new(240.0, 24.0), 15.333_333, next);
+            assert!(
+                (Vec2::ZERO.distance(Vec2::ZERO.clamp(rect.min, rect.max))
+                    - 15.333_333)
+                    .abs()
+                    < 0.0001
+            );
+            angle = next;
+            velocity = speed;
+        }
+    }
+    #[test]
+    fn forecast_rejects_turning_into_an_outer_frame_edge() {
+        let future = vec![Vec2::new(626.0, 0.0); 30];
+        let clear = forecast_clip(
+            std::f32::consts::PI,
+            0.0,
+            std::f32::consts::PI,
+            Vec2::new(240.0, 24.0),
+            15.333_333,
+            &future,
+        );
+        let clipped = forecast_clip(
+            std::f32::consts::PI,
+            0.0,
+            0.0,
+            Vec2::new(240.0, 24.0),
+            15.333_333,
+            &future,
+        );
+        assert!(clear <= 0.001);
+        assert!(clipped > 100.0);
     }
 }

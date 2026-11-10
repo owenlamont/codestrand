@@ -155,8 +155,13 @@ impl MovingBeams {
         )
         .size();
         let distance = state.avatar_radius() + 4.0 / 3.0;
-        let possible = (0..8).any(|attachment| {
-            let rect = super::attached_rect(body, size, distance, attachment);
+        let possible = (0..32_u8).any(|attachment| {
+            let rect = super::labels::tangent_rect(
+                body,
+                size,
+                distance,
+                f32::from(attachment) * std::f32::consts::TAU / 32.0,
+            );
             rect.min.cmpge(-HALF + bevy::math::Vec2::splat(0.5)).all()
                 && rect.max.cmple(HALF - bevy::math::Vec2::splat(0.5)).all()
                 && state

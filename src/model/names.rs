@@ -36,7 +36,8 @@ pub(super) struct Visibility {
 pub(super) struct Placement {
     pub point: Vec2,
     pub body: Vec2,
-    pub attachment: u8,
+    pub angle: f32,
+    pub angular_velocity: f32,
     pub commit: usize,
     pub text: String,
     pub scale: f32,

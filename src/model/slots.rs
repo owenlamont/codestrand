@@ -1,3 +1,4 @@
+use std::sync::Arc;
 pub(crate) mod diagnostics;
 mod envelopes;
 mod labels;
@@ -15,12 +16,13 @@ use crate::layout::packing::Tile;
 const HALF: Vec2 = Vec2::new(640.0, 360.0);
 const HALO: f32 = 2.0;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(super) struct Envelope {
     low: Vec2,
     high: Vec2,
     samples: u32,
     mean: f32,
+    rays: Arc<Vec<Vec2>>,
 }
 
 impl Envelope {
@@ -46,6 +48,18 @@ impl Envelope {
         }
     }
 
+    fn include_rays(&mut self, points: &[Vec2], touched: usize, tile: Tile) {
+        if self.samples == 0 {
+            let size = (tile.high - tile.low).max(Vec2::splat(1e-8));
+            self.rays = Arc::new(
+                points
+                    .iter()
+                    .take(touched)
+                    .map(|p| (*p - tile.low) / size)
+                    .collect(),
+            );
+        }
+    }
     fn include_service(&mut self, points: &mut [Vec3], touched: usize, tile: Tile) {
         let initial_mean = (self.samples == 0)
             .then(|| touched_mean(&points[..touched], tile))
@@ -57,12 +71,13 @@ impl Envelope {
             project(view_direction() * framing::DISTANCE, Vec3::ZERO, points)
                 .flatten()
                 .collect();
+        self.include_rays(&points, touched, tile);
         self.include(&points, tile);
         if let Some(mean) = initial_mean {
             self.mean = mean;
         }
     }
-    fn corners(self, tile: Tile) -> [Vec2; 4] {
+    fn corners(&self, tile: Tile) -> [Vec2; 4] {
         let size = tile.high - tile.low;
         Tile {
             low: (tile.low + size * self.low) * HALF,
@@ -111,6 +126,7 @@ impl Dock {
 #[derive(Clone, Debug)]
 pub(super) struct Placement {
     pub dock: Dock,
+    pub commit: usize,
     pub point: Vec2,
     pub name: Option<Vec2>,
     pub text: String,
@@ -187,6 +203,7 @@ fn fan(point: Vec2, corners: &[Vec2; 4]) -> f32 {
     std::f32::consts::TAU - gap
 }
 
+#[cfg(test)]
 fn intersect(a: Rect, b: Rect) -> bool {
     !a.intersect(b).is_empty()
 }
@@ -205,6 +222,7 @@ fn tile_obstacles(state: &State) -> Vec<(usize, Rect)> {
     result
 }
 
+#[cfg(test)]
 fn obstacles(state: &State) -> Vec<(usize, Rect)> {
     let mut result = content_obstacles(state);
     for rect in [
@@ -239,6 +257,10 @@ pub(super) fn content_obstacles(state: &State) -> Vec<(usize, Rect)> {
         );
         if low.is_finite() && high.is_finite() {
             result.push((index, Rect::from_corners(low, high).inflate(HALO)));
+        }
+        if let Some(title) = state.titles.get(&index) {
+            result.push((index, title.rect().inflate(HALO)));
+            continue;
         }
         let anchor = project(
             view_direction() * framing::DISTANCE,
@@ -279,6 +301,7 @@ fn short_name(name: &str, scale: f32, width: f32) -> String {
     text
 }
 
+#[cfg(test)]
 fn name_obstacles(
     obstacles: &[(usize, Rect)],
     owner: usize,
@@ -297,9 +320,39 @@ fn place_point(point: Vec3, rotated: bool, scale: f32, origin: Vec2) -> Vec3 {
     ground(local * scale + origin)
 }
 impl Simulation {
+    fn plan_ray_runs(&mut self) {
+        let mut runs = Vec::<Vec<usize>>::new();
+        let mut authors = std::collections::HashMap::new();
+        for (commit, event) in self.events.iter().enumerate() {
+            let key = &event.contributor.as_ref().expect("resolved author").key;
+            let run = authors
+                .get(key)
+                .copied()
+                .filter(|&run: &usize| {
+                    self.events[runs[run][0]].repository == event.repository
+                })
+                .unwrap_or_else(|| {
+                    runs.push(Vec::new());
+                    runs.len() - 1
+                });
+            authors.insert(key.clone(), run);
+            runs[run].push(commit);
+        }
+        for run in runs {
+            let points: Vec<_> = run
+                .iter()
+                .flat_map(|&commit| self.envelopes[commit].rays.iter().copied())
+                .collect();
+            let shared = Arc::new(points);
+            for commit in run {
+                self.envelopes[commit].rays = shared.clone();
+            }
+        }
+    }
     pub(super) fn plan_avatar_envelopes(&mut self, snapshots: Option<Snapshots>) {
         if let Some(snapshots) = snapshots {
             self.envelopes = snapshots.project(&self.packing, self.events.len());
+            self.plan_ray_runs();
             return;
         }
         let mut envelopes = vec![Envelope::default(); self.events.len()];
@@ -352,14 +405,25 @@ impl Simulation {
             }
         }
         self.envelopes = envelopes;
+        self.plan_ray_runs();
         self.state = self.initial.clone();
     }
 }
 
 impl State {
+    #[cfg(test)]
     pub(super) fn place_slots(&mut self, envelopes: &[Envelope], now: f32) {
+        self.place_slots_planned(envelopes, now, &[]);
+    }
+    pub(super) fn place_slots_planned(
+        &mut self,
+        envelopes: &[Envelope],
+        now: f32,
+        docks: &[Option<Dock>],
+    ) {
         let gap = Vec2::splat(self.gutter);
         let beams = tile_obstacles(self);
+        #[cfg(test)]
         let obstacles = obstacles(self);
         let radius = self.avatar_radius();
         let name_scale = self.name_scale();
@@ -372,7 +436,7 @@ impl State {
                 if let Some(tile) = self.layout.repositories[avatar.repository].gutter {
                     slot.point = slot.dock.on_network(tile);
                 }
-                if avatar.slot_presence > 0.0 {
+                if avatar.slot_presence > 0.0 || avatar.presence > 0.0 {
                     occupied.push(disk(slot.point, radius));
                 }
             }
@@ -407,7 +471,7 @@ impl State {
             }
             let avatar = &self.avatars[index];
             let commit = avatar.commit;
-            let envelope = envelopes[commit];
+            let envelope = envelopes[commit].clone();
             let record = self.slot_records.entry(commit).or_default();
             record.observations += 1;
             let Some(tile) = self.layout.repositories[avatar.repository].tile else {
@@ -422,6 +486,7 @@ impl State {
                 gutter: self.layout.repositories[avatar.repository].gutter,
                 gap,
                 radius,
+                #[cfg(test)]
                 obstacles: &obstacles,
                 beams: &beams,
                 occupied: &occupied,
@@ -430,21 +495,19 @@ impl State {
                 scale: name_scale,
                 envelope,
             };
-            let mut chosen = avatar.slot_origin.map_or_else(
-                || choice.select(avatar.slot.as_ref().map(|s| s.dock)),
-                |point| choice.nearest(point),
+            let mut chosen = choice.pick(
+                avatar.slot.as_ref(),
+                avatar.slot_origin,
+                commit,
+                docks.get(commit).copied().flatten(),
             );
+            chosen.commit = commit;
             record.fallback |= chosen.dock.edge != 0;
             record.least_bad |= !chosen.valid();
             record.half_plane_failures += u32::from(!chosen.half_plane);
             record.max_crossings = record.max_crossings.max(chosen.crossings);
             record.max_overlaps = record.max_overlaps.max(chosen.overlaps);
-            let name = choice.name_rect(chosen.point, self.geometry.label_height);
             occupied.push(disk(chosen.point, radius));
-            if let Some(rect) = name {
-                chosen.name = Some(Vec2::new(rect.min.x, rect.max.y));
-                occupied.push(rect);
-            }
             self.avatars[index].slot = Some(chosen);
             self.avatars[index].slot_origin = None;
         }
@@ -452,6 +515,40 @@ impl State {
 }
 
 impl State {
+    #[cfg(test)]
+    pub(super) fn clear_parking_option(
+        &self,
+        index: usize,
+        envelope: &Envelope,
+        others: &[Vec2],
+    ) -> bool {
+        let avatar = &self.avatars[index];
+        let Some(tile) = self.layout.repositories[avatar.repository].tile else {
+            return false;
+        };
+        let occupied: Vec<_> = others
+            .iter()
+            .map(|p| disk(*p, self.avatar_radius()))
+            .collect();
+        let beams = tile_obstacles(self);
+        #[cfg(test)]
+        let obstacles = obstacles(self);
+        let choice = Choice {
+            tile,
+            gutter: self.layout.repositories[avatar.repository].gutter,
+            gap: Vec2::splat(self.gutter),
+            radius: self.avatar_radius(),
+            obstacles: &obstacles,
+            beams: &beams,
+            occupied: &occupied,
+            repository: avatar.repository,
+            text: avatar.name.clone(),
+            scale: self.name_scale(),
+            envelope: envelope.clone(),
+        };
+        let selected = choice.select(None);
+        selected.valid() && choice.avatar_cost(selected.point) <= 0.001
+    }
     pub(super) fn name_scale(&self) -> f32 {
         self.avatar_scale
             * if self.layout.repositories.is_empty() {
@@ -493,9 +590,18 @@ impl State {
             })
             .collect()
     }
-    fn name_rays(&self, bodies: &[Option<Vec2>]) -> Vec<(Vec2, Vec2)> {
+    fn name_rays(
+        &self,
+        bodies: &[Option<Vec2>],
+        travel: &super::travel::Plan,
+    ) -> Vec<(Vec2, Vec2)> {
         self.pulses
             .iter()
+            .filter(|pulse| {
+                super::tick_time(self.tick) >= pulse.start
+                    && super::tick_time(self.tick) < pulse.end
+                    && !travel.travelling(pulse.author, self.tick)
+            })
             .flat_map(|pulse| {
                 pulse.targets.iter().filter_map(|&(target, ..)| {
                     let author = pulse.author;
@@ -514,89 +620,15 @@ impl State {
             })
             .collect()
     }
-    fn retained_names(
-        &self,
-        bodies: &[Option<Vec2>],
-        travel: &super::travel::Plan,
-    ) -> Option<Vec<(usize, super::names::Placement)>> {
-        let mut result = Vec::new();
-        let radius = self.avatar_radius();
-        let margin = 4.0 / 3.0;
-        for (index, avatar) in self
-            .avatars
-            .iter()
-            .enumerate()
-            .filter(|(_, a)| a.presence > 0.0)
-        {
-            let body = bodies[index]?;
-            let previous = avatar.name_visibility.placement.as_ref()?;
-            if previous.commit != avatar.commit || travel.departing(index, self.tick) {
-                return None;
-            }
-            let size = super::names::rect(
-                Vec2::ZERO,
-                &avatar.name,
-                self.name_scale(),
-                self.geometry.label_height,
-            )
-            .size();
-            let rect = attached_rect(body, size, radius + margin, previous.attachment);
-            if !travel.travelling(index, self.tick)
-                && (!rect.min.cmpge(-HALF + Vec2::splat(0.5)).all()
-                    || !rect.max.cmple(HALF - Vec2::splat(0.5)).all()
-                    || bodies
-                        .iter()
-                        .enumerate()
-                        .filter(|(i, _)| *i != index && self.avatars[*i].presence > 0.0)
-                        .filter_map(|(_, p)| *p)
-                        .any(|p| {
-                            p.distance(p.clamp(rect.min, rect.max))
-                                <= radius + margin + 0.001
-                        }))
-            {
-                return None;
-            }
-            if result
-                .iter()
-                .any(|(_, name): &(usize, super::names::Placement)| {
-                    let other_size = super::names::rect(
-                        Vec2::ZERO,
-                        &name.text,
-                        name.scale,
-                        self.geometry.label_height,
-                    )
-                    .size();
-                    intersect(
-                        rect,
-                        Rect::from_corners(
-                            name.point - Vec2::Y * other_size.y,
-                            name.point + Vec2::X * other_size.x,
-                        ),
-                    )
-                })
-            {
-                return None;
-            }
-            result.push((
-                index,
-                super::names::Placement {
-                    body,
-                    point: Vec2::new(rect.min.x, rect.max.y),
-                    scale: self.name_scale(),
-                    ..previous.clone()
-                },
-            ));
-        }
-        Some(result)
-    }
-
     fn label_domains(
         &self,
         bodies: &[Option<Vec2>],
         travel: &super::travel::Plan,
+        dt: f32,
     ) -> (Vec<usize>, Vec<Vec<labels::Candidate>>) {
-        let obstacles = tile_obstacles(self);
-        let rays = self.name_rays(bodies);
+        let mut obstacles = tile_obstacles(self);
+        obstacles.extend(self.titles.values().map(|title| (usize::MAX, title.rect())));
+        let rays = self.name_rays(bodies, travel);
         let space = LabelSpace {
             bodies,
             obstacles: &obstacles,
@@ -622,68 +654,65 @@ impl State {
             )
             .size();
             let previous = avatar.name_visibility.placement.as_ref();
-            let frozen = previous.filter(|_| {
-                travel.travelling(index, self.tick)
-                    && !travel.departing(index, self.tick)
+            let velocity = previous
+                .map_or(Vec2::ZERO, |p| (body - p.body) / dt.max(1e-6))
+                .clamp_length_max(480.0);
+            let future = travel.forecast(index, self.tick).unwrap_or_else(|| {
+                (1..=30_u8)
+                    .map(|step| {
+                        (body
+                            + velocity
+                                * (f32::from(step) * 4.0 * super::tick_seconds())
+                                    .min(1.0))
+                        .clamp(
+                            -HALF + Vec2::splat(space.radius),
+                            HALF - Vec2::splat(space.radius),
+                        )
+                    })
+                    .collect()
             });
-            let scored: Vec<_> = (0..8_u8)
-                .filter(|a| frozen.is_none_or(|p| p.attachment == *a))
-                .map(|attachment| {
-                    let rect = attached_rect(
-                        body,
-                        size,
-                        space.radius + space.margin,
-                        attachment,
-                    );
-                    let mut cost = space.cost(index, rect);
-                    cost[0] += travel.label_boundary_cost(index, self.tick, body, rect);
-                    cost[2] += previous.map_or(0.0, |p| {
-                        f32::from(u8::from(p.attachment != attachment)) * 10.0
-                    });
-                    (
-                        labels::Candidate {
-                            attachment,
-                            rect,
-                            soft: cost[2],
-                        },
-                        cost,
-                    )
-                })
+            let rotation = Rotation {
+                body,
+                size,
+                previous,
+                dt,
+                future: &future,
+            };
+            let mut targets: Vec<_> = (0..32_u8)
+                .map(|i| f32::from(i) * std::f32::consts::TAU / 32.0)
                 .collect();
-            let best = scored
-                .iter()
-                .map(|(_, c)| *c)
-                .min_by(|a, b| a[0].total_cmp(&b[0]).then(a[1].total_cmp(&b[1])))
-                .expect("eight attachments or frozen attachment");
-            let mut candidates: Vec<_> = scored
+            let corner = size * 0.5
+                + Vec2::splat(
+                    (space.radius + space.margin) * std::f32::consts::FRAC_1_SQRT_2,
+                );
+            targets.extend(
+                [
+                    corner,
+                    Vec2::new(-corner.x, corner.y),
+                    -corner,
+                    Vec2::new(corner.x, -corner.y),
+                ]
+                .map(Vec2::to_angle),
+            );
+            targets.extend(previous.map(|p| p.angle));
+            let scored = targets
                 .into_iter()
-                .filter(|(_, c)| {
-                    c[0].total_cmp(&best[0]).is_eq() && c[1].total_cmp(&best[1]).is_eq()
-                })
-                .map(|(candidate, _)| candidate)
+                .map(|target| space.candidate(index, target, &rotation))
                 .collect();
-            candidates.sort_by(|a, b| {
-                a.soft
-                    .total_cmp(&b.soft)
-                    .then(a.attachment.cmp(&b.attachment))
-            });
+            let candidates = eligible_angles(scored);
             authors.push(index);
             domains.push(candidates);
         }
         (authors, domains)
     }
-
-    pub(super) fn place_slot_names(&mut self, _dt: f32, travel: &super::travel::Plan) {
-        let bodies = self.name_bodies();
-        if let Some(retained) = self.retained_names(&bodies, travel) {
-            for (index, placement) in retained {
-                self.avatars[index].name_visibility.placement = Some(placement);
-                self.avatars[index].name_visibility.joint_exhausted = false;
-                self.avatars[index].name_visibility.joint_clear = true;
-            }
-            return;
+    pub(super) fn place_slot_names(&mut self, dt: f32, travel: &super::travel::Plan) {
+        for avatar in self.avatars.iter_mut().filter(|a| a.presence <= 0.0) {
+            avatar.name_visibility.placement = None;
+            avatar.name_visibility.visible = false;
+            avatar.name_visibility.opacity = 0.0;
         }
-        let (authors, domains) = self.label_domains(&bodies, travel);
+        let bodies = self.name_bodies();
+        let (authors, domains) = self.label_domains(&bodies, travel, dt);
         let assignment = labels::solve(&domains);
         for ((index, candidates), choice) in
             authors.into_iter().zip(domains).zip(assignment.choices)
@@ -694,7 +723,8 @@ impl State {
                 body: bodies[index].expect("projected visible avatar"),
                 text: self.avatars[index].name.clone(),
                 scale: self.name_scale(),
-                attachment: selected.attachment,
+                angle: selected.angle,
+                angular_velocity: selected.angular_velocity,
                 commit: self.avatars[index].commit,
             };
             let visibility = &mut self.avatars[index].name_visibility;
@@ -706,6 +736,40 @@ impl State {
         }
     }
 }
+fn eligible_angles(
+    scored: Vec<(labels::Candidate, [f32; 4])>,
+) -> Vec<labels::Candidate> {
+    let best = scored
+        .iter()
+        .map(|(_, c)| *c)
+        .min_by(|a, b| {
+            a[0].total_cmp(&b[0])
+                .then(a[1].total_cmp(&b[1]))
+                .then(a[2].total_cmp(&b[2]))
+        })
+        .expect("continuous angle samples");
+    let mut candidates: Vec<_> = scored
+        .into_iter()
+        .filter(|(_, c)| {
+            c[0].total_cmp(&best[0]).is_eq()
+                && c[1].total_cmp(&best[1]).is_eq()
+                && c[2].total_cmp(&best[2]).is_eq()
+        })
+        .map(|(candidate, _)| candidate)
+        .collect();
+    candidates
+        .sort_by(|a, b| a.soft.total_cmp(&b.soft).then(a.angle.total_cmp(&b.angle)));
+    candidates
+        .dedup_by(|a, b| a.angle.to_bits() == b.angle.to_bits() && a.goal == b.goal);
+    candidates
+}
+struct Rotation<'a> {
+    body: Vec2,
+    size: Vec2,
+    previous: Option<&'a super::names::Placement>,
+    dt: f32,
+    future: &'a [Vec2],
+}
 struct LabelSpace<'a> {
     bodies: &'a [Option<Vec2>],
     obstacles: &'a [(usize, Rect)],
@@ -715,6 +779,46 @@ struct LabelSpace<'a> {
     margin: f32,
 }
 impl LabelSpace<'_> {
+    fn candidate(
+        &self,
+        index: usize,
+        target: f32,
+        motion: &Rotation<'_>,
+    ) -> (labels::Candidate, [f32; 4]) {
+        let (angle, angular_velocity) = motion.previous.map_or((target, 0.0), |p| {
+            labels::advance(p.angle, p.angular_velocity, target, motion.dt)
+        });
+        let distance = self.radius + self.margin;
+        let rect = labels::tangent_rect(motion.body, motion.size, distance, angle);
+        let goal = labels::tangent_rect(motion.body, motion.size, distance, target);
+        let cost = self.cost(index, rect);
+        let goal_cost = self.cost(index, goal);
+        let clip = labels::forecast_clip(
+            angle,
+            angular_velocity,
+            target,
+            motion.size,
+            distance,
+            motion.future,
+        );
+        let soft = cost[2]
+            + goal_cost[0]
+            + goal_cost[1] * 1e6
+            + goal_cost[2]
+            + motion
+                .previous
+                .map_or(0.0, |p| (angular_velocity - p.angular_velocity).abs());
+        (
+            labels::Candidate {
+                angle,
+                angular_velocity,
+                rect,
+                goal,
+                soft,
+            },
+            [cost[0], cost[1], clip, soft],
+        )
+    }
     fn cost(&self, index: usize, rect: Rect) -> [f32; 3] {
         let foreign = self
             .bodies
@@ -745,8 +849,12 @@ impl LabelSpace<'_> {
                 .max(Vec2::ZERO)
                 .element_product()
         };
-        let outside = (rect.min + HALF).min(Vec2::ZERO).length_squared()
-            + (rect.max - HALF).max(Vec2::ZERO).length_squared();
+        let outside = (rect.min + HALF - Vec2::splat(0.5))
+            .min(Vec2::ZERO)
+            .length_squared()
+            + (rect.max - HALF + Vec2::splat(0.5))
+                .max(Vec2::ZERO)
+                .length_squared();
         [
             outside * 1e8,
             conflicts,
@@ -756,59 +864,34 @@ impl LabelSpace<'_> {
                     .obstacles
                     .iter()
                     .filter(|(r, _)| *r != self.avatars[index].repository)
-                    .map(|(_, r)| area(*r))
+                    .map(|(owner, r)| {
+                        area(*r) * if *owner == usize::MAX { 10_000.0 } else { 1.0 }
+                    })
                     .sum::<f32>()
                 + count(
                     self.rays
                         .iter()
                         .filter(|(a, b)| segment(*a, *b, rect))
                         .count(),
-                ) * 20.0,
+                ) * 20_000.0,
         ]
     }
 }
+#[cfg(test)]
 fn attached_rect(body: Vec2, size: Vec2, distance: f32, attachment: u8) -> Rect {
-    let directions = [
-        Vec2::X,
-        Vec2::NEG_X,
-        Vec2::Y,
-        Vec2::NEG_Y,
-        Vec2::new(1.0, 1.0),
-        Vec2::new(-1.0, 1.0),
-        Vec2::new(1.0, -1.0),
-        Vec2::new(-1.0, -1.0),
-    ];
-    let direction = directions[usize::from(attachment)];
-    let normal = if attachment >= 4 {
-        Vec2::Y * direction.y
-    } else {
-        direction
-    };
-    let anchor = body + normal * distance;
-    let low = anchor
-        - Vec2::new(
-            if direction.x == 0.0 {
-                size.x * 0.5
-            } else if direction.x < 0.0 {
-                size.x
-            } else {
-                0.0
-            },
-            if direction.y == 0.0 {
-                size.y * 0.5
-            } else if direction.y < 0.0 {
-                size.y
-            } else {
-                0.0
-            },
-        );
-    Rect::from_corners(low, low + size)
+    labels::tangent_rect(
+        body,
+        size,
+        distance,
+        f32::from(attachment) * std::f32::consts::TAU / 8.0,
+    )
 }
 struct Choice<'a> {
     tile: Tile,
     gutter: Option<Tile>,
     gap: Vec2,
     radius: f32,
+    #[cfg(test)]
     obstacles: &'a [(usize, Rect)],
     beams: &'a [(usize, Rect)],
     occupied: &'a [Rect],
@@ -819,6 +902,23 @@ struct Choice<'a> {
 }
 
 impl Choice<'_> {
+    fn pick(
+        &self,
+        previous: Option<&Placement>,
+        origin: Option<Vec2>,
+        commit: usize,
+        planned: Option<Dock>,
+    ) -> Placement {
+        if let Some(dock) = planned {
+            return self.assess(dock).0;
+        }
+        let previous = previous
+            .filter(|s| {
+                s.commit == commit || self.avatar_cost(self.point(s.dock)) <= 0.001
+            })
+            .map(|s| s.dock);
+        origin.map_or_else(|| self.select(previous), |p| self.nearest(p))
+    }
     fn point(&self, dock: Dock) -> Vec2 {
         self.gutter.map_or_else(
             || dock.point(self.tile, self.gap),
@@ -837,8 +937,13 @@ impl Choice<'_> {
             .map(|dock| self.assess(dock).0)
             .filter(Placement::valid)
             .min_by(|a, b| {
-                self.spacing_cost(a.point)
-                    .total_cmp(&self.spacing_cost(b.point))
+                self.avatar_cost(a.point)
+                    .total_cmp(&self.avatar_cost(b.point))
+                    .then(
+                        self.spacing_cost(a.point)
+                            .total_cmp(&self.spacing_cost(b.point)),
+                    )
+                    .then(self.ray_cost(a.point).total_cmp(&self.ray_cost(b.point)))
                     .then(
                         a.point
                             .distance_squared(point)
@@ -848,10 +953,17 @@ impl Choice<'_> {
             .unwrap_or_else(|| self.select(None))
     }
     fn avatar_cost(&self, point: Vec2) -> f32 {
-        let body = disk(point, self.radius);
         self.occupied
             .iter()
-            .map(|r| body.intersect(*r).size().min_element().max(0.0))
+            .map(|r| (self.radius * 2.0 - point.distance(r.center())).max(0.0))
+            .sum()
+    }
+    fn ray_cost(&self, point: Vec2) -> f32 {
+        let size = self.tile.high - self.tile.low;
+        self.envelope
+            .rays
+            .iter()
+            .map(|p| point.distance((self.tile.low + *p * size) * HALF))
             .sum()
     }
     fn spacing_cost(&self, point: Vec2) -> f32 {
@@ -884,6 +996,7 @@ impl Choice<'_> {
         (
             Placement {
                 dock,
+                commit: usize::MAX,
                 point,
                 name: None,
                 text: self.text.clone(),
@@ -893,7 +1006,7 @@ impl Choice<'_> {
                 overlaps,
                 missing_tile: false,
             },
-            span + 10_000.0 * self.spacing_cost(point),
+            span,
         )
     }
 
@@ -932,10 +1045,12 @@ impl Choice<'_> {
                 });
             }
         }
-        let fixed = self.best(docks.iter().copied());
-        if fixed.valid() && self.spacing_cost(fixed.point) == 0.0 {
-            return fixed;
-        }
+        docks.extend((0..4).flat_map(|edge| {
+            (0..=32_u8).map(move |i| Dock {
+                edge,
+                fraction: f32::from(i) / 32.0,
+            })
+        }));
         docks.extend(self.free_docks());
         self.best(docks.into_iter())
     }
@@ -960,8 +1075,16 @@ impl Choice<'_> {
                         self.avatar_cost(a.0.point)
                             .total_cmp(&self.avatar_cost(b.0.point)),
                     )
-                    .then(a.2.total_cmp(&b.2))
+                    .then(
+                        self.spacing_cost(a.0.point)
+                            .total_cmp(&self.spacing_cost(b.0.point)),
+                    )
+                    .then(
+                        self.ray_cost(a.0.point)
+                            .total_cmp(&self.ray_cost(b.0.point)),
+                    )
                     .then(a.1.3.cmp(&b.1.3))
+                    .then(a.2.total_cmp(&b.2))
                     .then(a.3.cmp(&b.3))
             })
             .expect("at least one candidate dock")
@@ -1028,6 +1151,7 @@ impl Choice<'_> {
             fraction: (value - origin) / span,
         })
     }
+    #[cfg(test)]
     fn name_rect(&self, point: Vec2, label_height: f32) -> Option<Rect> {
         if self.text.is_empty() {
             return None;
@@ -1164,6 +1288,21 @@ mod tests {
     use crate::{contributors::Mappings, model::Options, theme::Theme};
 
     #[test]
+    fn arrival_prefers_a_clear_disc_over_the_nearest_occupied_slot() {
+        let first = choice(&[], &[]).select(None);
+        let occupied = [disk(first.point, 7.5)];
+        let chooser = choice(&[], &occupied);
+        let selected = chooser.nearest(first.point);
+        assert!(selected.valid());
+        assert_eq!(chooser.avatar_cost(selected.point), 0.0);
+    }
+    #[test]
+    fn touched_file_distances_choose_the_nearest_eligible_edge() {
+        let mut chooser = choice(&[], &[]);
+        chooser.envelope.rays = Arc::new(vec![Vec2::new(0.5, 0.15)]);
+        assert_eq!(chooser.select(None).dock.edge, 2);
+    }
+    #[test]
     fn attachments_touch_the_disc_and_translate_rigidly() {
         let body = Vec2::new(35.0, -28.0);
         let delta = Vec2::new(213.0, 57.0);
@@ -1291,6 +1430,7 @@ mod tests {
                 high: Vec2::splat(0.9),
                 samples: 4,
                 mean: 0.5,
+                rays: Arc::default(),
             },
         }
     }
@@ -1401,7 +1541,16 @@ mod tests {
                 .into_iter()
                 .any(|dock| exact.assess(dock).0.valid())
         );
-        let full = [Rect::from_corners(-HALF, HALF)];
+        let empty = choice(&[], &[]);
+        let full: Vec<_> = (0..4)
+            .flat_map(|edge| {
+                (0..=128_u8).map(move |i| Dock {
+                    edge,
+                    fraction: f32::from(i) / 128.0,
+                })
+            })
+            .map(|dock| disk(empty.point(dock), 7.5))
+            .collect();
         let blocked = choice(&[], &full);
         assert_eq!(blocked.free_docks(), Vec::new());
         let least_bad = blocked.select(None);
@@ -1409,14 +1558,15 @@ mod tests {
         assert!(blocked.avatar_cost(least_bad.point) > 0.0);
     }
     #[test]
-    fn geometric_top_failure_uses_another_edge_before_spreading() {
+    fn geometric_top_failure_uses_another_valid_dock() {
         let obstacles = [(
             1,
             Rect::from_center_size(Vec2::new(0.0, 124.0), Vec2::splat(4.0)),
         )];
         let selected = choice(&obstacles, &[]).select(None);
         assert!(selected.valid());
-        assert_ne!(selected.dock.edge, 0);
+        assert_eq!(selected.crossings, 0);
+        assert_ne!(selected.dock, choice(&[], &[]).select(None).dock);
     }
     #[test]
     fn separates_parked_bodies_and_name_lanes_and_bounds_long_names() {
@@ -1494,7 +1644,7 @@ mod tests {
             let Some(tile) = sim.layout().repositories[pulse.repository].tile else {
                 continue;
             };
-            let envelope = sim.envelopes[pulse.commit];
+            let envelope = sim.envelopes[pulse.commit].clone();
             let targets = pulse
                 .touched
                 .iter()
@@ -1537,6 +1687,7 @@ mod tests {
                     .iter()
                     .filter_map(|&id| sim.state.point(Target::File(id)))
                     .collect();
+                let touched_count = points.len();
                 let initial_mean = (envelopes[pulse.commit].samples == 0)
                     .then(|| touched_mean(&points, tile))
                     .flatten();
@@ -1553,6 +1704,7 @@ mod tests {
                     project(view_direction() * framing::DISTANCE, Vec3::ZERO, &points)
                         .flatten()
                         .collect();
+                envelopes[pulse.commit].include_rays(&points, touched_count, tile);
                 envelopes[pulse.commit].include(&points, tile);
                 if let Some(mean) = initial_mean {
                     envelopes[pulse.commit].mean = mean;
@@ -1560,6 +1712,7 @@ mod tests {
             }
         }
         sim.envelopes = envelopes;
+        sim.plan_ray_runs();
         sim.state = sim.initial.clone();
     }
     #[test]
