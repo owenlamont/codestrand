@@ -162,10 +162,12 @@ Live repositories share the inset viewport inside a 24-pixel frame margin. The
 contributor band. Tile weights follow eased square roots of live file counts;
 empty active repositories retain weight one. Each repository keeps file identity,
 local layout and one uniform scale, with a fixed quarter-turn chosen for its history.
-Content zoom anticipates the next five playback seconds of growth. A precomputed rate
-limit keeps log-scale change below 0.12 per second in either direction (about 11.3%
-shrink or 12.7% growth). A larger future contraction can start the adjustment earlier;
-the chosen scale never exceeds the tile's current safe fit.
+Content zoom anticipates growth with a precomputed safe-fit envelope and half-second
+easing. The log-scale limit is 0.12 per second when zooming out and 0.08 when zooming in
+(about 11.3% shrink or 8.3% growth). A larger future contraction can start the
+adjustment earlier; the chosen scale never exceeds the tile's current safe fit.
+The usable content area leaves an eight-pixel edge inset; corner titles retain their
+existing placement rules. Invisible archived content cannot constrain earlier zoom.
 
 A newcomer splits one existing tile or subtree. Other repositories retain their
 relative order. Splits clamp to a ground-aspect range of 1:2.5 to 2.5:1 and a

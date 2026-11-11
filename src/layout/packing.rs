@@ -35,6 +35,16 @@ impl Tile {
         (self.high - self.low).element_product() * 0.25
     }
 
+    pub(crate) fn usable(self) -> Self {
+        let size = self.high - self.low;
+        let low_padding = (Vec2::splat(8.0) * 2.0 / framing::VIEWPORT).min(size * 0.2);
+        let high_padding = low_padding;
+        Self {
+            low: self.low + low_padding,
+            high: self.high - high_padding,
+        }
+    }
+
     pub(crate) fn pixels(self) -> Vec2 {
         (self.high - self.low) * framing::VIEWPORT * 0.5
     }
@@ -505,6 +515,7 @@ pub(crate) struct Packing {
     rotated: Vec<bool>,
     placements: Arc<[OnceLock<Vec<Placement>>]>,
     zoom: Arc<[Vec<f32>]>,
+    visible_until: Arc<[f32]>,
 }
 
 fn rotations(
@@ -547,6 +558,7 @@ impl Packing {
         if !endings.iter().any(|end| end.is_finite()) {
             return self;
         }
+        self.visible_until = endings.iter().map(|end| end + exit).collect();
         for (tick, sample) in Arc::make_mut(&mut self.samples).iter_mut().enumerate() {
             let now = crate::model::tick_time(
                 u64::try_from(tick).expect("bounded packing tick"),
@@ -681,17 +693,34 @@ impl Packing {
             rotated,
             placements: (0..regions.len()).map(|_| OnceLock::new()).collect(),
             zoom: Arc::default(),
+            visible_until: Arc::default(),
         }
         .plan_zoom()
     }
 
     fn plan_zoom(mut self) -> Self {
+        self.zoom = Arc::default();
         let mut scales: Vec<Vec<_>> = (0..self.regions.len())
             .map(|tick| {
                 self.fit(tick, None)
                     .iter()
                     .zip(&self.regions[tick])
-                    .map(|(p, r)| if r.live { p.scale } else { 0.0 })
+                    .enumerate()
+                    .map(|(i, (p, r))| {
+                        if r.live
+                            && crate::model::tick_time(
+                                u64::try_from(tick).expect("bounded packing tick"),
+                            ) < self
+                                .visible_until
+                                .get(i)
+                                .copied()
+                                .unwrap_or(f32::INFINITY)
+                        {
+                            p.scale
+                        } else {
+                            0.0
+                        }
+                    })
                     .collect()
             })
             .collect();
@@ -811,7 +840,7 @@ impl Packing {
                 let tile = placement[i];
                 // A fixed screen anchor avoids switching between equal-area fit vertices.
                 let fitted = tile.map(|tile| {
-                    fit::anchored(tile, &shape, r.height, Vec2::splat(0.5))
+                    fit::anchored(tile.usable(), &shape, r.height, Vec2::splat(0.5))
                 });
                 let raw_scale = fitted.map_or(0.0, |f| f.scale);
                 let scale = self
@@ -1134,6 +1163,27 @@ mod tests {
             .unwrap();
         assert!(regions.iter().all(|r| !r.live));
         assert!(Packing::default().sample(0).is_none());
+    }
+
+    #[test]
+    fn invisible_ending_slivers_do_not_zoom_out_visible_content() {
+        let rows: Vec<_> = fixture()
+            .into_iter()
+            .take(1600)
+            .map(|row| row.into_iter().take(2).collect())
+            .collect();
+        let original = Packing::build(&rows);
+        let ending = original
+            .clone()
+            .with_endings(&[20.0, f32::INFINITY], 2.5, 4.0);
+        for tick in 600..1200 {
+            let before = original.sample(tick).unwrap().2[0];
+            let after = ending.sample(tick).unwrap().2[0];
+            assert!(
+                after >= before * 0.99,
+                "premature collapse at {tick}: {before} -> {after}"
+            );
+        }
     }
 
     #[test]
