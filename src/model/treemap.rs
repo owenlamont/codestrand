@@ -201,9 +201,11 @@ pub(crate) fn run(
     std::hint::black_box(placement);
     eprintln!("treemap_single_sample_seconds={elapsed:.9}");
     let mut moving_beams = super::slots::diagnostics::MovingBeams::default();
+    let mut occlusion = super::occlusion::Audit::default();
     for frame in 0..=frames {
         simulation.advance_to(frame, 60);
         moving_beams.observe(simulation);
+        occlusion.observe(simulation);
         serde_json::to_writer(
             &mut *writer,
             &serde_json::json!({
@@ -218,7 +220,7 @@ pub(crate) fn run(
     }
     serde_json::to_writer(
         &mut *writer,
-        &serde_json::json!({"moving_beams": moving_beams, "avatar_slots": super::slots::report(&simulation.state), "travel": simulation.travel.report()}),
+        &serde_json::json!({"occlusion": occlusion, "moving_beams": moving_beams, "avatar_slots": super::slots::report(&simulation.state), "travel": simulation.travel.report()}),
     )?;
     writeln!(writer)?;
     Ok(())

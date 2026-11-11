@@ -158,7 +158,9 @@ order. Contributor mappings apply across all repositories, so a matched contribu
 uses one avatar that moves between regions.
 
 Live repositories share the inset viewport inside a 24-pixel frame margin. The
-top wordmark has a separate 26-pixel reserved strip, including a four-pixel buffer;
+same frame-scaled avatar sizing and gutter placement apply to single repositories and
+synthetic playback. The top wordmark has a separate 26-pixel reserved strip, including
+a four-pixel buffer;
 avatars, gutter routes and name labels stay below the strip, matching caption clearance.
 The 16:9 export camera stays fixed. Shared gutters separate neighbouring tiles, with no
 contributor band. Tile weights follow eased square roots of live file counts;

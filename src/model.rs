@@ -21,6 +21,7 @@ mod measurement;
 mod names;
 #[cfg(test)]
 mod nitpicks;
+pub(crate) mod occlusion;
 #[cfg(test)]
 mod pacing_tests;
 pub(crate) mod quality;
@@ -399,6 +400,7 @@ impl Simulation {
         &self.schedule.starts
     }
 
+    #[cfg(test)]
     pub(super) fn new(
         events: Vec<Event>,
         options: &Options,
@@ -408,6 +410,7 @@ impl Simulation {
         Self::with_repositories(events, options, theme, mappings, &[])
     }
 
+    #[cfg(test)]
     pub(super) fn with_repositories(
         events: Vec<Event>,
         options: &Options,
