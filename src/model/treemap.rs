@@ -74,7 +74,7 @@ fn framing_metrics(
         .outline
         .iter()
         .copied()
-        .map(framing::project_ground)
+        .map(framing::world_to_field)
         .collect();
     let usable_fill =
         crate::layout::outline::area(&projected) * 0.25 / usable.area().max(1e-12);
@@ -83,8 +83,8 @@ fn framing_metrics(
         .iter()
         .flat_map(|&p| {
             [
-                framing::project_ground(p),
-                framing::project_at(p, region.height),
+                framing::world_to_field(p),
+                framing::project_field_at(p, region.height),
             ]
         })
         .any(|p| {
@@ -135,7 +135,7 @@ pub(crate) fn measure(layout: &Layout) -> Metrics {
         let content_area = if low.is_finite() {
             let mut polygon: Vec<_> = crate::layout::outline::rectangle(low, high)
                 .into_iter()
-                .map(framing::project_ground)
+                .map(framing::world_to_field)
                 .collect();
             for axis in [Vec2::X, Vec2::Y] {
                 polygon =
@@ -191,7 +191,7 @@ pub(crate) fn run(
     serde_json::to_writer(
         &mut *writer,
         &serde_json::json!({"definitions":
-        "All areas are fractions of the full 1280x720 frame. Glass tiles are disjoint screen rectangles inside the 24 px margin plus the caption reservation below, separated by shared gutters. Largest empty rectangle is the exact maximum axis-aligned rectangle outside their union, including the margin. Content is the projected ground-plane AABB of current directory discs and file positions padded by their rendered size; not glyph ink or opaque pixel occupancy. Content fill divides content-envelope area by tile area; overall fill is area weighted. The first repository owns the empty lead-in tile. Weights are eased square roots of live file counts; empty active repositories retain weight one until archived. Samples include every canonical 1/60 second. Content AABBs are clipped to their own tiles; actual footprints may use trapezoid corners. Content largest-empty rectangles use fully covered cells on a 160x90 grid inside the usable tile viewport, excluding the caption reservation, with 8 px boundary uncertainty."}),
+        "All areas are fractions of the full 1280x720 frame. Glass tiles are disjoint world rectangles in fixed reference-frame units inside the 24 px margin plus the caption reservation below, separated by shared gutters. Largest empty rectangle is the exact maximum axis-aligned rectangle outside their union, including the margin. Content is the projected ground-plane AABB of current directory discs and file positions padded by their rendered size; not glyph ink or opaque pixel occupancy. Content fill divides content-envelope area by tile area; overall fill is area weighted. The first repository owns the empty lead-in tile. Weights are eased square roots of live file counts; empty active repositories retain weight one until archived. Samples include every canonical 1/60 second. Content AABBs are clipped to their own tiles; actual footprints use convex outlines. Content largest-empty rectangles use fully covered cells on a 160x90 grid inside the usable tile viewport, excluding the caption reservation, with 8 px boundary uncertainty."}),
     )?;
     writeln!(writer)?;
     let frames = super::frames_for(simulation.duration(), 60)?;

@@ -327,7 +327,7 @@ mod tests {
     }
 
     #[test]
-    fn single_repository_caption_retains_the_original_format() {
+    fn unnamed_internal_simulation_retains_the_original_caption_format() {
         let mut sim = Simulation::new(
             crate::timeline::synthetic(),
             &super::super::Options::default(),

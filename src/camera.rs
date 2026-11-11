@@ -1,5 +1,5 @@
 use bevy::{
-    math::{Vec2, Vec3},
+    math::{Quat, Vec2, Vec3},
     prelude::Resource,
 };
 
@@ -19,8 +19,7 @@ enum Mode {
     Reset {
         focus: Vec3,
         distance: f32,
-        yaw: f32,
-        pitch: f32,
+        rotation: Quat,
         elapsed: f32,
     },
 }
@@ -39,19 +38,16 @@ pub(super) struct PreviewCamera {
     mode: Mode,
     focus: Vec3,
     distance: f32,
-    yaw: f32,
-    pitch: f32,
+    rotation: Quat,
 }
 
 impl PreviewCamera {
     pub(super) fn new(view: (Vec3, f32)) -> Self {
-        let direction = model::view_direction();
         Self {
             mode: Mode::Fit,
             focus: view.0,
             distance: view.1,
-            yaw: direction.x.atan2(direction.z),
-            pitch: direction.y.asin(),
+            rotation: Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
         }
     }
 
@@ -66,8 +62,7 @@ impl PreviewCamera {
             self.mode = Mode::Reset {
                 focus: self.focus,
                 distance: self.distance,
-                yaw: self.yaw,
-                pitch: self.pitch,
+                rotation: self.rotation,
                 elapsed: 0.0,
             };
         } else {
@@ -86,8 +81,7 @@ impl PreviewCamera {
             Mode::Reset {
                 focus,
                 distance,
-                yaw,
-                pitch,
+                rotation,
                 elapsed,
             } => {
                 *elapsed += dt;
@@ -96,16 +90,16 @@ impl PreviewCamera {
                 let default = Self::new(view);
                 self.focus = focus.lerp(default.focus, ease);
                 self.distance = *distance + (default.distance - *distance) * ease;
-                let yaw_delta =
-                    (default.yaw - *yaw).sin().atan2((default.yaw - *yaw).cos());
-                self.yaw = *yaw + yaw_delta * ease;
-                self.pitch = *pitch + (default.pitch - *pitch) * ease;
+                self.rotation = rotation.slerp(default.rotation, ease);
                 if weight >= 1.0 {
                     *self = default;
                 }
             }
             Mode::Free | Mode::Follow { .. } => {
-                self.yaw -= input.orbit.x * 0.004;
+                self.rotation = (self.rotation
+                    * Quat::from_rotation_y(-input.orbit.x * 0.004)
+                    * Quat::from_rotation_x(input.orbit.y * 0.004))
+                .normalize();
                 self.distance =
                     (self.distance * (-input.zoom * 0.12).exp()).clamp(1.0, 20_000.0);
                 if let Mode::Follow { key, .. } = &self.mode {
@@ -119,8 +113,8 @@ impl PreviewCamera {
                         self.mode = Mode::Free;
                     }
                 } else {
-                    let right = Vec3::new(self.yaw.cos(), 0.0, -self.yaw.sin());
-                    let forward = Vec3::new(-self.yaw.sin(), 0.0, -self.yaw.cos());
+                    let right = (self.rotation * Vec3::X).with_y(0.0);
+                    let forward = (self.rotation * Vec3::Y).with_y(0.0);
                     self.focus += (right * input.pan.x + forward * input.pan.y)
                         * self.distance
                         * 0.7
@@ -152,13 +146,13 @@ impl PreviewCamera {
         let direction = if self.mode == Mode::Fit {
             model::view_direction()
         } else {
-            Vec3::new(
-                self.yaw.sin() * self.pitch.cos(),
-                self.pitch.sin(),
-                self.yaw.cos() * self.pitch.cos(),
-            )
+            self.rotation * Vec3::Z
         };
         (self.focus + direction * self.distance, self.focus)
+    }
+
+    pub(super) fn rotation(&self) -> Quat {
+        self.rotation
     }
 
     pub(super) fn caption(&self) -> String {
@@ -187,6 +181,74 @@ mod tests {
         theme::Theme,
         timeline::{self, Event},
     };
+
+    #[test]
+    fn top_down_default_aims_at_the_field_centre() {
+        let view = (Vec3::ZERO, model::framing::DISTANCE);
+        let camera = PreviewCamera::new(view);
+        let (eye, focus) = camera.pose();
+        assert_eq!(focus, view.0);
+        assert!((eye - focus).normalize().abs_diff_eq(Vec3::Y, 1e-6));
+    }
+
+    #[test]
+    fn top_down_free_pitch_and_yaw_orbit() {
+        let view = (Vec3::ZERO, 60.0);
+        let mut camera = PreviewCamera::new(view);
+        let before = (camera.pose().0 - camera.pose().1).normalize();
+        camera.update(
+            &Input {
+                orbit: Vec2::new(40.0, 100.0),
+                ..Input::default()
+            },
+            view,
+            &[],
+            0.1,
+        );
+        assert_eq!(camera.mode, Mode::Free);
+        assert!(
+            ((camera.pose().0 - camera.pose().1).normalize().y - before.y).abs() > 0.05
+        );
+        let (eye, focus) = camera.pose();
+        assert!((eye.distance(focus) - 60.0).abs() < 1e-4);
+        assert!(eye.z.abs() > 0.1);
+    }
+
+    #[test]
+    fn top_down_follow_pitch_and_yaw_keep_the_target() {
+        let simulation = avatars();
+        let avatars = simulation.avatars();
+        let view = (Vec3::ZERO, 60.0);
+        let mut camera = PreviewCamera::new(view);
+        camera.update(
+            &Input {
+                cycle: true,
+                ..Input::default()
+            },
+            view,
+            avatars,
+            0.1,
+        );
+        let before = (camera.pose().0 - camera.pose().1).normalize();
+
+        camera.update(
+            &Input {
+                orbit: Vec2::new(40.0, 100.0),
+                ..Input::default()
+            },
+            view,
+            avatars,
+            0.1,
+        );
+        assert_eq!(camera.mode, following(&avatars[0]));
+        assert!(
+            ((camera.pose().0 - camera.pose().1).normalize().y - before.y).abs() > 0.05
+        );
+        assert!((camera.pose().0 - camera.pose().1).x.abs() > 0.1);
+        let (eye, focus) = camera.pose();
+        assert!((eye.distance(focus) - 60.0).abs() < 1e-4);
+        assert!(focus.distance(avatars[0].position) < avatars[0].position.length());
+    }
 
     fn avatars() -> Simulation {
         simulation(&[("Ada", ""), ("Grace", "")])
@@ -263,7 +325,7 @@ mod tests {
     }
 
     #[test]
-    fn orbit_preserves_the_default_pitch() {
+    fn orbit_remains_finite_for_large_drags() {
         let view = (Vec3::ZERO, 10.0);
         let mut camera = PreviewCamera::new(view);
         for motion in [-10000.0, 10000.0] {
@@ -276,19 +338,115 @@ mod tests {
                 &[],
                 0.1,
             );
-            assert_eq!(camera.pitch, model::view_direction().y.asin());
+            assert!(camera.rotation().is_finite());
             let (eye, focus) = camera.pose();
-            assert!(eye.y > 0.0);
+            assert!(eye.is_finite());
             assert!(eye.distance(focus) > 9.99);
             assert!(eye.x.is_finite() && eye.z.is_finite());
         }
     }
 
     #[test]
+    fn orbit_has_no_lock_or_snap_through_poles_horizon_and_nadir() {
+        let view = (Vec3::ZERO, 60.0);
+        let simulation = avatars();
+        for follow in [false, true] {
+            for direction in [-1.0, 1.0] {
+                let mut camera = PreviewCamera::new(view);
+                camera.update(
+                    &Input {
+                        cycle: follow,
+                        ..Input::default()
+                    },
+                    view,
+                    simulation.avatars(),
+                    0.1,
+                );
+                let mut previous = camera.rotation();
+                let expected = if follow {
+                    following(&simulation.avatars()[0])
+                } else {
+                    Mode::Free
+                };
+                let mut low = 1.0_f32;
+                let mut high = -1.0_f32;
+                for _ in 0..2000 {
+                    camera.update(
+                        &Input {
+                            orbit: Vec2::new(0.0, direction * 4.0),
+                            ..Input::default()
+                        },
+                        view,
+                        simulation.avatars(),
+                        0.1,
+                    );
+                    let q = camera.rotation();
+                    let [right, up, back] = [Vec3::X, Vec3::Y, Vec3::Z].map(|v| q * v);
+                    assert!(q.is_finite());
+                    assert!((q.length() - 1.0).abs() < 1e-5);
+                    assert!(right.dot(up).abs() < 1e-5 && up.dot(back).abs() < 1e-5);
+                    assert!((right.cross(up) - back).length() < 1e-5);
+                    assert!(previous.angle_between(q) < 0.017);
+                    let (eye, focus) = camera.pose();
+                    assert!((eye - focus).normalize().abs_diff_eq(back, 1e-5));
+                    low = low.min(back.y);
+                    high = high.max(back.y);
+                    assert_eq!(camera.mode, expected);
+                    previous = q;
+                }
+                assert!(low < -0.999 && high > 0.999);
+                let before = camera.rotation();
+                camera.update(
+                    &Input {
+                        orbit: Vec2::X * 20.0,
+                        ..Input::default()
+                    },
+                    view,
+                    simulation.avatars(),
+                    0.1,
+                );
+                assert!(before.angle_between(camera.rotation()) > 0.07);
+            }
+        }
+    }
+
+    #[test]
+    fn reset_from_below_slerps_to_overhead_without_a_jump() {
+        let view = (Vec3::ZERO, 60.0);
+        let mut camera = PreviewCamera::new(view);
+        camera.update(
+            &Input {
+                orbit: Vec2::Y * (std::f32::consts::PI / 0.004),
+                ..Input::default()
+            },
+            view,
+            &[],
+            0.1,
+        );
+        assert!(camera.pose().0.y < 0.0);
+        let before = camera.rotation();
+        camera.update(
+            &Input {
+                reset: true,
+                ..Input::default()
+            },
+            view,
+            &[],
+            0.0,
+        );
+        assert!(before.angle_between(camera.rotation()) < 1e-5);
+        for _ in 0..31 {
+            camera.update(&Input::default(), view, &[], 1.0 / 60.0);
+        }
+        assert_eq!(camera.mode, Mode::Fit);
+        assert_eq!(camera.rotation(), PreviewCamera::new(view).rotation());
+    }
+
+    #[test]
     fn pan_is_planar_and_relative_to_yaw_and_zoom_is_bounded() {
         let view = (Vec3::ZERO, 10.0);
         let mut camera = PreviewCamera::new(view);
-        camera.yaw = 0.0;
+        camera.rotation = PreviewCamera::new(view).rotation;
         camera.update(
             &Input {
                 pan: Vec2::Y,
@@ -299,7 +457,9 @@ mod tests {
             0.5,
         );
         assert!(camera.focus.abs_diff_eq(Vec3::new(0.0, 0.0, -0.7), 0.0001));
-        camera.yaw = std::f32::consts::FRAC_PI_2;
+        camera.rotation =
+            bevy::math::Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)
+                * PreviewCamera::new(view).rotation;
         camera.update(
             &Input {
                 pan: Vec2::X,

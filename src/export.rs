@@ -195,6 +195,67 @@ mod tests {
     use bevy::{color::ColorToPacked, prelude::IntoScheduleConfigs};
 
     #[test]
+    #[ignore = "requires a graphics adapter and CODESTRAND_BELOW_OUTPUT directory"]
+    fn below_plane_preview_still() {
+        use clap::Parser;
+        let output = std::path::PathBuf::from(
+            std::env::var_os("CODESTRAND_BELOW_OUTPUT").unwrap(),
+        );
+        let repository = std::env::var("CODESTRAND_BELOW_REPOSITORY").unwrap();
+        let cli = crate::Cli::try_parse_from([
+            "codestrand",
+            "preview",
+            "--repository",
+            &repository,
+            "--seconds-per-day",
+            "2",
+            "--max-idle-seconds",
+            "6",
+        ])
+        .unwrap();
+        let Some(crate::Command::Preview { source, .. }) = cli.command else {
+            panic!("preview fixture");
+        };
+        let (simulation, title) = source.load().unwrap();
+        let mut camera = crate::camera::PreviewCamera::new(simulation.view());
+        camera.update(
+            &crate::camera::Input {
+                orbit: bevy::math::Vec2::Y * (140.0_f32.to_radians() / 0.004),
+                ..Default::default()
+            },
+            simulation.view(),
+            &[],
+            0.1,
+        );
+        assert!(camera.pose().0.y < 0.0);
+        let (mut app, target) = scene::headless(simulation, title, 30);
+        app.insert_resource(camera);
+        app.world_mut().resource_mut::<scene::Frame>().index = 393;
+        let started = Instant::now();
+        while app.plugins_state() != PluginsState::Ready {
+            assert!(started.elapsed() < WAIT_LIMIT);
+            bevy::tasks::tick_global_task_pools_on_main_thread();
+            thread::sleep(Duration::from_millis(1));
+        }
+        app.finish();
+        app.cleanup();
+        loop {
+            update(&mut app).unwrap();
+            assert!(started.elapsed() < WAIT_LIMIT);
+            if ready(&mut app) {
+                break;
+            }
+        }
+        capture(&mut app, &target, 393)
+            .unwrap()
+            .try_into_dynamic()
+            .unwrap()
+            .to_rgb8()
+            .save(output.join("below-plane.png"))
+            .unwrap();
+    }
+
+    #[test]
     #[ignore = "requires a graphics adapter; writes a live theme-switch sequence"]
     fn live_theme_switch_export() {
         let scratch = tempfile::tempdir().unwrap();

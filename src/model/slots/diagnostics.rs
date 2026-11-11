@@ -90,7 +90,7 @@ impl MovingBeams {
             let wordmark = crate::model::caption::frame_text_rects()[0]
                 .inflate(crate::model::caption::BUFFER);
             let direction = view_direction();
-            let right = Vec3::new(direction.z, 0.0, -direction.x).normalize();
+            let right = Vec3::X;
             let draw_radius = state.geometry.avatar_radius
                 * state.scale()
                 * state.avatar_scale

@@ -43,7 +43,7 @@ const FRAGMENT_FLIGHT: f32 = 1.0 / FRAGMENT_SPEED;
 const ADD_DELAY: f32 = 0.2;
 const DELETE_DELAY: f32 = 0.0;
 const MIN_AVATAR_HEIGHT: f32 = 3.2;
-const AVATAR_CLEARANCE: f32 = 0.04;
+
 const AVATAR_IDLE: f32 = 5.0;
 const ARRIVAL_SCALE: f32 = 1.15;
 const BEAM_LIMIT: usize = 24;
@@ -233,7 +233,6 @@ pub(super) struct Avatar {
     // Travel fades do not release a reserved parking slot.
     slot_presence: f32,
     pub projection_scale: f32,
-    height_band: f32,
     activity: f32,
     name_visibility: names::Visibility,
     commit: usize,
@@ -1267,7 +1266,7 @@ impl State {
     }
 
     fn avatar_targets(&self, now: f32) -> Vec<Vec3> {
-        let right = Vec3::new(view_direction().z, 0.0, -view_direction().x).normalize();
+        let right = Vec3::X;
         let unit = 2.0 * self.distance * std::f32::consts::FRAC_PI_8.tan() / 720.0;
         let mut targets: Vec<_> =
             self.avatars.iter().map(|avatar| avatar.target).collect();
@@ -1339,7 +1338,6 @@ impl State {
             presence: 0.0,
             slot_presence: 0.0,
             projection_scale: 1.0,
-            height_band: names::height_band(&contributor.key),
             activity: 0.0,
             name_visibility: names::Visibility::default(),
             commit: 0,
@@ -1555,11 +1553,11 @@ impl State {
         let tops = self.file_tops();
         let points = self.scene_points(&tops);
         let direction = view_direction();
-        let ground_up = Vec3::new(-direction.x, 0.0, -direction.z).normalize();
+        let ground_up = Vec3::NEG_Z;
         let ground_right = ground_up.cross(Vec3::Y);
         for _ in 0..4 {
-            let distance = self.fit_distance(focus, &points, &tops, false);
-            let lifted = self.lifted_points(focus, distance, &tops, false);
+            let distance = self.fit_distance(focus, &points);
+            let lifted = self.avatar_bounds(distance);
             let all: Vec<_> = points.iter().chain(&lifted).copied().collect();
             let (low, high) = screen_bounds(focus + direction * distance, focus, &all);
             let centre = (low + high) * 0.5 - Vec2::new(0.0, -0.04);
@@ -1567,21 +1565,15 @@ impl State {
             focus += ground_right * centre.x * span * 16.0 / 9.0
                 + ground_up * centre.y * span * 1.2;
         }
-        (focus, self.fit_distance(focus, &points, &tops, false))
+        (focus, self.fit_distance(focus, &points))
     }
 
-    fn fit_distance(
-        &self,
-        focus: Vec3,
-        points: &[Vec3],
-        tops: &[Vec3],
-        include_displayed: bool,
-    ) -> f32 {
+    fn fit_distance(&self, focus: Vec3, points: &[Vec3]) -> f32 {
         let direction = view_direction();
         let (mut near, mut far) = (2.0_f32, 20_000.0_f32);
         for _ in 0..32 {
             let middle = f32::midpoint(near, far);
-            let mut all = self.lifted_points(focus, middle, tops, include_displayed);
+            let mut all = self.avatar_bounds(middle);
             all.extend_from_slice(points);
             if in_view(focus + direction * middle, focus, &all) {
                 far = middle;
@@ -1592,68 +1584,24 @@ impl State {
         far
     }
 
-    fn lifted_points(
-        &self,
-        focus: Vec3,
-        distance: f32,
-        tops: &[Vec3],
-        include_displayed: bool,
-    ) -> Vec<Vec3> {
-        let eye = focus + view_direction() * distance;
-        let line =
-            screen_bounds(eye, focus, tops).1.y.max(-0.8) + 2.0 * AVATAR_CLEARANCE;
+    fn avatar_bounds(&self, distance: f32) -> Vec<Vec3> {
         let scale = (1.0 + distance / 60.0) * self.avatar_scale * self.avatar_size;
         self.avatars
             .iter()
-            .filter(|avatar| avatar.presence > 0.0)
+            .filter(|a| a.presence > 0.0)
             .flat_map(|avatar| {
-                let height = self.lift(avatar, focus, distance, line);
-                [height, avatar.position.y]
-                    .into_iter()
-                    .take(if include_displayed { 2 } else { 1 })
-                    .flat_map(move |height| {
-                        let position =
-                            Vec3::new(avatar.position.x, height, avatar.position.z);
-                        box_corners(
-                            Vec3::splat(-self.geometry.avatar_radius * scale),
-                            Vec3::splat(self.geometry.avatar_radius * scale),
-                        )
-                        .map(|corner| position + corner)
-                        .into_iter()
-                        .chain(std::iter::once(
-                            position + self.geometry.avatar_label_offset,
-                        ))
-                    })
+                box_corners(
+                    Vec3::splat(-self.geometry.avatar_radius * scale),
+                    Vec3::splat(self.geometry.avatar_radius * scale),
+                )
+                .map(|corner| avatar.position + corner)
+                .into_iter()
+                .chain(std::iter::once(
+                    avatar.position + self.geometry.avatar_label_offset,
+                ))
             })
             .collect()
     }
-
-    fn lift(&self, avatar: &Avatar, focus: Vec3, distance: f32, line: f32) -> f32 {
-        let eye = focus + view_direction() * distance;
-        let forward = -view_direction();
-        let up = forward.cross(Vec3::Y).normalize().cross(forward);
-        let radius = self.geometry.avatar_radius
-            * (1.0 + distance / 60.0)
-            * self.avatar_scale
-            * self.avatar_size;
-        let base = Vec3::new(avatar.position.x, 0.0, avatar.position.z);
-        let solve = |offset: Vec3, target: f32| {
-            let slope = target * std::f32::consts::FRAC_PI_8.tan();
-            let delta = base + offset - eye;
-            (slope * delta.dot(forward) - delta.dot(up)) / (up.y - slope * forward.y)
-        };
-        let line = line + avatar.height_band;
-        let height = box_corners(Vec3::splat(-radius), Vec3::splat(radius))
-            .into_iter()
-            .map(|corner| solve(corner, line))
-            .fold(MIN_AVATAR_HEIGHT, f32::max)
-            .max(solve(
-                self.geometry.avatar_label_offset,
-                line + 2.0 * self.geometry.label_height * self.avatar_scale / 720.0,
-            ));
-        height + 0.0001
-    }
-
     fn place_view(&mut self, dt: f32) {
         if !self.layout.repositories.is_empty() {
             self.focus = Vec3::ZERO;
@@ -1667,29 +1615,7 @@ impl State {
         self.distance += (distance - self.distance) * ease;
         let tops = self.file_tops();
         let points = self.scene_points(&tops);
-        self.distance = self
-            .distance
-            .max(self.fit_distance(self.focus, &points, &tops, true));
-        let line = screen_bounds(
-            self.focus + view_direction() * self.distance,
-            self.focus,
-            &tops,
-        )
-        .1
-        .y
-        .max(-0.8)
-            + 2.0 * AVATAR_CLEARANCE;
-        let heights: Vec<_> = self
-            .avatars
-            .iter()
-            .map(|avatar| self.lift(avatar, self.focus, self.distance, line))
-            .collect();
-        for (avatar, height) in self.avatars.iter_mut().zip(heights) {
-            avatar.position.y = height.max(
-                avatar.position.y
-                    + (height - avatar.position.y) * (1.0 - (-dt / 0.6).exp()),
-            );
-        }
+        self.distance = self.distance.max(self.fit_distance(self.focus, &points));
     }
 }
 
@@ -1716,7 +1642,7 @@ pub(crate) fn apply(
 }
 
 pub(super) fn view_direction() -> Vec3 {
-    Vec3::new(0.4, 0.44, 0.95).normalize()
+    Vec3::Y
 }
 
 pub(crate) fn box_corners(low: Vec3, high: Vec3) -> [Vec3; 8] {
@@ -1739,7 +1665,7 @@ fn project(
     points: &[Vec3],
 ) -> impl Iterator<Item = Option<Vec2>> {
     let forward = (focus - eye).normalize();
-    let right = forward.cross(Vec3::Y).normalize();
+    let right = Vec3::X;
     let up = right.cross(forward);
     let half_height = (std::f32::consts::FRAC_PI_8).tan();
     points.iter().map(move |&point| {
@@ -2420,7 +2346,8 @@ mod tests {
                 let corners = box_corners(geometry.file_min, geometry.file_max)
                     .map(|corner| ground(file.position) + corner * presence);
                 for point in project(eye, focus, &corners) {
-                    let point = point.expect("visible file in front of camera");
+                    let point = point.expect("visible file in front of camera")
+                        / framing::GROUND_FACTOR;
                     assert!(
                         point.cmpge(tile.low - Vec2::splat(0.0001)).all()
                             && point.cmple(tile.high + Vec2::splat(0.0001)).all(),
@@ -2723,7 +2650,7 @@ mod tests {
         let state = &sim.state;
         let eye = state.focus + view_direction() * state.distance;
         let tops = state.file_tops();
-        let highest = screen_bounds(eye, state.focus, &tops).1.y;
+
         for avatar in state.avatars.iter().filter(|avatar| avatar.presence > 0.0) {
             let radius =
                 state.geometry.avatar_radius * sim.scale() * sim.avatar_disc_scale();
@@ -2732,16 +2659,6 @@ mod tests {
             let projected: Vec<_> = project(eye, state.focus, &corners)
                 .map(|point| point.expect("avatar bounds are in front of the camera"))
                 .collect();
-            let lowest = projected
-                .iter()
-                .map(|point| point.y)
-                .fold(f32::MAX, f32::min);
-            assert!(
-                lowest > highest + 2.0 * AVATAR_CLEARANCE,
-                "tick {}: avatar {lowest}, file {highest}, distance {}",
-                state.tick,
-                state.distance
-            );
             assert!(
                 projected.iter().all(|point| point.x.abs() <= 0.9201
                     && (-0.8001..=0.7201).contains(&point.y)),
@@ -2753,11 +2670,7 @@ mod tests {
                 .next()
                 .flatten()
                 .expect("label is in front of the camera");
-            assert!(
-                label.y
-                    - 2.0 * state.geometry.label_height * sim.avatar_scale() / 720.0
-                    > highest + 2.0 * AVATAR_CLEARANCE
-            );
+            assert!(label.is_finite());
             assert!(avatar.position.y >= MIN_AVATAR_HEIGHT);
         }
         assert!(
@@ -2767,7 +2680,7 @@ mod tests {
     }
 
     #[test]
-    fn synthetic_avatars_clear_file_tops_during_growth_and_rewind() {
+    fn overhead_avatar_bounds_remain_finite_during_growth_and_rewind() {
         for start in [0, 8] {
             let mut sim = Simulation::new(
                 timeline::synthetic(),
@@ -2788,7 +2701,7 @@ mod tests {
     }
 
     #[test]
-    fn projection_check_rejects_fixed_height() {
+    fn overhead_fit_preserves_fixed_avatar_height() {
         let mut events = timeline::synthetic();
         events[7]
             .changes
@@ -2807,18 +2720,11 @@ mod tests {
         );
         sim.advance_to(13, 2);
         assert_clearance(&sim);
-        let state = &sim.state;
-        let eye = state.focus + view_direction() * state.distance;
-        let highest = screen_bounds(eye, state.focus, &state.file_tops()).1.y;
-        let points: Vec<_> = state
-            .avatars
-            .iter()
-            .map(|avatar| {
-                Vec3::new(avatar.position.x, MIN_AVATAR_HEIGHT, avatar.position.z)
-            })
-            .collect();
-        let lowest = screen_bounds(eye, state.focus, &points).0.y;
-        assert!(lowest < highest + 2.0 * AVATAR_CLEARANCE);
+        assert!(
+            sim.avatars()
+                .iter()
+                .all(|a| a.position.y == MIN_AVATAR_HEIGHT)
+        );
     }
 
     #[test]

@@ -98,7 +98,7 @@ impl Title {
         .map(move |(point, opacity)| {
             (
                 ground(crate::layout::world_coordinates(
-                    super::framing::unproject_at(point / HALF, height),
+                    super::framing::screen_to_world_at(point / HALF, height),
                 )) + Vec3::Y * height,
                 opacity,
             )

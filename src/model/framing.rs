@@ -13,35 +13,35 @@ pub(crate) const GLASS_TOP: f32 = 1.1;
 pub(crate) const LABEL_Y: f32 = 1.6;
 pub(crate) const MARGIN: f32 = 24.0;
 pub(crate) const DISTANCE: f32 = 60.0;
+pub(crate) const FIELD_HEIGHT: f32 = super::MIN_AVATAR_HEIGHT;
+pub(crate) const GROUND_FACTOR: f32 = (DISTANCE - FIELD_HEIGHT) / DISTANCE;
 
-pub(crate) fn unproject(point: Vec2) -> Vec2 {
-    unproject_at(point, 0.0)
+// One affine field scale reserves the elevated portraits' frame clearance without warping tiles.
+pub(crate) fn field_to_world(point: Vec2) -> Vec2 {
+    screen_to_world_at(point, FIELD_HEIGHT)
 }
 
-pub(crate) fn unproject_at(point: Vec2, height: f32) -> Vec2 {
-    let direction = view_direction();
-    let horizontal = direction.x.hypot(direction.z);
+pub(crate) fn screen_to_world_at(point: Vec2, height: f32) -> Vec2 {
     let tangent = (FOV * 0.5).tan();
-    let z = (height * (horizontal + point.y * tangent * direction.y)
-        - point.y * tangent * DISTANCE)
-        / (direction.y - point.y * tangent * horizontal);
-    let depth = DISTANCE - horizontal * z - direction.y * height;
-    Vec2::new(point.x * tangent * (VIEWPORT.x / VIEWPORT.y) * depth, z)
+    let depth = DISTANCE - height;
+    Vec2::new(point.x * VIEWPORT.x / VIEWPORT.y, -point.y) * tangent * depth
 }
 
-pub(crate) fn project_ground(point: Vec2) -> Vec2 {
-    project_at(point, 0.0)
+pub(crate) fn world_to_field(point: Vec2) -> Vec2 {
+    project_at(point, FIELD_HEIGHT)
 }
 
 pub(crate) fn project_at(point: Vec2, height: f32) -> Vec2 {
-    let direction = view_direction();
-    let horizontal = direction.x.hypot(direction.z);
-    let depth = DISTANCE - horizontal * point.y - direction.y * height;
+    let depth = DISTANCE - height;
     let tangent = (FOV * 0.5).tan();
     Vec2::new(
         point.x / (tangent * VIEWPORT.x / VIEWPORT.y),
-        (horizontal * height - direction.y * point.y) / tangent,
+        -point.y / tangent,
     ) / depth
+}
+
+pub(crate) fn project_field_at(point: Vec2, height: f32) -> Vec2 {
+    project_at(point, height) / GROUND_FACTOR
 }
 
 pub(super) fn label_position(region: &RepositoryRegion) -> Vec3 {
@@ -51,7 +51,7 @@ pub(super) fn label_position(region: &RepositoryRegion) -> Vec3 {
         let size = label_size(&region.label, 20.0) * 2.0 / VIEWPORT;
         let anchor = Vec2::new(tile.low.x + padding.x, tile.high.y - padding.y)
             .clamp(limit.low + Vec2::Y * size.y, limit.high - Vec2::X * size.x);
-        return ground(crate::layout::world_coordinates(unproject_at(
+        return ground(crate::layout::world_coordinates(screen_to_world_at(
             anchor, LABEL_Y,
         ))) + Vec3::Y * LABEL_Y;
     }
@@ -76,7 +76,7 @@ pub(crate) fn distance(
     viewport: Vec2,
 ) -> f32 {
     let forward = -view_direction();
-    let right = forward.cross(Vec3::Y).normalize();
+    let right = Vec3::X;
     let up = right.cross(forward);
     let tangent = (fov * 0.5).tan();
     let aspect = viewport.x / viewport.y;
@@ -99,10 +99,8 @@ pub(crate) fn distance(
         if let Some(tile) = region.tile {
             for point in tile.corners() {
                 include(
-                    ground(crate::layout::world_coordinates(unproject_at(
-                        point,
-                        GLASS_BOTTOM,
-                    ))) + Vec3::Y * GLASS_BOTTOM,
+                    ground(crate::layout::world_coordinates(field_to_world(point)))
+                        + Vec3::Y * GLASS_BOTTOM,
                     -limit,
                     limit,
                 );
@@ -144,6 +142,22 @@ mod tests {
         prelude::*,
     };
 
+    #[test]
+    fn top_down_tiles_are_world_rectangles() {
+        let corners = crate::layout::packing::Tile::viewport().ground();
+        let [a, b, c, d] = corners;
+        assert!((a + c).abs_diff_eq(b + d, 1e-5));
+        assert!((b - a).dot(d - a).abs() < 1e-5);
+    }
+
+    #[test]
+    fn top_down_default_clearance() {
+        assert_eq!(view_direction(), Vec3::Y);
+        for count in [1, 5, 30] {
+            assert_theme_framing(&Theme::neon(), count);
+        }
+    }
+
     fn assert_region_in_view(
         region: &RepositoryRegion,
         clip: Mat4,
@@ -160,10 +174,9 @@ mod tests {
         };
         let tile = region.tile.unwrap();
         for corner in tile.corners() {
-            let world = ground(crate::layout::world_coordinates(unproject_at(
-                corner,
-                GLASS_BOTTOM,
-            ))) + Vec3::Y * GLASS_BOTTOM;
+            let world =
+                ground(crate::layout::world_coordinates(field_to_world(corner)))
+                    + Vec3::Y * GLASS_BOTTOM;
             let point = screen(world);
             assert!(
                 inside(point),
@@ -181,14 +194,17 @@ mod tests {
     #[test]
     fn every_frame_contains_live_glass_and_raised_labels_in_real_projections() {
         for name in crate::theme::ThemeName::ALL {
-            assert_theme_framing(&name.build());
+            assert_theme_framing(&name.build(), 5);
         }
     }
 
-    fn assert_theme_framing(theme: &Theme) {
-        let histories = (0..5)
+    fn assert_theme_framing(theme: &Theme, count: usize) {
+        let histories = (0..count)
             .map(|index| {
                 let mut events = crate::timeline::synthetic();
+                if count == 30 {
+                    events.truncate(2);
+                }
                 for event in &mut events {
                     event.seconds += i64::try_from(index).unwrap() * 7 * 86_400;
                 }
@@ -205,13 +221,7 @@ mod tests {
             },
             theme,
             &Mappings::default(),
-            &[
-                "uv-secure".into(),
-                "ryl".into(),
-                "aiomoto".into(),
-                "pyglobegl".into(),
-                "codestrand".into(),
-            ],
+            &(0..count).map(|i| format!("repo-{i}")).collect::<Vec<_>>(),
         );
         let mut previous = simulation.view().1;
         let fixed_focus = simulation.view().0;
@@ -238,7 +248,7 @@ mod tests {
                 let (focus, distance) = simulation.view_for_projection(fov, viewport);
                 let transform =
                     Transform::from_translation(focus + view_direction() * distance)
-                        .looking_at(focus, Vec3::Y);
+                        .looking_at(focus, Vec3::NEG_Z);
                 let clip =
                     projection.get_clip_from_view() * transform.to_matrix().inverse();
                 for region in simulation.layout().repositories.iter().filter(|r| r.live)
@@ -260,7 +270,7 @@ mod tests {
                 .iter()
                 .filter(|r| r.live)
                 .count(),
-            5
+            count
         );
     }
 }

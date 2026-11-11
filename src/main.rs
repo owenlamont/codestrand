@@ -109,6 +109,9 @@ enum Command {
         revision: String,
     },
     /// Play history in a loop; [ halves and ] doubles live speed (0.125x–8x). Escape closes it.
+    #[command(
+        after_help = "Camera: overhead by default. Right drag orbits horizontally and vertically without pitch limits, including below the plane. WASD pans, scroll zooms, Tab follows contributors, Space restores overhead. Orbit and zoom retain follow; pan releases it."
+    )]
     Preview {
         #[arg(long, value_enum, default_value = "neon")]
         theme: theme::ThemeName,
@@ -368,6 +371,49 @@ impl Source {
 
 #[cfg(test)]
 mod single_source_tests {
+    #[test]
+    fn cli_single_multi_and_synthetic_share_camera_and_caption_columns() {
+        for names in [
+            vec![],
+            vec!["One".to_owned()],
+            vec!["One".to_owned(), "Two".to_owned()],
+        ] {
+            let events = if names.len() > 1 {
+                crate::repositories::merge(
+                    (0..names.len())
+                        .map(|index| {
+                            let mut events = crate::timeline::synthetic();
+                            crate::repositories::namespace(&mut events, index);
+                            events
+                        })
+                        .collect(),
+                )
+            } else {
+                crate::timeline::synthetic()
+            };
+            let mut sim = super::Source::playback(
+                events,
+                &crate::model::Options::default(),
+                &crate::contributors::Mappings::default(),
+                &names,
+            )
+            .unwrap();
+            sim.advance_to(60, 60);
+            assert_eq!(
+                sim.view(),
+                (bevy::math::Vec3::ZERO, crate::model::framing::DISTANCE)
+            );
+            assert_eq!(crate::model::caption::Columns::new(&sim).layout().len(), 6);
+            let expected = names.first().map_or("Synthetic history", String::as_str);
+            let repository = sim.caption_repository().unwrap().1;
+            assert!(
+                names.is_empty() && repository == expected
+                    || names.iter().any(|name| name == repository)
+            );
+            eprintln!("CLI {expected}: {}", sim.caption());
+        }
+    }
+
     #[test]
     fn small_single_repository_keeps_frame_sized_discs_and_clear_text() {
         let mut events = crate::timeline::synthetic();

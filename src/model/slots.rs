@@ -150,10 +150,9 @@ impl Placement {
 }
 
 pub(super) fn world(point: Vec2) -> Vec3 {
-    ground(crate::layout::world_coordinates(framing::unproject_at(
-        point / HALF,
-        MIN_AVATAR_HEIGHT,
-    ))) + Vec3::Y * MIN_AVATAR_HEIGHT
+    ground(crate::layout::world_coordinates(
+        framing::screen_to_world_at(point / HALF, MIN_AVATAR_HEIGHT),
+    )) + Vec3::Y * MIN_AVATAR_HEIGHT
 }
 
 pub(super) fn projection_scale(point: Vec3) -> f32 {
@@ -1285,7 +1284,7 @@ impl State {
             } else {
                 let eye = self.focus + view_direction() * self.distance;
                 let forward = (self.focus - eye).normalize();
-                let right = forward.cross(Vec3::Y).normalize();
+                let right = Vec3::X;
                 let up = right.cross(forward);
                 let depth = (avatar.position - eye).dot(forward);
                 let half_height = depth * std::f32::consts::FRAC_PI_8.tan();

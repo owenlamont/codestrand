@@ -16,7 +16,7 @@ impl Audit {
     pub(crate) fn observe(&mut self, sim: &Simulation) {
         let (focus, distance) = sim.view();
         let eye = focus + view_direction() * distance;
-        let right = (-view_direction()).cross(Vec3::Y).normalize();
+        let right = Vec3::X;
         let screen = |point| {
             project(eye, focus, &[point])
                 .next()

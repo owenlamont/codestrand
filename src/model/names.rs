@@ -1,21 +1,7 @@
 use bevy::math::{Rect, Vec2};
 
-use crate::contributors::Key;
-
 pub(super) fn scale(active: usize) -> f32 {
     (1.0 / (1.0 + super::count(active.saturating_sub(3)) * 0.035).sqrt()).max(0.72)
-}
-
-pub(super) fn height_band(key: &Key) -> f32 {
-    let hash_byte =
-        |hash: u32, byte: &u8| (hash ^ u32::from(*byte)).wrapping_mul(16_777_619);
-    let hash = match key {
-        Key::Email(bytes) | Key::Name(bytes) => {
-            bytes.iter().fold(2_166_136_261, hash_byte)
-        }
-        Key::Config(index) => index.to_le_bytes().iter().fold(2_166_136_261, hash_byte),
-    };
-    f32::from(u8::try_from(hash % 8).expect("eight height bands")) * 0.04
 }
 
 pub(crate) fn rect(point: Vec2, text: &str, scale: f32, height: f32) -> Rect {
@@ -101,7 +87,6 @@ mod tests {
                     .map(|avatar| {
                         (
                             avatar.position,
-                            avatar.height_band,
                             avatar.activity,
                             avatar.name_visibility.opacity,
                             avatar.name_visibility.placement.clone(),
@@ -129,15 +114,5 @@ mod tests {
         assert!(scale(20) < scale(10));
         assert!(scale(1000) >= 0.72);
         assert!((scale(4) - scale(3)).abs() < 0.02);
-    }
-
-    #[test]
-    fn identity_bands_are_stable_and_spread_across_heights() {
-        let bands: Vec<_> = (0..32)
-            .map(|index| height_band(&Key::Config(index)))
-            .collect();
-        assert!(bands.iter().all(|band| (0.0..=0.28).contains(band)));
-        assert!(bands.contains(&0.0));
-        assert!(bands.iter().any(|band| *band > 0.25));
     }
 }

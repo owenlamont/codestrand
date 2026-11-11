@@ -11,6 +11,7 @@ use planning::trips;
 const HALF: Vec2 = Vec2::new(640.0, 360.0);
 const MAX_POSES: usize = 4_000_000;
 const NETWORK_EPSILON: f32 = 0.01;
+const JUNCTION_EPSILON: f32 = 0.001;
 
 pub(super) fn interior(tile: crate::layout::packing::Tile, radius: f32) -> Rect {
     let rect = Rect::from_corners(tile.low * HALF, tile.high * HALF);
@@ -718,13 +719,13 @@ impl RouteFailure {
 
 pub(super) fn on_network(point: Vec2, cells: &[Rect]) -> bool {
     cells.iter().any(|r| {
-        point.cmpge(r.min - Vec2::splat(0.001)).all()
-            && point.cmple(r.max + Vec2::splat(0.001)).all()
+        point.cmpge(r.min - Vec2::splat(JUNCTION_EPSILON)).all()
+            && point.cmple(r.max + Vec2::splat(JUNCTION_EPSILON)).all()
             && (point - r.min)
                 .abs()
                 .min((point - r.max).abs())
                 .min_element()
-                < 0.001
+                < JUNCTION_EPSILON
     })
 }
 
@@ -764,7 +765,8 @@ impl Router {
         }
         for values in &mut axes {
             values.sort_by(f32::total_cmp);
-            values.dedup();
+            // Moving anchors need a shared junction for boundaries within the network tolerance.
+            values.dedup_by(|a, b| (*a - *b).abs() < JUNCTION_EPSILON);
         }
         let width = axes[0].len();
         let nodes = width * axes[1].len();
@@ -773,11 +775,13 @@ impl Router {
         }
         let index = |p: Vec2| {
             axes[1]
-                .binary_search_by(|v| v.total_cmp(&p.y))
+                .iter()
+                .position(|v| (*v - p.y).abs() < JUNCTION_EPSILON)
                 .expect("inserted y")
                 * width
                 + axes[0]
-                    .binary_search_by(|v| v.total_cmp(&p.x))
+                    .iter()
+                    .position(|v| (*v - p.x).abs() < JUNCTION_EPSILON)
                     .expect("inserted x")
         };
         let point = |i: usize| Vec2::new(axes[0][i % width], axes[1][i / width]);
@@ -903,6 +907,25 @@ fn simplify_path(path: &[Vec2]) -> Vec<Vec2> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nearby_gutter_boundaries_do_not_create_unanchorable_micro_legs() {
+        let cells = [
+            Rect::from_corners(Vec2::new(0.0, -300.0), Vec2::new(400.0, -0.000_005_2)),
+            Rect::from_corners(Vec2::new(-400.0, -300.0), Vec2::new(0.0, 0.000_037_7)),
+            Rect::from_corners(Vec2::new(-400.0, 0.000_037_7), Vec2::new(400.0, 300.0)),
+        ];
+        let source = Vec2::new(145.787_22, -0.000_005_2);
+        let target = Vec2::new(-270.0, 300.0);
+        let points = Router::default().route(source, target, &cells).unwrap();
+        assert!(
+            points
+                .windows(2)
+                .all(|p| p[0].distance(p[1]) >= JUNCTION_EPSILON),
+            "{points:?}"
+        );
+        assert!(points.iter().all(|p| on_network(*p, &cells)));
+    }
 
     #[test]
     fn projection_roundoff_does_not_create_a_false_endpoint_failure() {

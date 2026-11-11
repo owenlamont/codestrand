@@ -23,16 +23,11 @@ pub(super) struct RepositoryRegion {
 }
 
 pub(super) fn region_coordinates(point: Vec2) -> Vec2 {
-    let direction = crate::model::view_direction();
-    let right = Vec2::new(direction.z, -direction.x).normalize();
-    let back = Vec2::new(direction.x, direction.z).normalize();
-    Vec2::new(point.dot(right), point.dot(back))
+    point
 }
 
 pub(super) fn world_coordinates(point: Vec2) -> Vec2 {
-    let direction = crate::model::view_direction();
-    Vec2::new(direction.z, -direction.x).normalize() * point.x
-        + Vec2::new(direction.x, direction.z).normalize() * point.y
+    point
 }
 
 impl RepositoryRegion {
