@@ -143,7 +143,7 @@ struct Source {
     /// Assume departure after this many calendar days; default 60 marks two quiet months.
     #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u32).range(1..=36500))]
     contributor_inactivity_days: u32,
-    /// Multi-repository caption colour treatment.
+    /// Repository caption colour treatment.
     #[arg(long, value_enum, default_value = "bar")]
     caption_style: model::caption::Style,
     /// Local repository to play; repeat for a shared timeline; synthetic when omitted.
@@ -152,7 +152,7 @@ struct Source {
     /// TOML repository list; relative paths resolve beside the TOML file.
     #[arg(long)]
     repositories_file: Option<PathBuf>,
-    /// Repository boundary treatment for multiple repositories.
+    /// Repository tile boundary treatment.
     #[arg(long, value_enum, default_value = "glass")]
     repository_boundary: repositories::Boundary,
     /// Permanent repository labels at file level or between files and avatars.

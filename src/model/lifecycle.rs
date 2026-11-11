@@ -102,6 +102,9 @@ fn ending_time(
     options: &super::Options,
     complete: bool,
 ) -> f32 {
+    if events.first().is_some_and(|event| date < event.seconds) {
+        return -REPOSITORY_EXIT - REFLOW;
+    }
     let time = calendar_time(events, schedule, date);
     if time.is_finite() || !complete {
         return time;
@@ -163,14 +166,14 @@ fn fraction32(value: f64) -> f32 {
 
 pub(super) fn departures(events: &[Event], schedule: &Schedule, days: u32) -> Vec<f32> {
     let dates = calendar_dates(events);
-    events
+    dates
         .iter()
         .zip(&schedule.starts)
-        .map(|(event, &start)| {
+        .map(|(&date, &start)| {
             mapped_time(
                 &dates,
                 schedule,
-                event.seconds.saturating_add(i64::from(days) * 86_400),
+                date.saturating_add(i64::from(days) * 86_400),
             )
             .max(start + tick_seconds())
         })
@@ -184,6 +187,51 @@ pub(super) fn progress(now: f32, start: f32, duration: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reversed_author_dates_do_not_trigger_immediate_departures() {
+        let mut events = crate::timeline::synthetic();
+        events.truncate(2);
+        events[0].seconds = 100 * 86_400;
+        events[1].seconds = 0;
+        let schedule = Schedule::new(&events, 0.5, 1.0);
+        assert_eq!(departures(&events, &schedule, 60), [f32::INFINITY; 2]);
+        let mut later = events[1].clone();
+        later.seconds = 200 * 86_400;
+        events.push(later);
+        let schedule = Schedule::new(&events, 0.5, 1.0);
+        let expected =
+            schedule.starts[1] + (schedule.starts[2] - schedule.starts[1]) * 0.6;
+        assert_eq!(
+            departures(&events, &schedule, 60),
+            [expected, expected, f32::INFINITY]
+        );
+    }
+
+    #[test]
+    fn explicit_endings_before_selected_history_are_already_complete() {
+        let mut events = crate::timeline::synthetic();
+        events.truncate(2);
+        events[0].seconds = 0;
+        events[1].seconds = 100 * 86_400;
+        let options = super::super::Options {
+            start: 1,
+            repository_ends: vec![Some(50 * 86_400)],
+            ..Default::default()
+        };
+        let mut sim = playback(events, &options);
+        assert_eq!(sim.repository_effect(0).1, 0.0);
+        at(&mut sim, super::super::LEAD_IN);
+        assert_eq!(sim.repository_effect(0).1, 0.0);
+        let boundary = super::super::Options {
+            repository_ends: vec![Some(100 * 86_400)],
+            ..options
+        };
+        assert_eq!(
+            ending_time(&sim.events, &sim.schedule, 100 * 86_400, &boundary, true),
+            sim.schedule.starts[0]
+        );
+    }
 
     #[test]
     fn explicit_endings_cannot_bypass_the_repository_planning_budget() {
