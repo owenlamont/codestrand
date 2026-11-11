@@ -134,8 +134,12 @@ impl PreviewCamera {
                     let eye = eye + back * (self.distance - old_distance);
                     self.focus =
                         eye.with_y(eye.y.max(EYE_FLOOR)) - back * self.distance;
-                    let right = (self.rotation * Vec3::X).with_y(0.0);
-                    let forward = (self.rotation * Vec3::Y).with_y(0.0);
+                    let mut forward = (self.rotation * Vec3::NEG_Z).with_y(0.0);
+                    if forward.length_squared() < 1e-6 {
+                        forward = (self.rotation * Vec3::Y).with_y(0.0);
+                    }
+                    let forward = forward.normalize();
+                    let right = forward.cross(Vec3::Y);
                     self.focus += (right * input.pan.x + forward * input.pan.y)
                         * self.distance
                         * 0.7
@@ -211,6 +215,42 @@ mod tests {
         theme::Theme,
         timeline::{self, Event},
     };
+
+    #[test]
+    fn pan_speed_is_independent_of_pitch_and_roll() {
+        let view = (Vec3::Y * 20.0, 10.0);
+        for (pitch, roll) in [
+            (-90.0_f32, 0.0_f32),
+            (-45.0, 0.0),
+            (0.0, 0.0),
+            (-90.0, 180.0),
+            (-45.0, 180.0),
+            (0.0, 180.0),
+        ] {
+            for pan in [Vec2::X, Vec2::Y, Vec2::ONE.normalize()] {
+                let mut camera = PreviewCamera::new(view);
+                camera.mode = Mode::Free;
+                camera.rotation = Quat::from_rotation_y(0.7)
+                    * Quat::from_rotation_x(pitch.to_radians())
+                    * Quat::from_rotation_z(roll.to_radians());
+                camera.update(
+                    &Input {
+                        pan,
+                        ..Default::default()
+                    },
+                    view,
+                    &[],
+                    0.1,
+                );
+                let displacement = camera.focus - view.0;
+                assert!(displacement.y.abs() < 1e-5);
+                assert!(
+                    (displacement.length() - 0.7).abs() < 1e-5,
+                    "pitch {pitch}, roll {roll}, pan {pan:?}: {displacement:?}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn floor_turns_about_the_eye_and_follow_releases_without_a_jump() {

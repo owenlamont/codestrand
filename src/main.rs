@@ -373,10 +373,10 @@ impl Source {
 mod single_source_tests {
     #[test]
     fn cli_single_multi_and_synthetic_share_camera_and_caption_columns() {
-        for names in [
-            vec![],
-            vec!["One".to_owned()],
-            vec!["One".to_owned(), "Two".to_owned()],
+        for (names, expected) in [
+            (vec![], "Synthetic history"),
+            (vec!["One".to_owned()], "One"),
+            (vec!["One".to_owned(), "Two".to_owned()], "Two"),
         ] {
             let events = if names.len() > 1 {
                 crate::repositories::merge(
@@ -404,13 +404,8 @@ mod single_source_tests {
                 (bevy::math::Vec3::ZERO, crate::model::framing::DISTANCE)
             );
             assert_eq!(crate::model::caption::Columns::new(&sim).layout().len(), 6);
-            let expected = names.first().map_or("Synthetic history", String::as_str);
             let repository = sim.caption_repository().unwrap().1;
-            assert!(
-                names.is_empty() && repository == expected
-                    || names.iter().any(|name| name == repository)
-            );
-            eprintln!("CLI {expected}: {}", sim.caption());
+            assert_eq!(repository, expected);
         }
     }
 
