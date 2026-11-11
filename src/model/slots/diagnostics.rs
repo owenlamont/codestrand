@@ -5,6 +5,9 @@ use bevy::math::{Rect, Vec3};
 
 #[derive(Default, Serialize)]
 pub(crate) struct MovingBeams {
+    pub wordmark_avatar_observations: u64,
+    pub wordmark_label_observations: u64,
+    pub first_wordmark_overlap: Option<serde_json::Value>,
     pub label_label_pairs: u64,
     pub label_joint_avoidable_frames: u64,
     pub label_joint_exhausted_frames: u64,
@@ -52,6 +55,8 @@ impl MovingBeams {
     }
     #[cfg(test)]
     pub(in crate::model) fn assert_clear(&self, speed: f32) {
+        assert_eq!(self.wordmark_avatar_observations, 0, "avatar over wordmark");
+        assert_eq!(self.wordmark_label_observations, 0, "label over wordmark");
         assert_eq!(self.pair_frames, 0, "beam/foreign tile intersections");
         assert!(
             self.observed_beams > 0,
@@ -82,6 +87,33 @@ impl MovingBeams {
         content: &[(usize, Rect)],
     ) {
         if avatar.presence > 0.0 {
+            let wordmark = crate::model::caption::frame_text_rects()[0]
+                .inflate(crate::model::caption::BUFFER);
+            let direction = view_direction();
+            let right = Vec3::new(direction.z, 0.0, -direction.x).normalize();
+            let draw_radius = state.geometry.avatar_radius
+                * state.scale()
+                * state.avatar_scale
+                * state.avatar_size
+                * avatar.projection_scale
+                * avatar.lifecycle_scale
+                * avatar.presence;
+            let edge = project(
+                direction * framing::DISTANCE,
+                Vec3::ZERO,
+                &[avatar.position + right * draw_radius],
+            )
+            .next()
+            .flatten()
+            .expect("visible avatar");
+            let avatar_overlap = (edge * HALF - point).length()
+                > point.distance(point.clamp(wordmark.min, wordmark.max)) + 0.001;
+            self.wordmark_avatar_observations += u64::from(avatar_overlap);
+            if avatar_overlap && self.first_wordmark_overlap.is_none() {
+                self.first_wordmark_overlap = Some(
+                    serde_json::json!({"seconds":crate::model::tick_time(state.tick),"avatar":avatar.name,"kind":"avatar"}),
+                );
+            }
             self.visible_avatar_frames += 1;
             let depth = content
                 .iter()
@@ -112,6 +144,12 @@ impl MovingBeams {
                     .map(|(_, r)| bounds.intersect(*r).size().min_element().max(0.0))
                     .fold(0.0_f32, f32::max);
                 self.name_content_frames += u64::from(depth > 0.001);
+                if avatar.name_visibility.opacity > 0.0
+                    && !bounds.intersect(wordmark).is_empty()
+                {
+                    self.wordmark_label_observations += 1;
+                    self.first_wordmark_overlap.get_or_insert_with(|| serde_json::json!({"seconds":crate::model::tick_time(state.tick),"avatar":avatar.name,"kind":"label"}));
+                }
                 if depth > self.name_content_max_px {
                     self.name_content_max_px = depth;
                     self.worst_name_tick = state.tick;

@@ -17,12 +17,13 @@ pub(crate) const MULTI_TOP: f32 = 698.0;
 pub(crate) const BAR_HEIGHT: f32 = 22.0;
 pub(crate) const BUFFER: f32 = 4.0;
 pub(crate) const BOTTOM: f32 = 360.0 - MULTI_TOP + BUFFER;
+pub(crate) const TOP: f32 = 360.0 - BAR_HEIGHT - BUFFER;
 pub(crate) const HEADING_LEFT: f32 = 24.0;
 pub(crate) const HEADING_SIZE: f32 = 18.0;
 
 pub(super) fn outside(rect: Rect, margin: f32) -> f32 {
     let low = Vec2::new(-640.0 + margin, BOTTOM + margin);
-    let high = Vec2::new(640.0 - margin, 360.0 - margin);
+    let high = Vec2::new(640.0 - margin, TOP - margin);
     (rect.min - low).min(Vec2::ZERO).length_squared()
         + (rect.max - high).max(Vec2::ZERO).length_squared()
 }
@@ -225,6 +226,14 @@ impl Simulation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wordmark_strip_has_the_same_clearance_as_the_caption() {
+        let wordmark = frame_text_rects()[0].inflate(-6.0);
+        assert!(outside(wordmark, 0.5) > 0.0);
+        let tile = crate::layout::packing::Tile::viewport();
+        assert!(tile.high.y * 360.0 + super::super::framing::MARGIN <= 334.001);
+    }
 
     #[test]
     #[ignore = "requires local repositories and caption diagnostic output path"]

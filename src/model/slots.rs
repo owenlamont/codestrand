@@ -690,7 +690,10 @@ impl State {
                                 -HALF.x + space.radius,
                                 super::caption::BOTTOM + space.radius,
                             ),
-                            HALF - Vec2::splat(space.radius),
+                            Vec2::new(
+                                HALF.x - space.radius,
+                                super::caption::TOP - space.radius,
+                            ),
                         )
                     })
                     .collect()
@@ -1108,7 +1111,8 @@ impl Choice<'_> {
             .count();
         let overlaps = usize::from(
             !point.abs().cmple(HALF - Vec2::splat(self.radius)).all()
-                || point.y - self.radius < super::caption::BOTTOM,
+                || point.y - self.radius < super::caption::BOTTOM
+                || point.y + self.radius > super::caption::TOP,
         );
         (
             Placement {

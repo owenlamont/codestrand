@@ -29,6 +29,7 @@ fn hard_clearance(capture: &Capture, tick: u64, point: Vec2) -> bool {
         .cmple(HALF - Vec2::splat(capture.radius(tick)))
         .all()
         && point.y - capture.radius(tick) >= super::super::caption::BOTTOM
+        && point.y + capture.radius(tick) <= super::super::caption::TOP
         && !capture.tiles[usize::try_from(tick)
             .expect("bounded tick")
             .min(capture.tiles.len() - 1)]
@@ -188,7 +189,10 @@ fn moving_route(
         .windows(2)
         .map(|p| p[0].distance(p[1]) * 60.0)
         .fold(0.0, f32::max);
-    if peak > speed + 0.05 || track.first()?.distance(trip.source) * 60.0 > speed + 0.05
+    let previous = capture.pose(trip.author, epoch.saturating_sub(1))?.point;
+    if peak > speed + 0.05
+        || track.first()?.distance(previous) * 60.0 > speed + 0.05
+        || track.last()?.distance(trip.destination) * 60.0 > speed + 0.05
     {
         return None;
     }

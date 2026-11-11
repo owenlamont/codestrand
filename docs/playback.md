@@ -158,7 +158,9 @@ order. Contributor mappings apply across all repositories, so a matched contribu
 uses one avatar that moves between regions.
 
 Live repositories share the inset viewport inside a 24-pixel frame margin. The
-16:9 export camera stays fixed. Shared gutters separate neighbouring tiles, with no
+top wordmark has a separate 26-pixel reserved strip, including a four-pixel buffer;
+avatars, gutter routes and name labels stay below the strip, matching caption clearance.
+The 16:9 export camera stays fixed. Shared gutters separate neighbouring tiles, with no
 contributor band. Tile weights follow eased square roots of live file counts;
 empty active repositories retain weight one. Each repository keeps file identity,
 local layout and one uniform scale, with a fixed quarter-turn chosen for its history.

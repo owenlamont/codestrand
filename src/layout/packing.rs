@@ -11,7 +11,7 @@ mod zoom;
 const BOUND: f32 = 2.5;
 pub(crate) const MINIMUM: Vec2 = Vec2::new(144.0, 64.0);
 pub(crate) const BIRTH_TICKS: u32 = 45;
-const ALLOCATION_TOLERANCE_PX: f32 = 0.1;
+const ALLOCATION_TOLERANCE_PX: f32 = 0.25;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Tile {
@@ -27,7 +27,10 @@ impl Tile {
                 -limit.x,
                 (caption::BOTTOM + framing::MARGIN) * 2.0 / framing::VIEWPORT.y,
             ),
-            high: limit,
+            high: Vec2::new(
+                limit.x,
+                (caption::TOP - framing::MARGIN) * 2.0 / framing::VIEWPORT.y,
+            ),
         }
     }
 
@@ -146,7 +149,10 @@ fn combine(a: &[Vec2], b: &[Vec2], axis: usize, gap: f32) -> Vec<Vec2> {
             let before = low[(i + length - 1) % length];
             let point = low[i];
             let after = low[(i + 1) % length];
-            ((point - before).perp_dot(after - point).abs() > 0.01).then_some(point)
+            let first = point - before;
+            let second = after - point;
+            (first.perp_dot(second).abs() > 1e-6 * first.length() * second.length())
+                .then_some(point)
         })
         .collect()
 }
@@ -337,7 +343,8 @@ fn allocated(
 ) -> Option<Vec<Option<Tile>>> {
     let size = Tile::viewport().pixels();
     let (low, high) = interval(&states[0].sizes, 0, size.y)?;
-    if size.x < low - 0.01 || size.x > high + 0.01 {
+    if size.x < low - ALLOCATION_TOLERANCE_PX || size.x > high + ALLOCATION_TOLERANCE_PX
+    {
         return None;
     }
     let mut output = vec![None; repositories];
@@ -498,7 +505,7 @@ fn gutter_cells(nodes: &[Node], placement: &[Placement]) -> Vec<Option<Tile>> {
                 -limit.x,
                 (caption::BOTTOM + 16.0) * 2.0 / framing::VIEWPORT.y,
             ),
-            high: limit,
+            high: Vec2::new(limit.x, (caption::TOP - 16.0) * 2.0 / framing::VIEWPORT.y),
         },
         placement,
         &mut result,
