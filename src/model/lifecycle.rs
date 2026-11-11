@@ -244,7 +244,11 @@ mod tests {
     #[ignore = "requires CODESTRAND_LIFECYCLE_OUTPUT and local five-repository manifest"]
     fn movie_event_audit() {
         use clap::Parser as _;
-        let root = "C:/Users/Owen/agent-scratch/codestrand/lifecycles";
+        let output = std::env::var("CODESTRAND_LIFECYCLE_OUTPUT").unwrap();
+        let root = std::path::Path::new(&output)
+            .parent()
+            .expect("audit output directory")
+            .to_string_lossy();
         let mut arguments = vec![
             "codestrand".to_owned(),
             "preview".to_owned(),
@@ -315,9 +319,8 @@ mod tests {
                 .total_cmp(&b["time"].as_f64().unwrap())
                 .then(a.to_string().cmp(&b.to_string()))
         });
-        let output = std::env::var("CODESTRAND_LIFECYCLE_OUTPUT").unwrap();
         std::fs::write(
-            output,
+            &output,
             serde_json::to_vec_pretty(
                 &serde_json::json!({"duration":simulation.duration(),"events":records,"travel":simulation.travel.report()}),
             )
