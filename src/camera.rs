@@ -742,7 +742,7 @@ mod tests {
     }
 
     #[test]
-    fn reset_finishes_within_half_a_second_while_playback_moves() {
+    fn reset_finishes_within_half_a_second_during_field_playback() {
         for start in [10, 60, 120] {
             let mut simulation = Simulation::new(
                 crate::timeline::synthetic(),
@@ -783,7 +783,7 @@ mod tests {
                     1.0 / 30.0,
                 );
             }
-            assert_ne!(simulation.view(), initial_view);
+            assert_eq!(simulation.view(), initial_view);
             assert_eq!(camera.mode, Mode::Fit);
             assert_eq!(camera.pose(), PreviewCamera::new(simulation.view()).pose());
             simulation.advance_to(start + 16, 30);

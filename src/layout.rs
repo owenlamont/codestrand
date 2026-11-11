@@ -232,9 +232,6 @@ impl Layout {
 
     pub(super) fn directory_label(&self, index: usize) -> &str {
         let dir = &self.dirs[index];
-        if self.repositories.is_empty() {
-            return &dir.path;
-        }
         dir.path.split_once('/').map_or_else(
             || self.repositories[dir.repository].label.as_str(),
             |(_, path)| path,
@@ -417,33 +414,6 @@ impl Layout {
             file.position = self.dirs[file.dir].position + file.slot_offset;
             file.velocity = Vec2::ZERO;
         }
-    }
-
-    /// Ground-plane bounds of the live scene.
-    pub(super) fn bounds(&self) -> (Vec2, Vec2) {
-        if !self.repositories.is_empty() {
-            return self.repositories.iter().filter(|region| region.live).fold(
-                (Vec2::splat(-2.0), Vec2::splat(2.0)),
-                |(low, high), region| {
-                    region
-                        .corners()
-                        .into_iter()
-                        .fold((low, high), |(low, high), point| {
-                            (low.min(point), high.max(point))
-                        })
-                },
-            );
-        }
-        self.dirs().fold(
-            (Vec2::splat(-2.0), Vec2::splat(2.0)),
-            |(low, high), (_, dir)| {
-                let radius = Vec2::splat(dir.radius());
-                (
-                    low.min(dir.position - radius),
-                    high.max(dir.position + radius),
-                )
-            },
-        )
     }
 
     fn fade_files(&mut self, dt: f32) {

@@ -12,6 +12,8 @@ fn beam_finishes_the_last_emitted_flight_before_fading() {
         &Theme::neon(),
         &Mappings::default(),
     );
+    assert_eq!(sim.layout().repositories.len(), 1);
+    assert_eq!(sim.layout().repositories[0].label, "Synthetic history");
     let mut late_flight = false;
     for frame in 31..180 {
         sim.advance_to(frame, 60);
@@ -32,7 +34,7 @@ fn beam_finishes_the_last_emitted_flight_before_fading() {
 
 pub(super) fn assert_labels_and_beams(sim: &Simulation) {
     for avatar in sim.avatars().iter().filter(|a| a.presence > 0.0) {
-        if !sim.layout().repositories.is_empty() {
+        {
             let point = project(
                 sim.state.focus + view_direction() * sim.state.distance,
                 sim.state.focus,
@@ -85,12 +87,10 @@ pub(super) fn assert_labels_and_beams(sim: &Simulation) {
             sim.seconds(),
             avatar.name
         );
-        if !sim.layout().repositories.is_empty() {
-            assert!(
-                bounds.max.y <= caption::MULTI_TOP - caption::BUFFER,
-                "label covers buffered caption: {bounds:?}"
-            );
-        }
+        assert!(
+            bounds.max.y <= caption::MULTI_TOP - caption::BUFFER,
+            "label covers buffered caption: {bounds:?}"
+        );
     }
     let beams = sim.beams();
     for fragment in sim.fragments() {

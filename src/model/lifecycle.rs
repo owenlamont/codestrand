@@ -219,17 +219,18 @@ mod tests {
             repository_ends: vec![Some(50 * 86_400)],
             ..Default::default()
         };
-        let mut sim = playback(events, &options);
-        assert_eq!(sim.repository_effect(0).1, 0.0);
-        at(&mut sim, super::super::LEAD_IN);
-        assert_eq!(sim.repository_effect(0).1, 0.0);
+        let selected = &events[1..];
+        let schedule =
+            Schedule::new(selected, options.seconds_per_day, options.max_idle_seconds);
+        let (_, endings) = plan(&events, &schedule, &options, 1..2);
+        assert!(endings[0] + REPOSITORY_EXIT < 0.0);
         let boundary = super::super::Options {
             repository_ends: vec![Some(100 * 86_400)],
             ..options
         };
         assert_eq!(
-            ending_time(&sim.events, &sim.schedule, 100 * 86_400, &boundary, true),
-            sim.schedule.starts[0]
+            ending_time(selected, &schedule, 100 * 86_400, &boundary, true),
+            schedule.starts[0]
         );
     }
 

@@ -224,7 +224,6 @@ pub(super) struct Avatar {
     pub name: String,
     pub portrait: Option<std::sync::Arc<crate::avatars::Portrait>>,
     pub position: Vec3,
-    velocity: Vec3,
     target: Vec3,
     repository: usize,
     touched: Vec<u64>,
@@ -346,15 +345,9 @@ impl Simulation {
             &events[options.selected_range(events.len())],
             options.seconds_per_day,
             options.max_idle_seconds,
-            |_| {
-                if repositories > 0 {
-                    match options.travel_cap {
-                        TravelCap::Seconds(_) => options.travel_cap.ticks(),
-                        TravelCap::None => 0,
-                    }
-                } else {
-                    0
-                }
+            |_| match options.travel_cap {
+                TravelCap::Seconds(_) => options.travel_cap.ticks(),
+                TravelCap::None => 0,
             },
         );
         Self::check_schedule(events, options, repositories, &schedule)
@@ -401,12 +394,19 @@ impl Simulation {
 
     #[cfg(test)]
     pub(super) fn new(
-        events: Vec<Event>,
+        mut events: Vec<Event>,
         options: &Options,
         theme: &Theme,
         mappings: &Mappings,
     ) -> Self {
-        Self::with_repositories(events, options, theme, mappings, &[])
+        crate::repositories::namespace(&mut events, 0);
+        Self::with_repositories(
+            events,
+            options,
+            theme,
+            mappings,
+            &["Synthetic history".into()],
+        )
     }
 
     #[cfg(test)]
@@ -422,21 +422,18 @@ impl Simulation {
     }
 
     pub(super) fn try_with_repositories(
-        events: Vec<Event>,
+        mut events: Vec<Event>,
         options: &Options,
         theme: &Theme,
         mappings: &Mappings,
         repositories: &[String],
     ) -> anyhow::Result<Self> {
-        if repositories.is_empty() {
-            return Ok(Self::build(
-                events,
-                options,
-                theme,
-                mappings,
-                &[],
-                repositories,
-            ));
+        anyhow::ensure!(
+            !repositories.is_empty(),
+            "simulation requires a repository name"
+        );
+        if events.iter().any(|event| event.contributor.is_none()) {
+            mappings.apply(&mut events);
         }
         Self::check_repository_plan(&events, options, repositories.len())?;
         let mut simulation =
@@ -504,6 +501,10 @@ impl Simulation {
             compactions = 1;
             padding = simulation.compact_travel_padding(options, &padding);
         }
+        let Range { start, end } = options.selected_range(events.len());
+        events.truncate(end);
+        events.drain(..start);
+        simulation.events = events;
         simulation.caption_plan =
             caption::plan(&simulation.schedule, &simulation.events);
         simulation.plan_titles();
@@ -547,7 +548,7 @@ impl Simulation {
             next_event: 0,
             pulses: VecDeque::new(),
             focus: Vec3::ZERO,
-            distance: 12.0,
+            distance: framing::DISTANCE,
             geometry: theme.geometry(),
             avatar_scale: 1.0,
             avatar_size: options.avatar_size
@@ -578,7 +579,6 @@ impl Simulation {
             state.avatars.clear();
             state.authors.clear();
         }
-        (state.focus, state.distance) = state.fit();
         let total = events.len();
         let prior_active = prior_activity(&events[..start], repositories.len());
         let (departures, repository_ends) =
@@ -609,11 +609,9 @@ impl Simulation {
             visual_updates: true,
             title_plan: Vec::new(),
         };
-        if !repositories.is_empty() {
-            let snapshots = simulation
-                .plan_repositories(prior_active, options.travel_cap == TravelCap::None);
-            simulation.plan_avatar_envelopes(snapshots);
-        }
+        let snapshots = simulation
+            .plan_repositories(prior_active, options.travel_cap == TravelCap::None);
+        simulation.plan_avatar_envelopes(snapshots);
         simulation
     }
 
@@ -811,62 +809,32 @@ impl Simulation {
         let now = tick_time(state.tick);
         let dt = tick_seconds();
         state.pulses.retain(|pulse| now < pulse.end);
-        let singleton_targets = state
-            .layout
-            .repositories
-            .is_empty()
-            .then(|| state.avatar_targets(now));
         let active = state
             .avatars
             .iter()
             .filter(|avatar| now < avatar.expires)
             .count();
-        let scale = if state.layout.repositories.is_empty() {
-            names::scale(active)
-        } else {
-            names::scale(active).min(
-                crate::layout::packing::gutters(count(state.layout.repositories.len()))
-                    .y
-                    / 32.0,
-            )
-        };
+        let scale = names::scale(active).min(
+            crate::layout::packing::gutters(count(state.layout.repositories.len())).y
+                / 32.0,
+        );
         state.avatar_scale += (scale - state.avatar_scale) * (1.0 - (-dt / 0.6).exp());
-        if !state.layout.repositories.is_empty() {
-            state.place_slots_planned(&self.envelopes, now, &self.travel);
-        }
-        let targets = singleton_targets.unwrap_or_else(|| {
-            state
-                .avatars
-                .iter()
-                .map(|a| a.slot.as_ref().map_or(a.position, slots::Placement::world))
-                .collect()
-        });
+        state.place_slots_planned(&self.envelopes, now, &self.travel);
+        let targets: Vec<_> = state
+            .avatars
+            .iter()
+            .map(|a| a.slot.as_ref().map_or(a.position, slots::Placement::world))
+            .collect();
         for (index, (avatar, target)) in
             state.avatars.iter_mut().zip(targets).enumerate()
         {
             let travel = self.travel.sample(index, state.tick);
             avatar.activity *= (-dt / 3.0).exp();
-            if state.layout.repositories.is_empty() {
-                let omega = 3.0;
-                let acceleration = (target - avatar.position) * omega * omega
-                    - avatar.velocity * 2.0 * omega;
-                avatar.velocity += acceleration * dt;
-                avatar.velocity.y = 0.0;
-                if now < avatar.expires {
-                    avatar.position += avatar.velocity * dt;
-                }
-            } else {
-                avatar.position = target;
-                avatar.velocity = Vec3::ZERO;
-                if let Some((point, _)) = travel {
-                    avatar.position = slots::world(point);
-                }
+            avatar.position = target;
+            if let Some((point, _)) = travel {
+                avatar.position = slots::world(point);
             }
-            avatar.projection_scale = if state.layout.repositories.is_empty() {
-                1.0
-            } else {
-                slots::projection_scale(avatar.position)
-            };
+            avatar.projection_scale = slots::projection_scale(avatar.position);
             let service_visible = now < avatar.expires;
             let service_fade = if service_visible { dt / 0.4 } else { -dt / 1.2 };
             avatar.slot_presence =
@@ -886,7 +854,7 @@ impl Simulation {
                 avatar.presence = avatar.presence.min(opacity);
             }
         }
-        state.place_view(dt);
+        state.place_view();
         if self.visual_updates {
             self.place_titles(dt);
             let texts: Vec<_> = self
@@ -926,16 +894,13 @@ impl Simulation {
         &self.state.avatars
     }
 
-    /// Smoothed camera focus and distance along [`view_direction`].
+    /// Default field camera focus and distance along [`view_direction`].
     pub(super) fn view(&self) -> (Vec3, f32) {
         (self.state.focus, self.state.distance)
     }
 
     pub(super) fn view_for_projection(&self, fov: f32, viewport: Vec2) -> (Vec3, f32) {
         let (focus, distance) = self.view();
-        if self.layout().repositories.is_empty() {
-            return (focus, distance);
-        }
         if fov == framing::FOV && viewport == framing::VIEWPORT {
             return (focus, distance);
         }
@@ -1038,9 +1003,8 @@ impl Simulation {
     }
 
     fn pulse_beams_visible(&self, pulse: &Pulse) -> bool {
-        self.state.layout.repositories.is_empty()
-            || (self.state.avatars[pulse.author].repository == pulse.repository
-                && !self.travel.travelling(pulse.author, self.state.tick))
+        self.state.avatars[pulse.author].repository == pulse.repository
+            && !self.travel.travelling(pulse.author, self.state.tick)
     }
 
     #[cfg(test)]
@@ -1265,57 +1229,6 @@ impl State {
         6.5 * self.avatar_scale * self.avatar_size * ARRIVAL_SCALE + 1.0
     }
 
-    fn avatar_targets(&self, now: f32) -> Vec<Vec3> {
-        let right = Vec3::X;
-        let unit = 2.0 * self.distance * std::f32::consts::FRAC_PI_8.tan() / 720.0;
-        let mut targets: Vec<_> =
-            self.avatars.iter().map(|avatar| avatar.target).collect();
-        let widths: Vec<_> = self
-            .avatars
-            .iter()
-            .map(|avatar| {
-                count(avatar.name.chars().count())
-                    * self.geometry.label_height
-                    * 0.6
-                    * self.avatar_scale
-            })
-            .collect();
-        let active_width: f32 = self
-            .avatars
-            .iter()
-            .zip(&widths)
-            .filter(|(avatar, _)| now < avatar.expires)
-            .map(|(_, &width)| width + 12.0)
-            .sum();
-        let (low, high) = self.layout.bounds();
-        let unit = unit.min((high - low).length().max(4.0) / active_width.max(1.0));
-        let mut pairs = Vec::new();
-        for a in 0..targets.len() {
-            for b in a + 1..targets.len() {
-                if now < self.avatars[a].expires && now < self.avatars[b].expires {
-                    pairs.push((
-                        a,
-                        b,
-                        [(widths[a] + 12.0) * unit, (widths[b] + 12.0) * unit],
-                    ));
-                }
-            }
-        }
-        for _ in 0..16 {
-            for &(a, b, separations) in &pairs {
-                let delta = (targets[b] - targets[a]).dot(right);
-                let separation = separations[usize::from(delta < 0.0)];
-                if delta.abs() < separation {
-                    let sign = delta.signum();
-                    let correction = right * ((separation - delta.abs()) * 0.5 * sign);
-                    targets[a] -= correction;
-                    targets[b] += correction;
-                }
-            }
-        }
-        targets
-    }
-
     fn author(&mut self, contributor: &Contributor, now: f32) -> usize {
         if let Some(&index) = self.authors.get(&contributor.key) {
             return index;
@@ -1330,7 +1243,6 @@ impl State {
             name: contributor.name.clone(),
             portrait: contributor.portrait.clone(),
             position: self.focus() + Vec3::Y * MIN_AVATAR_HEIGHT,
-            velocity: Vec3::ZERO,
             target: self.focus(),
             repository: 0,
             touched: Vec::new(),
@@ -1391,15 +1303,12 @@ impl State {
         }
         avatar.repository = event.repository;
         avatar.commit = self.next_event;
-        if !self.layout.repositories.is_empty() {
-            avatar.touched = touched.into_keys().collect();
-        }
+        avatar.touched = touched.into_keys().collect();
         if centroid.1 > 0.0 {
             avatar.target = ground(centroid.0 / centroid.1);
         }
         if avatar.presence <= 0.0 {
             avatar.position = avatar.target + Vec3::Y * MIN_AVATAR_HEIGHT;
-            avatar.velocity = Vec3::ZERO;
         }
         avatar.last_active = start;
         avatar.activity = (avatar.activity + 1.0).min(1000.0);
@@ -1489,133 +1398,9 @@ impl State {
         1.0 + self.distance / 60.0
     }
 
-    fn file_tops(&self) -> Vec<Vec3> {
-        let mut tops: Vec<_> = self
-            .layout
-            .files()
-            .flat_map(|(_, file)| {
-                let low = self.geometry.file_min
-                    * file.visible_presence(self.layout.dir(file.dir)).max(0.001);
-                let high = self.geometry.file_max
-                    * file.visible_presence(self.layout.dir(file.dir)).max(0.001);
-                [
-                    Vec3::new(low.x, high.y, low.z),
-                    Vec3::new(low.x, high.y, high.z),
-                    Vec3::new(high.x, high.y, low.z),
-                    high,
-                ]
-                .map(|corner| ground(file.position) + corner)
-            })
-            .collect();
-        for (centre, radius) in self.layout.forecast() {
-            let radius = radius / std::f32::consts::FRAC_PI_8.cos();
-            tops.extend((0_u8..8).map(|side| {
-                let point = centre
-                    + Vec2::from_angle(f32::from(side) * std::f32::consts::FRAC_PI_4)
-                        * radius;
-                ground(point) + Vec3::Y * self.geometry.file_max.y
-            }));
-        }
-        tops
-    }
-
-    fn scene_points(&self, tops: &[Vec3]) -> Vec<Vec3> {
-        let mut points: Vec<Vec3> = self
-            .layout
-            .dirs()
-            .filter(|(_, dir)| {
-                self.layout.repositories.is_empty()
-                    || self.layout.repositories[dir.repository].live
-            })
-            .flat_map(|(_, dir)| {
-                let centre = ground(dir.position);
-                let radius = dir.radius();
-                [Vec3::X, Vec3::NEG_X, Vec3::Z, Vec3::NEG_Z]
-                    .map(|side| centre + side * radius)
-            })
-            .collect();
-        points.extend_from_slice(tops);
-        for region in self.layout.repositories.iter().filter(|region| region.live) {
-            for height in [framing::GLASS_BOTTOM, framing::GLASS_TOP] {
-                points.extend(
-                    region
-                        .corners()
-                        .map(|point| ground(point) + Vec3::Y * height),
-                );
-            }
-        }
-        points
-    }
-
-    fn fit(&self) -> (Vec3, f32) {
-        let (low, high) = self.layout.bounds();
-        let mut focus = ground((low + high) * 0.5);
-        let tops = self.file_tops();
-        let points = self.scene_points(&tops);
-        let direction = view_direction();
-        let ground_up = Vec3::NEG_Z;
-        let ground_right = ground_up.cross(Vec3::Y);
-        for _ in 0..4 {
-            let distance = self.fit_distance(focus, &points);
-            let lifted = self.avatar_bounds(distance);
-            let all: Vec<_> = points.iter().chain(&lifted).copied().collect();
-            let (low, high) = screen_bounds(focus + direction * distance, focus, &all);
-            let centre = (low + high) * 0.5 - Vec2::new(0.0, -0.04);
-            let span = distance * (std::f32::consts::FRAC_PI_8).tan();
-            focus += ground_right * centre.x * span * 16.0 / 9.0
-                + ground_up * centre.y * span * 1.2;
-        }
-        (focus, self.fit_distance(focus, &points))
-    }
-
-    fn fit_distance(&self, focus: Vec3, points: &[Vec3]) -> f32 {
-        let direction = view_direction();
-        let (mut near, mut far) = (2.0_f32, 20_000.0_f32);
-        for _ in 0..32 {
-            let middle = f32::midpoint(near, far);
-            let mut all = self.avatar_bounds(middle);
-            all.extend_from_slice(points);
-            if in_view(focus + direction * middle, focus, &all) {
-                far = middle;
-            } else {
-                near = middle;
-            }
-        }
-        far
-    }
-
-    fn avatar_bounds(&self, distance: f32) -> Vec<Vec3> {
-        let scale = (1.0 + distance / 60.0) * self.avatar_scale * self.avatar_size;
-        self.avatars
-            .iter()
-            .filter(|a| a.presence > 0.0)
-            .flat_map(|avatar| {
-                box_corners(
-                    Vec3::splat(-self.geometry.avatar_radius * scale),
-                    Vec3::splat(self.geometry.avatar_radius * scale),
-                )
-                .map(|corner| avatar.position + corner)
-                .into_iter()
-                .chain(std::iter::once(
-                    avatar.position + self.geometry.avatar_label_offset,
-                ))
-            })
-            .collect()
-    }
-    fn place_view(&mut self, dt: f32) {
-        if !self.layout.repositories.is_empty() {
-            self.focus = Vec3::ZERO;
-            self.distance = framing::DISTANCE;
-            return;
-        }
-        let (focus, distance) = self.fit();
-        let settle = if distance > self.distance { 0.3 } else { 1.5 };
-        let ease = 1.0 - (-dt / settle).exp();
-        self.focus += (focus - self.focus) * ease;
-        self.distance += (distance - self.distance) * ease;
-        let tops = self.file_tops();
-        let points = self.scene_points(&tops);
-        self.distance = self.distance.max(self.fit_distance(self.focus, &points));
+    fn place_view(&mut self) {
+        self.focus = Vec3::ZERO;
+        self.distance = framing::DISTANCE;
     }
 }
 
@@ -1678,22 +1463,6 @@ fn project(
             )
         })
     })
-}
-
-/// Whether every point projects inside the margins left by the title and caption.
-fn in_view(eye: Vec3, focus: Vec3, points: &[Vec3]) -> bool {
-    project(eye, focus, points).all(|point| {
-        point.is_some_and(|point| {
-            point.x.abs() <= 0.92 && (-0.8..=0.72).contains(&point.y)
-        })
-    })
-}
-
-fn screen_bounds(eye: Vec3, focus: Vec3, points: &[Vec3]) -> (Vec2, Vec2) {
-    project(eye, focus, points).flatten().fold(
-        (Vec2::splat(f32::MAX), Vec2::splat(f32::MIN)),
-        |(low, high), point| (low.min(point), high.max(point)),
-    )
 }
 
 /// Up to three pieces per direction, descending along the beam or rising from the file.
@@ -2235,7 +2004,10 @@ mod tests {
 
     #[test]
     fn heat_scales_with_both_diff_counts_and_accumulates_to_a_cap() {
-        let mut sim = simulation();
+        let mut layout = Layout::planned_paths(
+            &["heat.rs", "insertions.rs", "huge.rs", "moved.rs"],
+            0,
+        );
         let mut change = timeline::FileChange {
             path: "heat.rs".to_owned(),
             kind: Kind::Added,
@@ -2243,35 +2015,35 @@ mod tests {
             removals: 0,
             ..Default::default()
         };
-        let id = apply(&mut sim.state.layout, &change, 0);
-        let small = sim.layout().file(id).unwrap().heat;
+        let id = apply(&mut layout, &change, 0);
+        let small = layout.file(id).unwrap().heat;
         assert!(small > 0.0);
         let mut insertion = change.clone();
         insertion.path = "insertions.rs".to_owned();
         insertion.insertions = 100;
-        let inserted = apply(&mut sim.state.layout, &insertion, 0);
-        assert!(sim.layout().file(inserted).unwrap().heat > small);
+        let inserted = apply(&mut layout, &insertion, 0);
+        assert!(layout.file(inserted).unwrap().heat > small);
         change.kind = Kind::Modified;
         change.removals = 100;
-        apply(&mut sim.state.layout, &change, 0);
-        let accumulated = sim.layout().file(id).unwrap().heat;
+        apply(&mut layout, &change, 0);
+        let accumulated = layout.file(id).unwrap().heat;
         assert!(accumulated > 2.0 * small);
         assert!(accumulated < 1.0);
         change.insertions = u32::MAX;
         change.removals = u32::MAX;
-        apply(&mut sim.state.layout, &change, 0);
-        assert_eq!(sim.layout().file(id).unwrap().heat, 1.0);
+        apply(&mut layout, &change, 0);
+        assert_eq!(layout.file(id).unwrap().heat, 1.0);
         let mut huge = change.clone();
         huge.path = "huge.rs".to_owned();
         huge.kind = Kind::Added;
-        let huge_id = apply(&mut sim.state.layout, &huge, 0);
-        assert_eq!(sim.layout().file(huge_id).unwrap().heat, 0.75);
+        let huge_id = apply(&mut layout, &huge, 0);
+        assert_eq!(layout.file(huge_id).unwrap().heat, 0.75);
         change.kind = Kind::Moved {
             from: change.path.clone(),
         };
         change.path = "moved.rs".to_owned();
-        assert_eq!(apply(&mut sim.state.layout, &change, 0), id);
-        assert_eq!(sim.layout().file(id).unwrap().heat, 1.0);
+        assert_eq!(apply(&mut layout, &change, 0), id);
+        assert_eq!(layout.file(id).unwrap().heat, 1.0);
     }
 
     #[test]
@@ -2407,39 +2179,6 @@ mod tests {
     }
 
     #[test]
-    fn avatar_targets_separate_names_and_ignore_idle_contributors() {
-        let mut sim = Simulation::new(
-            timeline::synthetic(),
-            &Options::default(),
-            &Theme::neon(),
-            &Mappings::default(),
-        );
-        sim.advance_to(300, 60);
-        assert!(sim.state.avatars.len() >= 2);
-        for avatar in &mut sim.state.avatars {
-            avatar.target = Vec3::ZERO;
-            avatar.last_active = 5.0;
-            avatar.expires = 5.0 + AVATAR_IDLE;
-        }
-        sim.state.avatars[0].name = "a very long contributor name".to_owned();
-        sim.state.avatars[1].name = "X".to_owned();
-        sim.state.distance = 2.0;
-        let targets = sim.state.avatar_targets(5.0);
-        assert!(targets[0].distance(targets[1]) > 1.0);
-        let unit = 2.0 * sim.state.distance * std::f32::consts::FRAC_PI_8.tan() / 720.0;
-        let width = count(sim.state.avatars[0].name.chars().count())
-            * sim.state.geometry.label_height
-            * 0.6;
-        assert!(targets[0].distance(targets[1]) >= (width + 12.0) * unit * 0.99);
-        sim.state.distance = 10_000.0;
-        let bounded = sim.state.avatar_targets(5.0);
-        let (low, high) = sim.state.layout.bounds();
-        assert!(bounded[0].distance(bounded[1]) <= (high - low).length().max(4.0));
-        let idle = sim.state.avatar_targets(5.0 + AVATAR_IDLE);
-        assert!(idle.iter().all(|&target| target == Vec3::ZERO));
-    }
-
-    #[test]
     fn coincident_and_reversed_timestamps_remain_strictly_monotonic() {
         let mut events = timeline::synthetic();
         for (event, seconds) in events.iter_mut().zip([100, 100, 90, 95, 101]) {
@@ -2485,23 +2224,14 @@ mod tests {
         for (index, event) in events.iter_mut().enumerate() {
             event.seconds = i64::try_from(index).unwrap() * 86_400;
         }
-        let sim = Simulation::new(
-            events,
-            &Options {
-                seconds_per_day: 86_400.0,
-                max_idle_seconds: 86_400.0,
-                ..Options::default()
-            },
-            &Theme::neon(),
-            &Mappings::default(),
-        );
+        let schedule = Schedule::new(&events, 86_400.0, 86_400.0);
         assert!(
-            frames_for(sim.duration(), 240)
+            frames_for(schedule.duration(), 240)
                 .unwrap_err()
                 .to_string()
                 .contains("supported export range")
         );
-        assert!(frames_for(sim.duration(), 30).is_ok());
+        assert!(frames_for(schedule.duration(), 30).is_ok());
         assert_eq!(frames_for(1.0, 30).unwrap(), 30);
     }
 
@@ -2605,7 +2335,7 @@ mod tests {
     }
 
     #[test]
-    fn construction_preserves_event_buffers_when_selecting_a_range() {
+    fn construction_preserves_selected_event_content() {
         let events: Vec<_> = ["First", "Second"]
             .into_iter()
             .map(|name| Event {
@@ -2627,8 +2357,8 @@ mod tests {
             })
             .collect();
         let total = events.len();
-        let changes = events[1].changes.as_ptr();
-        let author = events[1].author.name.as_ptr();
+        let path = format!("0/{}", events[1].changes[0].path);
+        let author = events[1].author.name.clone();
         let sim = Simulation::new(
             events,
             &Options {
@@ -2642,40 +2372,17 @@ mod tests {
         assert_eq!(sim.total(), total);
         assert_eq!(sim.commit(), 1);
         assert_eq!(sim.events.len(), 1);
-        assert_eq!(sim.events[0].changes.as_ptr(), changes);
-        assert_eq!(sim.events[0].author.name.as_ptr(), author);
+        assert_eq!(sim.events[0].changes[0].path, path);
+        assert_eq!(sim.events[0].author.name, author);
     }
 
     fn assert_clearance(sim: &Simulation) {
-        let state = &sim.state;
-        let eye = state.focus + view_direction() * state.distance;
-        let tops = state.file_tops();
-
-        for avatar in state.avatars.iter().filter(|avatar| avatar.presence > 0.0) {
-            let radius =
-                state.geometry.avatar_radius * sim.scale() * sim.avatar_disc_scale();
-            let corners = box_corners(Vec3::splat(-radius), Vec3::splat(radius))
-                .map(|corner| avatar.position + corner);
-            let projected: Vec<_> = project(eye, state.focus, &corners)
-                .map(|point| point.expect("avatar bounds are in front of the camera"))
-                .collect();
-            assert!(
-                projected.iter().all(|point| point.x.abs() <= 0.9201
-                    && (-0.8001..=0.7201).contains(&point.y)),
-                "tick {}: avatar outside fit margins: {projected:?}",
-                state.tick
-            );
-            let label = [avatar.position + state.geometry.avatar_label_offset];
-            let label = project(eye, state.focus, &label)
-                .next()
-                .flatten()
-                .expect("label is in front of the camera");
-            assert!(label.is_finite());
-            assert!(avatar.position.y >= MIN_AVATAR_HEIGHT);
-        }
+        nitpicks::assert_labels_and_beams(sim);
+        assert_eq!(sim.view(), (Vec3::ZERO, framing::DISTANCE));
         assert!(
-            project(eye, state.focus, &tops).all(|point| point.is_some()),
-            "files are in front of the camera"
+            sim.avatars()
+                .iter()
+                .all(|a| a.position.y == MIN_AVATAR_HEIGHT)
         );
     }
 
@@ -2724,33 +2431,6 @@ mod tests {
             sim.avatars()
                 .iter()
                 .all(|a| a.position.y == MIN_AVATAR_HEIGHT)
-        );
-    }
-
-    #[test]
-    fn lift_and_fit_settle_without_camera_drift() {
-        let mut sim = simulation();
-        sim.advance_to(13, 2);
-        sim.state.layout.settle(SETTLE_TICKS, tick_seconds());
-        for _ in 0..600 {
-            sim.state.place_view(tick_seconds());
-        }
-        let (focus, distance) = sim.view();
-        for _ in 0..120 {
-            sim.state.place_view(tick_seconds());
-            assert_clearance(&sim);
-        }
-        assert!(
-            (sim.view().0 - focus).length() < 0.01,
-            "camera focus drift: {:?} -> {:?}, distance {distance} -> {}",
-            focus,
-            sim.view().0,
-            sim.view().1
-        );
-        assert!(
-            (sim.view().1 - distance).abs() < 0.01,
-            "camera distance drift: {distance} -> {}",
-            sim.view().1
         );
     }
 
@@ -2831,21 +2511,40 @@ mod tests {
         );
     }
 
+    fn paths_simulation(paths: &[String]) -> Simulation {
+        let mut event = timeline::synthetic().remove(0);
+        event.changes = paths
+            .iter()
+            .map(|path| timeline::FileChange {
+                path: path.clone(),
+                kind: Kind::Added,
+                insertions: 1,
+                removals: 0,
+                samples: Vec::new(),
+            })
+            .collect();
+        let mut sim = Simulation::new(
+            vec![event],
+            &Options::default(),
+            &Theme::neon(),
+            &Mappings::default(),
+        );
+        sim.advance_to(120, 60);
+        sim
+    }
+
     #[test]
     fn landmarks_rank_large_nested_subtrees_before_small_top_level_directories() {
-        let mut sim = simulation();
         let paths: Vec<_> = (0..30)
             .flat_map(|dir| (0..8).map(move |file| format!("big/d{dir}/f{file}.rs")))
             .chain(std::iter::once("small/one.rs".to_owned()))
             .collect();
-        sim.state.layout = Layout::planned_paths(
-            &paths.iter().map(String::as_str).collect::<Vec<_>>(),
-            0,
-        );
-        for path in &paths {
-            sim.state.layout.add(path, 0.0, 0);
-        }
-        let labels = sim.labels();
+        let sim = paths_simulation(&paths);
+        let labels: Vec<_> = sim
+            .labels()
+            .into_iter()
+            .filter(|l| l.kind == LabelKind::Landmark)
+            .collect();
         assert!(labels.iter().any(|label| label.text == "small/"));
         assert!(
             labels
@@ -2860,15 +2559,8 @@ mod tests {
 
     #[test]
     fn extra_top_level_landmarks_are_capped_and_hidden_directories_are_excluded() {
-        let mut sim = simulation();
         let paths: Vec<_> = (0..50).map(|index| format!("d{index}/file.rs")).collect();
-        sim.state.layout = Layout::planned_paths(
-            &paths.iter().map(String::as_str).collect::<Vec<_>>(),
-            0,
-        );
-        for path in &paths {
-            sim.state.layout.add(path, 0.0, 0);
-        }
+        let sim = paths_simulation(&paths);
         assert_eq!(
             sim.labels()
                 .iter()
@@ -2897,9 +2589,9 @@ mod tests {
             .files()
             .map(|(_, file)| file.path.as_str())
             .collect();
-        assert!(paths.contains(&"src/scene/layout.rs"));
-        assert!(!paths.contains(&"src/old.rs"));
-        assert!(!paths.contains(&"docs/guide.md"));
+        assert!(paths.contains(&"0/src/scene/layout.rs"));
+        assert!(!paths.contains(&"0/src/old.rs"));
+        assert!(!paths.contains(&"0/docs/guide.md"));
     }
 
     #[test]

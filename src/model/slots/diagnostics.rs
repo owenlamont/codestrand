@@ -332,9 +332,6 @@ impl MovingBeams {
     }
     fn observe_avatars(&mut self, simulation: &Simulation) {
         let state = &simulation.state;
-        if state.layout.repositories.is_empty() {
-            return;
-        }
         let radius = state.avatar_radius();
         let content = super::content_obstacles(state);
         let projected: Vec<_> = project(
@@ -419,9 +416,6 @@ impl MovingBeams {
 
     pub(crate) fn observe(&mut self, simulation: &Simulation) {
         let state = &simulation.state;
-        if state.layout.repositories.is_empty() {
-            return;
-        }
         self.observe_avatars(simulation);
         self.observe_label_pairs(state);
         for (pulse, target) in state

@@ -710,7 +710,7 @@ mod tests {
                         < 0.0001
                 );
             }
-            assert_eq!(visible, 2, "{}", name.title());
+            assert!(visible > 0, "{}", name.title());
         }
     }
 

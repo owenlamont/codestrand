@@ -50,7 +50,6 @@ pub(crate) const SEPARATOR_WIDTH: f32 = ADVANCE * 3.0;
 #[derive(Clone, Copy, Resource)]
 pub(crate) struct Columns {
     pub widths: [usize; 6],
-    pub multi: bool,
 }
 
 impl Columns {
@@ -90,7 +89,6 @@ impl Columns {
                     .max()
                     .expect("available themes"),
             ],
-            multi: !sim.layout().repositories.is_empty(),
         }
     }
 
@@ -98,9 +96,6 @@ impl Columns {
         let mut left = 28.0;
         let mut columns = Vec::new();
         for (index, width) in self.widths.into_iter().enumerate() {
-            if index == 1 && !self.multi {
-                continue;
-            }
             let width = super::count(width) * ADVANCE + 8.0;
             columns.push((index, left, width));
             left += width + SEPARATOR_WIDTH;
@@ -327,7 +322,7 @@ mod tests {
     }
 
     #[test]
-    fn unnamed_internal_simulation_retains_the_original_caption_format() {
+    fn internal_simulation_uses_the_shared_repository_caption() {
         let mut sim = Simulation::new(
             crate::timeline::synthetic(),
             &super::super::Options::default(),
@@ -339,13 +334,13 @@ mod tests {
         assert_eq!(
             sim.caption(),
             format!(
-                "{}   |   {}   |   commit 1 / {}   |   1x",
+                "{}   |   Synthetic history   |   {}   |   commit 1 / {}   |   1x",
                 super::super::date(event.seconds),
                 event.contributor.as_ref().unwrap().name,
                 sim.total
             )
         );
-        assert!(sim.caption_repository().is_none());
+        assert_eq!(sim.caption_repository(), Some((0, "Synthetic history")));
     }
 
     #[test]
