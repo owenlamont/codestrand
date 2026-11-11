@@ -140,6 +140,9 @@ enum Command {
     reason = "each bool is an independent clap switch"
 )]
 struct Source {
+    /// Assume departure after this many calendar days; default 60 marks two quiet months.
+    #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u32).range(1..=36500))]
+    contributor_inactivity_days: u32,
     /// Multi-repository caption colour treatment.
     #[arg(long, value_enum, default_value = "bar")]
     caption_style: model::caption::Style,
@@ -305,6 +308,18 @@ impl Source {
                 .join(" | ")
         };
         let options = model::Options {
+            contributor_inactivity_days: self.contributor_inactivity_days,
+            repository_ends: repositories
+                .iter()
+                .map(|repository| {
+                    repository
+                        .ended
+                        .as_deref()
+                        .map(repositories::parse_ended)
+                        .transpose()
+                })
+                .collect::<anyhow::Result<_>>()?,
+            repository_archived: repositories.iter().map(|r| r.archived).collect(),
             heat_half_life: self.heat_half_life,
             seconds_per_day: self.seconds_per_day,
             max_idle_seconds: self.max_idle_seconds,

@@ -3,6 +3,13 @@ use std::time::Duration;
 use super::{LEAD_IN, TAIL, TICK_RATE, tick_seconds, tick_time};
 use crate::timeline::Event;
 
+pub(super) fn padding_at(padding: &[(usize, u32)], index: usize) -> u32 {
+    padding
+        .iter()
+        .find(|&&(event, _)| event == index)
+        .map_or(0, |&(_, ticks)| ticks)
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Schedule {
     pub(crate) starts: Vec<f32>,

@@ -538,6 +538,31 @@ fn rotations(
 }
 
 impl Packing {
+    pub(crate) fn with_endings(
+        mut self,
+        endings: &[f32],
+        exit: f32,
+        reflow: f32,
+    ) -> Self {
+        if !endings.iter().any(|end| end.is_finite()) {
+            return self;
+        }
+        for (tick, sample) in Arc::make_mut(&mut self.samples).iter_mut().enumerate() {
+            let now = crate::model::tick_time(
+                u64::try_from(tick).expect("bounded packing tick"),
+            );
+            for (presence, end) in sample.presence.iter_mut().zip(endings) {
+                let u = ((now - end - exit) / reflow).clamp(0.0, 1.0);
+                *presence *= 1.0 - u * u * (3.0 - 2.0 * u);
+                // Subpixel regions fall below the feasible-polygon clipping tolerance.
+                if u > 0.0 && *presence < 0.001 {
+                    *presence = 0.0;
+                }
+            }
+        }
+        self.placements = (0..self.samples.len()).map(|_| OnceLock::new()).collect();
+        self.plan_zoom()
+    }
     #[cfg(test)]
     pub(crate) fn build(regions: &[Vec<RepositoryRegion>]) -> Self {
         Self::build_births(regions, false, 4.0, None)
@@ -1109,5 +1134,28 @@ mod tests {
             .unwrap();
         assert!(regions.iter().all(|r| !r.live));
         assert!(Packing::default().sample(0).is_none());
+    }
+
+    #[test]
+    fn ending_holds_tiles_until_fade_finishes_then_reflows_for_four_seconds() {
+        let original = Packing::build(&fixture());
+        let endings: Vec<_> = (0..30)
+            .map(|i| if i == 0 { f32::INFINITY } else { 20.0 })
+            .collect();
+        let ending = original.clone().with_endings(&endings, 2.5, 4.0);
+        assert_eq!(
+            original.sample(1350).unwrap().0[0].tile,
+            ending.sample(1350).unwrap().0[0].tile
+        );
+        let middle = ending.sample(1470).unwrap().0;
+        assert!(middle[1].tile.is_some());
+        let final_regions = ending.sample(1599).unwrap().0;
+        assert_eq!(final_regions[0].tile, Some(Tile::viewport()));
+        assert!(
+            final_regions[1..]
+                .iter()
+                .all(|region| region.tile.is_none())
+        );
+        assert_eq!(ending.sample(1470).unwrap().0[0].tile, middle[0].tile);
     }
 }

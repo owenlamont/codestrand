@@ -32,6 +32,9 @@ pub(super) enum LabelPlane {
 pub(super) struct Repository {
     pub path: PathBuf,
     pub label: Option<String>,
+    #[serde(default)]
+    pub archived: bool,
+    pub ended: Option<String>,
 }
 
 impl Repository {
@@ -83,6 +86,8 @@ pub(super) fn inputs(
         .map(|path| Repository {
             path: path.clone(),
             label: None,
+            archived: false,
+            ended: None,
         })
         .collect();
     if let Some(file) = file {
@@ -101,6 +106,9 @@ pub(super) fn inputs(
     let mut labels = std::collections::HashSet::new();
     let mut unique = Vec::new();
     for mut repository in repositories {
+        if let Some(ended) = &repository.ended {
+            parse_ended(ended)?;
+        }
         anyhow::ensure!(
             repository.path.as_os_str().len() <= MAX_PATH_BYTES,
             "repository path exceeds 4096 bytes"
@@ -125,6 +133,28 @@ pub(super) fn inputs(
         unique.push(repository);
     }
     Ok(unique)
+}
+
+pub(super) fn parse_ended(value: &str) -> anyhow::Result<i64> {
+    anyhow::ensure!(
+        value.len() == 10 && value.is_ascii(),
+        "ended must be a UTC date YYYY-MM-DD"
+    );
+    let mut low = -719_162_i64;
+    let mut high = 2_932_896_i64;
+    while low < high {
+        let middle = low + (high - low) / 2;
+        if crate::model::date(middle * 86_400).as_str() < value {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    anyhow::ensure!(
+        crate::model::date(low * 86_400) == value,
+        "ended must be a valid UTC date YYYY-MM-DD"
+    );
+    Ok(low * 86_400)
 }
 
 pub(super) fn prefix(index: usize) -> String {
@@ -180,6 +210,27 @@ mod tests {
     use std::fmt::Write as _;
 
     use super::*;
+
+    #[test]
+    fn ended_dates_reject_invalid_calendar_values_and_archival_is_opt_in() {
+        for value in [
+            "2026-02-30",
+            "2026-13-01",
+            "26-05-01",
+            "2026-5-01",
+            "arbitrary",
+        ] {
+            assert!(parse_ended(value).is_err(), "{value}");
+        }
+        assert_eq!(
+            crate::model::date(parse_ended("2026-05-01").unwrap()),
+            "2026-05-01"
+        );
+        let repository: Repository =
+            toml::from_str("path='repo'\narchived=true\nended='2026-05-01'").unwrap();
+        assert!(repository.archived);
+        assert_eq!(repository.ended.as_deref(), Some("2026-05-01"));
+    }
 
     #[test]
     fn repository_limit_counts_unique_resolved_paths() {

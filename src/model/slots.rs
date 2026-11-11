@@ -427,7 +427,7 @@ impl State {
         self.avatars
             .iter()
             .map(|avatar| {
-                if now - avatar.last_active >= super::AVATAR_IDLE {
+                if now >= avatar.expires {
                     return None;
                 }
                 let slot = avatar.slot.as_ref()?;
@@ -1980,6 +1980,7 @@ mod tests {
             &Options {
                 seconds_per_day: 1.0,
                 max_idle_seconds: 20.0,
+                contributor_inactivity_days: 5,
                 ..Default::default()
             },
             &Theme::neon(),

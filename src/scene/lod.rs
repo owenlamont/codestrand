@@ -255,7 +255,7 @@ mod tests {
                 let detail = lod.detail.clone();
                 lod.sample(&layout, seconds, view(10000.0));
                 assert_eq!(lod.detail, detail);
-                if change == "delete" && tick >= 6 {
+                if change == "delete" && tick >= 9 {
                     assert!(layout.file(id).is_none());
                 }
             }

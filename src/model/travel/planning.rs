@@ -164,12 +164,16 @@ fn moving_route(
         let delta = points[leg + 1] - points[leg];
         let u = ((base - points[leg]).dot(delta) / delta.length_squared().max(1e-8))
             .clamp(0.0, 1.0);
-        let a = Vec2::new(anchors[leg][0].at(row, 0)?, anchors[leg][1].at(row, 1)?);
         let b = Vec2::new(
             anchors[leg + 1][0].at(row, 0)?,
             anchors[leg + 1][1].at(row, 1)?,
         );
-        let point = a.lerp(b, u);
+        let point = if u >= 1.0 {
+            b
+        } else {
+            Vec2::new(anchors[leg][0].at(row, 0)?, anchors[leg][1].at(row, 1)?)
+                .lerp(b, u)
+        };
         let cells: Vec<_> = row
             .iter()
             .flatten()
@@ -357,6 +361,40 @@ pub(super) fn trips(
 mod tests {
     use super::super::{Plan, Service, Statistics, slots::Dock};
     use super::*;
+
+    #[test]
+    fn completed_travel_survives_the_source_repository_disappearing() {
+        let mut capture = fixture();
+        for row in &mut capture.gutters[300..] {
+            row[0] = None;
+        }
+        let (trips, _) = trips(&capture, 480.0, crate::model::BotTravel::Walk, true);
+        assert_eq!(trips.len(), 1);
+        assert_eq!(trips[0].departure, 70);
+        assert!(!trips[0].fade);
+        assert_eq!(trips[0].route.track.last(), Some(&Vec2::new(100.0, 0.0)));
+    }
+
+    #[test]
+    fn a_calendar_departure_fades_even_during_an_uncapped_trip() {
+        let mut events = crate::timeline::synthetic();
+        events.truncate(1);
+        let mut sim = crate::model::Simulation::new(
+            events,
+            &crate::model::Options::default(),
+            &crate::theme::Theme::neon(),
+            &crate::contributors::Mappings::default(),
+        );
+        sim.departures[0] = 1.2;
+        let (trips, _) = trips(&fixture(), 480.0, crate::model::BotTravel::Walk, true);
+        sim.travel = Plan {
+            trips,
+            ..Default::default()
+        };
+        sim.advance_to(180, 60);
+        assert!(sim.travel.sample(0, sim.state.tick).is_some());
+        assert_eq!(sim.state.avatars[0].presence, 0.0);
+    }
 
     fn dock(edge: u8, fraction: f32) -> Dock {
         Dock::new(edge, fraction)

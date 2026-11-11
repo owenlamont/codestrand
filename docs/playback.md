@@ -106,17 +106,45 @@ Alternatively, pass `--repositories-file repositories.toml` to preview or export
 [[repositories]]
 path = "/path/to/first"
 label = "First project"
+archived = true
 
 [[repositories]]
 path = "../second"
+ended = "2026-05-01"
 ```
 
 Paths in the TOML file resolve relative to the file. Labels default to the repository
 directory name. Repeated flags and a file can be combined; flag entries come first.
 Paths resolving to the same location share one entry; the first entry wins. Labels for
-distinct repositories must be unique. Each entry is a table so future repository metadata
-can be added; archive dates are not supported yet. The combined list is limited to 30
+distinct repositories must be unique. The combined list is limited to 30
 unique repositories before any history is imported or avatars are resolved.
+
+`archived = true` ends a repository after the final commit in the selected revision,
+once the commit's activity finishes. `ended = "YYYY-MM-DD"` supplies an explicit UTC
+ending date and overrides `archived`, for example after deletion. Neither field fetches
+platform metadata. Without either field the repository remains visible.
+
+The ending tile, files and directories grey, rise and fade over 2.5 playback seconds.
+Neighbours then reclaim the space over four seconds. Text fades in place.
+
+## Contributor and file lifecycles
+
+The first commit enlarges the contributor avatar, settling over 1.2 playback seconds.
+Whole-file additions descend from the contributor along the beam to the file layout;
+deletions grey, rise and fade over 1.2 seconds. Line fragments remain separate.
+
+`--contributor-inactivity-days 60` assumes a contributor has left after 60 calendar
+days without a commit across the combined history. The avatar greys and fades over
+1.2 playback seconds; another commit revives the same contributor. The two-month default
+flags Owen's observed 88-day pause in the combined first-parent histories.
+Departure is an assumption, not platform knowledge. Deadlines follow the compressed,
+padded timeline. Playback does not extrapolate contributor departures beyond the final
+history date.
+
+```sh
+codestrand preview --repositories-file repositories.toml \
+  --contributor-inactivity-days 60
+```
 
 Repository manifests must be regular files no larger than 1 MiB, with at most 4,096
 entries. Repository paths are limited to 4,096 bytes before filesystem resolution.
@@ -188,7 +216,8 @@ waiting. `--bot-travel fade` is the default; `--bot-travel walk` gives bots the 
 routing and waiting policy as humans. Bot classification uses an explicit `bot` override
 in `contributors.toml`, then a GitHub noreply login ending in `[bot]`, then the displayed
 name's `[bot]` suffix. Travel policies apply to multi-repository playback.
-Walking avatars remain visible during travel. With `--travel-cap none`, walking trips
+Walking avatars remain visible during travel until an inferred calendar departure.
+With `--travel-cap none`, walking trips
 also remain routed across long idle gaps instead of disappearing and re-entering at a
 different repository. After the last service, the normal inactivity fade still applies.
 Uncapped walking services trips in commit order and adds another second of waiting
@@ -197,6 +226,7 @@ a full 0.75-second birth window inside their added wait. Packing weights start
 approaching the upcoming service footprint during that wait. An uncapped plan
 that cannot find safe routes within the planning budgets reports an error instead of
 silently accepting a travel fade.
+A plan that cannot converge within 32 replans stops with an error.
 Dormant contributors follow their previous repository's lane while waiting, so later
 tile growth cannot bury the starting point of their next uncapped trip.
 The caption holds the last applied date during waiting; heat, fragments and fades
