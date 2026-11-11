@@ -134,12 +134,12 @@ impl PreviewCamera {
                     let eye = eye + back * (self.distance - old_distance);
                     self.focus =
                         eye.with_y(eye.y.max(EYE_FLOOR)) - back * self.distance;
-                    let mut forward = (self.rotation * Vec3::NEG_Z).with_y(0.0);
-                    if forward.length_squared() < 1e-6 {
-                        forward = (self.rotation * Vec3::Y).with_y(0.0);
-                    }
-                    let forward = forward.normalize();
-                    let right = forward.cross(Vec3::Y);
+                    let right = (self.rotation * Vec3::X).with_y(0.0).normalize_or(
+                        (self.rotation * Vec3::NEG_Z)
+                            .with_y(0.0)
+                            .normalize_or(Vec3::X),
+                    );
+                    let forward = Vec3::Y.cross(right);
                     self.focus += (right * input.pan.x + forward * input.pan.y)
                         * self.distance
                         * 0.7
@@ -221,6 +221,8 @@ mod tests {
         let view = (Vec3::Y * 20.0, 10.0);
         for (pitch, roll) in [
             (-90.0_f32, 0.0_f32),
+            (-90.0 - 0.004_f32.to_degrees(), 0.0),
+            (-90.0 + 0.004_f32.to_degrees(), 0.0),
             (-45.0, 0.0),
             (0.0, 0.0),
             (-90.0, 180.0),
@@ -233,6 +235,13 @@ mod tests {
                 camera.rotation = Quat::from_rotation_y(0.7)
                     * Quat::from_rotation_x(pitch.to_radians())
                     * Quat::from_rotation_z(roll.to_radians());
+                let eye = camera.pose().0;
+                let rotation = camera.rotation();
+                let screen = |point: Vec3| {
+                    let local = rotation.conjugate() * (point - eye);
+                    Vec2::new(local.x, local.y) / -local.z
+                };
+                let ground = view.0.with_y(0.0);
                 camera.update(
                     &Input {
                         pan,
@@ -248,6 +257,19 @@ mod tests {
                     (displacement.length() - 0.7).abs() < 1e-5,
                     "pitch {pitch}, roll {roll}, pan {pan:?}: {displacement:?}"
                 );
+                let projected = screen(ground + displacement) - screen(ground);
+                if pan == Vec2::X {
+                    assert!(
+                        projected.x > 0.0 && projected.y.abs() < 1e-5,
+                        "D reversed or skewed at pitch {pitch}, roll {roll}: {projected:?}"
+                    );
+                }
+                if pan == Vec2::Y {
+                    assert!(
+                        projected.y > 0.0 && projected.x.abs() < 1e-5,
+                        "W reversed or skewed at pitch {pitch}, roll {roll}: {projected:?}"
+                    );
+                }
             }
         }
     }

@@ -140,6 +140,13 @@ fn multipliers_preserve_fading_directory_space() {
     };
     for (factor, change_tick) in [(1.0, 0), (0.125, 0), (8.0, 6036)] {
         let mut sim = simulation(events.clone(), &options);
+        sim.advance_to(60, 60);
+        assert!(
+            sim.layout()
+                .files()
+                .any(|(_, file)| file.path.starts_with("0/a/"))
+        );
+        sim.restart();
         for _ in 0..change_tick {
             sim.tick_layout();
         }
@@ -174,7 +181,7 @@ fn multipliers_preserve_fading_directory_space() {
         assert!(
             sim.layout()
                 .files()
-                .all(|(_, file)| !file.path.starts_with("a/"))
+                .all(|(_, file)| !file.path.starts_with("0/a/"))
         );
     }
 }
