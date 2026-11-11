@@ -48,7 +48,8 @@ fn realistic_history_has_stable_framing_and_uniform_icons_at_sixty_hz() {
                 * framing::VIEWPORT
                 * 0.5;
             let tile = region.tile.unwrap();
-            let anchor = (tile.low + tile.high) * framing::VIEWPORT * 0.25;
+            let usable = tile.usable();
+            let anchor = (usable.low + usable.high) * framing::VIEWPORT * 0.25;
             assert!(
                 centre.distance(anchor) < 0.002,
                 "fit drifts within tile at {frame}/{i}"

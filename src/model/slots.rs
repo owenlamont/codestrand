@@ -427,7 +427,7 @@ impl State {
         self.avatars
             .iter()
             .map(|avatar| {
-                if now - avatar.last_active >= super::AVATAR_IDLE {
+                if now >= avatar.expires {
                     return None;
                 }
                 let slot = avatar.slot.as_ref()?;
@@ -690,7 +690,10 @@ impl State {
                                 -HALF.x + space.radius,
                                 super::caption::BOTTOM + space.radius,
                             ),
-                            HALF - Vec2::splat(space.radius),
+                            Vec2::new(
+                                HALF.x - space.radius,
+                                super::caption::TOP - space.radius,
+                            ),
                         )
                     })
                     .collect()
@@ -1108,7 +1111,8 @@ impl Choice<'_> {
             .count();
         let overlaps = usize::from(
             !point.abs().cmple(HALF - Vec2::splat(self.radius)).all()
-                || point.y - self.radius < super::caption::BOTTOM,
+                || point.y - self.radius < super::caption::BOTTOM
+                || point.y + self.radius > super::caption::TOP,
         );
         (
             Placement {
@@ -1980,6 +1984,7 @@ mod tests {
             &Options {
                 seconds_per_day: 1.0,
                 max_idle_seconds: 20.0,
+                contributor_inactivity_days: 5,
                 ..Default::default()
             },
             &Theme::neon(),

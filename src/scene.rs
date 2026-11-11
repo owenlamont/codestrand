@@ -281,6 +281,110 @@ struct Pools {
     grid: Vec<Entity>,
 }
 
+#[derive(Component)]
+struct LifecycleMaterial {
+    original: Handle<StandardMaterial>,
+    tinted: Handle<StandardMaterial>,
+}
+
+#[derive(Resource, Default)]
+struct GreyTextures(HashMap<AssetId<Image>, Handle<Image>>);
+
+fn grey_texture(world: &mut World, source: &Handle<Image>) -> Handle<Image> {
+    world.init_resource::<GreyTextures>();
+    if let Some(texture) = world.resource::<GreyTextures>().0.get(&source.id()) {
+        return texture.clone();
+    }
+    let mut image = world
+        .resource::<Assets<Image>>()
+        .get(source)
+        .expect("loaded lifecycle texture")
+        .clone();
+    if let Some(data) = &mut image.data {
+        for pixel in data.as_chunks_mut::<4>().0 {
+            let grey = u8::try_from(
+                (u16::from(pixel[0]) * 54
+                    + u16::from(pixel[1]) * 183
+                    + u16::from(pixel[2]) * 19)
+                    / 256,
+            )
+            .expect("weighted byte average");
+            pixel[..3].fill(grey);
+        }
+    }
+    let texture = world.resource_mut::<Assets<Image>>().add(image);
+    world
+        .resource_mut::<GreyTextures>()
+        .0
+        .insert(source.id(), texture.clone());
+    texture
+}
+
+fn restore_lifecycle_materials(world: &mut World) {
+    let updates: Vec<_> = world
+        .query::<(Entity, &LifecycleMaterial)>()
+        .iter(world)
+        .map(|(entity, material)| (entity, material.original.clone()))
+        .collect();
+    for (entity, handle) in updates {
+        world.entity_mut(entity).insert(MeshMaterial3d(handle));
+    }
+}
+
+fn lifecycle_material(world: &mut World, entity: Entity, grey: f32, alpha: f32) {
+    let children = world
+        .get::<Children>(entity)
+        .map(|children| children.to_vec())
+        .unwrap_or_default();
+    for child in children {
+        lifecycle_material(world, child, grey, alpha);
+    }
+    let Some(source) = world
+        .get::<MeshMaterial3d<StandardMaterial>>(entity)
+        .map(|m| m.0.clone())
+    else {
+        return;
+    };
+    let mut material = world
+        .resource::<Assets<StandardMaterial>>()
+        .get(&source)
+        .expect("live material")
+        .clone();
+    let color = material.base_color.to_srgba();
+    let luminance = 0.2126 * color.red + 0.7152 * color.green + 0.0722 * color.blue;
+    material.base_color = Color::srgba(
+        color.red + (luminance - color.red) * grey,
+        color.green + (luminance - color.green) * grey,
+        color.blue + (luminance - color.blue) * grey,
+        color.alpha * alpha,
+    );
+    material.emissive *= 1.0 - grey;
+    material.alpha_mode = AlphaMode::Blend;
+    if grey > 0.5
+        && let Some(texture) = &material.base_color_texture
+    {
+        material.base_color_texture = Some(grey_texture(world, texture));
+    }
+    let tinted = if let Some(previous) = world.get::<LifecycleMaterial>(entity) {
+        previous.tinted.clone()
+    } else {
+        world
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(material.clone())
+    };
+    *world
+        .resource_mut::<Assets<StandardMaterial>>()
+        .get_mut(&tinted)
+        .expect("lifecycle material") = material;
+    world.entity_mut(entity).insert((
+        MeshMaterial3d(tinted.clone()),
+        LifecycleMaterial {
+            original: source,
+            tinted,
+        },
+    ));
+}
+
 fn app(simulation: Simulation, title: String) -> App {
     let mut app = App::new();
     let label_system = labels
@@ -293,6 +397,7 @@ fn app(simulation: Simulation, title: String) -> App {
         .insert_resource(Playback(simulation))
         .insert_resource(Title(title))
         .init_resource::<Pools>()
+        .init_resource::<GreyTextures>()
         .add_systems(Startup, setup)
         .add_systems(Update, animate)
         .add_systems(
@@ -893,6 +998,7 @@ fn preview_camera(world: &mut World, mut drag_from: Local<Option<Vec2>>) {
 }
 
 pub(super) fn animate(world: &mut World) {
+    restore_lifecycle_materials(world);
     let frame = world.resource::<Frame>();
     let (index, fps) = (frame.index, frame.fps);
     world.resource_scope(|world, mut playback: Mut<Playback>| {
@@ -971,6 +1077,21 @@ fn sync_repository_regions(world: &mut World, simulation: &Simulation) {
             mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
         }
     }
+
+    let entities: Vec<_> = world
+        .query::<(Entity, &RepositoryGlass)>()
+        .iter(world)
+        .map(|(entity, glass)| (entity, glass.0))
+        .collect();
+    for (entity, repository) in entities {
+        let (grey, alpha, rise) = simulation.repository_effect(repository);
+        if let Some(mut transform) = world.get_mut::<Transform>(entity) {
+            transform.translation.y = rise;
+        }
+        if grey > 0.0 || alpha < 1.0 {
+            lifecycle_material(world, entity, grey, alpha);
+        }
+    }
 }
 fn sync_files(
     world: &mut World,
@@ -1005,7 +1126,7 @@ fn sync_files(
             )
         });
         set_visible(world, entity, true);
-        let position = Vec3::new(file.position.x, 0.0, file.position.y);
+        let (position, grey, alpha) = simulation.file_effect(file);
         if let Some(mut transform) = world.get_mut::<Transform>(entity) {
             transform.translation = position;
             transform.rotation = Quat::from_rotation_y(
@@ -1020,7 +1141,7 @@ fn sync_files(
                 },
             );
             transform.scale =
-                Vec3::splat(file.visible_presence(layout.dir(file.dir)) * detail);
+                Vec3::splat(file.draw_scale(layout.dir(file.dir)) * detail);
         }
         let visual = world
             .get::<FileVisual>(entity)
@@ -1070,6 +1191,9 @@ fn sync_files(
             transform.scale *= Vec3::new(grow, grow, 1.0);
         }
         set_visible(world, halo, glowing);
+        if grey > 0.0 || alpha < 1.0 {
+            lifecycle_material(world, entity, grey, alpha);
+        }
     }
 }
 
@@ -1223,14 +1347,13 @@ fn spawn_file(
         .id()
 }
 
-fn sync_structure(
+fn sync_directory_edges(
     world: &mut World,
     palette: &Palette,
     pools: &mut Pools,
     simulation: &Simulation,
 ) {
     let layout = simulation.layout();
-    pools.hues.sync(layout);
     let edges: Vec<_> = layout
         .dirs()
         .filter_map(|(index, dir)| {
@@ -1247,12 +1370,13 @@ fn sync_structure(
                 ground(dir.position) - Vec3::Y * 0.05,
                 palette.directory(pools.hues.slots[index], dir.depth),
                 width * dir.parent.map_or(1.0, |parent| pools.lod.detail[parent]),
+                dir.repository,
             ))
         })
-        .flat_map(|(from, to, material, width)| {
+        .flat_map(|(from, to, material, width, repository)| {
             styling::edge_segments(simulation.theme(), from, to)
                 .into_iter()
-                .map(move |(a, b)| (a, b, material, width))
+                .map(move |(a, b)| (a, b, material, width, repository))
         })
         .collect();
     let pool = grow(
@@ -1262,7 +1386,8 @@ fn sync_structure(
         &palette.cube,
         &palette.edge,
     );
-    for (entity, (from, to, material, width)) in pool.iter().zip(&edges) {
+    for (entity, (from, to, material, width, repository)) in pool.iter().zip(&edges) {
+        let (grey, alpha, rise) = simulation.repository_effect(*repository);
         if let Some(mut transform) = world.get_mut::<Transform>(*entity) {
             let delta = *to - *from;
             *transform = Transform::from_translation(from.midpoint(*to))
@@ -1275,8 +1400,25 @@ fn sync_structure(
         }
         set_visible(world, *entity, true);
         set_material(world, *entity, material);
+        if let Some(mut transform) = world.get_mut::<Transform>(*entity) {
+            transform.translation.y += rise;
+        }
+        if grey > 0.0 || alpha < 1.0 {
+            lifecycle_material(world, *entity, grey, alpha);
+        }
     }
     hide_rest(world, pool, edges.len());
+}
+
+fn sync_structure(
+    world: &mut World,
+    palette: &Palette,
+    pools: &mut Pools,
+    simulation: &Simulation,
+) {
+    let layout = simulation.layout();
+    pools.hues.sync(layout);
+    sync_directory_edges(world, palette, pools, simulation);
     let dirs: Vec<_> = layout.dirs().collect();
     let pool = grow(
         world,
@@ -1301,6 +1443,13 @@ fn sync_structure(
                     );
         }
         set_visible(world, *entity, pools.lod.detail[index] > 0.0);
+        let (grey, alpha, rise) = simulation.repository_effect(dir.repository);
+        if let Some(mut transform) = world.get_mut::<Transform>(*entity) {
+            transform.translation.y += rise;
+        }
+        if grey > 0.0 || alpha < 1.0 {
+            lifecycle_material(world, *entity, grey, alpha);
+        }
     }
     hide_rest(world, pool, dirs.len());
     let glyphs = &pools.lod.glyphs;
@@ -1326,6 +1475,13 @@ fn sync_structure(
             );
         }
         set_visible(world, entity, true);
+        let (grey, alpha, rise) = simulation.repository_effect(dir.repository);
+        if let Some(mut transform) = world.get_mut::<Transform>(entity) {
+            transform.translation.y += rise;
+        }
+        if grey > 0.0 || alpha < 1.0 {
+            lifecycle_material(world, entity, grey, alpha);
+        }
     }
     hide_rest(world, pool, glyphs.len());
     sync_grid(world, palette, pools, simulation);
@@ -1482,10 +1638,15 @@ fn sync_activity(
                     * simulation.scale()
                     * simulation.avatar_disc_scale()
                     * avatar.projection_scale)
-                    .max(0.001),
+                    * avatar.lifecycle_scale.max(0.001),
             );
         }
         set_visible(world, entity, presence > 0.0);
+        if let Some(avatar) = avatar
+            && (avatar.grey > 0.0 || presence < 1.0)
+        {
+            lifecycle_material(world, entity, avatar.grey, presence);
+        }
     }
     styling::beams(world, palette, pools, simulation);
     sync_fragments(world, palette, pools, simulation);
@@ -2042,6 +2203,65 @@ fn face_file_glyphs(world: &mut World) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lifecycle_greys_texture_pixels_once_and_restores_the_original_material() {
+        let mut world = World::new();
+        world.init_resource::<Assets<Image>>();
+        world.init_resource::<Assets<StandardMaterial>>();
+        let mut image = Image::new_uninit(
+            Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            TextureDimension::D2,
+            TextureFormat::Rgba8UnormSrgb,
+            RenderAssetUsages::default(),
+        );
+        image.data = Some(vec![255, 0, 0, 255]);
+        let source = world.resource_mut::<Assets<Image>>().add(image);
+        let material =
+            world
+                .resource_mut::<Assets<StandardMaterial>>()
+                .add(StandardMaterial {
+                    base_color_texture: Some(source.clone()),
+                    ..default()
+                });
+        let entity = world.spawn(MeshMaterial3d(material.clone())).id();
+        lifecycle_material(&mut world, entity, 1.0, 0.5);
+        let grey = grey_texture(&mut world, &source);
+        assert_eq!(grey_texture(&mut world, &source), grey);
+        let pixels = world
+            .resource::<Assets<Image>>()
+            .get(&grey)
+            .unwrap()
+            .data
+            .as_ref()
+            .unwrap();
+        assert_eq!(pixels, &[53, 53, 53, 255]);
+        let tinted = &world
+            .get::<MeshMaterial3d<StandardMaterial>>(entity)
+            .unwrap()
+            .0;
+        assert_eq!(
+            world
+                .resource::<Assets<StandardMaterial>>()
+                .get(tinted)
+                .unwrap()
+                .base_color
+                .alpha(),
+            0.5
+        );
+        restore_lifecycle_materials(&mut world);
+        assert_eq!(
+            world
+                .get::<MeshMaterial3d<StandardMaterial>>(entity)
+                .unwrap()
+                .0,
+            material
+        );
+    }
 
     #[test]
     fn file_glyphs_face_the_camera_after_repository_rotation_and_theme_reset() {

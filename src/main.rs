@@ -140,7 +140,10 @@ enum Command {
     reason = "each bool is an independent clap switch"
 )]
 struct Source {
-    /// Multi-repository caption colour treatment.
+    /// Assume departure after this many calendar days; default 60 marks two quiet months.
+    #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u32).range(1..=36500))]
+    contributor_inactivity_days: u32,
+    /// Repository caption colour treatment.
     #[arg(long, value_enum, default_value = "bar")]
     caption_style: model::caption::Style,
     /// Local repository to play; repeat for a shared timeline; synthetic when omitted.
@@ -149,7 +152,7 @@ struct Source {
     /// TOML repository list; relative paths resolve beside the TOML file.
     #[arg(long)]
     repositories_file: Option<PathBuf>,
-    /// Repository boundary treatment for multiple repositories.
+    /// Repository tile boundary treatment.
     #[arg(long, value_enum, default_value = "glass")]
     repository_boundary: repositories::Boundary,
     /// Permanent repository labels at file level or between files and avatars.
@@ -305,6 +308,18 @@ impl Source {
                 .join(" | ")
         };
         let options = model::Options {
+            contributor_inactivity_days: self.contributor_inactivity_days,
+            repository_ends: repositories
+                .iter()
+                .map(|repository| {
+                    repository
+                        .ended
+                        .as_deref()
+                        .map(repositories::parse_ended)
+                        .transpose()
+                })
+                .collect::<anyhow::Result<_>>()?,
+            repository_archived: repositories.iter().map(|r| r.archived).collect(),
             heat_half_life: self.heat_half_life,
             seconds_per_day: self.seconds_per_day,
             max_idle_seconds: self.max_idle_seconds,
@@ -316,29 +331,80 @@ impl Source {
             avatar_size: self.avatar_scale,
             gutter: self.gutter,
         };
-        let names = if repositories.len() > 1 {
-            repositories
-                .iter()
-                .map(repositories::Repository::name)
-                .collect()
-        } else {
-            Vec::new()
-        };
-        let mut simulation = if names.is_empty() {
-            model::Simulation::new(events, &options, &theme::Theme::neon(), &mappings)
-        } else {
-            model::Simulation::try_with_repositories(
-                events,
-                &options,
-                &theme::Theme::neon(),
-                &mappings,
-                &names,
-            )?
-        };
+        let names: Vec<_> = repositories
+            .iter()
+            .map(repositories::Repository::name)
+            .collect();
+        let mut simulation = Self::playback(events, &options, &mappings, &names)?;
         simulation.repository_boundary = self.repository_boundary;
         simulation.caption_style = self.caption_style;
         simulation.repository_label_plane = self.repository_label_plane;
         Ok((simulation, title))
+    }
+
+    fn playback(
+        mut events: Vec<timeline::Event>,
+        options: &model::Options,
+        mappings: &contributors::Mappings,
+        names: &[String],
+    ) -> anyhow::Result<model::Simulation> {
+        let names = if names.is_empty() {
+            vec!["Synthetic history".to_owned()]
+        } else {
+            names.to_vec()
+        };
+        if names.len() == 1 {
+            repositories::namespace(&mut events, 0);
+        }
+        model::Simulation::try_with_repositories(
+            events,
+            options,
+            &theme::Theme::neon(),
+            mappings,
+            &names,
+        )
+    }
+}
+
+#[cfg(test)]
+mod single_source_tests {
+    #[test]
+    fn small_single_repository_keeps_frame_sized_discs_and_clear_text() {
+        let mut events = crate::timeline::synthetic();
+        events.truncate(5);
+        for (i, event) in events.iter_mut().enumerate() {
+            event.seconds = [0, 3, 10, 13, 16][i] * 86_400;
+            event.author.name = if i % 2 == 0 {
+                b"Alice".to_vec()
+            } else {
+                b"Bob".to_vec()
+            };
+            event.author.email = event.author.name.clone();
+            event.contributor = None;
+            event.changes.truncate(1);
+            event.changes[0].path = format!("src/file-{i}.rs");
+            event.changes[0].kind = crate::timeline::Kind::Added;
+        }
+        let options = crate::model::Options {
+            seconds_per_day: 2.0,
+            max_idle_seconds: 6.0,
+            ..Default::default()
+        };
+        let mut sim = super::Source::playback(
+            events,
+            &options,
+            &crate::contributors::Mappings::default(),
+            &["Small".to_owned()],
+        )
+        .unwrap();
+        let mut audit = crate::model::occlusion::Audit::default();
+        for frame in 0..=crate::model::frames_for(sim.duration(), 60).unwrap() {
+            sim.advance_to(frame, 60);
+            audit.observe(&sim);
+        }
+        assert!(audit.maximum_avatar_radius <= 17.0, "{audit:?}");
+        assert_eq!(audit.avatar_text_observations, 0, "{audit:?}");
+        assert_eq!(audit.parked_avatar_observations, 0, "{audit:?}");
     }
 }
 

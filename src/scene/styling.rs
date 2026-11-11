@@ -470,6 +470,15 @@ fn territories(
                             + f32::from(u16::try_from(ring).expect("3 rings")) * 0.07),
                 ));
                 set_visible(world, entity, true);
+                let (grey, alpha, rise) = simulation.repository_effect(dir.repository);
+                world
+                    .get_mut::<Transform>(entity)
+                    .expect("territory transform")
+                    .translation
+                    .y += rise;
+                if grey > 0.0 || alpha < 1.0 {
+                    super::lifecycle_material(world, entity, grey, alpha);
+                }
             }
         }
     }

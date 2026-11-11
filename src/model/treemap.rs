@@ -51,6 +51,8 @@ struct Repository {
     current_high: [f32; 2],
     scale: f32,
     rotated: bool,
+    usable_fill: f32,
+    cropped: bool,
 }
 
 #[derive(Serialize)]
@@ -61,6 +63,35 @@ pub(crate) struct Metrics {
     content_fill: f32,
     repositories: Vec<Repository>,
     pub content_largest_empty_inset: f32,
+}
+
+fn framing_metrics(
+    region: &crate::layout::RepositoryRegion,
+    tile: Tile,
+) -> (f32, bool) {
+    let usable = tile.usable();
+    let projected: Vec<_> = region
+        .outline
+        .iter()
+        .copied()
+        .map(framing::project_ground)
+        .collect();
+    let usable_fill =
+        crate::layout::outline::area(&projected) * 0.25 / usable.area().max(1e-12);
+    let cropped = region
+        .outline
+        .iter()
+        .flat_map(|&p| {
+            [
+                framing::project_ground(p),
+                framing::project_at(p, region.height),
+            ]
+        })
+        .any(|p| {
+            p.cmplt(usable.low - Vec2::splat(1e-5)).any()
+                || p.cmpgt(usable.high + Vec2::splat(1e-5)).any()
+        });
+    (usable_fill, cropped)
 }
 
 pub(crate) fn measure(layout: &Layout) -> Metrics {
@@ -119,6 +150,7 @@ pub(crate) fn measure(layout: &Layout) -> Metrics {
             0.0
         };
         let tile_area = tile.area();
+        let (usable_fill, cropped) = framing_metrics(region, tile);
         content += content_area;
         coverage += tile_area;
         tiles.push(tile);
@@ -138,6 +170,8 @@ pub(crate) fn measure(layout: &Layout) -> Metrics {
             current_high: current_high.to_array(),
             scale,
             rotated: region.rotated,
+            usable_fill,
+            cropped,
         });
     }
     Metrics {
@@ -167,9 +201,11 @@ pub(crate) fn run(
     std::hint::black_box(placement);
     eprintln!("treemap_single_sample_seconds={elapsed:.9}");
     let mut moving_beams = super::slots::diagnostics::MovingBeams::default();
+    let mut occlusion = super::occlusion::Audit::default();
     for frame in 0..=frames {
         simulation.advance_to(frame, 60);
         moving_beams.observe(simulation);
+        occlusion.observe(simulation);
         serde_json::to_writer(
             &mut *writer,
             &serde_json::json!({
@@ -184,7 +220,7 @@ pub(crate) fn run(
     }
     serde_json::to_writer(
         &mut *writer,
-        &serde_json::json!({"moving_beams": moving_beams, "avatar_slots": super::slots::report(&simulation.state), "travel": simulation.travel.report()}),
+        &serde_json::json!({"occlusion": occlusion, "moving_beams": moving_beams, "avatar_slots": super::slots::report(&simulation.state), "travel": simulation.travel.report()}),
     )?;
     writeln!(writer)?;
     Ok(())
@@ -279,6 +315,15 @@ mod tests {
                 }
             }
             assert_eq!(simulation.view(), (Vec3::ZERO, framing::DISTANCE));
+            for region in regions {
+                if let Some(tile) = region.tile {
+                    assert!(
+                        !framing_metrics(region, tile).1,
+                        "cropped {} at {frame}",
+                        region.label
+                    );
+                }
+            }
         }
         assert_eq!(simulation.state.slot_records.len(), simulation.events.len());
         let snapshot = serde_json::to_vec(&measure(simulation.layout())).unwrap();

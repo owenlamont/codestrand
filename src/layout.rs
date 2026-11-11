@@ -79,6 +79,13 @@ pub(super) struct File {
 }
 
 impl File {
+    pub(super) fn draw_scale(&self, dir: &Dir) -> f32 {
+        match self.state {
+            Presence::Present => self.visible_presence(dir),
+            Presence::Arriving => dir.scale * (0.15 + 0.85 * self.presence),
+            Presence::Leaving => dir.scale,
+        }
+    }
     fn set_slot(&mut self, slot: usize) {
         self.slot = slot;
         self.slot_offset = spiral(slot);
@@ -459,7 +466,7 @@ impl Layout {
                     }
                 }
                 Presence::Leaving => {
-                    file.presence = (file.presence - dt / FADE_SECONDS).max(0.0);
+                    file.presence = (file.presence - dt / 1.2).max(0.0);
                     if file.presence <= 0.0 {
                         gone.push(id);
                     }
@@ -735,7 +742,7 @@ mod tests {
         layout.remove("docs/guide.md", 0.5, 0);
         layout.step(DT);
         assert_eq!(layout.file(id).map(|file| file.presence), Some(1.0));
-        for _ in 0..120 {
+        for _ in 0..180 {
             layout.step(DT);
         }
         assert!(layout.file(id).is_none());

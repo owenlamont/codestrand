@@ -7,7 +7,8 @@ Commit application times are precomputed for the selected history and pacing.
 The caption shows the last applied commit's date; cooling and fades advance in
 playback seconds. Seeking or restarting replays the same fixed simulation ticks.
 
-Multi-repository captions also name the applying commit's repository. The default
+Repository captions also name the applying commit's repository, including single-tile
+playback. The default
 `--caption-style bar` tints the entire caption bar, matching the repository tile hue
 and cross-fading for 0.3 playback
 seconds, with at least 0.8 seconds between transitions (at least 0.5 seconds steady).
@@ -21,8 +22,7 @@ Widths use the longest scheduled date, repository and resolved contributor name,
 the total commit counter's digits. Speed and theme columns reserve their longest
 available values so preview controls cannot move separators. Captions always use the
 embedded monospace Fira Mono font, even when another theme uses proportional labels.
-Single-repository captions omit the repository column but fix the other five widths;
-their caption pixels therefore change from earlier versions too.
+The same six fixed columns apply to single repositories and synthetic playback.
 
 ## Controls
 
@@ -106,17 +106,47 @@ Alternatively, pass `--repositories-file repositories.toml` to preview or export
 [[repositories]]
 path = "/path/to/first"
 label = "First project"
+archived = true
 
 [[repositories]]
 path = "../second"
+ended = "2026-05-01"
 ```
 
 Paths in the TOML file resolve relative to the file. Labels default to the repository
 directory name. Repeated flags and a file can be combined; flag entries come first.
 Paths resolving to the same location share one entry; the first entry wins. Labels for
-distinct repositories must be unique. Each entry is a table so future repository metadata
-can be added; archive dates are not supported yet. The combined list is limited to 30
+distinct repositories must be unique. The combined list is limited to 30
 unique repositories before any history is imported or avatars are resolved.
+
+`archived = true` ends a repository after the final commit in the selected revision,
+once the commit's activity finishes. `ended = "YYYY-MM-DD"` supplies an explicit UTC
+ending date and overrides `archived`, for example after deletion. Neither field fetches
+platform metadata. Without either field the repository remains visible.
+An ending before the selected playback interval is already complete when playback starts.
+
+The ending tile, files and directories grey, rise and fade over 2.5 playback seconds.
+Neighbours then reclaim the space over four seconds. Text fades in place.
+
+## Contributor and file lifecycles
+
+The first commit enlarges the contributor avatar, settling over 1.2 playback seconds.
+Whole-file additions descend from the contributor along the beam to the file layout;
+deletions grey, rise and fade over 1.2 seconds. Line fragments remain separate.
+
+`--contributor-inactivity-days 60` assumes a contributor has left after 60 calendar
+days without a commit across the combined history. The avatar greys and fades over
+1.2 playback seconds; another commit revives the same contributor. The two-month default
+flags Owen's observed 88-day pause in the combined first-parent histories.
+Departure is an assumption, not platform knowledge. Deadlines follow the compressed,
+padded timeline, using the latest author date reached so reversed dates cannot trigger
+an immediate departure. Playback does not extrapolate contributor departures beyond
+the final history date.
+
+```sh
+codestrand preview --repositories-file repositories.toml \
+  --contributor-inactivity-days 60
+```
 
 Repository manifests must be regular files no larger than 1 MiB, with at most 4,096
 entries. Repository paths are limited to 4,096 bytes before filesystem resolution.
@@ -130,14 +160,20 @@ order. Contributor mappings apply across all repositories, so a matched contribu
 uses one avatar that moves between regions.
 
 Live repositories share the inset viewport inside a 24-pixel frame margin. The
-16:9 export camera stays fixed. Shared gutters separate neighbouring tiles, with no
+same frame-scaled avatar sizing and gutter placement apply to single repositories and
+synthetic playback. The top wordmark has a separate 26-pixel reserved strip, including
+a four-pixel buffer;
+avatars, gutter routes and name labels stay below the strip, matching caption clearance.
+The 16:9 export camera stays fixed. Shared gutters separate neighbouring tiles, with no
 contributor band. Tile weights follow eased square roots of live file counts;
 empty active repositories retain weight one. Each repository keeps file identity,
 local layout and one uniform scale, with a fixed quarter-turn chosen for its history.
-Content zoom anticipates the next five playback seconds of growth. A precomputed rate
-limit keeps log-scale change below 0.12 per second in either direction (about 11.3%
-shrink or 12.7% growth). A larger future contraction can start the adjustment earlier;
-the chosen scale never exceeds the tile's current safe fit.
+Content zoom anticipates growth with a precomputed safe-fit envelope and half-second
+easing. The log-scale limit is 0.12 per second when zooming out and 0.08 when zooming in
+(about 11.3% shrink or 8.3% growth). A larger future contraction can start the
+adjustment earlier; the chosen scale never exceeds the tile's current safe fit.
+The usable content area leaves an eight-pixel edge inset; corner titles retain their
+existing placement rules. Invisible archived content cannot constrain earlier zoom.
 
 A newcomer splits one existing tile or subtree. Other repositories retain their
 relative order. Splits clamp to a ground-aspect range of 1:2.5 to 2.5:1 and a
@@ -163,7 +199,7 @@ Other edges provide fallback docks. Avatars spread along edges; names shrink to 
 minimum, then move to free nearby lanes before truncating as a last resort. Names remain
 visible with their avatars. Portrait size accounts for perspective.
 
-Multi-repository travel follows gutter centrelines and the outer margin. Parking slots
+Avatar travel follows gutter centrelines and the outer margin. Parking slots
 sit on the same network. Routes never cross tile interiors, including unused areas;
 portraits may overlap tile edges beside a narrow gutter. Dijkstra minimises network
 length. Other avatars have no travel cost: walkers never wait or detour for each other.
@@ -175,9 +211,9 @@ animations; commits remain strictly chronological. Routes stop at corners and ac
 toward `--avatar-max-speed` reference pixels/second (default `480`, minimum `1`).
 Moving junctions follow the gutter network, with every canonical sample checked against
 the speed limit, frame bounds and tile guards. A shared parking point creates no trip.
-After five inactive playback seconds, contributors follow their parked gutter slot
-while fading over 1.2 seconds. Capped playback releases faded lanes and re-enters at the
-next service slot after a long idle gap.
+Contributors follow their parked gutter slot until their inferred calendar departure,
+then fade over 1.2 playback seconds. Capped playback releases faded lanes and re-enters
+at the next service slot after a long idle gap.
 
 `--travel-cap` limits extra waiting per walking trip (default `0.4` seconds; range `0`
 through `3600`, or `none` to wait as long as the route needs). Available gaps between
@@ -187,8 +223,10 @@ and fades in at the destination. Blocked capped routes fade across. Zero disable
 waiting. `--bot-travel fade` is the default; `--bot-travel walk` gives bots the same
 routing and waiting policy as humans. Bot classification uses an explicit `bot` override
 in `contributors.toml`, then a GitHub noreply login ending in `[bot]`, then the displayed
-name's `[bot]` suffix. Travel policies apply to multi-repository playback.
-Walking avatars remain visible during travel. With `--travel-cap none`, walking trips
+name's `[bot]` suffix. Travel policies also apply to single repositories and synthetic
+playback.
+Walking avatars remain visible during travel until an inferred calendar departure.
+With `--travel-cap none`, walking trips
 also remain routed across long idle gaps instead of disappearing and re-entering at a
 different repository. After the last service, the normal inactivity fade still applies.
 Uncapped walking services trips in commit order and adds another second of waiting
@@ -197,6 +235,7 @@ a full 0.75-second birth window inside their added wait. Packing weights start
 approaching the upcoming service footprint during that wait. An uncapped plan
 that cannot find safe routes within the planning budgets reports an error instead of
 silently accepting a travel fade.
+A plan that cannot converge within 32 replans stops with an error.
 Dormant contributors follow their previous repository's lane while waiting, so later
 tile growth cannot bury the starting point of their next uncapped trip.
 The caption holds the last applied date during waiting; heat, fragments and fades
@@ -222,14 +261,14 @@ Header and caption remain in the outer frame. Other preview aspect ratios use co
 framing;
 free-camera controls remain independent.
 
-Multi-repository planning supports up to 30 repositories, 216,000 simulation ticks,
+Repository planning supports up to 30 repositories, 216,000 simulation ticks,
 2,000,000 region samples and 4,000,000 temporary avatar poses. The preflight includes
 worst-case travel padding for numeric caps. With `none`, each actual padded schedule is
 checked before rebuilding; exceeding a budget reports an error rather than allocating
-an unbounded plan. Route searches stop at 10,000 nodes and fade across when
-the search cannot fit the bound. Use fewer repositories, shorten the imported history or
-reduce playback times if an input limit is exceeded. Single-repository playback is
-unaffected.
+an unbounded plan. Route searches stop at 10,000 nodes; capped playback can fade across
+when a search exceeds that bound, while uncapped walking reports an error. Use fewer
+repositories, shorten the imported history or reduce playback times if an input limit
+is exceeded. The same planning limits apply to single repositories and synthetic playback.
 
 Planning happens before the first frame. Large multi-repository histories can take
 several seconds to plan. To inspect a smaller interval, select the playback with
@@ -241,7 +280,8 @@ To choose visual treatments, use
 `--repository-boundary none|glass` and `--repository-label-plane files|raised`.
 Defaults are `glass` and `raised`. Glass is a faint, coloured ground-plane tile for
 each live repository; raised labels stay at a constant height of 1.6 scene units.
-Both options apply to preview and export and affect multiple repositories only.
+Both options apply to preview and export, including single repositories and synthetic
+playback.
 
 ## Range and pacing
 

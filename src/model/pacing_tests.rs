@@ -228,7 +228,7 @@ fn padding_holds_date_and_commit_while_heat_fragments_and_fades_advance() {
     assert_eq!(sim.caption(), caption);
     assert!(sim.layout().files().next().unwrap().1.heat < heat);
     assert!(sim.fragments().is_empty());
-    assert!(sim.state.avatars[0].presence < 1.0);
+    assert_eq!(sim.state.avatars[0].presence, 1.0);
     sim.advance_to(420, 60);
     assert_eq!(sim.commit(), 2);
     assert!(sim.caption().contains("1970-01-02"));

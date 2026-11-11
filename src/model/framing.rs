@@ -30,12 +30,17 @@ pub(crate) fn unproject_at(point: Vec2, height: f32) -> Vec2 {
 }
 
 pub(crate) fn project_ground(point: Vec2) -> Vec2 {
+    project_at(point, 0.0)
+}
+
+pub(crate) fn project_at(point: Vec2, height: f32) -> Vec2 {
     let direction = view_direction();
-    let depth = DISTANCE - direction.x.hypot(direction.z) * point.y;
+    let horizontal = direction.x.hypot(direction.z);
+    let depth = DISTANCE - horizontal * point.y - direction.y * height;
     let tangent = (FOV * 0.5).tan();
     Vec2::new(
         point.x / (tangent * VIEWPORT.x / VIEWPORT.y),
-        -direction.y * point.y / tangent,
+        (horizontal * height - direction.y * point.y) / tangent,
     ) / depth
 }
 

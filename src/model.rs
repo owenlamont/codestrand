@@ -15,11 +15,13 @@ use crate::{
 
 pub(crate) mod caption;
 pub(crate) mod framing;
+mod lifecycle;
 #[cfg(test)]
 mod measurement;
 mod names;
 #[cfg(test)]
 mod nitpicks;
+pub(crate) mod occlusion;
 #[cfg(test)]
 mod pacing_tests;
 pub(crate) mod quality;
@@ -39,16 +41,20 @@ const PULSE_SECONDS: f32 = 1.3;
 const FRAGMENT_SPEED: f32 = 1.1;
 const FRAGMENT_FLIGHT: f32 = 1.0 / FRAGMENT_SPEED;
 const ADD_DELAY: f32 = 0.2;
-const DELETE_DELAY: f32 = 0.6;
+const DELETE_DELAY: f32 = 0.0;
 const MIN_AVATAR_HEIGHT: f32 = 3.2;
 const AVATAR_CLEARANCE: f32 = 0.04;
 const AVATAR_IDLE: f32 = 5.0;
+const ARRIVAL_SCALE: f32 = 1.15;
 const BEAM_LIMIT: usize = 24;
 const FRAGMENT_TARGETS: usize = 24;
 const SETTLE_TICKS: u32 = 1200;
 const DIR_LABELS: usize = 20;
 
 pub(super) struct Options {
+    pub contributor_inactivity_days: u32,
+    pub repository_ends: Vec<Option<i64>>,
+    pub repository_archived: Vec<bool>,
     pub heat_half_life: f32,
     pub seconds_per_day: f32,
     pub max_idle_seconds: f32,
@@ -105,6 +111,9 @@ impl Options {
 impl Default for Options {
     fn default() -> Self {
         Self {
+            contributor_inactivity_days: 60,
+            repository_ends: Vec::new(),
+            repository_archived: Vec::new(),
             heat_half_life: 3.0,
             seconds_per_day: 0.5,
             max_idle_seconds: 1.0,
@@ -207,6 +216,10 @@ pub(super) struct DiffLine {
 
 #[derive(Clone, Debug)]
 pub(super) struct Avatar {
+    expires: f32,
+    arrived: f32,
+    pub lifecycle_scale: f32,
+    pub grey: f32,
     pub key: Key,
     pub name: String,
     pub portrait: Option<std::sync::Arc<crate::avatars::Portrait>>,
@@ -217,7 +230,7 @@ pub(super) struct Avatar {
     touched: Vec<u64>,
     last_active: f32,
     pub presence: f32,
-    // Service-only fading keeps lane occupancy identical in planning and playback.
+    // Travel fades do not release a reserved parking slot.
     slot_presence: f32,
     pub projection_scale: f32,
     height_band: f32,
@@ -301,6 +314,9 @@ struct State {
 
 /// Deterministic playback stepped at a fixed tick rate, independent of output frame rate.
 pub(super) struct Simulation {
+    first_arrivals: Vec<bool>,
+    departures: Vec<f32>,
+    repository_ends: Vec<f32>,
     pub caption_style: caption::Style,
     caption_plan: Vec<caption::Transition>,
     packing: crate::layout::packing::Packing,
@@ -351,7 +367,13 @@ impl Simulation {
         repositories: usize,
         schedule: &Schedule,
     ) -> anyhow::Result<()> {
-        let ticks = frames_for(schedule.duration(), 60)?;
+        let (_, endings) = lifecycle::plan(
+            events,
+            schedule,
+            options,
+            options.selected_range(events.len()),
+        );
+        let ticks = frames_for(lifecycle::duration(schedule, &endings), 60)?;
         let authors = events[options.selected_range(events.len())]
             .iter()
             .map(|e| (e.author.name.as_slice(), e.author.email.as_slice()))
@@ -378,6 +400,7 @@ impl Simulation {
         &self.schedule.starts
     }
 
+    #[cfg(test)]
     pub(super) fn new(
         events: Vec<Event>,
         options: &Options,
@@ -387,6 +410,7 @@ impl Simulation {
         Self::with_repositories(events, options, theme, mappings, &[])
     }
 
+    #[cfg(test)]
     pub(super) fn with_repositories(
         events: Vec<Event>,
         options: &Options,
@@ -423,6 +447,10 @@ impl Simulation {
         let mut compactions = 0;
         loop {
             pass += 1;
+            anyhow::ensure!(
+                pass <= 32,
+                "avatar travel planning did not converge within 32 passes; shorten the history or use capped travel"
+            );
             if pass > 1 || padding.iter().any(|&(_, ticks)| ticks > 0) {
                 let schedule = Schedule::with_padding(
                     &events[options.selected_range(events.len())],
@@ -491,12 +519,6 @@ impl Simulation {
         padding: &[(usize, u32)],
         repositories: &[String],
     ) -> Self {
-        let padding_at = |index| {
-            padding
-                .iter()
-                .find(|&&(event, _)| event == index)
-                .map_or(0, |&(_, ticks)| ticks)
-        };
         if events.iter().any(|event| event.contributor.is_none()) {
             mappings.apply(&mut events);
         }
@@ -505,13 +527,13 @@ impl Simulation {
             &events[start..end],
             options.seconds_per_day,
             options.max_idle_seconds,
-            |index| padding_at(start + index),
+            |index| schedule::padding_at(padding, start + index),
         );
         let layout_starts = Schedule::with_padding(
             &events,
             options.seconds_per_day,
             options.max_idle_seconds,
-            |index| padding_at(index) * u32::from(index >= start),
+            |index| schedule::padding_at(padding, index) * u32::from(index >= start),
         );
         let mut state = State {
             region_depth: 0.0,
@@ -560,9 +582,15 @@ impl Simulation {
         (state.focus, state.distance) = state.fit();
         let total = events.len();
         let prior_active = prior_activity(&events[..start], repositories.len());
+        let (departures, repository_ends) =
+            lifecycle::plan(&events, &schedule, options, start..end);
+        let first_arrivals = lifecycle::arrivals(&events, start..end);
         events.truncate(end);
         events.drain(..start);
         let mut simulation = Self {
+            first_arrivals,
+            departures,
+            repository_ends,
             caption_style: caption::Style::default(),
             caption_plan: Vec::new(),
             packing: crate::layout::packing::Packing::default(),
@@ -660,6 +688,11 @@ impl Simulation {
             &samples,
             self.state.gutter,
             uncapped.then_some(activation.as_slice()),
+        )
+        .with_endings(
+            &self.repository_ends,
+            lifecycle::REPOSITORY_EXIT,
+            lifecycle::REFLOW,
         );
         self.state = self.initial.clone();
         self.state.region_depth = framing::depth_bound();
@@ -672,7 +705,37 @@ impl Simulation {
         snapshots
     }
     pub(super) fn duration(&self) -> f32 {
-        self.schedule.duration()
+        lifecycle::duration(&self.schedule, &self.repository_ends)
+    }
+
+    pub(super) fn repository_effect(&self, repository: usize) -> (f32, f32, f32) {
+        let end = self
+            .repository_ends
+            .get(repository)
+            .copied()
+            .unwrap_or(f32::INFINITY);
+        let u = lifecycle::progress(self.seconds(), end, lifecycle::REPOSITORY_EXIT);
+        (u.min(0.2) * 5.0, 1.0 - u, u * self.scale() * 1.5)
+    }
+
+    pub(super) fn file_effect(&self, file: &crate::layout::File) -> (Vec3, f32, f32) {
+        let dir = self.layout().dir(file.dir);
+        let (grey, alpha, rise) = self.repository_effect(dir.repository);
+        let mut position = ground(file.position) + Vec3::Y * rise;
+        match file.state {
+            crate::layout::Presence::Arriving => {
+                if let Some(avatar) = self.state.avatars.get(file.author) {
+                    position = avatar.position.lerp(position, file.presence);
+                }
+                (position, grey, alpha)
+            }
+            crate::layout::Presence::Leaving => (
+                position + Vec3::Y * (1.0 - file.presence) * self.scale(),
+                1.0,
+                alpha * file.presence,
+            ),
+            crate::layout::Presence::Present => (position, grey, alpha),
+        }
     }
 
     pub(super) fn restart(&mut self) {
@@ -723,6 +786,19 @@ impl Simulation {
                 break;
             };
             state.begin(event, start);
+            if let Some(&author) = event
+                .contributor
+                .as_ref()
+                .and_then(|c| state.authors.get(&c.key))
+            {
+                state.avatars[author].expires = self.departures[state.next_event];
+                if !self.first_arrivals[state.next_event]
+                    && state.avatars[author].arrived >= start
+                {
+                    state.avatars[author].arrived = f32::NEG_INFINITY;
+                    state.avatars[author].lifecycle_scale = 1.0;
+                }
+            }
             state.next_event += 1;
         }
         let dt = tick_seconds();
@@ -744,7 +820,7 @@ impl Simulation {
         let active = state
             .avatars
             .iter()
-            .filter(|avatar| now - avatar.last_active < AVATAR_IDLE)
+            .filter(|avatar| now < avatar.expires)
             .count();
         let scale = if state.layout.repositories.is_empty() {
             names::scale(active)
@@ -777,7 +853,9 @@ impl Simulation {
                     - avatar.velocity * 2.0 * omega;
                 avatar.velocity += acceleration * dt;
                 avatar.velocity.y = 0.0;
-                avatar.position += avatar.velocity * dt;
+                if now < avatar.expires {
+                    avatar.position += avatar.velocity * dt;
+                }
             } else {
                 avatar.position = target;
                 avatar.velocity = Vec3::ZERO;
@@ -790,13 +868,21 @@ impl Simulation {
             } else {
                 slots::projection_scale(avatar.position)
             };
-            let service_visible = now - avatar.last_active < AVATAR_IDLE;
+            let service_visible = now < avatar.expires;
             let service_fade = if service_visible { dt / 0.4 } else { -dt / 1.2 };
             avatar.slot_presence =
                 (avatar.slot_presence + service_fade).clamp(0.0, 1.0);
-            let visible = travel.is_some() || service_visible;
-            let fade = if visible { dt / 0.4 } else { -dt / 1.2 };
+            let visible = service_visible;
+            let fade = if visible {
+                dt / 0.4
+            } else {
+                -dt / lifecycle::EXIT
+            };
             avatar.presence = (avatar.presence + fade).clamp(0.0, 1.0);
+            avatar.grey = lifecycle::progress(now, avatar.expires, 0.4);
+            avatar.lifecycle_scale = 1.0
+                + (ARRIVAL_SCALE - 1.0)
+                    * (1.0 - lifecycle::progress(now, avatar.arrived + 0.4, 0.8));
             if let Some((_, opacity)) = travel {
                 avatar.presence = avatar.presence.min(opacity);
             }
@@ -1057,7 +1143,7 @@ impl Simulation {
             .iter()
             .enumerate()
             .filter(|(_, r)| r.live)
-            .flat_map(|(index, region)| {
+            .flat_map(move |(index, region)| {
                 let height = match self.repository_label_plane {
                     crate::repositories::LabelPlane::Files => 0.15,
                     crate::repositories::LabelPlane::Raised => framing::LABEL_Y,
@@ -1081,7 +1167,7 @@ impl Simulation {
                         text: region.label.clone(),
                         kind: LabelKind::Repository,
                         scale,
-                        opacity,
+                        opacity: opacity * self.repository_effect(index).1,
                         priority: 0.0,
                     })
             })
@@ -1136,7 +1222,7 @@ impl Simulation {
                 text: format!("{}/", dir.name()),
                 kind: LabelKind::Landmark,
                 scale: 1.0,
-                opacity: 1.0,
+                opacity: self.repository_effect(dir.repository).1,
                 priority: 0.0,
             })
             .collect();
@@ -1177,7 +1263,7 @@ impl Simulation {
 
 impl State {
     fn avatar_radius(&self) -> f32 {
-        6.5 * self.avatar_scale * self.avatar_size + 1.0
+        6.5 * self.avatar_scale * self.avatar_size * ARRIVAL_SCALE + 1.0
     }
 
     fn avatar_targets(&self, now: f32) -> Vec<Vec3> {
@@ -1199,7 +1285,7 @@ impl State {
             .avatars
             .iter()
             .zip(&widths)
-            .filter(|(avatar, _)| now - avatar.last_active < AVATAR_IDLE)
+            .filter(|(avatar, _)| now < avatar.expires)
             .map(|(_, &width)| width + 12.0)
             .sum();
         let (low, high) = self.layout.bounds();
@@ -1207,9 +1293,7 @@ impl State {
         let mut pairs = Vec::new();
         for a in 0..targets.len() {
             for b in a + 1..targets.len() {
-                if now - self.avatars[a].last_active < AVATAR_IDLE
-                    && now - self.avatars[b].last_active < AVATAR_IDLE
-                {
+                if now < self.avatars[a].expires && now < self.avatars[b].expires {
                     pairs.push((
                         a,
                         b,
@@ -1239,6 +1323,10 @@ impl State {
         }
         let index = self.avatars.len();
         self.avatars.push(Avatar {
+            expires: now + AVATAR_IDLE,
+            arrived: now,
+            lifecycle_scale: ARRIVAL_SCALE,
+            grey: 0.0,
             key: contributor.key.clone(),
             name: contributor.name.clone(),
             portrait: contributor.portrait.clone(),
@@ -1756,7 +1844,7 @@ pub(crate) fn count_u32(value: u32) -> f32 {
 }
 
 /// Formats Unix seconds as a UTC calendar date, using Howard Hinnant's civil algorithm.
-fn date(seconds: i64) -> String {
+pub(super) fn date(seconds: i64) -> String {
     let days = seconds.div_euclid(86_400);
     let shifted = days + 719_468;
     let era = shifted.div_euclid(146_097);
@@ -2404,6 +2492,7 @@ mod tests {
         for avatar in &mut sim.state.avatars {
             avatar.target = Vec3::ZERO;
             avatar.last_active = 5.0;
+            avatar.expires = 5.0 + AVATAR_IDLE;
         }
         sim.state.avatars[0].name = "a very long contributor name".to_owned();
         sim.state.avatars[1].name = "X".to_owned();

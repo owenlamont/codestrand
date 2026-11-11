@@ -11,7 +11,7 @@ mod zoom;
 const BOUND: f32 = 2.5;
 pub(crate) const MINIMUM: Vec2 = Vec2::new(144.0, 64.0);
 pub(crate) const BIRTH_TICKS: u32 = 45;
-const ALLOCATION_TOLERANCE_PX: f32 = 0.1;
+const ALLOCATION_TOLERANCE_PX: f32 = 0.25;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Tile {
@@ -27,12 +27,25 @@ impl Tile {
                 -limit.x,
                 (caption::BOTTOM + framing::MARGIN) * 2.0 / framing::VIEWPORT.y,
             ),
-            high: limit,
+            high: Vec2::new(
+                limit.x,
+                (caption::TOP - framing::MARGIN) * 2.0 / framing::VIEWPORT.y,
+            ),
         }
     }
 
     pub(crate) fn area(self) -> f32 {
         (self.high - self.low).element_product() * 0.25
+    }
+
+    pub(crate) fn usable(self) -> Self {
+        let size = self.high - self.low;
+        let low_padding = (Vec2::splat(8.0) * 2.0 / framing::VIEWPORT).min(size * 0.2);
+        let high_padding = low_padding;
+        Self {
+            low: self.low + low_padding,
+            high: self.high - high_padding,
+        }
     }
 
     pub(crate) fn pixels(self) -> Vec2 {
@@ -136,7 +149,10 @@ fn combine(a: &[Vec2], b: &[Vec2], axis: usize, gap: f32) -> Vec<Vec2> {
             let before = low[(i + length - 1) % length];
             let point = low[i];
             let after = low[(i + 1) % length];
-            ((point - before).perp_dot(after - point).abs() > 0.01).then_some(point)
+            let first = point - before;
+            let second = after - point;
+            (first.perp_dot(second).abs() > 1e-6 * first.length() * second.length())
+                .then_some(point)
         })
         .collect()
 }
@@ -327,7 +343,8 @@ fn allocated(
 ) -> Option<Vec<Option<Tile>>> {
     let size = Tile::viewport().pixels();
     let (low, high) = interval(&states[0].sizes, 0, size.y)?;
-    if size.x < low - 0.01 || size.x > high + 0.01 {
+    if size.x < low - ALLOCATION_TOLERANCE_PX || size.x > high + ALLOCATION_TOLERANCE_PX
+    {
         return None;
     }
     let mut output = vec![None; repositories];
@@ -488,7 +505,7 @@ fn gutter_cells(nodes: &[Node], placement: &[Placement]) -> Vec<Option<Tile>> {
                 -limit.x,
                 (caption::BOTTOM + 16.0) * 2.0 / framing::VIEWPORT.y,
             ),
-            high: limit,
+            high: Vec2::new(limit.x, (caption::TOP - 16.0) * 2.0 / framing::VIEWPORT.y),
         },
         placement,
         &mut result,
@@ -505,6 +522,7 @@ pub(crate) struct Packing {
     rotated: Vec<bool>,
     placements: Arc<[OnceLock<Vec<Placement>>]>,
     zoom: Arc<[Vec<f32>]>,
+    visible_until: Arc<[f32]>,
 }
 
 fn rotations(
@@ -538,6 +556,32 @@ fn rotations(
 }
 
 impl Packing {
+    pub(crate) fn with_endings(
+        mut self,
+        endings: &[f32],
+        exit: f32,
+        reflow: f32,
+    ) -> Self {
+        if !endings.iter().any(|end| end.is_finite()) {
+            return self;
+        }
+        self.visible_until = endings.iter().map(|end| end + exit).collect();
+        for (tick, sample) in Arc::make_mut(&mut self.samples).iter_mut().enumerate() {
+            let now = crate::model::tick_time(
+                u64::try_from(tick).expect("bounded packing tick"),
+            );
+            for (presence, end) in sample.presence.iter_mut().zip(endings) {
+                let u = ((now - end - exit) / reflow).clamp(0.0, 1.0);
+                *presence *= 1.0 - u * u * (3.0 - 2.0 * u);
+                // Subpixel regions fall below the feasible-polygon clipping tolerance.
+                if u > 0.0 && *presence < 0.001 {
+                    *presence = 0.0;
+                }
+            }
+        }
+        self.placements = (0..self.samples.len()).map(|_| OnceLock::new()).collect();
+        self.plan_zoom()
+    }
     #[cfg(test)]
     pub(crate) fn build(regions: &[Vec<RepositoryRegion>]) -> Self {
         Self::build_births(regions, false, 4.0, None)
@@ -656,17 +700,34 @@ impl Packing {
             rotated,
             placements: (0..regions.len()).map(|_| OnceLock::new()).collect(),
             zoom: Arc::default(),
+            visible_until: Arc::default(),
         }
         .plan_zoom()
     }
 
     fn plan_zoom(mut self) -> Self {
+        self.zoom = Arc::default();
         let mut scales: Vec<Vec<_>> = (0..self.regions.len())
             .map(|tick| {
                 self.fit(tick, None)
                     .iter()
                     .zip(&self.regions[tick])
-                    .map(|(p, r)| if r.live { p.scale } else { 0.0 })
+                    .enumerate()
+                    .map(|(i, (p, r))| {
+                        if r.live
+                            && crate::model::tick_time(
+                                u64::try_from(tick).expect("bounded packing tick"),
+                            ) < self
+                                .visible_until
+                                .get(i)
+                                .copied()
+                                .unwrap_or(f32::INFINITY)
+                        {
+                            p.scale
+                        } else {
+                            0.0
+                        }
+                    })
                     .collect()
             })
             .collect();
@@ -786,7 +847,7 @@ impl Packing {
                 let tile = placement[i];
                 // A fixed screen anchor avoids switching between equal-area fit vertices.
                 let fitted = tile.map(|tile| {
-                    fit::anchored(tile, &shape, r.height, Vec2::splat(0.5))
+                    fit::anchored(tile.usable(), &shape, r.height, Vec2::splat(0.5))
                 });
                 let raw_scale = fitted.map_or(0.0, |f| f.scale);
                 let scale = self
@@ -1109,5 +1170,49 @@ mod tests {
             .unwrap();
         assert!(regions.iter().all(|r| !r.live));
         assert!(Packing::default().sample(0).is_none());
+    }
+
+    #[test]
+    fn invisible_ending_slivers_do_not_zoom_out_visible_content() {
+        let rows: Vec<_> = fixture()
+            .into_iter()
+            .take(1600)
+            .map(|row| row.into_iter().take(2).collect())
+            .collect();
+        let original = Packing::build(&rows);
+        let ending = original
+            .clone()
+            .with_endings(&[20.0, f32::INFINITY], 2.5, 4.0);
+        for tick in 600..1200 {
+            let before = original.sample(tick).unwrap().2[0];
+            let after = ending.sample(tick).unwrap().2[0];
+            assert!(
+                after >= before * 0.99,
+                "premature collapse at {tick}: {before} -> {after}"
+            );
+        }
+    }
+
+    #[test]
+    fn ending_holds_tiles_until_fade_finishes_then_reflows_for_four_seconds() {
+        let original = Packing::build(&fixture());
+        let endings: Vec<_> = (0..30)
+            .map(|i| if i == 0 { f32::INFINITY } else { 20.0 })
+            .collect();
+        let ending = original.clone().with_endings(&endings, 2.5, 4.0);
+        assert_eq!(
+            original.sample(1350).unwrap().0[0].tile,
+            ending.sample(1350).unwrap().0[0].tile
+        );
+        let middle = ending.sample(1470).unwrap().0;
+        assert!(middle[1].tile.is_some());
+        let final_regions = ending.sample(1599).unwrap().0;
+        assert_eq!(final_regions[0].tile, Some(Tile::viewport()));
+        assert!(
+            final_regions[1..]
+                .iter()
+                .all(|region| region.tile.is_none())
+        );
+        assert_eq!(ending.sample(1470).unwrap().0[0].tile, middle[0].tile);
     }
 }
