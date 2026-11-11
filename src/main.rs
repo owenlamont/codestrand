@@ -110,7 +110,7 @@ enum Command {
     },
     /// Play history in a loop; [ halves and ] doubles live speed (0.125x–8x). Escape closes it.
     #[command(
-        after_help = "Camera: overhead by default. Right drag orbits horizontally and vertically without pitch limits, including below the plane. WASD pans, scroll zooms, Tab follows contributors, Space restores overhead. Orbit and zoom retain follow; pan releases it."
+        after_help = "Camera: overhead by default. Right drag rotates without pitch limits; the eye stays above the file plane and can look up at contributors. At the floor, free orbit turns about the eye and follow shortens its radius. WASD pans, scroll zooms, Tab follows contributors, Space restores overhead. Orbit and zoom retain follow; pan releases it."
     )]
     Preview {
         #[arg(long, value_enum, default_value = "neon")]

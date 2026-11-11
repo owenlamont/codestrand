@@ -18,12 +18,8 @@ pub(crate) const GROUND_FACTOR: f32 = (DISTANCE - FIELD_HEIGHT) / DISTANCE;
 
 // One affine field scale reserves the elevated portraits' frame clearance without warping tiles.
 pub(crate) fn field_to_world(point: Vec2) -> Vec2 {
-    screen_to_world_at(point, FIELD_HEIGHT)
-}
-
-pub(crate) fn screen_to_world_at(point: Vec2, height: f32) -> Vec2 {
     let tangent = (FOV * 0.5).tan();
-    let depth = DISTANCE - height;
+    let depth = DISTANCE - FIELD_HEIGHT;
     Vec2::new(point.x * VIEWPORT.x / VIEWPORT.y, -point.y) * tangent * depth
 }
 
@@ -51,9 +47,8 @@ pub(super) fn label_position(region: &RepositoryRegion) -> Vec3 {
         let size = label_size(&region.label, 20.0) * 2.0 / VIEWPORT;
         let anchor = Vec2::new(tile.low.x + padding.x, tile.high.y - padding.y)
             .clamp(limit.low + Vec2::Y * size.y, limit.high - Vec2::X * size.x);
-        return ground(crate::layout::world_coordinates(screen_to_world_at(
-            anchor, LABEL_Y,
-        ))) + Vec3::Y * LABEL_Y;
+        return ground(crate::layout::world_coordinates(field_to_world(anchor)))
+            + Vec3::Y * LABEL_Y;
     }
     let point = crate::layout::world_coordinates(Vec2::new(
         region.low.x.midpoint(region.high.x),

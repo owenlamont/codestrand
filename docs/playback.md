@@ -44,19 +44,22 @@ returns to free camera when the target fades out. Preview controls do not change
 the exported camera or timeline.
 
 The default camera looks straight down at the centre of the repository tile area.
-Repository tiles are rectangles in world coordinates. Preview orbit can pass over the
-pole, through the file plane and underneath contributors, without stopping or flipping.
+Repository tiles are rectangles in world coordinates. Preview rotation has no pitch
+limits or pole lock. The eye stays at least 1.2 world units above the file plane,
+above the glass and file geometry, and can look up at contributors at height 3.2.
 Vertical drag rotates around the camera's right axis; horizontal drag rotates around
 the camera's up axis, so both controls follow the screen when upside down. Orbit and
-zoom retain the followed contributor as the aim; panning releases follow. Space smoothly
-restores the overhead view from any orientation.
+zoom retain the followed contributor as the aim; panning releases follow. At the floor,
+Free orbit turns about the eye instead of crossing the plane; zoom slides along the
+floor and pan stays horizontal. Follow shortens its orbit radius at the floor while
+keeping its aim on the contributor. Space smoothly raises the eye and restores the
+overhead view from any orientation.
 
 Export uses the fixed overhead perspective camera at explicit frame times. Default
 framing reserves space for elevated avatars and labels; clearance guarantees apply to
 the fitted view. Free orbit and zoom can crop content. File glyphs face the camera;
 directory structures, membership rings and activity halos remain on the file plane.
-The opaque background plane is single-sided, allowing views from underneath; repository
-glass and flat content remain visible from both sides.
+The plane cannot be viewed from underneath; glass and file surfaces use backface culling.
 
 ## Themes
 

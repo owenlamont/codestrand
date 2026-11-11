@@ -195,13 +195,13 @@ mod tests {
     use bevy::{color::ColorToPacked, prelude::IntoScheduleConfigs};
 
     #[test]
-    #[ignore = "requires a graphics adapter and CODESTRAND_BELOW_OUTPUT directory"]
-    fn below_plane_preview_still() {
+    #[ignore = "requires a graphics adapter and CODESTRAND_LOW_OUTPUT directory"]
+    fn low_angle_preview_still() {
         use clap::Parser;
         let output = std::path::PathBuf::from(
-            std::env::var_os("CODESTRAND_BELOW_OUTPUT").unwrap(),
+            std::env::var_os("CODESTRAND_LOW_OUTPUT").unwrap(),
         );
-        let repository = std::env::var("CODESTRAND_BELOW_REPOSITORY").unwrap();
+        let repository = std::env::var("CODESTRAND_LOW_REPOSITORY").unwrap();
         let cli = crate::Cli::try_parse_from([
             "codestrand",
             "preview",
@@ -216,18 +216,21 @@ mod tests {
         let Some(crate::Command::Preview { source, .. }) = cli.command else {
             panic!("preview fixture");
         };
-        let (simulation, title) = source.load().unwrap();
+        let (mut simulation, title) = source.load().unwrap();
+        simulation.advance_to(393, 30);
         let mut camera = crate::camera::PreviewCamera::new(simulation.view());
         camera.update(
             &crate::camera::Input {
-                orbit: bevy::math::Vec2::Y * (140.0_f32.to_radians() / 0.004),
+                orbit: bevy::math::Vec2::Y * (110.0_f32.to_radians() / 0.004),
+                cycle: true,
                 ..Default::default()
             },
             simulation.view(),
-            &[],
-            0.1,
+            simulation.avatars(),
+            10.0,
         );
-        assert!(camera.pose().0.y < 0.0);
+        assert!(camera.pose().0.y >= crate::camera::EYE_FLOOR);
+        assert!(camera.pose().0.y < model::framing::FIELD_HEIGHT);
         let (mut app, target) = scene::headless(simulation, title, 30);
         app.insert_resource(camera);
         app.world_mut().resource_mut::<scene::Frame>().index = 393;
@@ -251,7 +254,7 @@ mod tests {
             .try_into_dynamic()
             .unwrap()
             .to_rgb8()
-            .save(output.join("below-plane.png"))
+            .save(output.join("low-angle.png"))
             .unwrap();
     }
 

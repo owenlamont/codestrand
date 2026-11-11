@@ -130,15 +130,10 @@ impl Palette {
             })
             .collect();
         let heat_glyphs = Self::heat_materials(&mut materials, &glyphs, theme);
-        let tile = theme.file_tile.as_ref().map(|tile| {
-            (
-                materials.add(StandardMaterial {
-                    cull_mode: None,
-                    ..tile.material.clone()
-                }),
-                tile.transform,
-            )
-        });
+        let tile = theme
+            .file_tile
+            .as_ref()
+            .map(|tile| (materials.add(tile.material.clone()), tile.transform));
         let edge = materials.add(theme.edge.clone());
         let floor = materials.add(theme.floor.clone());
         let grid = materials.add(theme.grid.clone());
@@ -573,7 +568,6 @@ fn repository_glass_material(theme: &Theme, index: usize) -> StandardMaterial {
             .with_alpha(0.055),
         alpha_mode: AlphaMode::Blend,
         unlit: true,
-        cull_mode: None,
         ..default()
     }
 }
@@ -859,10 +853,8 @@ pub(super) fn switch_theme(world: &mut World, name: crate::theme::ThemeName) {
         if let (Some((handle, _)), Some(tile)) = (&palette.tile, &theme.file_tile) {
             *materials
                 .get_mut(handle)
-                .expect("palette tile material remains allocated") = StandardMaterial {
-                cull_mode: None,
-                ..tile.material.clone()
-            };
+                .expect("palette tile material remains allocated") =
+                tile.material.clone();
         }
         let textures = &palette
             .glyph_textures

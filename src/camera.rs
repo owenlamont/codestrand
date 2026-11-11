@@ -8,6 +8,8 @@ use crate::{
     model::{self, Avatar},
 };
 
+pub(super) const EYE_FLOOR: f32 = model::framing::GLASS_TOP + 0.1;
+
 #[derive(Debug, PartialEq)]
 enum Mode {
     Fit,
@@ -17,7 +19,7 @@ enum Mode {
         name: String,
     },
     Reset {
-        focus: Vec3,
+        eye: Vec3,
         distance: f32,
         rotation: Quat,
         elapsed: f32,
@@ -58,9 +60,11 @@ impl PreviewCamera {
         avatars: &[Avatar],
         dt: f32,
     ) {
+        let previous_eye = self.pose().0;
+        let was_following = matches!(self.mode, Mode::Follow { .. });
         if input.reset {
             self.mode = Mode::Reset {
-                focus: self.focus,
+                eye: self.pose().0,
                 distance: self.distance,
                 rotation: self.rotation,
                 elapsed: 0.0,
@@ -76,10 +80,14 @@ impl PreviewCamera {
                 self.mode = Mode::Free;
             }
         }
+        if was_following && self.mode == Mode::Free {
+            self.focus = previous_eye - self.rotation * Vec3::Z * self.distance;
+        }
+        let old_eye = self.pose().0;
         match &mut self.mode {
             Mode::Fit => *self = Self::new(view),
             Mode::Reset {
-                focus,
+                eye,
                 distance,
                 rotation,
                 elapsed,
@@ -88,14 +96,16 @@ impl PreviewCamera {
                 let weight = (*elapsed / 0.5).min(1.0);
                 let ease = weight * weight * (3.0 - 2.0 * weight);
                 let default = Self::new(view);
-                self.focus = focus.lerp(default.focus, ease);
                 self.distance = *distance + (default.distance - *distance) * ease;
                 self.rotation = rotation.slerp(default.rotation, ease);
+                self.focus = eye.lerp(default.pose().0, ease)
+                    - self.rotation * Vec3::Z * self.distance;
                 if weight >= 1.0 {
                     *self = default;
                 }
             }
             Mode::Free | Mode::Follow { .. } => {
+                let old_distance = self.distance;
                 self.rotation = (self.rotation
                     * Quat::from_rotation_y(-input.orbit.x * 0.004)
                     * Quat::from_rotation_x(input.orbit.y * 0.004))
@@ -111,8 +121,19 @@ impl PreviewCamera {
                             self.focus.lerp(avatar.position, 1.0 - (-dt / 0.3).exp());
                     } else {
                         self.mode = Mode::Free;
+                        self.focus = old_eye - self.rotation * Vec3::Z * self.distance;
                     }
                 } else {
+                    let back = self.rotation * Vec3::Z;
+                    let orbit_eye = self.focus + back * old_distance;
+                    let eye = if orbit_eye.y < EYE_FLOOR {
+                        old_eye.with_y(EYE_FLOOR)
+                    } else {
+                        orbit_eye
+                    };
+                    let eye = eye + back * (self.distance - old_distance);
+                    self.focus =
+                        eye.with_y(eye.y.max(EYE_FLOOR)) - back * self.distance;
                     let right = (self.rotation * Vec3::X).with_y(0.0);
                     let forward = (self.rotation * Vec3::Y).with_y(0.0);
                     self.focus += (right * input.pan.x + forward * input.pan.y)
@@ -140,6 +161,7 @@ impl PreviewCamera {
             _ => 0,
         };
         self.mode = following(visible[next]);
+        self.focus.y = self.focus.y.max(EYE_FLOOR + 0.001);
     }
 
     pub(super) fn pose(&self) -> (Vec3, Vec3) {
@@ -148,7 +170,15 @@ impl PreviewCamera {
         } else {
             self.rotation * Vec3::Z
         };
-        (self.focus + direction * self.distance, self.focus)
+        let distance = if matches!(self.mode, Mode::Follow { .. }) && direction.y < 0.0
+        {
+            self.distance
+                .min((self.focus.y - EYE_FLOOR).max(0.0) / -direction.y)
+        } else {
+            self.distance
+        };
+        let eye = self.focus + direction * distance;
+        (eye.with_y(eye.y.max(EYE_FLOOR)), self.focus)
     }
 
     pub(super) fn rotation(&self) -> Quat {
@@ -181,6 +211,126 @@ mod tests {
         theme::Theme,
         timeline::{self, Event},
     };
+
+    #[test]
+    fn floor_turns_about_the_eye_and_follow_releases_without_a_jump() {
+        let view = (Vec3::ZERO, 60.0);
+        let mut camera = PreviewCamera::new(view);
+        camera.update(
+            &Input {
+                orbit: Vec2::Y * 500.0,
+                ..Default::default()
+            },
+            view,
+            &[],
+            0.1,
+        );
+        let eye = camera.pose().0;
+        let rotation = camera.rotation();
+        camera.update(
+            &Input {
+                orbit: Vec2::Y,
+                ..Default::default()
+            },
+            view,
+            &[],
+            0.1,
+        );
+        assert!(camera.pose().0.abs_diff_eq(eye, 1e-5));
+        assert!(rotation.angle_between(camera.rotation()) > 0.003);
+
+        let simulation = avatars();
+        for pan in [Vec2::ZERO, Vec2::X] {
+            let mut camera = PreviewCamera::new(view);
+            camera.update(
+                &Input {
+                    cycle: true,
+                    orbit: Vec2::Y * 500.0,
+                    ..Default::default()
+                },
+                view,
+                simulation.avatars(),
+                10.0,
+            );
+            let pose = camera.pose();
+            let rotation = camera.rotation();
+            camera.update(
+                &Input {
+                    pan,
+                    ..Default::default()
+                },
+                view,
+                &[],
+                0.0,
+            );
+            assert_eq!(camera.mode, Mode::Free);
+            assert!(camera.pose().0.abs_diff_eq(pose.0, 1e-5));
+            assert_eq!(camera.rotation(), rotation);
+        }
+    }
+
+    #[test]
+    fn eye_floor_clears_every_theme_file_bound_and_glass() {
+        for name in crate::theme::ThemeName::ALL {
+            let theme = name.build();
+            assert!(theme.geometry().file_max.y < EYE_FLOOR, "{name:?}");
+        }
+    }
+
+    #[test]
+    fn eye_floor_survives_orbit_zoom_pan_and_follow() {
+        let view = (Vec3::ZERO, 60.0);
+        let simulation = avatars();
+        for (follow, direction) in
+            [(false, -1.0), (false, 1.0), (true, -1.0), (true, 1.0)]
+        {
+            let mut camera = PreviewCamera::new(view);
+            camera.update(
+                &Input {
+                    cycle: follow,
+                    ..Default::default()
+                },
+                view,
+                simulation.avatars(),
+                0.1,
+            );
+            let mut previous = camera.rotation();
+            for step in 0..4000 {
+                camera.update(
+                    &Input {
+                        orbit: Vec2::new(direction * 0.7, direction * 4.0),
+                        zoom: if step % 200 < 100 { 0.1 } else { -0.1 },
+                        pan: if follow {
+                            Vec2::ZERO
+                        } else {
+                            Vec2::new(direction, -direction)
+                        },
+                        ..Default::default()
+                    },
+                    view,
+                    simulation.avatars(),
+                    1.0 / 60.0,
+                );
+                let q = camera.rotation();
+                let (eye, aim) = camera.pose();
+                assert!(eye.y >= 1.2, "eye below file clearance: {eye:?}");
+                assert!(eye.is_finite() && aim.is_finite() && q.is_finite());
+                let [right, up, back] = [Vec3::X, Vec3::Y, Vec3::Z].map(|v| q * v);
+                assert!((right.cross(up) - back).length() < 1e-5);
+                assert!((q.length() - 1.0).abs() < 1e-5);
+                assert!(previous.angle_between(q) < 0.017);
+                assert!((eye - aim).normalize().abs_diff_eq(back, 1e-4));
+                if follow {
+                    assert_eq!(camera.mode, following(&simulation.avatars()[0]));
+                    assert!(
+                        aim.distance(simulation.avatars()[0].position) < 0.001
+                            || step < 200
+                    );
+                }
+                previous = q;
+            }
+        }
+    }
 
     #[test]
     fn top_down_default_aims_at_the_field_centre() {
@@ -411,7 +561,7 @@ mod tests {
     }
 
     #[test]
-    fn reset_from_below_slerps_to_overhead_without_a_jump() {
+    fn reset_from_floor_slerps_to_overhead_without_a_jump() {
         let view = (Vec3::ZERO, 60.0);
         let mut camera = PreviewCamera::new(view);
         camera.update(
@@ -423,7 +573,7 @@ mod tests {
             &[],
             0.1,
         );
-        assert!(camera.pose().0.y < 0.0);
+        assert!((camera.pose().0.y - EYE_FLOOR).abs() < 1e-5);
         let before = camera.rotation();
         camera.update(
             &Input {
@@ -437,6 +587,7 @@ mod tests {
         assert!(before.angle_between(camera.rotation()) < 1e-5);
         for _ in 0..31 {
             camera.update(&Input::default(), view, &[], 1.0 / 60.0);
+            assert!(camera.pose().0.y >= EYE_FLOOR);
         }
         assert_eq!(camera.mode, Mode::Fit);
         assert_eq!(camera.rotation(), PreviewCamera::new(view).rotation());
@@ -509,7 +660,7 @@ mod tests {
         assert!(camera.focus.y < avatars[0].position.y);
         let focus = camera.focus;
         camera.update(&Input::default(), view, &[], 0.1);
-        assert_eq!(camera.focus, focus);
+        assert!(camera.focus.abs_diff_eq(focus, 1e-5));
         assert_eq!(camera.mode, Mode::Free);
         camera.update(
             &Input {
@@ -686,7 +837,8 @@ mod tests {
         assert!(avatars[1].presence > 0.0);
         camera.update(&Input::default(), view, &avatars, 0.1);
         assert_eq!(camera.mode, Mode::Free);
-        assert_eq!(camera.pose(), pose);
+        assert!(camera.pose().0.abs_diff_eq(pose.0, 1e-5));
+        assert!(camera.pose().1.abs_diff_eq(pose.1, 1e-5));
     }
 
     #[test]

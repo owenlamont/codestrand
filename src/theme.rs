@@ -218,7 +218,6 @@ impl Theme {
                 base_color: Color::WHITE,
                 alpha_mode: AlphaMode::Blend,
                 unlit: true,
-                cull_mode: None,
                 ..default()
             },
             file_glyph_transform: Transform::from_xyz(0.0, 0.3, 0.0)
@@ -243,7 +242,6 @@ impl Theme {
                 base_color: color.with_alpha(0.32),
                 alpha_mode: AlphaMode::Blend,
                 unlit: true,
-                cull_mode: None,
                 ..default()
             }),
             directories: [

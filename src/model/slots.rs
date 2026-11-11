@@ -150,9 +150,9 @@ impl Placement {
 }
 
 pub(super) fn world(point: Vec2) -> Vec3 {
-    ground(crate::layout::world_coordinates(
-        framing::screen_to_world_at(point / HALF, MIN_AVATAR_HEIGHT),
-    )) + Vec3::Y * MIN_AVATAR_HEIGHT
+    ground(crate::layout::world_coordinates(framing::field_to_world(
+        point / HALF,
+    ))) + Vec3::Y * MIN_AVATAR_HEIGHT
 }
 
 pub(super) fn projection_scale(point: Vec3) -> f32 {
