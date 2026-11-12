@@ -23,6 +23,35 @@ pub(super) struct Lod {
 }
 
 impl Lod {
+    pub(super) fn expand_names(
+        &mut self,
+        layout: &Layout,
+        names: &std::collections::BTreeSet<crate::model::Target>,
+    ) {
+        for target in names {
+            let mut dir = match *target {
+                crate::model::Target::File(id) => layout.file(id).map(|file| file.dir),
+                crate::model::Target::Dir(index) => Some(index),
+            };
+            while let Some(index) = dir {
+                self.collapsed[index] = false;
+                self.blend[index] = 0.0;
+                dir = layout.dir(index).parent;
+            }
+        }
+        self.glyphs.clear();
+        for index in 0..layout.dir_count() {
+            let parent = layout.dir(index).parent.map_or(1.0, |p| self.detail[p]);
+            let weight =
+                self.blend[index] * self.blend[index] * (3.0 - 2.0 * self.blend[index]);
+            self.glyph[index] = parent * weight;
+            self.detail[index] = parent * (1.0 - weight);
+            if self.glyph[index] > 0.0 {
+                self.glyphs.push(index);
+            }
+        }
+    }
+
     #[cfg(test)]
     pub(super) fn sample(&mut self, layout: &Layout, seconds: f32, view: View) {
         self.sample_clocks(layout, seconds, seconds, view);

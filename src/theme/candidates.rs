@@ -1,4 +1,5 @@
 use super::{Theme, ThemeName};
+use bevy::color::Luminance;
 use bevy::prelude::*;
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -250,6 +251,17 @@ impl Theme {
             color(0x00c0_c0c0)
         } else {
             Color::NONE
+        }
+    }
+
+    pub(crate) fn detail_label_background(&self) -> Color {
+        let background = self.label_background();
+        if background.alpha() == 0.0
+            && self.label_emphasis.to_linear().luminance() > 0.5
+        {
+            Color::srgba(0.015, 0.02, 0.04, 0.85)
+        } else {
+            background
         }
     }
 

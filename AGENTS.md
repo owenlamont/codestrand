@@ -78,6 +78,7 @@ Motion must earn its place: it should show history, not decoration.
   overlap while travelling is acceptable.
 - Hold text still. Names and titles move only to avoid imminent occlusion, rarely,
   planned ahead to minimise changes.
+- Prefer brief occlusion to fast or oscillating text motion.
 - Keep whole-view motion such as camera and tile reflow slow and rare to avoid
   motion sickness.
 - Too little motion is dull; inefficient or excessive motion looks wrong. Judge new

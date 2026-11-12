@@ -2,6 +2,8 @@ use std::sync::Arc;
 pub(crate) mod diagnostics;
 mod envelopes;
 mod labels;
+#[cfg(test)]
+mod motion_tests;
 pub(super) use envelopes::Snapshots;
 
 use bevy::math::{Rect, Vec2, Vec3};
@@ -592,48 +594,6 @@ impl State {
             })
             .collect()
     }
-    fn label_emergency(
-        &self,
-        index: usize,
-        motion: &Rotation<'_>,
-        texts: &[Rect],
-    ) -> bool {
-        motion.previous.is_some_and(|p| {
-            let mut threats = texts.to_vec();
-            threats.extend(
-                self.avatars
-                    .iter()
-                    .enumerate()
-                    .filter(|(i, a)| *i != index && a.presence > 0.0)
-                    .filter_map(|(_, a)| a.name_visibility.placement.as_ref())
-                    .map(|n| {
-                        let size = super::names::rect(
-                            Vec2::ZERO,
-                            &n.text,
-                            n.scale,
-                            self.geometry.label_height,
-                        )
-                        .size();
-                        Rect::from_corners(
-                            n.point - Vec2::Y * size.y,
-                            n.point + Vec2::X * size.x,
-                        )
-                    }),
-            );
-            motion.future.iter().take(12).any(|&point| {
-                let rect = labels::tangent_rect(
-                    point,
-                    motion.size,
-                    self.avatar_radius() + 4.0 / 3.0,
-                    p.angle,
-                )
-                .inflate(12.0);
-                !rect.min.cmpge(-HALF).all()
-                    || !rect.max.cmple(HALF).all()
-                    || threats.iter().any(|r| !rect.intersect(*r).is_empty())
-            })
-        })
-    }
     fn label_domains(
         &self,
         bodies: &[Option<Vec2>],
@@ -696,10 +656,8 @@ impl State {
                 body,
                 size,
                 previous,
-                dt,
                 future: &future,
             };
-            let emergency = self.label_emergency(index, &rotation, texts);
             let mut targets: Vec<_> = (0..32_u8)
                 .map(|i| f32::from(i) * std::f32::consts::TAU / 32.0)
                 .collect();
@@ -716,17 +674,10 @@ impl State {
                 ]
                 .map(Vec2::to_angle),
             );
-            targets.extend(previous.map(|p| p.angle));
+            targets.extend(previous.map(|p| p.motion.goal));
             let scored = targets
                 .into_iter()
-                .flat_map(|target| {
-                    std::iter::once(space.candidate(index, target, &rotation, false))
-                        .chain(
-                            emergency.then(|| {
-                                space.candidate(index, target, &rotation, true)
-                            }),
-                        )
-                })
+                .map(|target| space.candidate(index, target, &rotation))
                 .collect();
             let candidates = eligible_angles(scored);
             authors.push(index);
@@ -752,13 +703,48 @@ impl State {
             authors.into_iter().zip(domains).zip(assignment.choices)
         {
             let selected = candidates[choice];
+            let body = bodies[index].expect("projected visible avatar");
+            let size = super::names::rect(
+                Vec2::ZERO,
+                &self.avatars[index].name,
+                self.name_scale(),
+                self.geometry.label_height,
+            )
+            .size();
+            let distance = self.avatar_radius() + 4.0 / 3.0;
+            let previous = self.avatars[index].name_visibility.placement.as_ref();
+            let (angle, angular_velocity, motion) = previous.map_or_else(
+                || {
+                    (
+                        selected.angle,
+                        0.0,
+                        super::names::Motion {
+                            goal: selected.angle,
+                            ..Default::default()
+                        },
+                    )
+                },
+                |previous| {
+                    let rect = labels::tangent_rect(
+                        body,
+                        size,
+                        distance,
+                        previous.motion.goal,
+                    );
+                    let gain = self.name_occlusion(index, rect, &bodies, texts)
+                        - self.name_occlusion(index, selected.rect, &bodies, texts);
+                    labels::move_name(previous, selected.angle, gain, self.tick, dt)
+                },
+            );
+            let rect = labels::tangent_rect(body, size, distance, angle);
             let placement = super::names::Placement {
-                point: Vec2::new(selected.rect.min.x, selected.rect.max.y),
+                point: Vec2::new(rect.min.x, rect.max.y),
                 body: bodies[index].expect("projected visible avatar"),
                 text: self.avatars[index].name.clone(),
                 scale: self.name_scale(),
-                angle: selected.angle,
-                angular_velocity: selected.angular_velocity,
+                angle,
+                angular_velocity,
+                motion,
                 commit: self.avatars[index].commit,
             };
             let visibility = &mut self.avatars[index].name_visibility;
@@ -768,6 +754,54 @@ impl State {
             visibility.joint_exhausted = assignment.exhausted;
             visibility.joint_clear = assignment.clear;
         }
+    }
+
+    fn name_occlusion(
+        &self,
+        index: usize,
+        rect: Rect,
+        bodies: &[Option<Vec2>],
+        texts: &[Rect],
+    ) -> f32 {
+        let area = rect.size().element_product().max(1.0);
+        let overlap = |other: Rect| {
+            rect.intersect(other)
+                .size()
+                .max(Vec2::ZERO)
+                .element_product()
+        };
+        let frame = Rect::from_corners(
+            Vec2::new(-HALF.x, super::caption::BOTTOM),
+            Vec2::new(HALF.x, super::caption::TOP),
+        );
+        let mut covered = area - overlap(frame);
+        covered += texts.iter().map(|&r| overlap(r)).sum::<f32>();
+        covered += content_obstacles(self)
+            .iter()
+            .map(|&(_, r)| overlap(r))
+            .sum::<f32>();
+        for (other, avatar) in self.avatars.iter().enumerate() {
+            if other == index || avatar.presence <= 0.0 {
+                continue;
+            }
+            if let Some(body) = bodies[other] {
+                covered += overlap(disk(body, self.avatar_radius()));
+            }
+            if let Some(name) = &avatar.name_visibility.placement {
+                let size = super::names::rect(
+                    Vec2::ZERO,
+                    &name.text,
+                    name.scale,
+                    self.geometry.label_height,
+                )
+                .size();
+                covered += overlap(Rect::from_corners(
+                    name.point - Vec2::Y * size.y,
+                    name.point + Vec2::X * size.x,
+                ));
+            }
+        }
+        (covered / area).clamp(0.0, 1.0)
     }
 }
 fn eligible_angles(
@@ -800,14 +834,13 @@ fn eligible_angles(
             .then(a.angle.total_cmp(&b.angle))
     });
     candidates
-        .dedup_by(|a, b| a.angle.to_bits() == b.angle.to_bits() && a.goal == b.goal);
+        .dedup_by(|a, b| a.angle.to_bits() == b.angle.to_bits() && a.rect == b.rect);
     candidates
 }
 struct Rotation<'a> {
     body: Vec2,
     size: Vec2,
     previous: Option<&'a super::names::Placement>,
-    dt: f32,
     future: &'a [Vec2],
 }
 struct LabelSpace<'a> {
@@ -824,50 +857,35 @@ impl LabelSpace<'_> {
         index: usize,
         target: f32,
         motion: &Rotation<'_>,
-        emergency: bool,
     ) -> (labels::Candidate, [f32; 4]) {
-        let (angle, angular_velocity) = motion.previous.map_or((target, 0.0), |p| {
-            labels::steer(p.angle, p.angular_velocity, target, motion.dt, emergency)
-        });
         let distance = self.radius + self.margin;
-        let rect = labels::tangent_rect(motion.body, motion.size, distance, angle);
-        let goal = labels::tangent_rect(motion.body, motion.size, distance, target);
+        let rect = labels::tangent_rect(motion.body, motion.size, distance, target);
         let cost = self.cost(index, rect);
-        let goal_cost = self.cost(index, goal);
         let clip = labels::forecast_clip(
-            angle,
-            angular_velocity,
+            target,
+            0.0,
             target,
             motion.size,
             distance,
             motion.future,
-            emergency,
         );
         let text = self.text_cost(rect);
-        let soft = cost[2]
+        let soft = cost[2] * 2.0
             + clip * 1e8
-            + f32::from(u8::from(emergency)) * 0.01
-            + goal_cost[0]
-            + goal_cost[1] * 1e6
-            + goal_cost[2]
+            + cost[0]
+            + cost[1] * 1e6
             + motion.previous.map_or(0.0, |p| {
-                let distance = |a: f32, b: f32| {
-                    (a - b + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)
-                        - std::f32::consts::PI
-                };
-                (angular_velocity - p.angular_velocity).abs()
-                    + distance(target, p.angle).abs() * 5_000.0
-                    + distance(angle, p.angle).abs() * 50_000.0
+                let distance = (target - p.angle + std::f32::consts::PI)
+                    .rem_euclid(std::f32::consts::TAU)
+                    - std::f32::consts::PI;
+                distance.abs() * 55_000.0
             });
         (
             labels::Candidate {
-                angle,
-                angular_velocity,
+                angle: target,
                 rect,
-                goal,
                 text_pairs: text.0,
                 text_area: text.1,
-                goal_text_pairs: self.text_cost(goal).0,
                 soft,
             },
             [cost[0], cost[1], clip, soft],
