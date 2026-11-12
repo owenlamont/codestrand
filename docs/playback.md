@@ -339,12 +339,22 @@ Commits affecting more than 24 files aim beams at directories to reduce clutter.
 
 ## Overview detail
 
+Directory collapsing is on by default. Use `--collapse-directories off` in preview
+or export to keep every file and directory visible at every zoom. Drawing every file
+can reduce frame rate in large repositories. `--collapse-directories on` restores
+aggregation. The option affects rendering only; file identity, layout and playback
+remain unchanged.
+
 Small subtrees containing multiple files collapse into folder glyphs below a 32-pixel screen
 footprint. Zooming in expands the subtree above 40 pixels; the gap prevents
 flicker near the boundary. Each touch expands the affected subtree and
 its ancestors for 2.5 playback seconds, independently of heat. Files and folders scale
 between the two views over 0.3 real seconds in preview and 0.3 playback seconds in export.
 Footprints use logical pixels and a bounding circle to stay stable during orbit.
+
+Collapsed folders have the theme's file-glyph footprint at the directory's scale,
+centred on the directory and raised clear of file surfaces. Folders shrink with the
+repository instead of growing to a minimum screen size.
 
 Aggregation changes rendering only. Every directory and file keeps the same
 simulation and position at every zoom, including export. Directory landmarks rank by

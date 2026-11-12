@@ -23,6 +23,20 @@ pub(super) struct Lod {
 }
 
 impl Lod {
+    pub(super) fn disable(&mut self, layout: &Layout) {
+        let count = layout.dir_count();
+        self.collapsed.resize(count, false);
+        self.collapsed.fill(false);
+        self.blend.resize(count, 0.0);
+        self.blend.fill(0.0);
+        self.detail.resize(count, 1.0);
+        self.detail.fill(1.0);
+        self.glyph.resize(count, 0.0);
+        self.glyph.fill(0.0);
+        self.glyphs.clear();
+        self.seconds = None;
+    }
+
     pub(super) fn expand_names(
         &mut self,
         layout: &Layout,
@@ -141,10 +155,7 @@ impl Lod {
                 self.glyphs.push(index);
             }
             self.detail[index] = parent_detail * (1.0 - weight);
-            let point = Vec3::new(dir.position.x, 0.0, dir.position.y);
-            let depth = (point - view.eye).dot((view.focus - view.eye).normalize());
-            self.size[index] =
-                (8.0 * 2.0 * depth * (view.fov * 0.5).tan() / view.height).max(1.0);
+            self.size[index] = dir.scale;
         }
     }
 }

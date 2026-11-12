@@ -174,6 +174,9 @@ struct Source {
     /// Hide changed source lines in preview and exported frames.
     #[arg(long)]
     no_diff_samples: bool,
+    /// Collapse small directory subtrees into file-sized folder icons (on|off).
+    #[arg(long, action = clap::ArgAction::Set, default_value = "on", value_parser = directory_collapsing)]
+    collapse_directories: bool,
     /// Contributor TOML file; defaults to the Codestrand user configuration directory.
     #[arg(long)]
     contributors: Option<PathBuf>,
@@ -344,6 +347,7 @@ impl Source {
             .collect();
         let mut simulation = Self::playback(events, &options, &mappings, &names)?;
         simulation.repository_boundary = self.repository_boundary;
+        simulation.collapse_directories = self.collapse_directories;
         simulation.caption_style = self.caption_style;
         simulation.repository_label_plane = self.repository_label_plane;
         Ok((simulation, title))
@@ -450,6 +454,14 @@ mod single_source_tests {
         assert!(audit.maximum_avatar_radius <= 17.0, "{audit:?}");
         assert_eq!(audit.avatar_text_observations, 0, "{audit:?}");
         assert_eq!(audit.parked_avatar_observations, 0, "{audit:?}");
+    }
+}
+
+fn directory_collapsing(value: &str) -> Result<bool, &'static str> {
+    match value {
+        "on" => Ok(true),
+        "off" => Ok(false),
+        _ => Err("expected on or off"),
     }
 }
 
