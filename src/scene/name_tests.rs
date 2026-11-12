@@ -90,3 +90,58 @@ fn close_names_bypass_both_landmark_and_renderer_caps() {
     assert_eq!(files, 90);
     assert_eq!(directories, 90);
 }
+
+#[test]
+fn review_directory_bounds_include_visible_sides() {
+    let sim = fixture();
+    let (index, dir) = sim.layout().dirs().find(|(_, d)| d.depth > 0).unwrap();
+    let center = ground(dir.position) - Vec3::Y * 0.05;
+    let rotation = Quat::from_rotation_x(-26.0_f32.to_radians());
+    let eye = center + Vec3::new(0.0, 1.25, 1.98) * dir.scale;
+    assert!(eye.y >= crate::camera::EYE_FLOOR);
+    let camera = Transform::from_translation(eye).with_rotation(rotation);
+    let view = names::View {
+        clip_from_world: bevy::math::proj::perspective_infinite_reverse(
+            std::f32::consts::FRAC_PI_4,
+            1280.0 / 720.0,
+            0.1,
+        ) * camera.to_matrix().inverse(),
+        rotation,
+        viewport: Vec2::new(1280.0, 720.0),
+    };
+    let half = sim.theme().directory_node_scale * dir.scale * 0.5;
+    let mut low = Vec2::splat(f32::INFINITY);
+    let mut high = Vec2::splat(f32::NEG_INFINITY);
+    for x in [-half.x, half.x] {
+        for y in [-half.y, half.y] {
+            for z in [-half.z, half.z] {
+                let ndc = view
+                    .clip_from_world
+                    .project_point3(center + Vec3::new(x, y, z));
+                assert!(
+                    ndc.x.abs() < 1.0
+                        && ndc.y.abs() < 1.0
+                        && ndc.z > 0.0
+                        && ndc.z < 1.0
+                );
+                let p = ndc.truncate() * view.viewport * 0.5;
+                low = low.min(p);
+                high = high.max(p);
+            }
+        }
+    }
+    let pixels = (high - low).min_element();
+    let mut names = names::Names::default();
+    names.sample(&sim, &view);
+    println!(
+        "directory={} scale={} eye={eye:?} cube_footprint={pixels}px permanent={}",
+        dir.name(),
+        dir.scale,
+        names.targets.contains(&model::Target::Dir(index))
+    );
+    assert!(pixels > 48.0);
+    assert!(
+        names.targets.contains(&model::Target::Dir(index)),
+        "visible directory above threshold has no permanent name"
+    );
+}

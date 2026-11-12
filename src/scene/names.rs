@@ -21,7 +21,17 @@ pub(super) struct View {
 }
 
 impl View {
-    fn footprint(&self, corners: [Vec3; 4]) -> f32 {
+    fn footprint(&self, faces: impl IntoIterator<Item = [Vec3; 4]>) -> f32 {
+        faces
+            .into_iter()
+            .filter_map(|face| self.face_bounds(face))
+            .reduce(|a, b| Rect::from_corners(a.min.min(b.min), a.max.max(b.max)))
+            .map_or(0.0, |bounds| {
+                (bounds.size() * self.viewport * 0.5).min_element()
+            })
+    }
+
+    fn face_bounds(&self, corners: [Vec3; 4]) -> Option<Rect> {
         let mut polygon: Vec<_> = corners
             .into_iter()
             .map(|p| self.clip_from_world * p.extend(1.0))
@@ -50,20 +60,20 @@ impl View {
             }
             polygon = clipped;
             if polygon.is_empty() {
-                return 0.0;
+                return None;
             }
         }
         let mut low = Vec2::splat(f32::INFINITY);
         let mut high = Vec2::splat(f32::NEG_INFINITY);
         for p in polygon {
             if !p.is_finite() || p.w <= 0.0 {
-                return 0.0;
+                return None;
             }
             let point = p.truncate().truncate() / p.w;
             low = low.min(point);
             high = high.max(point);
         }
-        ((high - low) * self.viewport * 0.5).min_element()
+        Some(Rect::from_corners(low, high))
     }
 }
 
@@ -73,6 +83,18 @@ fn corners(center: Vec3, right: Vec3, up: Vec3) -> [Vec3; 4] {
         center + right - up,
         center + right + up,
         center - right + up,
+    ]
+}
+
+fn cuboid_faces(center: Vec3, half: Vec3) -> [[Vec3; 4]; 6] {
+    let (x, y, z) = (Vec3::X * half.x, Vec3::Y * half.y, Vec3::Z * half.z);
+    [
+        corners(center + x, y, z),
+        corners(center - x, y, z),
+        corners(center + y, x, z),
+        corners(center - y, x, z),
+        corners(center + z, x, y),
+        corners(center - z, x, y),
     ]
 }
 
@@ -118,7 +140,7 @@ impl Names {
                     point + Vec3::new(-0.2, 0.0, 0.45) * dir.scale,
                     opacity,
                 ),
-                view.footprint(bounds),
+                view.footprint([bounds]),
                 &mut selected,
                 || file.name().to_owned(),
             );
@@ -127,11 +149,7 @@ impl Names {
             let (_, opacity, rise) = simulation.repository_effect(dir.repository);
             let center = super::ground(dir.position) + Vec3::Y * (rise - 0.05);
             let half = theme.directory_node_scale * dir.scale * 0.5;
-            let bounds = corners(
-                center + Vec3::Y * half.y,
-                Vec3::X * half.x,
-                Vec3::Z * half.z,
-            );
+            let bounds = cuboid_faces(center, half);
             self.include(
                 (
                     Target::Dir(index),
@@ -189,16 +207,25 @@ mod tests {
             viewport: Vec2::splat(720.0),
         };
         let quad = |center| corners(center, Vec3::X * 0.2, Vec3::Y * 0.2);
-        assert!(view.footprint(quad(Vec3::new(0.0, 0.0, -1.0))) > ENTER_PIXELS);
-        assert_eq!(view.footprint(quad(Vec3::new(100.0, 0.0, -1.0))), 0.0);
-        assert_eq!(view.footprint(quad(Vec3::Z)), 0.0);
+        assert!(view.footprint([quad(Vec3::new(0.0, 0.0, -1.0))]) > ENTER_PIXELS);
+        assert_eq!(view.footprint([quad(Vec3::new(100.0, 0.0, -1.0))]), 0.0);
+        assert_eq!(view.footprint([quad(Vec3::Z)]), 0.0);
         let crossing = corners(
             Vec3::new(0.0, 0.0, -0.1),
             Vec3::new(0.2, 0.0, 0.2),
             Vec3::Y * 0.2,
         );
-        let pixels = view.footprint(crossing);
+        let pixels = view.footprint([crossing]);
         assert!(pixels.is_finite() && pixels > 0.0 && pixels <= 720.0);
+        assert_eq!(
+            view.footprint(cuboid_faces(Vec3::new(0.0, 0.0, -0.15), Vec3::splat(0.2))),
+            720.0,
+        );
+        assert_eq!(view.footprint(cuboid_faces(Vec3::Z, Vec3::splat(0.2))), 0.0);
+        assert_eq!(
+            view.footprint(cuboid_faces(Vec3::new(100.0, 0.0, -1.0), Vec3::splat(0.2))),
+            0.0,
+        );
     }
 
     #[test]
