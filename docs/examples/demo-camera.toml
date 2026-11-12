@@ -1,0 +1,28 @@
+fps = 30
+
+[[key]]
+frame = 30
+eye = { point = [0.0, 24.0, 16.0] }
+focus = { point = [0.0, 0.0, 0.0] }
+
+[[key]]
+frame = 60
+eye = { avatar = "Ada", offset = [0.0, 6.0, 8.0] }
+focus = { avatar = "Ada" }
+
+[[key]]
+frame = 120
+eye = { avatar = "Ada", offset = [0.0, 6.0, 8.0] }
+focus = { avatar = "Ada" }
+
+[[key]]
+frame = 180
+eye = { file = "src/main.rs", offset = [0.0, 8.0, 0.0] }
+focus = { file = "src/main.rs" }
+up = [0.0, 0.0, -1.0]
+
+[[key]]
+frame = 240
+eye = { directory = "src", offset = [0.0, 14.0, 0.0] }
+focus = { directory = "src" }
+up = [0.0, 0.0, -1.0]

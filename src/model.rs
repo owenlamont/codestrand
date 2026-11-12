@@ -314,6 +314,7 @@ struct State {
 
 /// Deterministic playback stepped at a fixed tick rate, independent of output frame rate.
 pub(super) struct Simulation {
+    file_ids: HashMap<String, FileIdentity>,
     first_arrivals: Vec<bool>,
     departures: Vec<f32>,
     repository_ends: Vec<f32>,
@@ -335,6 +336,12 @@ pub(super) struct Simulation {
     travel: travel::Plan,
     visual_updates: bool,
     title_plan: Vec<Vec<u8>>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub(super) enum FileIdentity {
+    Unique(u64),
+    Ambiguous,
 }
 
 impl Simulation {
@@ -588,7 +595,13 @@ impl Simulation {
         let first_arrivals = lifecycle::arrivals(&events, start..end);
         events.truncate(end);
         events.drain(..start);
+        let file_ids = state
+            .layout
+            .files()
+            .map(|(id, file)| (file.path.clone(), FileIdentity::Unique(id)))
+            .collect();
         let mut simulation = Self {
+            file_ids,
             first_arrivals,
             departures,
             repository_ends,
@@ -784,7 +797,7 @@ impl Simulation {
             let Some(start) = self.schedule.start(state.next_event, canonical) else {
                 break;
             };
-            state.begin(event, start);
+            state.begin(event, start, &mut self.file_ids);
             if let Some(&author) = event
                 .contributor
                 .as_ref()
@@ -894,6 +907,14 @@ impl Simulation {
 
     pub(super) fn avatars(&self) -> &[Avatar] {
         &self.state.avatars
+    }
+
+    pub(super) fn camera_events(&self) -> &[Event] {
+        &self.events
+    }
+
+    pub(super) fn camera_file_identity(&self, path: &str) -> Option<FileIdentity> {
+        self.file_ids.get(path).copied()
     }
 
     /// Default field camera focus and distance along [`view_direction`].
@@ -1277,7 +1298,12 @@ impl State {
         index
     }
 
-    fn begin(&mut self, event: &Event, start: f32) {
+    fn begin(
+        &mut self,
+        event: &Event,
+        start: f32,
+        file_ids: &mut HashMap<String, FileIdentity>,
+    ) {
         let author = self.author(
             event
                 .contributor
@@ -1289,6 +1315,15 @@ impl State {
         let mut samples = Vec::new();
         for change in &event.changes {
             let id = apply(&mut self.layout, change, author);
+            let identity = FileIdentity::Unique(id);
+            file_ids
+                .entry(change.path.clone())
+                .and_modify(|seen| {
+                    if *seen != identity {
+                        *seen = FileIdentity::Ambiguous;
+                    }
+                })
+                .or_insert(identity);
             touched.insert(id, (change.insertions, change.removals));
             for sample in change.samples.iter().take(crate::diff_samples::PER_FILE) {
                 if samples.len() < crate::diff_samples::PER_COMMIT {

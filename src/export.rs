@@ -31,7 +31,7 @@ pub(super) fn prepare(directory: &Path) -> anyhow::Result<()> {
 
 pub(super) fn run(
     directory: &Path,
-    simulation: Simulation,
+    (simulation, camera_path): (Simulation, Option<crate::camera_path::CameraPath>),
     title: String,
     frames: u32,
     fps: u16,
@@ -45,6 +45,7 @@ pub(super) fn run(
         fps,
         delay_ms,
         encoder,
+        camera_path.as_ref(),
     )
 }
 
@@ -55,6 +56,7 @@ fn render(
     fps: u16,
     delay_ms: u16,
     mut encoder: Option<crate::encoder::Encoder>,
+    camera_path: Option<&crate::camera_path::CameraPath>,
 ) -> anyhow::Result<()> {
     let mut manifest = BufWriter::new(File::create(directory.join("frames.csv"))?);
     writeln!(manifest, "frame,seconds,commit,files,avatars,beams")?;
@@ -79,8 +81,19 @@ fn render(
         }
     }
     let started = Instant::now();
+    let mut previous_camera = None;
     for index in 0..frames {
         app.world_mut().resource_mut::<scene::Frame>().index = index;
+        if let Some(path) = &camera_path {
+            let mut playback = app.world_mut().resource_mut::<scene::Playback>();
+            playback.0.advance_to(index, fps);
+            let pose = path.pose(&playback.0, index, fps)?;
+            if let Some(previous) = &previous_camera {
+                path.validate_step(previous, &pose, index)?;
+            }
+            previous_camera = Some(pose);
+            app.world_mut().insert_resource(scene::ScriptedCamera(pose));
+        }
         let image = capture(&mut app, &target, index)?;
         let pixels = image
             .try_into_dynamic()
@@ -251,7 +264,7 @@ mod tests {
             })
             .before(scene::animate),
         );
-        render(&output, (app, target), 70, 5, 0, None).unwrap();
+        render(&output, (app, target), 70, 5, 0, None, None).unwrap();
         for index in 0..70 {
             let name = ThemeName::ALL[index / 10];
             let image = image::open(output.join(format!("frame-{index:05}.png")))

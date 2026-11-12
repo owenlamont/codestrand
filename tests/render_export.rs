@@ -4,7 +4,7 @@
 use std::{
     fs,
     path::Path,
-    process::{Command, Stdio},
+    process::{Child, Command, ExitStatus, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -52,12 +52,58 @@ fn export_is_complete_and_independent_of_render_pacing() {
     assert_eq!(fast_manifest, slow_manifest);
 }
 
+#[test]
+#[ignore = "requires a graphics adapter; validates motion before the second capture"]
+fn pole_crossing_is_rejected_before_second_capture() {
+    let scratch = tempfile::tempdir().unwrap().keep();
+    let path = scratch.join("pole-crossing.toml");
+    fs::write(
+        &path,
+        r"fps=30
+[[key]]
+frame=0
+eye={point=[1.0,12.0,0.0]}
+focus={point=[0.0,12.0,2.0]}
+[[key]]
+frame=1
+eye={point=[-1.0,12.0,0.0]}
+focus={point=[0.0,12.0,2.0]}
+",
+    )
+    .unwrap();
+    let directory = scratch.join("frames");
+    let log_path = scratch.join("export.log");
+    let log = fs::File::create(&log_path).unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_codestrand"))
+        .arg("export")
+        .arg(&directory)
+        .arg("--camera-path")
+        .arg(&path)
+        .args(["--frames", "2", "--fps", "30"])
+        .stdout(Stdio::from(log.try_clone().unwrap()))
+        .stderr(Stdio::from(log))
+        .spawn()
+        .unwrap();
+    let status = wait(child, &log_path);
+    let error = fs::read_to_string(&log_path).unwrap();
+    assert!(!status.success(), "pole crossing was accepted: {error}");
+    assert!(error.contains("output frames 0..1"), "{error}");
+    assert!(error.contains("intermediate key"), "{error}");
+    assert!(directory.join("frame-00000.png").exists());
+    assert!(!directory.join("frame-00001.png").exists());
+}
+
 fn export(directory: &Path, delay: &str) {
     let log_path = directory.with_extension("log");
     let log = fs::File::create(&log_path).expect("capture log can be created");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_codestrand"))
+    let child = Command::new(env!("CARGO_BIN_EXE_codestrand"))
         .arg("export")
         .arg(directory)
+        .arg("--camera-path")
+        .arg(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("docs/examples/demo-camera.toml"),
+        )
         .args(["--frames", "8", "--fps", "2", "--frame-delay-ms", delay])
         .stdout(Stdio::from(
             log.try_clone().expect("log handle can be cloned"),
@@ -65,15 +111,19 @@ fn export(directory: &Path, delay: &str) {
         .stderr(Stdio::from(log))
         .spawn()
         .expect("export process can start");
+    let status = wait(child, &log_path);
+    assert!(
+        status.success(),
+        "export failed: {}",
+        fs::read_to_string(&log_path).unwrap()
+    );
+}
+
+fn wait(mut child: Child, log_path: &Path) -> ExitStatus {
     let started = Instant::now();
     loop {
         if let Some(status) = child.try_wait().expect("export process can be polled") {
-            assert!(
-                status.success(),
-                "export failed: {}",
-                fs::read_to_string(&log_path).expect("log is readable")
-            );
-            return;
+            return status;
         }
         if started.elapsed() > Duration::from_secs(120) {
             child.kill().expect("timed out export can be stopped");
