@@ -20,6 +20,71 @@ pub(super) struct View {
     pub viewport: Vec2,
 }
 
+const CLIP_PLANES: [Vec4; 6] = [
+    Vec4::new(0.0, 0.0, -1.0, 1.0),
+    Vec4::Z,
+    Vec4::new(1.0, 0.0, 0.0, 1.0),
+    Vec4::new(-1.0, 0.0, 0.0, 1.0),
+    Vec4::new(0.0, 1.0, 0.0, 1.0),
+    Vec4::new(0.0, -1.0, 0.0, 1.0),
+];
+
+struct BroadPhase {
+    planes: [(Vec4, f32); 6],
+    rows: [Vec4; 3],
+    lengths: Vec3,
+    viewport: Vec2,
+}
+
+impl BroadPhase {
+    fn new(view: &View) -> Self {
+        let transpose = view.clip_from_world.transpose();
+        let rows = [transpose.x_axis, transpose.y_axis, transpose.w_axis];
+        Self {
+            planes: CLIP_PLANES.map(|p| {
+                let plane = transpose * p;
+                (plane, plane.truncate().length())
+            }),
+            rows,
+            lengths: Vec3::new(
+                rows[0].truncate().length(),
+                rows[1].truncate().length(),
+                rows[2].truncate().length(),
+            ),
+            viewport: view.viewport,
+        }
+    }
+
+    fn rejects(&self, center: Vec3, radius: f32) -> bool {
+        let center = center.extend(1.0);
+        // Inflate support to retain tangencies despite floating-point roundoff.
+        let radius = radius * 1.0001 + 0.0001;
+        if self
+            .planes
+            .iter()
+            .any(|&(p, length)| p.dot(center) < -radius * length)
+        {
+            return true;
+        }
+        let c = Vec3::new(
+            self.rows[0].dot(center),
+            self.rows[1].dot(center),
+            self.rows[2].dot(center),
+        );
+        let extent = self.lengths * radius;
+        let near_w = c.z - extent.z;
+        if near_w <= 0.0 {
+            return false;
+        }
+        // Clipping only shrinks the rectangle bounded by
+        // |x/w - cx/cw| <= (rx + |cx/cw| rw) / (cw - rw).
+        let diameter = (extent.truncate() + (c.truncate() / c.z).abs() * extent.z)
+            * self.viewport
+            / near_w;
+        diameter.min_element() < EXIT_PIXELS - 0.01
+    }
+}
+
 impl View {
     fn footprint(&self, faces: impl IntoIterator<Item = [Vec3; 4]>) -> f32 {
         faces
@@ -32,40 +97,36 @@ impl View {
     }
 
     fn face_bounds(&self, corners: [Vec3; 4]) -> Option<Rect> {
-        let mut polygon: Vec<_> = corners
-            .into_iter()
-            .map(|p| self.clip_from_world * p.extend(1.0))
-            .collect();
-        for plane in [
-            Vec4::new(0.0, 0.0, -1.0, 1.0),
-            Vec4::Z,
-            Vec4::new(1.0, 0.0, 0.0, 1.0),
-            Vec4::new(-1.0, 0.0, 0.0, 1.0),
-            Vec4::new(0.0, 1.0, 0.0, 1.0),
-            Vec4::new(0.0, -1.0, 0.0, 1.0),
-        ] {
-            let mut clipped = Vec::new();
-            for (&a, &b) in polygon
-                .iter()
-                .zip(polygon.iter().cycle().skip(1))
-                .take(polygon.len())
-            {
+        // A convex quad gains at most one vertex per clipping plane: 4 + 6 < 16.
+        let mut polygon = [Vec4::ZERO; 16];
+        let mut clipped = [Vec4::ZERO; 16];
+        for (slot, p) in polygon.iter_mut().zip(corners) {
+            *slot = self.clip_from_world * p.extend(1.0);
+        }
+        let mut len = 4;
+        for plane in CLIP_PLANES {
+            let mut count = 0;
+            for index in 0..len {
+                let (a, b) = (polygon[index], polygon[(index + 1) % len]);
                 let (da, db) = (plane.dot(a), plane.dot(b));
                 if da >= 0.0 {
-                    clipped.push(a);
+                    clipped[count] = a;
+                    count += 1;
                 }
                 if (da >= 0.0) != (db >= 0.0) {
-                    clipped.push(a.lerp(b, da / (da - db)));
+                    clipped[count] = a.lerp(b, da / (da - db));
+                    count += 1;
                 }
             }
-            polygon = clipped;
-            if polygon.is_empty() {
+            if count == 0 {
                 return None;
             }
+            std::mem::swap(&mut polygon, &mut clipped);
+            len = count;
         }
         let mut low = Vec2::splat(f32::INFINITY);
         let mut high = Vec2::splat(f32::NEG_INFINITY);
-        for p in polygon {
+        for &p in &polygon[..len] {
             if !p.is_finite() || p.w <= 0.0 {
                 return None;
             }
@@ -111,6 +172,7 @@ impl Names {
         let mut selected = BTreeSet::new();
         let layout = simulation.layout();
         let theme = simulation.theme();
+        let broad = BroadPhase::new(view);
         for (id, file) in layout.files() {
             let dir = layout.dir(file.dir);
             let scale = file.draw_scale(dir);
@@ -129,6 +191,9 @@ impl Names {
             let center =
                 point + rotation * theme.file_glyph_transform.translation * scale;
             let half = theme.file_glyph_transform.scale * scale * 0.5;
+            if opacity <= 0.001 || broad.rejects(center, half.truncate().length()) {
+                continue;
+            }
             let bounds = corners(
                 center,
                 view.rotation * Vec3::X * half.x,
@@ -149,6 +214,9 @@ impl Names {
             let (_, opacity, rise) = simulation.repository_effect(dir.repository);
             let center = super::ground(dir.position) + Vec3::Y * (rise - 0.05);
             let half = theme.directory_node_scale * dir.scale * 0.5;
+            if opacity <= 0.001 || broad.rejects(center, half.length()) {
+                continue;
+            }
             let bounds = cuboid_faces(center, half);
             self.include(
                 (
@@ -194,6 +262,53 @@ impl Names {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn broad_phase_rejects_only_subthreshold_footprints() {
+        for (pitch, roll, aspect) in [(0.0, 0.0, 3.0), (1.5, 0.0, 1.8), (0.8, 0.6, 1.0)]
+        {
+            let rotation = Quat::from_euler(EulerRot::YXZ, 0.3, pitch, roll);
+            let view = View {
+                clip_from_world: bevy::math::proj::perspective_infinite_reverse(
+                    std::f32::consts::FRAC_PI_4,
+                    aspect,
+                    0.1,
+                ) * Mat4::from_quat(rotation).inverse(),
+                rotation,
+                viewport: Vec2::new(720.0 * aspect, 720.0),
+            };
+            let broad = BroadPhase::new(&view);
+            let (mut rejected, mut selectable) = (0, 0);
+            let bounds =
+                [-100.0, -1.0, 0.0, 1.0, 100.0].into_iter().flat_map(|x| {
+                    [-100.0, -10.0, -1.0, -0.1, 0.0, 1.0].into_iter().flat_map(
+                        move |z| [0.001, 0.04, 0.2, 1.0, 10.0].map(|size| (x, z, size)),
+                    )
+                });
+            for (x, z, size) in bounds {
+                let center = rotation * Vec3::new(x, 0.0, z);
+                let half = Vec3::splat(size);
+                let quad = corners(
+                    center,
+                    rotation * Vec3::X * size,
+                    rotation * Vec3::Y * size,
+                );
+                for (radius, pixels) in [
+                    (half.truncate().length(), view.footprint([quad])),
+                    (half.length(), view.footprint(cuboid_faces(center, half))),
+                ] {
+                    let skip = broad.rejects(center, radius);
+                    assert!(
+                        !skip || pixels < EXIT_PIXELS,
+                        "pitch={pitch} roll={roll} aspect={aspect} center={center:?} radius={radius} pixels={pixels}"
+                    );
+                    rejected += usize::from(skip);
+                    selectable += usize::from(pixels >= EXIT_PIXELS);
+                }
+            }
+            assert!(rejected > 0 && selectable > 0);
+        }
+    }
 
     #[test]
     fn footprint_clips_offscreen_behind_and_near_plane_geometry() {
