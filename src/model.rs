@@ -323,6 +323,7 @@ pub(super) struct Simulation {
     packing: crate::layout::packing::Packing,
     envelopes: Vec<slots::Envelope>,
     pub repository_boundary: crate::repositories::Boundary,
+    pub(super) collapse_directories: bool,
     pub repository_label_plane: crate::repositories::LabelPlane,
     events: Vec<Event>,
     offset: usize,
@@ -595,13 +596,12 @@ impl Simulation {
         let first_arrivals = lifecycle::arrivals(&events, start..end);
         events.truncate(end);
         events.drain(..start);
-        let file_ids = state
-            .layout
-            .files()
-            .map(|(id, file)| (file.path.clone(), FileIdentity::Unique(id)))
-            .collect();
         let mut simulation = Self {
-            file_ids,
+            file_ids: state
+                .layout
+                .files()
+                .map(|(id, file)| (file.path.clone(), FileIdentity::Unique(id)))
+                .collect(),
             first_arrivals,
             departures,
             repository_ends,
@@ -610,6 +610,7 @@ impl Simulation {
             packing: crate::layout::packing::Packing::default(),
             envelopes: Vec::new(),
             repository_boundary: crate::repositories::Boundary::default(),
+            collapse_directories: true,
             repository_label_plane: crate::repositories::LabelPlane::default(),
             events,
             offset: start,

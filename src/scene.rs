@@ -32,6 +32,8 @@ const AVATAR_LAYER: usize = 1;
 
 mod caption;
 #[cfg(test)]
+mod collapse_tests;
+#[cfg(test)]
 mod file_sync_tests;
 mod lod;
 #[cfg(test)]
@@ -261,14 +263,36 @@ struct DirectoryHues {
 }
 
 fn folder_mesh() -> Mesh {
-    let mut folder = Mesh::from(Cuboid::new(1.4, 0.1, 0.9));
+    let mut folder =
+        Mesh::from(Cuboid::new(1.4, 0.1, 0.9)).translated_by(Vec3::Z * 0.1);
     folder
         .merge(
-            &Mesh::from(Cuboid::new(0.55, 0.1, 0.3))
-                .translated_by(Vec3::new(-0.425, 0.0, -0.5)),
+            &Mesh::from(Cuboid::new(0.55, 0.1, 0.2))
+                .translated_by(Vec3::new(-0.425, 0.0, -0.45)),
         )
         .expect("folder parts share mesh attributes");
     folder
+}
+
+fn folder_transform(
+    theme: &Theme,
+    position: Vec2,
+    scale: f32,
+    weight: f32,
+) -> Transform {
+    let glyph = theme.glyph_transform();
+    let surface = theme
+        .geometry()
+        .file_max
+        .y
+        .max(theme.directory_edge_height * 0.5)
+        .max(theme.directory_node_scale.y * 0.5 - 0.05);
+    Transform::from_translation(
+        ground(position) + Vec3::Y * (surface + 0.015 + 0.005 * weight) * scale,
+    )
+    .with_scale(
+        Vec3::new(glyph.scale.x / 1.4, 0.1, glyph.scale.y / 1.1) * scale * weight,
+    )
 }
 
 impl DirectoryHues {
@@ -1080,17 +1104,21 @@ fn sync_lod(world: &mut World, pools: &mut Pools, simulation: &Simulation) {
     } else {
         simulation.seconds()
     };
-    pools.lod.sample_clocks(
-        layout,
-        simulation.seconds(),
-        seconds,
-        lod::View {
-            eye,
-            focus,
-            height,
-            fov,
-        },
-    );
+    if simulation.collapse_directories {
+        pools.lod.sample_clocks(
+            layout,
+            simulation.seconds(),
+            seconds,
+            lod::View {
+                eye,
+                focus,
+                height,
+                fov,
+            },
+        );
+    } else {
+        pools.lod.disable(layout);
+    }
     if let Ok((camera, transform, projection)) = world
         .query_filtered::<(&Camera, &Transform, &Projection), With<SceneCamera>>()
         .single(world)
@@ -1519,14 +1547,14 @@ fn sync_structure(
         );
         let (grey, alpha, rise) = simulation.repository_effect(dir.repository);
         if let Some(mut transform) = world.get_mut::<Transform>(entity) {
-            transform.set_if_neq(
-                Transform::from_translation(ground(dir.position) + Vec3::Y * rise)
-                    .with_scale(
-                        Vec3::new(1.0, 0.1, 1.0)
-                            * pools.lod.size[index]
-                            * pools.lod.glyph[index],
-                    ),
+            let mut folder = folder_transform(
+                simulation.theme(),
+                dir.position,
+                pools.lod.size[index],
+                pools.lod.glyph[index],
             );
+            folder.translation.y += rise;
+            transform.set_if_neq(folder);
         }
         set_visible(world, entity, true);
         if grey > 0.0 || alpha < 1.0 {
