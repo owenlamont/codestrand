@@ -97,27 +97,36 @@ continues resolving its targets.
 ```toml
 fps = 30
 [[key]]
-frame = 0
-eye = { avatar = "Ada", point = [0.0, 3.2, 0.0], offset = [0.0, 6.0, 8.0] }
-focus = { avatar = "Ada", point = [0.0, 3.2, 0.0] }
-up = [0.0, 0.0, -1.0]
+frame = 30
+eye = { point = [0.0, 24.0, 16.0] }
+focus = { point = [0.0, 0.0, 0.0] }
+[[key]]
+frame = 60
+eye = { avatar = "Ada", offset = [0.0, 6.0, 8.0] }
+focus = { avatar = "Ada" }
 ```
 
-Each anchor selects `point`, `avatar`, `file` or `directory`. Coordinates and
-optional `offset` vectors use world units: +Y is up, with files on the XZ plane.
-Offsets remain world-aligned. Semantic anchors can also supply a fallback `point`
-(default origin). Contributor names match resolved display names exactly; ambiguous
-names fail. File and directory paths match repository-relative layout strings,
-including case. An empty directory path selects the repository root. A `repository`
+Each anchor selects exactly one of `point`, `avatar`, `file` or `directory`.
+Coordinates and optional `offset` vectors use world units: +Y is up, with files
+on the XZ plane. Offsets remain world-aligned. Contributor names match resolved
+display names exactly; ambiguous names fail.
+File and directory paths match repository-relative layout strings, including case.
+An empty directory path selects the repository root. A `repository`
 label can qualify a file or directory; without the label, an ambiguous path reports
 candidate repositories. Paths are matched, never opened by the camera evaluator.
 
 Targets resolve from the simulation's current world positions on every frame,
 including arrival/deletion effects. Avatars retain their simulation positions after
-leaving. Before an avatar has a position, or while a file path is absent, the anchor
-uses its fallback point plus offset. Files match the authored path, so a rename away
-from that path uses the fallback; the camera does not follow rename identity.
-Directories use their planned positions even before appearing. There is no follow
+leaving, but have none before first creation. A referenced target without a position
+fails with the output frame, key and target name; there is no origin fallback.
+The first key must use points or targets already present at playback start. Hold a point
+view until a target exists before blending toward that target's key.
+
+A file target follows the same file through renames. A name used by multiple file
+identities is ambiguous; choose another historical name. Re-adding after a deletion's
+fade completes creates a new identity, so pacing can affect ambiguity.
+Directories bind directly to the loaded layout, including planned positions before
+appearance and outside the selected playback interval. There is no follow
 filter: target motion retains the simulation's fixed 60 Hz ticks, which can show
 steps at high output rates. Smoothstep blends the two keys' current eye/focus
 positions; a repeated target follows throughout the segment without easing to a stop.
@@ -126,7 +135,7 @@ positions; a repeated target follows throughout the segment without easing to a 
 straight-down views. Normalised up vectors blend with smoothstep; orientation is
 constructed from the resolved eye, focus and up, without Euler interpolation.
 Opposite consecutive ups fail. Unknown fields, non-finite coordinates, invalid
-ordering and missing targets fail before the GPU, encoder or output directory starts.
+ordering and unknown targets fail before the GPU, encoder or output directory starts.
 Each output frame also rejects an eye below the 1.2-unit camera floor, coincident
 eye/focus, or up parallel to the view. A later invalid pose can leave partial output.
 Right/forward turns over 45° per output frame fail; add an intermediate key.

@@ -1,7 +1,7 @@
 fps = 30
 
 [[key]]
-frame = 0
+frame = 30
 eye = { point = [0.0, 24.0, 16.0] }
 focus = { point = [0.0, 0.0, 0.0] }
 

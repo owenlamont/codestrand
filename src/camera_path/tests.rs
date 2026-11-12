@@ -25,6 +25,101 @@ const POINT: &str =
     "eye = { point = [0.0, 12.0, 0.0] }\nfocus = { point = [0.0, 0.0, 0.0] }\n";
 
 #[test]
+fn review_renamed_file_keeps_identity_for_old_and_new_names() {
+    let (file, _) = fixture("fps=30\nkey=[]");
+    let mut events = crate::timeline::synthetic();
+    events.truncate(2);
+    events[0].changes.truncate(2);
+    events[0].changes[0].path = "other/stable.rs".into();
+    events[0].changes[1].path = "source/old.rs".into();
+    events[1].changes.truncate(1);
+    events[1].changes[0].path = "destination/new.rs".into();
+    events[1].changes[0].kind = crate::timeline::Kind::Moved {
+        from: "source/old.rs".into(),
+    };
+    let mut sim = Simulation::new(
+        events,
+        &crate::model::Options::default(),
+        &crate::theme::Theme::neon(),
+        &crate::contributors::Mappings::default(),
+    );
+    let mut paths = Vec::new();
+    for name in ["source/old.rs", "destination/new.rs"] {
+        fs::write(&file, format!("fps=30\n[[key]]\nframe=0\neye={{file='{name}',offset=[0,8,0]}}\nfocus={{point=[0,0,0]}}")).unwrap();
+        paths.push(CameraPath::load(&file, &sim).unwrap());
+    }
+    for frame in [180, 45, 180] {
+        sim.advance_to(frame, 60);
+        let target = sim
+            .layout()
+            .files()
+            .find(|(_, file)| {
+                file.path.ends_with("/old.rs") || file.path.ends_with("/new.rs")
+            })
+            .unwrap()
+            .1;
+        let expected = sim.file_effect(target).0 + Vec3::Y * 8.0;
+        assert!(expected.x.abs() + expected.z.abs() > 0.01);
+        for path in &paths {
+            assert!(
+                path.pose(&sim, frame, 60)
+                    .unwrap()
+                    .translation
+                    .abs_diff_eq(expected, 0.0001)
+            );
+        }
+    }
+}
+
+#[test]
+fn review_history_only_directory_is_not_found_instead_of_panicking() {
+    let (file, _) = fixture("fps=30\nkey=[]");
+    let mut events = crate::timeline::synthetic();
+    events.truncate(1);
+    events[0].changes.truncate(1);
+    events[0].changes[0].path = "new.rs".into();
+    events[0].changes[0].kind = crate::timeline::Kind::Moved {
+        from: "ghost/old.rs".into(),
+    };
+    let sim = Simulation::new(
+        events,
+        &crate::model::Options::default(),
+        &crate::theme::Theme::neon(),
+        &crate::contributors::Mappings::default(),
+    );
+    assert!(
+        (0..sim.layout().dir_count())
+            .all(|index| sim.layout().dir(index).path != "0/ghost")
+    );
+    fs::write(&file, "fps=30\n[[key]]\nframe=0\neye={directory='ghost',offset=[0,8,0]}\nfocus={point=[0,0,0]}").unwrap();
+    let error = CameraPath::load(&file, &sim)
+        .err()
+        .expect("history-only directory is rejected");
+    assert!(error.to_string().contains("path \"ghost\" not found"));
+}
+
+#[test]
+fn review_missing_avatar_errors_and_seek_has_no_camera_state() {
+    let (file, mut sim) = fixture(
+        "fps=30\n[[key]]\nframe=0\neye={avatar='Ada',offset=[0,8,0]}\nfocus={point=[0,0,0]}",
+    );
+    let path = CameraPath::load(&file, &sim).unwrap();
+    let error = path.pose(&sim, 0, 60).unwrap_err().to_string();
+    assert!(
+        error.contains("output frame 0")
+            && error.contains("Ada")
+            && error.contains("has no position"),
+        "{error}"
+    );
+    sim.advance_to(90, 60);
+    let pose = path.pose(&sim, 90, 60).unwrap();
+    sim.advance_to(0, 60);
+    assert_eq!(path.pose(&sim, 0, 60).unwrap_err().to_string(), error);
+    sim.advance_to(90, 60);
+    assert_eq!(path.pose(&sim, 90, 60).unwrap(), pose);
+}
+
+#[test]
 fn frame_keys_ease_and_clamp_with_file_fps() {
     let (file, sim) = fixture(&format!(
         "fps=24\n[[key]]\nframe=24\n{POINT}[[key]]\nframe=72\neye={{point=[8.0,12.0,0.0]}}\nfocus={{point=[8.0,0.0,0.0]}}"
@@ -81,13 +176,15 @@ fn example_tracks_live_targets_and_replays_identically() {
 }
 
 #[test]
-fn targets_use_fallbacks_and_report_ambiguous_repositories() {
-    let text = "fps=30\n[[key]]\nframe=0\neye={file='src/main.rs',point=[1,2,3],offset=[0,6,8]}\nfocus={point=[0,0,0]}";
+fn targets_require_positions_and_report_ambiguous_repositories() {
+    let text = "fps=30\n[[key]]\nframe=0\neye={file='src/main.rs',offset=[0,6,8]}\nfocus={point=[0,0,0]}";
     let (file, sim) = fixture(text);
     let path = CameraPath::load(&file, &sim).unwrap();
-    assert_eq!(
-        path.pose(&sim, 0, 30).unwrap().translation,
-        Vec3::new(1.0, 8.0, 11.0)
+    assert!(
+        path.pose(&sim, 0, 30)
+            .unwrap_err()
+            .to_string()
+            .contains("has no position")
     );
     let mut events = Vec::new();
     for index in 0..2 {

@@ -60,7 +60,7 @@ struct Anchor {
 
 enum Target {
     Avatar(Key),
-    File(String),
+    File(u64),
     Directory(usize),
 }
 
@@ -81,7 +81,7 @@ impl CameraPath {
                 path: name.clone(),
                 source,
             })?;
-        let validate = || -> Result<(), String> {
+        let mut validate = || -> Result<(), String> {
             if !(1..=240).contains(&document.fps) || document.key.is_empty() {
                 return Err(
                     "fps must be 1..240 and at least one key is required".into()
@@ -117,7 +117,6 @@ impl CameraPath {
             }
             Ok(())
         };
-        let mut validate = validate;
         validate().map_err(|reason| Error::Invalid {
             path: name.clone(),
             reason,
@@ -147,14 +146,24 @@ impl CameraPath {
                 as f32
         };
         let weight = SmoothStepCurve.sample_clamped(weight);
-        let eye = a
-            .eye
-            .position(simulation)
-            .lerp(b.eye.position(simulation), weight);
-        let focus = a
-            .focus
-            .position(simulation)
-            .lerp(b.focus.position(simulation), weight);
+        let positions = |key: &Keyframe| -> Result<(Vec3, Vec3), Error> {
+            let position = |anchor: &Anchor, channel: &str| {
+                anchor.position(simulation).ok_or_else(|| {
+                    let target = anchor.avatar.as_deref().or(anchor.file.as_deref()).or(anchor.directory.as_deref()).unwrap_or("point");
+                    Error::Invalid { path: self.name.clone(), reason: format!("output frame {frame} key frame {} {channel}: target {target:?} has no position", key.frame) }
+                })
+            };
+            Ok((position(&key.eye, "eye")?, position(&key.focus, "focus")?))
+        };
+        let (eye, focus) = if weight <= 0.0 {
+            positions(a)?
+        } else if weight >= 1.0 {
+            positions(b)?
+        } else {
+            let (eye_a, focus_a) = positions(a)?;
+            let (eye_b, focus_b) = positions(b)?;
+            (eye_a.lerp(eye_b, weight), focus_a.lerp(focus_b, weight))
+        };
         let up = Vec3::from_array(a.up.expect("validated up"))
             .lerp(Vec3::from_array(b.up.expect("validated up")), weight)
             .normalize_or_zero();
@@ -223,8 +232,9 @@ impl Anchor {
         }
         let count = usize::from(self.avatar.is_some())
             + usize::from(self.file.is_some())
-            + usize::from(self.directory.is_some());
-        if count > 1 || (count == 0 && self.point.is_none()) {
+            + usize::from(self.directory.is_some())
+            + usize::from(self.point.is_some());
+        if count != 1 {
             return Err("choose a point, avatar, file or directory".into());
         }
         if self.repository.is_some() && self.file.is_none() && self.directory.is_none()
@@ -267,15 +277,20 @@ impl Anchor {
                 } else {
                     format!("{}{path}", crate::repositories::prefix(repository))
                 };
-                let found = self.matches(simulation, &internal);
-                if found {
-                    matches.push((region.label.clone(), internal));
+                let target = self.path_target(simulation, &internal, &region.label)?;
+                if let Some(target) = target {
+                    matches.push((region.label.clone(), target));
                 }
             }
-            let internal = match matches.as_slice() {
-                [(_, internal)] => internal.clone(),
-                [] => {
-                    return Err(format!("path {path:?} not found in selected history"));
+            match matches.len() {
+                1 => self.target = matches.pop().map(|(_, target)| target),
+                0 => {
+                    let scope = if self.file.is_some() {
+                        "selected history"
+                    } else {
+                        "layout"
+                    };
+                    return Err(format!("path {path:?} not found in {scope}"));
                 }
                 _ => {
                     return Err(format!(
@@ -287,46 +302,46 @@ impl Anchor {
                             .join(", ")
                     ));
                 }
-            };
-            self.target = Some(if self.file.is_some() {
-                Target::File(internal)
-            } else {
-                Target::Directory(
-                    (0..layout.dir_count())
-                        .find(|&index| layout.dir(index).path == internal)
-                        .expect("matched directory"),
-                )
-            });
+            }
         }
         Ok(())
     }
 
-    fn matches(&self, simulation: &Simulation, internal: &str) -> bool {
-        let prefix = format!("{internal}/");
-        let matches = |path: &str| {
-            if self.file.is_some() {
-                path == internal
-            } else {
-                path.starts_with(&prefix)
+    fn path_target(
+        &self,
+        simulation: &Simulation,
+        internal: &str,
+        repository: &str,
+    ) -> Result<Option<Target>, String> {
+        if let Some(path) = &self.file {
+            match simulation.camera_file_identity(internal) {
+                Some(crate::model::FileIdentity::Unique(id)) => {
+                    Ok(Some(Target::File(id)))
+                }
+                Some(crate::model::FileIdentity::Ambiguous) => Err(format!(
+                    "file path {path:?} identifies multiple files in repository {repository:?}"
+                )),
+                None => Ok(None),
             }
-        };
-        simulation.layout().files().any(|(_, file)| matches(&file.path))
-            || simulation.camera_events().iter().flat_map(|event| &event.changes).any(|change|
-                matches(&change.path) || matches!(&change.kind, crate::timeline::Kind::Moved { from } if matches(from)))
+        } else {
+            let layout = simulation.layout();
+            Ok((0..layout.dir_count())
+                .find(|&index| layout.dir(index).path == internal)
+                .map(Target::Directory))
+        }
     }
 
-    fn position(&self, simulation: &Simulation) -> Vec3 {
+    fn position(&self, simulation: &Simulation) -> Option<Vec3> {
         let point = match &self.target {
             Some(Target::Avatar(key)) => simulation
                 .avatars()
                 .iter()
                 .find(|avatar| &avatar.key == key)
                 .map(|avatar| avatar.position),
-            Some(Target::File(path)) => simulation
+            Some(Target::File(id)) => simulation
                 .layout()
-                .files()
-                .find(|(_, file)| &file.path == path)
-                .map(|(_, file)| simulation.file_effect(file).0),
+                .file(*id)
+                .map(|file| simulation.file_effect(file).0),
             Some(Target::Directory(index)) => {
                 let dir = simulation.layout().dir(*index);
                 Some(Vec3::new(
@@ -335,9 +350,8 @@ impl Anchor {
                     dir.position.y,
                 ))
             }
-            None => None,
+            None => self.point.map(Vec3::from_array),
         };
-        point.unwrap_or_else(|| Vec3::from_array(self.point.unwrap_or([0.0; 3])))
-            + Vec3::from_array(self.offset)
+        point.map(|point| point + Vec3::from_array(self.offset))
     }
 }
