@@ -32,6 +32,9 @@ const AVATAR_LAYER: usize = 1;
 
 mod caption;
 mod lod;
+#[cfg(test)]
+mod name_tests;
+mod names;
 mod styling;
 
 #[derive(Resource)]
@@ -270,6 +273,7 @@ impl DirectoryHues {
 #[derive(Resource, Default)]
 struct Pools {
     lod: lod::Lod,
+    names: names::Names,
     aggregates: Vec<Entity>,
     files: HashMap<u64, Entity>,
     beams: Vec<Entity>,
@@ -1003,11 +1007,11 @@ pub(super) fn animate(world: &mut World) {
         world.resource_scope(|world, palette: Mut<Palette>| {
             world.resource_scope(|world, mut pools: Mut<Pools>| {
                 let simulation = &playback.0;
+                place_camera(world, simulation);
                 sync_files(world, &palette, &mut pools, simulation);
                 sync_structure(world, &palette, &mut pools, simulation);
                 sync_activity(world, &palette, &mut pools, simulation);
                 sync_repository_regions(world, simulation);
-                place_camera(world, simulation);
             });
         });
     });
@@ -1052,6 +1056,21 @@ fn sync_lod(world: &mut World, pools: &mut Pools, simulation: &Simulation) {
             fov,
         },
     );
+    if let Ok((camera, transform, projection)) = world
+        .query_filtered::<(&Camera, &Transform, &Projection), With<SceneCamera>>()
+        .single(world)
+    {
+        let view = names::View {
+            clip_from_world: projection.get_clip_from_view()
+                * transform.to_matrix().inverse(),
+            rotation: transform.rotation,
+            viewport: camera
+                .logical_viewport_size()
+                .unwrap_or(Vec2::new(1280.0, 720.0)),
+        };
+        pools.names.sample(simulation, &view);
+        pools.lod.expand_names(layout, &pools.names.targets);
+    }
 }
 
 fn sync_repository_regions(world: &mut World, simulation: &Simulation) {
@@ -1876,12 +1895,15 @@ fn place_labels(
             continue;
         }
         let rect = model::label_rect(point, &label.text, label.scale, height);
-        if rect.min.x < 0.0
-            || rect.min.y < 0.0
-            || rect.max.x > viewport.x
-            || rect.max.y > viewport.y
-            || (label.kind != model::LabelKind::Avatar
-                && placed.iter().any(|other| !other.intersect(rect).is_empty()))
+        if (label.kind != model::LabelKind::Detail
+            && (rect.min.x < 0.0
+                || rect.min.y < 0.0
+                || rect.max.x > viewport.x
+                || rect.max.y > viewport.y))
+            || (!matches!(
+                label.kind,
+                model::LabelKind::Avatar | model::LabelKind::Detail
+            ) && placed.iter().any(|other| !other.intersect(rect).is_empty()))
         {
             continue;
         }
@@ -1944,9 +1966,13 @@ fn sync_labels(
                 ..default()
             });
             background.set_if_neq(BackgroundColor(
-                theme
-                    .label_background()
-                    .with_alpha(theme.label_background().alpha() * opacity),
+                if label.kind == model::LabelKind::Detail {
+                    Color::srgba(0.015, 0.02, 0.04, 0.85 * opacity)
+                } else {
+                    theme
+                        .label_background()
+                        .with_alpha(theme.label_background().alpha() * opacity)
+                },
             ));
             let mut wanted_border = theme.label_border();
             for color in [
@@ -2006,11 +2032,15 @@ fn labels(world: &mut World) {
     let lod = &world.resource::<Pools>().lod;
     let wanted = playback
         .0
-        .labels_for_detail(|index| {
-            lod.detail.get(index).is_none_or(|&weight| weight > 0.0)
-                || lod.glyph.get(index).is_some_and(|&weight| weight > 0.0)
-        })
+        .labels_with_names(
+            |index| {
+                lod.detail.get(index).is_none_or(|&weight| weight > 0.0)
+                    || lod.glyph.get(index).is_some_and(|&weight| weight > 0.0)
+            },
+            &world.resource::<Pools>().names.targets,
+        )
         .into_iter()
+        .chain(world.resource::<Pools>().names.labels.iter().cloned())
         .filter_map(|label| {
             let point = camera.world_to_viewport(&transform, label.position).ok()?;
             let anchor = if label.kind == model::LabelKind::Avatar {

@@ -3,7 +3,6 @@ use bevy::math::Rect;
 #[derive(Clone, Copy)]
 pub(super) struct Candidate {
     pub angle: f32,
-    pub angular_velocity: f32,
     pub rect: Rect,
     pub goal: Rect,
     pub text_pairs: usize,
@@ -18,42 +17,92 @@ pub(super) struct Assignment {
     pub clear: bool,
 }
 
-pub(super) const ANGULAR_SPEED: f32 = std::f32::consts::PI;
-pub(super) const ANGULAR_ACCELERATION: f32 = 4.0 * std::f32::consts::PI;
-pub(super) const EMERGENCY_SPEED: f32 = 4.0 * std::f32::consts::PI;
-pub(super) const EMERGENCY_ACCELERATION: f32 = 128.0 * std::f32::consts::PI;
+pub(super) const ANGULAR_SPEED: f32 = std::f32::consts::PI / 6.0;
+pub(super) const ANGULAR_ACCELERATION: f32 = std::f32::consts::PI / 3.0;
+const GAIN: f32 = 0.25;
+const DWELL_TICKS: u64 = 45;
+const REVERSAL_TICKS: u64 = 180;
 
 #[cfg(test)]
 pub(super) fn advance(angle: f32, velocity: f32, target: f32, dt: f32) -> (f32, f32) {
-    steer(angle, velocity, target, dt, false)
+    steer(angle, velocity, target, dt)
 }
 
-pub(super) fn steer(
-    angle: f32,
-    velocity: f32,
-    target: f32,
-    dt: f32,
-    emergency: bool,
-) -> (f32, f32) {
-    let emergency = emergency || velocity.abs() > ANGULAR_SPEED;
-    let (speed, acceleration, gain) = if emergency {
-        (EMERGENCY_SPEED, EMERGENCY_ACCELERATION, 30.0)
-    } else {
-        (ANGULAR_SPEED, ANGULAR_ACCELERATION, 6.0)
-    };
-    let error = (target - angle + std::f32::consts::PI)
-        .rem_euclid(std::f32::consts::TAU)
-        - std::f32::consts::PI;
+pub(super) fn steer(angle: f32, velocity: f32, target: f32, dt: f32) -> (f32, f32) {
+    let error = difference(target, angle);
     let desired = error.signum()
-        * (2.0 * acceleration * error.abs())
+        * (2.0 * ANGULAR_ACCELERATION * error.abs())
             .sqrt()
-            .min(speed - 0.001)
-            .min(error.abs() * gain);
+            .min(ANGULAR_SPEED)
+            .min(error.abs() * 2.0);
     let velocity = desired.clamp(
-        velocity - (acceleration - 0.001) * dt,
-        velocity + (acceleration - 0.001) * dt,
+        velocity - ANGULAR_ACCELERATION * dt,
+        velocity + ANGULAR_ACCELERATION * dt,
     );
     (angle + velocity * dt, velocity)
+}
+
+fn difference(target: f32, angle: f32) -> f32 {
+    (target - angle + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)
+        - std::f32::consts::PI
+}
+
+pub(super) fn move_name(
+    previous: &super::super::names::Placement,
+    proposed: f32,
+    gain: f32,
+    tick: u64,
+    dt: f32,
+) -> (f32, f32, super::super::names::Motion) {
+    let mut motion = previous.motion.clone();
+    let settled = difference(motion.goal, previous.angle).abs() < 0.001
+        && previous.angular_velocity.abs() < 0.001;
+    if settled && gain >= GAIN {
+        let sector = (0..32_u8)
+            .find(|i| {
+                proposed.rem_euclid(std::f32::consts::TAU)
+                    < f32::from(i + 1) * std::f32::consts::TAU / 32.0
+            })
+            .unwrap_or(31);
+        let since = match motion.pending {
+            Some((old, since)) if old == sector => since,
+            _ => tick,
+        };
+        motion.pending = Some((sector, since));
+        let direction = if difference(proposed, previous.angle) > 0.0 {
+            1
+        } else {
+            -1
+        };
+        let locked = motion.direction != 0
+            && direction != motion.direction
+            && motion
+                .reversal
+                .is_some_and(|last| tick - last < REVERSAL_TICKS);
+        if tick - since >= DWELL_TICKS && !locked {
+            motion.goal = proposed;
+            motion.pending = None;
+        }
+    } else {
+        motion.pending = None;
+    }
+    let (angle, velocity) =
+        steer(previous.angle, previous.angular_velocity, motion.goal, dt);
+    let delta = angle - previous.angle;
+    if delta.abs() > 1e-7 {
+        let direction = if delta > 0.0 { 1 } else { -1 };
+        if motion.direction != 0 && direction != motion.direction {
+            if motion
+                .reversal
+                .is_some_and(|last| tick - last < REVERSAL_TICKS)
+            {
+                return (previous.angle, 0.0, motion);
+            }
+            motion.reversal = Some(tick);
+        }
+        motion.direction = direction;
+    }
+    (angle, velocity, motion)
 }
 
 pub(super) fn tangent_rect(
@@ -86,17 +135,11 @@ pub(super) fn forecast_clip(
     size: bevy::math::Vec2,
     distance: f32,
     future: &[bevy::math::Vec2],
-    emergency: bool,
 ) -> f32 {
     let mut maximum = 0.0_f32;
     for &body in future {
-        (angle, velocity) = steer(
-            angle,
-            velocity,
-            target,
-            4.0 * super::super::tick_seconds(),
-            emergency,
-        );
+        (angle, velocity) =
+            steer(angle, velocity, target, 4.0 * super::super::tick_seconds());
         let rect = tangent_rect(body, size, distance, angle);
         let outside = crate::model::caption::outside(rect, 16.0);
         maximum = maximum.max(outside);
@@ -240,7 +283,6 @@ mod tests {
     fn candidate(x: f32) -> Candidate {
         Candidate {
             angle: 0.0,
-            angular_velocity: 0.0,
             rect: Rect::from_center_size(Vec2::new(x, 0.0), Vec2::splat(2.0)),
             goal: Rect::from_center_size(Vec2::new(x, 0.0), Vec2::splat(2.0)),
             text_pairs: 0,
@@ -289,31 +331,17 @@ mod tests {
     }
 
     #[test]
-    fn emergency_rotation_integrates_without_jumps_or_velocity_resets() {
+    fn rotation_integrates_without_jumps_or_velocity_resets() {
         let mut angle = 0.0;
         let mut velocity = 0.0;
         for tick in 0..90 {
             let target = if tick < 15 { std::f32::consts::PI } else { 0.0 };
-            let (next, speed) = steer(angle, velocity, target, 1.0 / 60.0, true);
-            assert!((next - angle).abs() <= EMERGENCY_SPEED / 60.0 + 1e-6);
-            assert!((speed - velocity).abs() <= EMERGENCY_ACCELERATION / 60.0 + 1e-6);
+            let (next, speed) = steer(angle, velocity, target, 1.0 / 60.0);
+            assert!((next - angle).abs() <= ANGULAR_SPEED / 60.0 + 1e-6);
+            assert!((speed - velocity).abs() <= ANGULAR_ACCELERATION / 60.0 + 1e-6);
             angle = next;
             velocity = speed;
         }
-    }
-
-    #[test]
-    fn a_cleared_emergency_still_brakes_before_the_frame_edge() {
-        let (angle, velocity) =
-            steer(0.1, EMERGENCY_SPEED - 0.001, 0.0, 1.0 / 60.0, false);
-        let rect = tangent_rect(
-            Vec2::new(-624.0, 80.0),
-            Vec2::new(236.76, 23.0),
-            15.333_333,
-            angle,
-        );
-        assert!(rect.min.x > -639.5);
-        assert!(velocity < 2.0 * ANGULAR_SPEED);
     }
 
     #[test]
@@ -364,7 +392,6 @@ mod tests {
             Vec2::new(240.0, 24.0),
             15.333_333,
             &future,
-            false,
         );
         let clipped = forecast_clip(
             std::f32::consts::PI,
@@ -373,7 +400,6 @@ mod tests {
             Vec2::new(240.0, 24.0),
             15.333_333,
             &future,
-            false,
         );
         assert!(clear <= 0.001);
         assert!(clipped > 100.0);

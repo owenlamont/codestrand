@@ -128,7 +128,7 @@ impl Default for Options {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum Target {
     File(u64),
     Dir(usize),
@@ -277,10 +277,12 @@ impl Fragment {
 pub(super) enum LabelKind {
     Repository,
     Avatar,
+    Detail,
     Landmark,
     Activity,
 }
 
+#[derive(Clone)]
 pub(super) struct Label {
     pub position: Vec3,
     pub text: String,
@@ -1139,6 +1141,14 @@ impl Simulation {
         &self,
         visible: impl Fn(usize) -> bool,
     ) -> Vec<Label> {
+        self.labels_with_names(visible, &std::collections::BTreeSet::new())
+    }
+
+    pub(super) fn labels_with_names(
+        &self,
+        visible: impl Fn(usize) -> bool,
+        permanent: &std::collections::BTreeSet<Target>,
+    ) -> Vec<Label> {
         let layout = &self.state.layout;
         let mut subtree = vec![0_usize; layout.dir_count()];
         let mut centroids = vec![Vec2::ZERO; layout.dir_count()];
@@ -1152,7 +1162,11 @@ impl Simulation {
         }
         let mut dirs: Vec<_> = layout
             .dirs()
-            .filter(|(index, dir)| dir.depth > 0 && visible(*index))
+            .filter(|(index, dir)| {
+                dir.depth > 0
+                    && visible(*index)
+                    && !permanent.contains(&Target::Dir(*index))
+            })
             .collect();
         dirs.sort_by_key(|&(index, dir)| {
             (
@@ -1195,6 +1209,9 @@ impl Simulation {
                 continue;
             }
             for &(target, ..) in &pulse.targets {
+                if permanent.contains(&target) {
+                    continue;
+                }
                 let text = match target {
                     Target::File(id) => {
                         layout.file(id).map(|file| file.name().to_owned())

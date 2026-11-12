@@ -205,6 +205,17 @@ Names prefer clear content rectangles, including repository labels
 and a small margin, but may overlap content near tile edges when space is tight.
 Different content shapes can leave space inside a uniformly fitted tile.
 
+Contributor names orbit at no more than 30 degrees per playback second, with a
+three-second minimum between direction reversals. A new position must reduce the
+occluded fraction of the name by at least a quarter for 0.75 playback seconds before
+the name moves. Brief overlap is preferable to fast or oscillating text.
+
+Close zoom keeps inactive file and directory names visible. Names appear when the
+smaller dimension of the object's projected footprint reaches 48 logical pixels and
+remain until the footprint drops below 40 pixels. These names bypass the activity and
+landmark limits. Names use fixed world anchors and upright text; long names can overlap.
+The same rules apply to preview and export, using each mode's camera.
+
 Contributors first appear in a gutter slot above their repository, aligned with the
 projected mean of touched files. Switching repositories chooses the nearest valid edge
 instead of requiring a detour to the top. A slot survives consecutive commits while

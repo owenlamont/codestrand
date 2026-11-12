@@ -27,6 +27,15 @@ pub(super) struct Placement {
     pub commit: usize,
     pub text: String,
     pub scale: f32,
+    pub motion: Motion,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(super) struct Motion {
+    pub goal: f32,
+    pub pending: Option<(u8, u64)>,
+    pub direction: i8,
+    pub reversal: Option<u64>,
 }
 
 impl super::State {
