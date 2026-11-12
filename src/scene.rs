@@ -31,6 +31,8 @@ const GRID_LINES: i16 = 20;
 const AVATAR_LAYER: usize = 1;
 
 mod caption;
+#[cfg(test)]
+mod file_sync_tests;
 mod lod;
 #[cfg(test)]
 mod name_tests;
@@ -79,6 +81,8 @@ struct FileVisual {
     membership: Entity,
     glyph: Entity,
     glyph_kind: usize,
+    glyph_name: Box<str>,
+    glyph_theme: Option<crate::theme::ThemeName>,
     halo: Entity,
     author: Option<usize>,
 }
@@ -816,6 +820,9 @@ pub(super) fn switch_theme(world: &mut World, name: crate::theme::ThemeName) {
     let theme = name.build();
     cache_glyphs(world, &theme);
     world.resource_mut::<Playback>().0.set_theme(theme.clone());
+    for mut visual in world.query::<&mut FileVisual>().iter_mut(world) {
+        visual.glyph_theme = None;
+    }
     world.resource_scope(|world, palette: Mut<Palette>| {
         let mut meshes = world.resource_mut::<Assets<Mesh>>();
         *meshes
@@ -1124,36 +1131,26 @@ fn sync_files(
     sync_lod(world, pools, simulation);
     let layout = simulation.layout();
     pools.hues.sync(layout);
-    pools.files.retain(|id, entity| {
-        let keep = layout.file(*id).is_some();
-        if !keep {
-            world.despawn(*entity);
-        }
-        keep
-    });
+    let mut seen = 0;
     for (id, file) in layout.files() {
         let detail = pools.lod.detail[file.dir];
         if detail == 0.0 {
             if let Some(&entity) = pools.files.get(&id) {
+                seen += 1;
                 set_visible(world, entity, false);
             }
             continue;
         }
         let entity = *pools.files.entry(id).or_insert_with(|| {
-            spawn_file(
-                world,
-                palette,
-                simulation.theme(),
-                simulation.theme().glyph_kind(file.name()),
-            )
+            spawn_file(world, palette, simulation.theme(), file.name())
         });
+        seen += 1;
         set_visible(world, entity, true);
         let (position, grey, alpha) = simulation.file_effect(file);
         if let Some(mut transform) = world.get_mut::<Transform>(entity) {
-            transform.translation = position;
-            transform.rotation = Quat::IDENTITY;
-            transform.scale =
-                Vec3::splat(file.draw_scale(layout.dir(file.dir)) * detail);
+            transform.set_if_neq(Transform::from_translation(position).with_scale(
+                Vec3::splat(file.draw_scale(layout.dir(file.dir)) * detail),
+            ));
         }
         let visual = world
             .get::<FileVisual>(entity)
@@ -1162,13 +1159,20 @@ fn sync_files(
             (visual.halo, visual.author, visual.membership);
         let heat_material = visual.heat_material.clone();
         let glyph = visual.glyph;
-        let glyph_kind = simulation.theme().glyph_kind(file.name());
-        if visual.glyph_kind != glyph_kind {
-            world
+        let glyph_kind = if visual.glyph_name.as_ref() != file.name()
+            || visual.glyph_theme != Some(simulation.theme().name)
+        {
+            let glyph_kind = simulation.theme().glyph_kind(file.name());
+            let mut visual = world
                 .get_mut::<FileVisual>(entity)
-                .expect("file entities are visuals")
-                .glyph_kind = glyph_kind;
-        }
+                .expect("file entities are visuals");
+            visual.glyph_kind = glyph_kind;
+            visual.glyph_name = file.name().into();
+            visual.glyph_theme = Some(simulation.theme().name);
+            glyph_kind
+        } else {
+            visual.glyph_kind
+        };
         let material = palette.heat_glyph(glyph_kind, file.heat);
         if heat_material != *material {
             set_material(world, glyph, material);
@@ -1197,7 +1201,7 @@ fn sync_files(
                 .expect("file entities are visuals")
                 .author = Some(file.author);
         }
-        if let Some(mut transform) = world.get_mut::<Transform>(halo) {
+        if glowing && let Some(mut transform) = world.get_mut::<Transform>(halo) {
             let grow = 1.0 + simulation.theme().activity_growth * file.activity;
             *transform = simulation.theme().activity_transform;
             transform.scale *= Vec3::new(grow, grow, 1.0);
@@ -1206,6 +1210,15 @@ fn sync_files(
         if grey > 0.0 || alpha < 1.0 {
             lifecycle_material(world, entity, grey, alpha);
         }
+    }
+    if seen != pools.files.len() {
+        pools.files.retain(|id, entity| {
+            let keep = layout.file(*id).is_some();
+            if !keep {
+                world.despawn(*entity);
+            }
+            keep
+        });
     }
 }
 
@@ -1305,8 +1318,9 @@ fn spawn_file(
     world: &mut World,
     palette: &Palette,
     theme: &Theme,
-    glyph_kind: usize,
+    name: &str,
 ) -> Entity {
+    let glyph_kind = theme.glyph_kind(name);
     let heat_material = palette.glyphs[glyph_kind].clone();
     let membership = world
         .spawn((
@@ -1351,6 +1365,8 @@ fn spawn_file(
                 membership,
                 glyph,
                 glyph_kind,
+                glyph_name: name.into(),
+                glyph_theme: Some(theme.name),
                 halo,
                 author: None,
             },
@@ -1402,19 +1418,18 @@ fn sync_directory_edges(
         let (grey, alpha, rise) = simulation.repository_effect(*repository);
         if let Some(mut transform) = world.get_mut::<Transform>(*entity) {
             let delta = *to - *from;
-            *transform = Transform::from_translation(from.midpoint(*to))
-                .looking_to(delta.normalize_or(Vec3::Z), Vec3::Y)
-                .with_scale(Vec3::new(
-                    *width,
-                    simulation.theme().directory_edge_height,
-                    delta.length(),
-                ));
+            transform.set_if_neq(
+                Transform::from_translation(from.midpoint(*to) + Vec3::Y * rise)
+                    .looking_to(delta.normalize_or(Vec3::Z), Vec3::Y)
+                    .with_scale(Vec3::new(
+                        *width,
+                        simulation.theme().directory_edge_height,
+                        delta.length(),
+                    )),
+            );
         }
         set_visible(world, *entity, true);
         set_material(world, *entity, material);
-        if let Some(mut transform) = world.get_mut::<Transform>(*entity) {
-            transform.translation.y += rise;
-        }
         if grey > 0.0 || alpha < 1.0 {
             lifecycle_material(world, *entity, grey, alpha);
         }
@@ -1445,20 +1460,17 @@ fn sync_structure(
             *entity,
             palette.directory(pools.hues.slots[index], dir.depth),
         );
-        if let Some(mut transform) = world.get_mut::<Transform>(*entity) {
-            *transform =
-                Transform::from_translation(ground(dir.position) - Vec3::Y * 0.05)
-                    .with_scale(
-                        simulation.theme().directory_node_scale
-                            * pools.lod.detail[index]
-                            * dir.scale,
-                    );
-        }
-        set_visible(world, *entity, pools.lod.detail[index] > 0.0);
         let (grey, alpha, rise) = simulation.repository_effect(dir.repository);
         if let Some(mut transform) = world.get_mut::<Transform>(*entity) {
-            transform.translation.y += rise;
+            let mut translation = ground(dir.position) - Vec3::Y * 0.05;
+            translation.y += rise;
+            transform.set_if_neq(Transform::from_translation(translation).with_scale(
+                simulation.theme().directory_node_scale
+                    * pools.lod.detail[index]
+                    * dir.scale,
+            ));
         }
+        set_visible(world, *entity, pools.lod.detail[index] > 0.0);
         if grey > 0.0 || alpha < 1.0 {
             lifecycle_material(world, *entity, grey, alpha);
         }
@@ -1479,18 +1491,18 @@ fn sync_structure(
             entity,
             palette.directory(pools.hues.slots[index], dir.depth),
         );
+        let (grey, alpha, rise) = simulation.repository_effect(dir.repository);
         if let Some(mut transform) = world.get_mut::<Transform>(entity) {
-            *transform = Transform::from_translation(ground(dir.position)).with_scale(
-                Vec3::new(1.0, 0.1, 1.0)
-                    * pools.lod.size[index]
-                    * pools.lod.glyph[index],
+            transform.set_if_neq(
+                Transform::from_translation(ground(dir.position) + Vec3::Y * rise)
+                    .with_scale(
+                        Vec3::new(1.0, 0.1, 1.0)
+                            * pools.lod.size[index]
+                            * pools.lod.glyph[index],
+                    ),
             );
         }
         set_visible(world, entity, true);
-        let (grey, alpha, rise) = simulation.repository_effect(dir.repository);
-        if let Some(mut transform) = world.get_mut::<Transform>(entity) {
-            transform.translation.y += rise;
-        }
         if grey > 0.0 || alpha < 1.0 {
             lifecycle_material(world, entity, grey, alpha);
         }
@@ -1535,7 +1547,8 @@ fn sync_grid(
             )
         };
         if let Some(mut transform) = world.get_mut::<Transform>(entity) {
-            *transform = Transform::from_translation(translation).with_scale(scale);
+            transform
+                .set_if_neq(Transform::from_translation(translation).with_scale(scale));
         }
     }
 }
@@ -2390,7 +2403,7 @@ mod tests {
             world.init_resource::<Assets<Image>>();
             world.init_resource::<Assets<StandardMaterial>>();
             let palette = Palette::new(&mut world, &theme);
-            let parent = spawn_file(&mut world, &palette, &theme, 0);
+            let parent = spawn_file(&mut world, &palette, &theme, "unknown");
             let glyph = world.get::<FileVisual>(parent).unwrap().glyph;
             let transform = world.get::<Transform>(glyph).unwrap();
             assert!(
@@ -3553,8 +3566,7 @@ mod tests {
         world.init_resource::<Assets<Image>>();
         world.init_resource::<Assets<StandardMaterial>>();
         let palette = Palette::new(&mut world, &theme);
-        let entity =
-            spawn_file(&mut world, &palette, &theme, theme.glyph_kind("main.rs"));
+        let entity = spawn_file(&mut world, &palette, &theme, "main.rs");
         let children = world.get::<Children>(entity).expect("file children");
         assert_eq!(children.len(), 4);
         let tile = *children.last().expect("tile child");
