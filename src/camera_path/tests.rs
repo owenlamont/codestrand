@@ -25,6 +25,59 @@ const POINT: &str =
     "eye = { point = [0.0, 12.0, 0.0] }\nfocus = { point = [0.0, 0.0, 0.0] }\n";
 
 #[test]
+fn one_second_pan_at_one_fps_passes_but_pole_crossing_fails() {
+    let (file, mut sim) = fixture(
+        r"fps=30
+[[key]]
+frame=0
+eye={point=[0,12,0]}
+focus={point=[0,12,-10]}
+up=[0,1,0]
+[[key]]
+frame=30
+eye={point=[0,12,0]}
+focus={point=[-8.660254,12,-5]}
+",
+    );
+    let path = CameraPath::load(&file, &sim).unwrap();
+    let previous = path.pose(&sim, 0, 1).unwrap();
+    sim.advance_to(1, 1);
+    let current = path.pose(&sim, 1, 1).unwrap();
+    assert!((previous.forward().dot(*current.forward()) - 0.5).abs() < 0.0001);
+    path.validate_step(&previous, &current, 1).unwrap();
+
+    fs::write(
+        &file,
+        r"fps=30
+[[key]]
+frame=0
+eye={point=[1,12,0]}
+focus={point=[0,12,2]}
+[[key]]
+frame=1
+eye={point=[-1,12,0]}
+focus={point=[0,12,2]}
+",
+    )
+    .unwrap();
+    let path = CameraPath::load(&file, &sim).unwrap();
+    let previous = path.pose(&sim, 0, 30).unwrap();
+    let current = path.pose(&sim, 1, 30).unwrap();
+    let error = path
+        .validate_step(&previous, &current, 1)
+        .unwrap_err()
+        .to_string();
+    for advice in [
+        "output frames 0..1",
+        "intermediate key",
+        "raise the export fps",
+        "lengthen the move",
+    ] {
+        assert!(error.contains(advice), "{error}");
+    }
+}
+
+#[test]
 fn review_renamed_file_keeps_identity_for_old_and_new_names() {
     let (file, _) = fixture("fps=30\nkey=[]");
     let mut events = crate::timeline::synthetic();

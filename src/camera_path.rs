@@ -194,14 +194,13 @@ impl CameraPath {
         current: &Transform,
         frame: u32,
     ) -> Result<(), Error> {
-        if previous.right().dot(*current.right()) < std::f32::consts::FRAC_1_SQRT_2
-            || previous.forward().dot(*current.forward())
-                < std::f32::consts::FRAC_1_SQRT_2
+        if previous.right().dot(*current.right()) < 0.0
+            || previous.forward().dot(*current.forward()) < 0.0
         {
             return Err(Error::Invalid {
                 path: self.name.clone(),
                 reason: format!(
-                    "output frames {}..{frame}: camera right or forward reverses or turns more than 45 degrees; add an intermediate key",
+                    "output frames {}..{frame}: camera right or forward reverses; add an intermediate key, raise the export fps, or lengthen the move",
                     frame - 1
                 ),
             });

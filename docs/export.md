@@ -138,7 +138,7 @@ Opposite consecutive ups fail. Unknown fields, non-finite coordinates, invalid
 ordering and unknown targets fail before the GPU, encoder or output directory starts.
 Each output frame also rejects an eye below the 1.2-unit camera floor, coincident
 eye/focus, or up parallel to the view. A later invalid pose can leave partial output.
-Right/forward turns over 45° per output frame fail; add an intermediate key.
+Right/forward turns >90°/frame fail; add a key, raise fps, or lengthen the move.
 
 The same inputs, including fps, produce the same logical camera poses regardless
 of render delays. Pixel equality is limited to the same graphics backend and driver.
