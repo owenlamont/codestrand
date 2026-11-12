@@ -406,7 +406,7 @@ fn app(simulation: Simulation, title: String) -> App {
         .add_systems(Update, animate)
         .add_systems(
             PostUpdate,
-            (sync_avatar_camera, face_portraits, face_file_glyphs)
+            (sync_avatar_camera, face_portraits)
                 .chain()
                 .before(bevy::camera::CameraUpdateSystems)
                 .before(bevy::transform::TransformSystems::Propagate),
@@ -1063,7 +1063,6 @@ fn sync_lod(world: &mut World, pools: &mut Pools, simulation: &Simulation) {
         let view = names::View {
             clip_from_world: projection.get_clip_from_view()
                 * transform.to_matrix().inverse(),
-            rotation: transform.rotation,
             viewport: camera
                 .logical_viewport_size()
                 .unwrap_or(Vec2::new(1280.0, 720.0)),
@@ -1145,17 +1144,7 @@ fn sync_files(
         let (position, grey, alpha) = simulation.file_effect(file);
         if let Some(mut transform) = world.get_mut::<Transform>(entity) {
             transform.translation = position;
-            transform.rotation = Quat::from_rotation_y(
-                if layout
-                    .repositories
-                    .get(layout.dir(file.dir).repository)
-                    .is_some_and(|r| r.rotated)
-                {
-                    -std::f32::consts::FRAC_PI_2
-                } else {
-                    0.0
-                },
-            );
+            transform.rotation = Quat::IDENTITY;
             transform.scale =
                 Vec3::splat(file.draw_scale(layout.dir(file.dir)) * detail);
         }
@@ -1323,7 +1312,7 @@ fn spawn_file(
         .spawn((
             Mesh3d(palette.glyph_mesh.clone()),
             MeshMaterial3d(heat_material.clone()),
-            theme.file_glyph_transform,
+            theme.glyph_transform(),
         ))
         .id();
     let halo = world
@@ -2200,34 +2189,6 @@ fn face_portraits(world: &mut World) {
     }
 }
 
-pub(crate) fn glyph_rotation(parent: Quat, camera: Quat) -> Quat {
-    // Cancel repository orientation before applying the shared camera-facing basis.
-    parent.inverse() * camera
-}
-
-fn face_file_glyphs(world: &mut World) {
-    let Ok(camera) = world
-        .query_filtered::<&Transform, With<SceneCamera>>()
-        .single(world)
-        .map(|transform| transform.rotation)
-    else {
-        return;
-    };
-    let glyphs: Vec<_> = world
-        .query::<(&FileVisual, &Transform)>()
-        .iter(world)
-        .map(|(visual, transform)| {
-            (visual.glyph, glyph_rotation(transform.rotation, camera))
-        })
-        .collect();
-    for (entity, rotation) in glyphs {
-        world
-            .get_mut::<Transform>(entity)
-            .expect("file glyph transform")
-            .rotation = rotation;
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2292,37 +2253,120 @@ mod tests {
     }
 
     #[test]
-    fn file_glyphs_face_the_camera_after_repository_rotation_and_theme_reset() {
-        let mut world = World::new();
-        world.init_resource::<Assets<Mesh>>();
-        world.init_resource::<Assets<Image>>();
-        world.init_resource::<Assets<StandardMaterial>>();
-        let theme = Theme::neon();
-        let palette = Palette::new(&mut world, &theme);
-        let parent = spawn_file(&mut world, &palette, &theme, 0);
-        let glyph = world.get::<FileVisual>(parent).unwrap().glyph;
-        let camera = Transform::from_translation(model::view_direction() * 60.0)
-            .looking_at(Vec3::ZERO, Vec3::NEG_Z);
-        world.spawn((SceneCamera, camera));
-        for turn in [0.0, -std::f32::consts::FRAC_PI_2] {
-            world.get_mut::<Transform>(parent).unwrap().rotation =
-                Quat::from_rotation_y(turn);
-            *world.get_mut::<Transform>(glyph).unwrap() = theme.file_glyph_transform;
-            face_file_glyphs(&mut world);
-            let parent = world.get::<Transform>(parent).unwrap();
-            let child = world.get::<Transform>(glyph).unwrap();
-            assert!(
-                (parent.rotation * child.rotation).abs_diff_eq(camera.rotation, 1e-6)
+    fn flat_files_stay_upright_while_portraits_follow_the_camera() {
+        for name in crate::theme::ThemeName::ALL {
+            let theme = name.build();
+            assert_eq!(
+                theme.glyph_transform().scale.x,
+                theme.glyph_transform().scale.y
             );
-            assert_eq!(child.scale, theme.file_glyph_transform.scale);
-            for point in [Vec3::new(-0.5, -0.5, 0.0), Vec3::new(0.5, -0.5, 0.0)] {
+            let histories = (0..5)
+                .map(|index| {
+                    let mut events = crate::timeline::synthetic();
+                    crate::repositories::namespace(&mut events, index);
+                    events
+                })
+                .collect();
+            let simulation = Simulation::with_repositories(
+                crate::repositories::merge(histories),
+                &model::Options::default(),
+                &theme,
+                &crate::contributors::Mappings::default(),
+                &(0..5)
+                    .map(|index| format!("repo-{index}"))
+                    .collect::<Vec<_>>(),
+            );
+            let mut app = app(simulation, "flat glyph test".to_owned());
+            let world = app.world_mut();
+            world.insert_resource(SceneTarget(Handle::<Image>::default().into()));
+            world.insert_resource(Frame {
+                index: 180,
+                fps: 30,
+            });
+            world.init_resource::<Assets<Mesh>>();
+            world.init_resource::<Assets<Image>>();
+            world.init_resource::<Assets<StandardMaterial>>();
+            setup(world);
+            animate(world);
+            let camera = world
+                .query_filtered::<Entity, With<SceneCamera>>()
+                .single(world)
+                .unwrap();
+            let portrait = world.spawn((PortraitDisc, Transform::default())).id();
+            for rotation in [
+                Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
+                Quat::from_euler(EulerRot::YXZ, 0.7, -0.3, 0.4),
+            ] {
+                world.get_mut::<Transform>(camera).unwrap().rotation = rotation;
+                world.run_schedule(PostUpdate);
                 assert!(
-                    (parent.to_matrix() * child.to_matrix())
-                        .transform_point3(point)
-                        .y
-                        > 0.0
+                    world
+                        .get::<Transform>(portrait)
+                        .unwrap()
+                        .rotation
+                        .abs_diff_eq(rotation, 1e-6)
                 );
+                let mut count = 0;
+                for (visual, parent) in
+                    world.query::<(&FileVisual, &Transform)>().iter(world)
+                {
+                    let child = world.get::<Transform>(visual.glyph).unwrap();
+                    let basis = parent.rotation * child.rotation;
+                    assert!(
+                        basis.abs_diff_eq(theme.glyph_transform().rotation, 1e-6),
+                        "{name:?}: file basis {basis:?}"
+                    );
+                    assert!((basis * Vec3::Z).abs_diff_eq(Vec3::Y, 1e-6));
+                    assert!((basis * Vec3::Y).abs_diff_eq(Vec3::NEG_Z, 1e-6));
+                    count += 1;
+                }
+                assert!(count > 0);
             }
+        }
+    }
+    #[test]
+    fn glyph_clearance_tracks_rings_and_transformed_tiles() {
+        for (tile, expected) in [
+            (None, 0.05),
+            (
+                Some(
+                    Transform::from_xyz(0.0, 0.4, 0.0)
+                        .with_scale(Vec3::new(0.8, 0.2, 0.8)),
+                ),
+                0.515,
+            ),
+            (
+                Some(
+                    Transform::from_xyz(0.0, 0.4, 0.0)
+                        .with_scale(Vec3::new(0.8, 0.2, 0.8))
+                        .with_rotation(Quat::from_rotation_z(
+                            std::f32::consts::FRAC_PI_2,
+                        )),
+                ),
+                0.815,
+            ),
+        ] {
+            let mut theme = Theme::neon();
+            theme.file_tile = tile.map(|transform| crate::theme::FileTile {
+                material: StandardMaterial::default(),
+                transform,
+            });
+            let mut world = World::new();
+            world.init_resource::<Assets<Mesh>>();
+            world.init_resource::<Assets<Image>>();
+            world.init_resource::<Assets<StandardMaterial>>();
+            let palette = Palette::new(&mut world, &theme);
+            let parent = spawn_file(&mut world, &palette, &theme, 0);
+            let glyph = world.get::<FileVisual>(parent).unwrap().glyph;
+            let transform = world.get::<Transform>(glyph).unwrap();
+            assert!(
+                (transform.translation.y - expected).abs() < 1e-6,
+                "glyph height {} should be {expected}",
+                transform.translation.y
+            );
+            let bounds = theme.geometry();
+            assert!(bounds.file_min.y <= transform.translation.y);
+            assert!(bounds.file_max.y >= transform.translation.y);
         }
     }
 
@@ -2953,7 +2997,7 @@ mod tests {
         );
         assert_eq!(
             world.get::<Transform>(visual.glyph),
-            Some(&theme.file_glyph_transform)
+            Some(&theme.glyph_transform())
         );
         let palette = world.resource::<Palette>();
         let textures = &palette
@@ -3667,7 +3711,7 @@ mod tests {
             );
             assert_eq!(
                 world.get::<Transform>(visual.glyph),
-                Some(&simulation.theme().file_glyph_transform)
+                Some(&simulation.theme().glyph_transform())
             );
             assert_eq!(
                 world.get::<Children>(entity).expect("file children").len(),
@@ -3770,7 +3814,7 @@ mod tests {
             );
             assert_eq!(
                 world.get::<Transform>(visual.glyph),
-                Some(&simulation.theme().file_glyph_transform)
+                Some(&simulation.theme().glyph_transform())
             );
         }
         sync_structure(&mut world, &palette, &mut pools, &simulation);

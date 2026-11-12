@@ -57,8 +57,10 @@ overhead view from any orientation.
 
 Export uses the fixed overhead perspective camera at explicit frame times. Default
 framing reserves space for elevated avatars and labels; clearance guarantees apply to
-the fitted view. Free orbit and zoom can crop content. File glyphs face the camera;
-directory structures, membership rings and activity halos remain on the file plane.
+the fitted view. Free orbit and zoom can crop content. File glyphs lie flat with upright
+artwork in the overhead view. Directory structures, membership rings and activity halos
+remain on the file plane.
+Avatar portraits face the camera.
 The plane cannot be viewed from underneath; glass and file surfaces use backface culling.
 
 ## Themes

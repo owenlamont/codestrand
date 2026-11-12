@@ -220,7 +220,7 @@ impl Theme {
                 unlit: true,
                 ..default()
             },
-            file_glyph_transform: Transform::from_xyz(0.0, 0.3, 0.0)
+            file_glyph_transform: Transform::from_xyz(0.0, 0.05, 0.0)
                 .with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2))
                 .with_scale(Vec3::new(0.48, 0.48, 1.0)),
             file_tile: None,
@@ -321,9 +321,26 @@ impl Theme {
         theme
     }
 
+    pub(super) fn glyph_transform(&self) -> Transform {
+        let mut transform = self.file_glyph_transform;
+        let mut surface = self
+            .membership_transform
+            .translation
+            .y
+            .max(self.activity_transform.translation.y);
+        if let Some(tile) = &self.file_tile {
+            let half = Mat3::from_quat(tile.transform.rotation).abs()
+                * tile.transform.scale.abs()
+                * 0.5;
+            surface = surface.max(tile.transform.translation.y + half.y);
+        }
+        transform.translation.y = transform.translation.y.max(surface + 0.015);
+        transform
+    }
+
     pub(super) fn geometry(&self) -> Geometry {
         let pieces = [
-            (self.file_glyph_transform, Vec3::new(0.5, 0.5, 0.0)),
+            (self.glyph_transform(), Vec3::new(0.5, 0.5, 0.0)),
             (
                 self.membership_transform,
                 Vec3::new(self.membership_radii.y, self.membership_radii.y, 0.0),
@@ -338,13 +355,8 @@ impl Theme {
         let mut file_min = Vec3::splat(f32::MAX);
         let mut file_max = Vec3::splat(f32::MIN);
         for (transform, half) in pieces {
-            let world_half = if transform == self.file_glyph_transform {
-                let radius = (transform.scale * half).length();
-                Vec3::new(radius, transform.scale.y * half.y, radius)
-            } else {
-                Mat3::from_quat(transform.rotation).abs()
-                    * (transform.scale * half).abs()
-            };
+            let world_half = Mat3::from_quat(transform.rotation).abs()
+                * (transform.scale * half).abs();
             file_min = file_min.min(transform.translation - world_half);
             file_max = file_max.max(transform.translation + world_half);
         }
@@ -516,11 +528,11 @@ mod tests {
     fn file_bounds_follow_icons_rings_and_optional_tiles() {
         let mut theme = Theme::neon();
         let bare = theme.geometry();
-        let radius = Vec2::splat(0.24).length();
+        let radius = theme.membership_radii.y;
         assert!(
             (bare.file_min - Vec3::new(-radius, 0.015, -radius)).length() < 0.000_001
         );
-        assert!((bare.file_max - Vec3::new(radius, 0.54, radius)).length() < 0.000_001);
+        assert!((bare.file_max - Vec3::new(radius, 0.05, radius)).length() < 0.000_001);
         theme.file_tile = Some(FileTile {
             material: StandardMaterial::default(),
             transform: Transform::from_xyz(0.0, 0.4, 0.0)
@@ -528,7 +540,7 @@ mod tests {
         });
         let tiled = theme.geometry();
         assert!((tiled.file_min - Vec3::new(-0.4, 0.015, -0.4)).length() < 0.000_001);
-        assert!((tiled.file_max - Vec3::new(0.4, 0.54, 0.4)).length() < 0.000_001);
+        assert!((tiled.file_max - Vec3::new(0.4, 0.515, 0.4)).length() < 0.000_001);
         theme
             .file_tile
             .as_mut()
@@ -539,7 +551,9 @@ mod tests {
         assert!(
             (rotated.file_min - Vec3::new(-radius, 0.0, -0.4)).length() < 0.000_001
         );
-        assert!((rotated.file_max - Vec3::new(radius, 0.8, 0.4)).length() < 0.000_001);
+        assert!(
+            (rotated.file_max - Vec3::new(radius, 0.815, 0.4)).length() < 0.000_001
+        );
     }
 
     #[test]
