@@ -100,7 +100,7 @@ fn assert_icons(sim: &Simulation) {
         }
         let parent = Transform::from_translation(ground(file.position))
             .with_scale(Vec3::splat(scale));
-        let glyph = sim.theme().file_glyph_transform;
+        let glyph = sim.theme().glyph_transform();
         let matrix = parent.to_matrix() * glyph.to_matrix();
         let points = [Vec3::NEG_X, Vec3::X, Vec3::NEG_Y, Vec3::Y]
             .map(|p| matrix.transform_point3(p * 0.5));
@@ -184,7 +184,7 @@ fn local_framing_trace() {
                 let scale = file.visible_presence(sim.layout().dir(file.dir));
                 if scale <= 0.001 { continue; }
                 let parent = Transform::from_translation(ground(file.position)).with_scale(Vec3::splat(scale));
-                let glyph = theme.file_glyph_transform;
+                let glyph = theme.glyph_transform();
                 let matrix = parent.to_matrix() * glyph.to_matrix();
                 let points = [Vec3::NEG_X * 0.5, Vec3::X * 0.5, Vec3::NEG_Y * 0.5, Vec3::Y * 0.5].map(|p| matrix.transform_point3(p));
                 let projected: Vec<_> = project(eye, focus, &points).flatten().map(|p| p * framing::VIEWPORT * 0.5).collect();
@@ -193,7 +193,7 @@ fn local_framing_trace() {
             }
             let tile = r.tile.unwrap();
             let anchor = (tile.low + tile.high) * framing::VIEWPORT * 0.25;
-            serde_json::json!({"tile":r.label,"origin":origin.to_array(),"centre":centre.to_array(),"tile_low":tile.low.to_array(),"tile_high":tile.high.to_array(),"anchor_error":(centre-anchor).to_array(),"scale":scales[i],"rotated":r.rotated,"pitch":view_direction().y.asin().to_degrees(),"incidence":incidence,"aspects":aspects,"intended_aspect":theme.file_glyph_transform.scale.x/theme.file_glyph_transform.scale.y})
+            serde_json::json!({"tile":r.label,"origin":origin.to_array(),"centre":centre.to_array(),"tile_low":tile.low.to_array(),"tile_high":tile.high.to_array(),"anchor_error":(centre-anchor).to_array(),"scale":scales[i],"rotated":r.rotated,"pitch":view_direction().y.asin().to_degrees(),"incidence":incidence,"aspects":aspects,"intended_aspect":theme.glyph_transform().scale.x/theme.glyph_transform().scale.y})
         }).collect();
         serde_json::to_writer(&mut writer, &serde_json::json!({"frame":frame,"camera":[focus.to_array(),distance],"tiles":rows})).unwrap();
         writeln!(writer).unwrap();

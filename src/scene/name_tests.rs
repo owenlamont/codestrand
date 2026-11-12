@@ -150,7 +150,7 @@ fn tilted_camera_measures_the_flat_file_footprint() {
     let (id, file) = sim.layout().files().next().unwrap();
     let dir = sim.layout().dir(file.dir);
     let scale = file.draw_scale(dir);
-    let glyph = sim.theme().file_glyph_transform;
+    let glyph = sim.theme().glyph_transform();
     let (point, _, _) = sim.file_effect(file);
     let center = point + glyph.translation * scale;
     let rotation = Quat::from_rotation_x(-15.0_f32.to_radians());

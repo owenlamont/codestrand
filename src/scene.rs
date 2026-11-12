@@ -1312,7 +1312,7 @@ fn spawn_file(
         .spawn((
             Mesh3d(palette.glyph_mesh.clone()),
             MeshMaterial3d(heat_material.clone()),
-            theme.file_glyph_transform,
+            theme.glyph_transform(),
         ))
         .id();
     let halo = world
@@ -2257,8 +2257,8 @@ mod tests {
         for name in crate::theme::ThemeName::ALL {
             let theme = name.build();
             assert_eq!(
-                theme.file_glyph_transform.scale.x,
-                theme.file_glyph_transform.scale.y
+                theme.glyph_transform().scale.x,
+                theme.glyph_transform().scale.y
             );
             let histories = (0..5)
                 .map(|index| {
@@ -2313,7 +2313,7 @@ mod tests {
                     let child = world.get::<Transform>(visual.glyph).unwrap();
                     let basis = parent.rotation * child.rotation;
                     assert!(
-                        basis.abs_diff_eq(theme.file_glyph_transform.rotation, 1e-6),
+                        basis.abs_diff_eq(theme.glyph_transform().rotation, 1e-6),
                         "{name:?}: file basis {basis:?}"
                     );
                     assert!((basis * Vec3::Z).abs_diff_eq(Vec3::Y, 1e-6));
@@ -2324,6 +2324,52 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn glyph_clearance_tracks_rings_and_transformed_tiles() {
+        for (tile, expected) in [
+            (None, 0.05),
+            (
+                Some(
+                    Transform::from_xyz(0.0, 0.4, 0.0)
+                        .with_scale(Vec3::new(0.8, 0.2, 0.8)),
+                ),
+                0.515,
+            ),
+            (
+                Some(
+                    Transform::from_xyz(0.0, 0.4, 0.0)
+                        .with_scale(Vec3::new(0.8, 0.2, 0.8))
+                        .with_rotation(Quat::from_rotation_z(
+                            std::f32::consts::FRAC_PI_2,
+                        )),
+                ),
+                0.815,
+            ),
+        ] {
+            let mut theme = Theme::neon();
+            theme.file_tile = tile.map(|transform| crate::theme::FileTile {
+                material: StandardMaterial::default(),
+                transform,
+            });
+            let mut world = World::new();
+            world.init_resource::<Assets<Mesh>>();
+            world.init_resource::<Assets<Image>>();
+            world.init_resource::<Assets<StandardMaterial>>();
+            let palette = Palette::new(&mut world, &theme);
+            let parent = spawn_file(&mut world, &palette, &theme, 0);
+            let glyph = world.get::<FileVisual>(parent).unwrap().glyph;
+            let transform = world.get::<Transform>(glyph).unwrap();
+            assert!(
+                (transform.translation.y - expected).abs() < 1e-6,
+                "glyph height {} should be {expected}",
+                transform.translation.y
+            );
+            let bounds = theme.geometry();
+            assert!(bounds.file_min.y <= transform.translation.y);
+            assert!(bounds.file_max.y >= transform.translation.y);
+        }
+    }
+
     fn assert_sample_layout(world: &World, text: Entity, pixels: f32) {
         assert_eq!(
             world.get::<Text>(text).unwrap().0,
@@ -2951,7 +2997,7 @@ mod tests {
         );
         assert_eq!(
             world.get::<Transform>(visual.glyph),
-            Some(&theme.file_glyph_transform)
+            Some(&theme.glyph_transform())
         );
         let palette = world.resource::<Palette>();
         let textures = &palette
@@ -3665,7 +3711,7 @@ mod tests {
             );
             assert_eq!(
                 world.get::<Transform>(visual.glyph),
-                Some(&simulation.theme().file_glyph_transform)
+                Some(&simulation.theme().glyph_transform())
             );
             assert_eq!(
                 world.get::<Children>(entity).expect("file children").len(),
@@ -3768,7 +3814,7 @@ mod tests {
             );
             assert_eq!(
                 world.get::<Transform>(visual.glyph),
-                Some(&simulation.theme().file_glyph_transform)
+                Some(&simulation.theme().glyph_transform())
             );
         }
         sync_structure(&mut world, &palette, &mut pools, &simulation);

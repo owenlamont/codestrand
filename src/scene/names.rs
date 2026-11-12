@@ -172,13 +172,13 @@ impl Names {
         let layout = simulation.layout();
         let theme = simulation.theme();
         let broad = BroadPhase::new(view);
+        let glyph = theme.glyph_transform();
         for (id, file) in layout.files() {
             let dir = layout.dir(file.dir);
             let scale = file.draw_scale(dir);
             let (point, _, opacity) = simulation.file_effect(file);
-            let glyph = theme.file_glyph_transform;
             let center = point + glyph.translation * scale;
-            let half = theme.file_glyph_transform.scale * scale * 0.5;
+            let half = glyph.scale * scale * 0.5;
             if opacity <= 0.001 || broad.rejects(center, half.truncate().length()) {
                 continue;
             }
