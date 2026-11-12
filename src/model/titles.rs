@@ -98,7 +98,7 @@ impl Title {
         .map(move |(point, opacity)| {
             (
                 ground(crate::layout::world_coordinates(
-                    super::framing::unproject_at(point / HALF, height),
+                    super::framing::field_to_world(point / HALF),
                 )) + Vec3::Y * height,
                 opacity,
             )
@@ -317,6 +317,15 @@ impl Simulation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn title_height_does_not_move_its_world_anchor() {
+        let title =
+            title(crate::layout::packing::Tile::viewport(), "repo", 20.0, 0).unwrap();
+        let low = title.positions(1.6).next().unwrap().0;
+        let high = title.positions(3.2).next().unwrap().0;
+        assert_eq!(low.with_y(0.0), high.with_y(0.0));
+    }
+
     #[test]
     fn whole_animation_plan_avoids_a_transient_switch_and_makes_one_necessary_change() {
         let costs = [

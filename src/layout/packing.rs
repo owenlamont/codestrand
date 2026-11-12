@@ -54,7 +54,7 @@ impl Tile {
 
     pub(crate) fn ground_aspect(self) -> f32 {
         let size = self.pixels();
-        size.x / size.y * crate::model::view_direction().y
+        size.x / size.y
     }
 
     pub(crate) fn corners(self) -> [Vec2; 4] {
@@ -67,7 +67,7 @@ impl Tile {
     }
 
     pub(crate) fn ground(self) -> [Vec2; 4] {
-        self.corners().map(framing::unproject)
+        self.corners().map(framing::field_to_world)
     }
 }
 
@@ -185,11 +185,7 @@ fn update(
         Node::Repository(i) => {
             let p = presence[i];
             let mut sizes = outline::rectangle(MINIMUM, limit);
-            let vertical = crate::model::view_direction().y;
-            for normal in [
-                Vec2::new(-1.0, 1.0 / (BOUND * vertical)),
-                Vec2::new(1.0, -BOUND / vertical),
-            ] {
+            for normal in [Vec2::new(-1.0, 1.0 / BOUND), Vec2::new(1.0, -BOUND)] {
                 sizes = outline::clip(&sizes, normal, 0.0);
             }
             Feasible {

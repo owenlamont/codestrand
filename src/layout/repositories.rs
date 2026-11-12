@@ -9,9 +9,6 @@ impl Layout {
         starts: &[f32],
         names: &[String],
     ) -> Self {
-        if names.is_empty() {
-            return Self::scheduled(events, starts);
-        }
         let mut combined = Self::empty();
         combined.dirs.clear();
         combined.dir_index.clear();

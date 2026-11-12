@@ -219,17 +219,18 @@ mod tests {
             repository_ends: vec![Some(50 * 86_400)],
             ..Default::default()
         };
-        let mut sim = playback(events, &options);
-        assert_eq!(sim.repository_effect(0).1, 0.0);
-        at(&mut sim, super::super::LEAD_IN);
-        assert_eq!(sim.repository_effect(0).1, 0.0);
+        let selected = &events[1..];
+        let schedule =
+            Schedule::new(selected, options.seconds_per_day, options.max_idle_seconds);
+        let (_, endings) = plan(&events, &schedule, &options, 1..2);
+        assert!(endings[0] + REPOSITORY_EXIT < 0.0);
         let boundary = super::super::Options {
             repository_ends: vec![Some(100 * 86_400)],
             ..options
         };
         assert_eq!(
-            ending_time(&sim.events, &sim.schedule, 100 * 86_400, &boundary, true),
-            sim.schedule.starts[0]
+            ending_time(selected, &schedule, 100 * 86_400, &boundary, true),
+            schedule.starts[0]
         );
     }
 
@@ -375,6 +376,126 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
+    }
+
+    fn gutter_trace(sim: &mut super::super::Simulation) -> u64 {
+        use std::hash::Hasher as _;
+        let mut trace = std::collections::hash_map::DefaultHasher::new();
+        for frame in 0..=super::super::frames_for(sim.duration(), 30).unwrap() {
+            sim.advance_to(frame, 30);
+            trace.write_u32(frame);
+            for avatar in sim.avatars().iter().filter(|a| a.presence > 0.0) {
+                trace.write(avatar.name.as_bytes());
+                for coordinate in avatar.position.to_array() {
+                    trace.write_u32(coordinate.to_bits());
+                }
+            }
+        }
+        trace.finish()
+    }
+
+    #[test]
+    #[ignore = "requires local lifecycle repositories and CODESTRAND_GUTTER_OUTPUT"]
+    fn capped_gutter_measurements() {
+        use bevy::math::{Vec2, Vec3};
+        use clap::Parser as _;
+        let root = std::env::var("CODESTRAND_LIFECYCLE_ROOT").unwrap();
+        let crate::Command::Preview { source, .. } = crate::Cli::parse_from([
+            "codestrand",
+            "preview",
+            "--repositories-file",
+            &format!("{root}/repositories.toml"),
+            "--contributors",
+            &format!("{root}/contributors.toml"),
+        ])
+        .command
+        .unwrap() else {
+            panic!("preview fixture")
+        };
+        let (mut sim, _) = source.load().unwrap();
+        let output = std::env::var("CODESTRAND_GUTTER_OUTPUT").unwrap();
+        std::fs::write(
+            format!("{output}.trace"),
+            gutter_trace(&mut sim).to_string(),
+        )
+        .unwrap();
+        let mut rows = Vec::new();
+        for (time, frame) in [(107.77_f32, 3233), (125.0, 3750), (126.98, 3809)] {
+            sim.advance_to(frame, 30);
+            let segments: Vec<_> = sim
+                .state
+                .layout
+                .repositories
+                .iter()
+                .filter_map(|r| r.gutter)
+                .flat_map(|tile| {
+                    let p = tile.ground();
+                    [(p[0], p[1]), (p[1], p[2]), (p[2], p[3]), (p[3], p[0])]
+                })
+                .collect();
+            let nearest = |point: Vec2| {
+                segments
+                    .iter()
+                    .map(|&(a, b)| {
+                        a + (b - a)
+                            * ((point - a).dot(b - a) / (b - a).length_squared())
+                                .clamp(0.0, 1.0)
+                    })
+                    .min_by(|a, b| {
+                        point
+                            .distance_squared(*a)
+                            .total_cmp(&point.distance_squared(*b))
+                    })
+                    .unwrap()
+            };
+            let screen = |point| {
+                super::super::project(
+                    sim.state.focus + Vec3::Y * sim.state.distance,
+                    sim.state.focus,
+                    &[point],
+                )
+                .next()
+                .flatten()
+                .unwrap()
+                    * Vec2::new(640.0, 360.0)
+            };
+            for (index, avatar) in sim
+                .avatars()
+                .iter()
+                .enumerate()
+                .filter(|(_, a)| a.presence > 0.0)
+            {
+                let xz = Vec2::new(avatar.position.x, avatar.position.z);
+                let centre = nearest(xz);
+                let plane = super::super::ground(xz);
+                let projected = screen(avatar.position);
+                let screen_distance = segments
+                    .iter()
+                    .map(|&(a, b)| {
+                        let a = screen(super::super::ground(a));
+                        let b = screen(super::super::ground(b));
+                        let nearest = a
+                            + (b - a)
+                                * ((projected - a).dot(b - a)
+                                    / (b - a).length_squared())
+                                .clamp(0.0, 1.0);
+                        projected.distance(nearest)
+                    })
+                    .fold(f32::INFINITY, f32::min);
+                rows.push(serde_json::json!({"time":time,"frame":frame,"name":avatar.name,
+                    "mode":if sim.travel.walking(index,sim.state.tick){"walking"}else if sim.travel.travelling(index,sim.state.tick){"fading"}else{"parked"},
+                    "world_xz":xz.to_array(),"world_distance":xz.distance(centre),
+                    "screen_centreline_distance":screen_distance,
+                    "screen_offset":projected.distance(screen(super::super::ground(centre))),
+                    "height_parallax":projected.distance(screen(plane))}));
+                assert!(
+                    xz.distance(centre) < 0.0001,
+                    "{} at {time}: {xz:?} vs {centre:?}",
+                    avatar.name
+                );
+            }
+        }
+        std::fs::write(output, serde_json::to_vec_pretty(&rows).unwrap()).unwrap();
     }
 
     #[test]

@@ -22,7 +22,8 @@ Widths use the longest scheduled date, repository and resolved contributor name,
 the total commit counter's digits. Speed and theme columns reserve their longest
 available values so preview controls cannot move separators. Captions always use the
 embedded monospace Fira Mono font, even when another theme uses proportional labels.
-The same six fixed columns apply to single repositories and synthetic playback.
+CLI playback uses the same six fixed columns for single repositories and synthetic
+history. The synthetic repository column is named `Synthetic history`.
 
 ## Controls
 
@@ -33,7 +34,7 @@ The same six fixed columns apply to single repositories and synthetic playback.
 | `]` | Double live speed, up to 8x |
 | `,` / `.` | Previous or next theme |
 | WASD | Pan; return from contributor follow to free camera |
-| Right mouse drag | Orbit horizontally at the fixed camera pitch |
+| Right mouse drag | Orbit horizontally and vertically, without pitch limits |
 | Scroll wheel | Zoom |
 | Tab | Follow or cycle visible contributors |
 | Space | Restore the fit-to-scene camera over half a second |
@@ -42,10 +43,23 @@ The caption shows the live multiplier, theme, camera mode and follow target. Fol
 returns to free camera when the target fades out. Preview controls do not change
 the exported camera or timeline.
 
-The camera keeps the same 23.116-degree pitch above the file plane in every repository
-tile and in single-repository playback. Fitting changes position or distance without
-flattening the viewing angle. File glyphs face the camera and shrink uniformly; directory
-structures, membership rings and activity halos remain on the file plane.
+The default camera looks straight down at the centre of the repository tile area.
+Repository tiles are rectangles in world coordinates. Preview rotation has no pitch
+limits or pole lock. The eye stays at least 1.2 world units above the file plane,
+above the glass and file geometry, and can look up at contributors at height 3.2.
+Vertical drag rotates around the camera's right axis; horizontal drag rotates around
+the camera's up axis, so both controls follow the screen when upside down. Orbit and
+zoom retain the followed contributor as the aim; panning releases follow. At the floor,
+Free orbit turns about the eye instead of crossing the plane; zoom slides along the
+floor and pan stays horizontal. Follow shortens its orbit radius at the floor while
+keeping its aim on the contributor. Space smoothly raises the eye and restores the
+overhead view from any orientation.
+
+Export uses the fixed overhead perspective camera at explicit frame times. Default
+framing reserves space for elevated avatars and labels; clearance guarantees apply to
+the fitted view. Free orbit and zoom can crop content. File glyphs face the camera;
+directory structures, membership rings and activity halos remain on the file plane.
+The plane cannot be viewed from underneath; glass and file surfaces use backface culling.
 
 ## Themes
 
@@ -164,7 +178,10 @@ same frame-scaled avatar sizing and gutter placement apply to single repositorie
 synthetic playback. The top wordmark has a separate 26-pixel reserved strip, including
 a four-pixel buffer;
 avatars, gutter routes and name labels stay below the strip, matching caption clearance.
-The 16:9 export camera stays fixed. Shared gutters separate neighbouring tiles, with no
+The 16:9 export camera stays fixed. Spacing and size floors use a fixed world scale
+calibrated in reference pixels; apparent ground spacing is slightly smaller to reserve
+room for elevated portraits. Preview orbit changes the projection, not the packing.
+Shared gutters separate neighbouring tiles, with no
 contributor band. Tile weights follow eased square roots of live file counts;
 empty active repositories retain weight one. Each repository keeps file identity,
 local layout and one uniform scale, with a fixed quarter-turn chosen for its history.
@@ -177,7 +194,7 @@ existing placement rules. Invisible archived content cannot constrain earlier zo
 
 A newcomer splits one existing tile or subtree. Other repositories retain their
 relative order. Splits clamp to a ground-aspect range of 1:2.5 to 2.5:1 and a
-144-by-64-pixel readable floor at 1280 by 720. Births ease for up to 0.75 playback seconds
+144-by-64 reference-pixel floor. Births ease for up to 0.75 playback seconds
 before their first commit; births near the lead-in use the available lead-in time.
 Aspect and size clamps scale with presence during the transition. Tiles and shared
 gutters partition the whole inset field. `--gutter` sets the visible spacing in

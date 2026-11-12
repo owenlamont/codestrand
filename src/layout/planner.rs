@@ -16,7 +16,6 @@ pub(super) const RELEASE_RADIUS: f32 = 0.05;
 pub(super) struct Plan {
     pub(super) parts: Vec<(usize, Plan)>,
     samples: Arc<[Vec<Vec2>]>,
-    footprints: Arc<[Vec<Vec2>]>,
     pub(super) time: f32,
     origin: f32,
     step: f32,
@@ -80,20 +79,9 @@ impl Plan {
         for position in samples.iter_mut().flatten() {
             *position = Vec2::new(position.y, -position.x);
         }
-        let footprints = required
-            .iter()
-            .map(|row| {
-                let values: Vec<_> = maximum(row, 6)
-                    .into_iter()
-                    .map(|radius| Vec2::new(radius, f32::from(u8::from(radius > 0.0))))
-                    .collect();
-                average(&average(&values, 2), 2)
-            })
-            .collect::<Vec<_>>();
         Self {
             parts: Vec::new(),
             samples: samples.into(),
-            footprints: footprints.into(),
             time: 0.0,
             origin: 0.0,
             step,
@@ -128,15 +116,6 @@ impl Plan {
                 plan.place(time, &mut dirs[*base..end]);
             }
         }
-    }
-
-    fn footprint(&self, dir: usize, time: f32) -> Vec2 {
-        if let Some((offset, plan)) =
-            self.parts.iter().rev().find(|(offset, _)| *offset <= dir)
-        {
-            return plan.footprint(dir - offset, time);
-        }
-        interpolate(&self.footprints[dir], time, self.step)
     }
 }
 
@@ -301,6 +280,7 @@ fn maximum(values: &[f32], window: usize) -> Vec<f32> {
         .collect()
 }
 
+#[cfg(test)]
 fn average(values: &[Vec2], window: usize) -> Vec<Vec2> {
     let width = u16::try_from(window * 2 + 1).expect("smoothing window fits u16");
     let mut sum =
@@ -559,26 +539,6 @@ fn pack_with_residual(
 }
 
 impl Layout {
-    pub(crate) fn forecast(&self) -> Vec<(Vec2, f32)> {
-        let mut centres = vec![Vec2::ZERO; self.dirs.len()];
-        let mut points = Vec::new();
-        for index in 0..self.dirs.len() {
-            let footprint = self.plan.footprint(index, self.plan.time);
-            let dir = &self.dirs[index];
-            let centre = dir.parent.map_or(dir.position, |parent| {
-                centres[parent].lerp(dir.position, footprint.y.clamp(0.0, 1.0))
-            });
-            centres[index] = centre;
-            if footprint.x > 0.0001
-                && (self.repositories.is_empty()
-                    || self.repositories[dir.repository].live)
-            {
-                points.push((centre, footprint.x * dir.scale));
-            }
-        }
-        points
-    }
-
     #[cfg(test)]
     pub(crate) fn planned(events: &[Event]) -> Self {
         let starts = model::schedule::Schedule::new(events, 0.5, 1.0).starts;
@@ -863,9 +823,9 @@ mod tests {
             let positions: BTreeMap<_, _> = sim
                 .layout()
                 .files()
-                .map(|(id, file)| ((false, id), file.position))
+                .map(|(id, file)| ((false, id), file.local_position))
                 .chain(sim.layout().dirs().map(|(id, dir)| {
-                    ((true, u64::try_from(id).unwrap()), dir.position)
+                    ((true, u64::try_from(id).unwrap()), dir.local_position)
                 }))
                 .collect();
             let mut next_velocities = BTreeMap::new();
@@ -894,37 +854,6 @@ mod tests {
             previous = positions;
             velocities = next_velocities;
         }
-    }
-
-    #[test]
-    fn camera_opens_before_growth_without_a_burst_tick_zoom() {
-        let mut sim = Simulation::new(
-            burst(),
-            &Options::default(),
-            &Theme::neon(),
-            &Mappings::default(),
-        );
-        let mut previous = sim.view().1;
-        let mut early = 0.0;
-        let mut before = 0.0;
-        for tick in 0..700 {
-            sim.advance_to(tick, 60);
-            let distance = sim.view().1;
-            if tick == 300 {
-                early = distance;
-            }
-            if tick == 600 {
-                before = distance;
-            }
-            if tick >= 570 {
-                assert!(
-                    (distance - previous).abs() / previous < 0.02,
-                    "camera zoom at {tick}: {previous} -> {distance}"
-                );
-            }
-            previous = distance;
-        }
-        assert!(before > early);
     }
 
     #[test]
@@ -1103,8 +1032,11 @@ mod probes {
             sim.tick_layout();
             assert_separated(&sim);
             for (id, file) in sim.layout().files() {
-                if let Some(before) = previous.insert(id, file.position) {
-                    assert!(file.position.distance(before) * 60.0 <= MAX_SPEED + 0.001);
+                if let Some(before) = previous.insert(id, file.local_position) {
+                    assert!(
+                        file.local_position.distance(before) * 60.0
+                            <= MAX_SPEED + 0.001
+                    );
                 }
                 let own = sim.layout().dir(file.dir);
                 let presence = file.visible_presence(own);

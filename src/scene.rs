@@ -474,7 +474,7 @@ fn setup(world: &mut World) {
             target.clone(),
             Tonemapping::None,
             DebandDither::Disabled,
-            Transform::from_xyz(6.0, 9.5, 12.0).looking_at(Vec3::ZERO, Vec3::Y),
+            Transform::from_xyz(6.0, 9.5, 12.0).looking_at(Vec3::ZERO, Vec3::NEG_Z),
             SceneCamera,
         ))
         .id();
@@ -568,7 +568,6 @@ fn repository_glass_material(theme: &Theme, index: usize) -> StandardMaterial {
             .with_alpha(0.055),
         alpha_mode: AlphaMode::Blend,
         unlit: true,
-        cull_mode: None,
         ..default()
     }
 }
@@ -592,10 +591,7 @@ fn glass_positions(region: &crate::layout::RepositoryRegion) -> Vec<[f32; 3]> {
         .tile
         .map_or([Vec2::ZERO; 4], crate::layout::packing::Tile::corners)
         .map(|point| {
-            crate::layout::world_coordinates(model::framing::unproject_at(
-                point,
-                model::framing::GLASS_BOTTOM,
-            ))
+            crate::layout::world_coordinates(model::framing::field_to_world(point))
         });
     [0, 1, 2, 0, 2, 3]
         .map(|i| [corners[i].x, model::framing::GLASS_BOTTOM, corners[i].y])
@@ -986,10 +982,11 @@ fn preview_camera(world: &mut World, mut drag_from: Local<Option<Vec2>>) {
             |(fov, viewport)| simulation.view_for_projection(fov, viewport),
         );
         camera.update(&input, view, simulation.avatars(), dt);
-        let (eye, focus) = camera.pose();
+        let (eye, _) = camera.pose();
         let mut query = world.query_filtered::<&mut Transform, With<SceneCamera>>();
         if let Ok(mut transform) = query.single_mut(world) {
-            *transform = Transform::from_translation(eye).looking_at(focus, Vec3::Y);
+            *transform =
+                Transform::from_translation(eye).with_rotation(camera.rotation());
         }
     });
     world.resource_scope(|world, playback: Mut<Playback>| {
@@ -1708,11 +1705,13 @@ fn place_camera(world: &mut World, simulation: &Simulation) {
         || simulation.view(),
         |(fov, viewport)| simulation.view_for_projection(fov, viewport),
     );
+    let fitted = PreviewCamera::new((focus, distance));
+    let camera = world.get_resource::<PreviewCamera>().unwrap_or(&fitted);
+    let (eye, _) = camera.pose();
+    let rotation = camera.rotation();
     let mut query = world.query_filtered::<&mut Transform, With<SceneCamera>>();
     if let Ok(mut transform) = query.single_mut(world) {
-        *transform =
-            Transform::from_translation(focus + model::view_direction() * distance)
-                .looking_at(focus, Vec3::Y);
+        *transform = Transform::from_translation(eye).with_rotation(rotation);
     }
 }
 
@@ -2274,7 +2273,7 @@ mod tests {
         let parent = spawn_file(&mut world, &palette, &theme, 0);
         let glyph = world.get::<FileVisual>(parent).unwrap().glyph;
         let camera = Transform::from_translation(model::view_direction() * 60.0)
-            .looking_at(Vec3::ZERO, Vec3::Y);
+            .looking_at(Vec3::ZERO, Vec3::NEG_Z);
         world.spawn((SceneCamera, camera));
         for turn in [0.0, -std::f32::consts::FRAC_PI_2] {
             world.get_mut::<Transform>(parent).unwrap().rotation =
@@ -2401,7 +2400,7 @@ mod tests {
         let camera = Transform::from_translation(
             model::view_direction() * model::framing::DISTANCE,
         )
-        .looking_at(Vec3::ZERO, Vec3::Y);
+        .looking_at(Vec3::ZERO, Vec3::NEG_Z);
         let clip = projection.get_clip_from_view() * camera.to_matrix().inverse();
         for frame in
             (0..model::frames_for(simulation.duration(), 60).unwrap()).step_by(7)
@@ -2424,7 +2423,11 @@ mod tests {
                 let expected = tile.corners();
                 for (vertex, index) in vertices.iter().zip([0, 1, 2, 0, 2, 3]) {
                     let projected = clip.project_point3(Vec3::from_array(*vertex));
-                    assert!((projected.truncate() - expected[index]).length() < 2e-6);
+                    let expected = model::framing::project_at(
+                        model::framing::field_to_world(expected[index]),
+                        model::framing::GLASS_BOTTOM,
+                    );
+                    assert!((projected.truncate() - expected).length() < 2e-6);
                 }
             }
         }
@@ -2753,7 +2756,7 @@ mod tests {
             assert!(world.get::<RenderLayers>(beam).is_none());
         }
         let changed =
-            Transform::from_xyz(12.0, 18.0, -6.0).looking_at(Vec3::ZERO, Vec3::Y);
+            Transform::from_xyz(12.0, 18.0, -6.0).looking_at(Vec3::ZERO, Vec3::NEG_Z);
         world.entity_mut(scene).insert((
             changed,
             Projection::Perspective(PerspectiveProjection {

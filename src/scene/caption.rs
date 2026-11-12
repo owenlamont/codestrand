@@ -51,11 +51,7 @@ pub(super) fn setup(world: &mut World, camera: Entity) {
             Node {
                 position_type: PositionType::Absolute,
                 left: px(0.0),
-                top: px(if columns.multi {
-                    crate::model::caption::MULTI_TOP
-                } else {
-                    668.0
-                }),
+                top: px(crate::model::caption::MULTI_TOP),
                 width: percent(100.0),
                 height: px(crate::model::caption::BAR_HEIGHT),
                 ..default()
@@ -96,14 +92,9 @@ pub(super) fn setup(world: &mut World, camera: Entity) {
 pub(super) fn update(world: &mut World) {
     let simulation = &world.resource::<Playback>().0;
     let fields = simulation.caption_fields();
-    let multi = !simulation.layout().repositories.is_empty();
     let style = simulation.caption_style;
     let tint = simulation.caption_background();
-    let ink = if multi {
-        Color::WHITE
-    } else {
-        simulation.theme().heading
-    };
+    let ink = Color::WHITE;
     let status = world
         .get_resource::<PreviewCamera>()
         .map_or_else(String::new, |c| format!(" | {}", c.caption()));
@@ -111,14 +102,10 @@ pub(super) fn update(world: &mut World) {
         .query_filtered::<&mut BackgroundColor, With<Bar>>()
         .iter_mut(world)
     {
-        background.set_if_neq(BackgroundColor(if multi {
-            if style == Style::Bar {
-                tint
-            } else {
-                Color::BLACK
-            }
+        background.set_if_neq(BackgroundColor(if style == Style::Bar {
+            tint
         } else {
-            Color::NONE
+            Color::BLACK
         }));
     }
     for (part, mut label, mut background, mut colour) in world
@@ -133,8 +120,7 @@ pub(super) fn update(world: &mut World) {
         label.set_if_neq(Text::new(value));
         colour.set_if_neq(TextColor(ink));
         background.set_if_neq(BackgroundColor(
-            if multi
-                && matches!(part, Part::Field(1))
+            if matches!(part, Part::Field(1))
                 && style == Style::Chip
                 && !fields[1].is_empty()
             {

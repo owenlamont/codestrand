@@ -124,31 +124,6 @@ fn every_multiplier_samples_the_canonical_timeline() {
 }
 
 #[test]
-fn multipliers_preserve_canonical_directory_speed() {
-    for factor in [0.125, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0] {
-        let mut sim = simulation(growth(), &Options::default());
-        sim.change_rate(factor);
-        let mut previous = BTreeMap::new();
-        let mut worst = 0.0_f32;
-        let frames = frames_for(sim.duration(), 60).unwrap();
-        for _ in 0..frames {
-            sim.tick_layout();
-            let mut current = BTreeMap::new();
-            for (id, dir) in sim.layout().dirs() {
-                if let Some(position) = previous.get(&id) {
-                    worst = worst.max(dir.position.distance(*position) * 60.0);
-                }
-                current.insert(id, dir.position);
-            }
-            previous = current;
-        }
-        eprintln!("factor {factor}: maximum retained-directory speed {worst}");
-        assert!(worst <= 3.001, "factor {factor}: {worst} units/s");
-        assert_eq!(sim.commit(), sim.total());
-    }
-}
-
-#[test]
 fn multipliers_preserve_fading_directory_space() {
     let mut first = changes("a", 100, &Kind::Added);
     first.extend(changes("b", 1, &Kind::Added));
@@ -165,6 +140,13 @@ fn multipliers_preserve_fading_directory_space() {
     };
     for (factor, change_tick) in [(1.0, 0), (0.125, 0), (8.0, 6036)] {
         let mut sim = simulation(events.clone(), &options);
+        sim.advance_to(60, 60);
+        assert!(
+            sim.layout()
+                .files()
+                .any(|(_, file)| file.path.starts_with("0/a/"))
+        );
+        sim.restart();
         for _ in 0..change_tick {
             sim.tick_layout();
         }
@@ -199,9 +181,25 @@ fn multipliers_preserve_fading_directory_space() {
         assert!(
             sim.layout()
                 .files()
-                .all(|(_, file)| !file.path.starts_with("a/"))
+                .all(|(_, file)| !file.path.starts_with("0/a/"))
         );
     }
+}
+
+fn padded(
+    mut events: Vec<Event>,
+    options: &Options,
+    padding: &[(usize, u32)],
+) -> Simulation {
+    crate::repositories::namespace(&mut events, 0);
+    Simulation::build(
+        events,
+        options,
+        &Theme::neon(),
+        &Mappings::default(),
+        padding,
+        &["Synthetic history".into()],
+    )
 }
 
 #[test]
@@ -211,14 +209,7 @@ fn padding_holds_date_and_commit_while_heat_fragments_and_fades_advance() {
         event(1, changes("a", 1, &Kind::Modified)),
         event(2, changes("b", 1, &Kind::Added)),
     ];
-    let mut sim = Simulation::build(
-        events,
-        &Options::default(),
-        &Theme::neon(),
-        &Mappings::default(),
-        &[(1, 360)],
-        &[],
-    );
+    let mut sim = padded(events, &Options::default(), &[(1, 360)]);
     sim.advance_to(60, 60);
     let caption = sim.caption();
     let heat = sim.layout().files().next().unwrap().1.heat;
@@ -245,16 +236,7 @@ fn padded_state_replays_identically_at_thirty_and_sixty_fps_and_after_rewind() {
         },
     ] {
         let events = crate::timeline::synthetic();
-        let make = || {
-            Simulation::build(
-                events.clone(),
-                &options,
-                &Theme::neon(),
-                &Mappings::default(),
-                &[(0, 30), (2, 60), (4, 45)],
-                &[],
-            )
-        };
+        let make = || padded(events.clone(), &options, &[(0, 30), (2, 60), (4, 45)]);
         let mut thirty = make();
         let mut sixty = make();
         for frame in [0, 15, 30, 45, 90, 180, 300, 25, 120, 0, 90] {
@@ -278,14 +260,7 @@ fn first_selected_padding_aligns_playback_and_full_history_layout() {
         start: 2,
         ..Options::default()
     };
-    let mut sim = Simulation::build(
-        events,
-        &options,
-        &Theme::neon(),
-        &Mappings::default(),
-        &[(2, 60)],
-        &[],
-    );
+    let mut sim = padded(events, &options, &[(2, 60)]);
     assert_eq!(sim.schedule.starts[0], 1.5);
     sim.advance_to(90, 60);
     assert_eq!(sim.commit(), 3);

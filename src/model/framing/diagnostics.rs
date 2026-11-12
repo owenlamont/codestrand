@@ -44,7 +44,7 @@ fn realistic_history_has_stable_framing_and_uniform_icons_at_sixty_hz() {
                 );
             }
             previous_scales[i] = (scales[i] > 0.0).then_some(scales[i]);
-            let centre = framing::project_ground((region.low + region.high) * 0.5)
+            let centre = framing::world_to_field((region.low + region.high) * 0.5)
                 * framing::VIEWPORT
                 * 0.5;
             let tile = region.tile.unwrap();
@@ -80,7 +80,7 @@ fn assert_icons(sim: &Simulation) {
     let mut camera = crate::camera::PreviewCamera::new(sim.view());
     camera.update(
         &crate::camera::Input {
-            orbit: Vec2::new(0.0, 10_000.0),
+            orbit: Vec2::ZERO,
             ..default()
         },
         sim.view(),
@@ -89,10 +89,12 @@ fn assert_icons(sim: &Simulation) {
     );
     let (eye, target) = camera.pose();
     assert!(
-        ((eye - target).normalize().y.asin() - view_direction().y.asin()).abs() < 1e-6
+        (eye - target)
+            .normalize()
+            .abs_diff_eq(view_direction(), 1e-5)
     );
     let rotation = Transform::from_translation(focus + view_direction() * distance)
-        .looking_at(focus, Vec3::Y)
+        .looking_at(focus, Vec3::NEG_Z)
         .rotation;
     for (_, file) in sim.layout().files() {
         let dir = sim.layout().dir(file.dir);
@@ -189,15 +191,15 @@ fn local_framing_trace() {
         let (focus, distance) = sim.view();
         let eye = focus + view_direction() * distance;
         let rows: Vec<_> = regions.iter().enumerate().filter(|(_, r)| r.live).map(|(i, r)| {
-            let origin = framing::project_ground(origins[i]) * framing::VIEWPORT * 0.5;
-            let centre = framing::project_ground((r.low + r.high) * 0.5) * framing::VIEWPORT * 0.5;
+            let origin = framing::world_to_field(origins[i]) * framing::VIEWPORT * 0.5;
+            let centre = framing::world_to_field((r.low + r.high) * 0.5) * framing::VIEWPORT * 0.5;
             let mut aspects = Vec::new();
             let mut incidence = Vec::new();
             for (_, file) in sim.layout().files().filter(|(_, f)| sim.layout().dir(f.dir).repository == i) {
                 let scale = file.visible_presence(sim.layout().dir(file.dir));
                 if scale <= 0.001 { continue; }
                 let parent = Transform::from_translation(ground(file.position)).with_rotation(Quat::from_rotation_y(if r.rotated {-std::f32::consts::FRAC_PI_2} else {0.0})).with_scale(Vec3::splat(scale));
-                let camera = Transform::from_translation(eye).looking_at(focus, Vec3::Y);
+                let camera = Transform::from_translation(eye).looking_at(focus, Vec3::NEG_Z);
                 let mut glyph = theme.file_glyph_transform;
                 glyph.rotation = crate::scene::glyph_rotation(parent.rotation, camera.rotation);
                 let matrix = parent.to_matrix() * glyph.to_matrix();

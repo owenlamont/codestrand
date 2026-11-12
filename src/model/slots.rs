@@ -150,9 +150,8 @@ impl Placement {
 }
 
 pub(super) fn world(point: Vec2) -> Vec3 {
-    ground(crate::layout::world_coordinates(framing::unproject_at(
+    ground(crate::layout::world_coordinates(framing::field_to_world(
         point / HALF,
-        MIN_AVATAR_HEIGHT,
     ))) + Vec3::Y * MIN_AVATAR_HEIGHT
 }
 
@@ -545,12 +544,7 @@ impl State {
 
 impl State {
     pub(super) fn name_scale(&self) -> f32 {
-        self.avatar_scale
-            * if self.layout.repositories.is_empty() {
-                1.0
-            } else {
-                0.95
-            }
+        self.avatar_scale * 0.95
     }
 
     fn name_bodies(&self) -> Vec<Option<Vec2>> {
@@ -1278,23 +1272,9 @@ impl Choice<'_> {
 
 impl State {
     pub(super) fn avatar_label(&self, avatar: &super::Avatar) -> super::Label {
-        let multi = !self.layout.repositories.is_empty();
         if let Some(name) = &avatar.name_visibility.placement {
-            let position = if multi {
-                world(name.point)
-            } else {
-                let eye = self.focus + view_direction() * self.distance;
-                let forward = (self.focus - eye).normalize();
-                let right = forward.cross(Vec3::Y).normalize();
-                let up = right.cross(forward);
-                let depth = (avatar.position - eye).dot(forward);
-                let half_height = depth * std::f32::consts::FRAC_PI_8.tan();
-                eye + forward * depth
-                    + right * (name.point.x / HALF.x * half_height * 16.0 / 9.0)
-                    + up * (name.point.y / HALF.y * half_height)
-            };
             return super::Label {
-                position,
+                position: world(name.point),
                 text: name.text.clone(),
                 kind: super::LabelKind::Avatar,
                 scale: name.scale,
@@ -1303,11 +1283,7 @@ impl State {
             };
         }
         super::Label {
-            position: if multi {
-                avatar.position
-            } else {
-                avatar.position + self.geometry.avatar_label_offset
-            },
+            position: avatar.position,
             text: avatar
                 .slot
                 .as_ref()
@@ -1316,7 +1292,7 @@ impl State {
             scale: self.name_scale(),
             opacity: avatar.name_visibility.opacity
                 * avatar.presence
-                * f32::from(u8::from(!multi || avatar.name_visibility.visible)),
+                * f32::from(u8::from(avatar.name_visibility.visible)),
             priority: avatar.activity,
         }
     }
@@ -1840,7 +1816,7 @@ mod tests {
     }
     fn snapshot(sim: &Simulation) -> serde_json::Value {
         serde_json::Value::Array(sim.state.avatars.iter().map(|a| serde_json::json!({
-            "commit":a.commit,"repository":a.repository,"position":a.position.to_array(),"velocity":a.velocity.to_array(),
+            "commit":a.commit,"repository":a.repository,"position":a.position.to_array(),
             "name_opacity":a.name_visibility.opacity,"name_visible":a.name_visibility.visible,
             "placement":a.name_visibility.placement.as_ref().map(|p| serde_json::json!({"point":p.point.to_array(),"body":p.body.to_array(),"text":p.text,"scale":p.scale})),
             "slot":a.slot.as_ref().map(|s| serde_json::json!({"edge":s.dock.edge,"fraction":s.dock.fraction,"point":s.point.to_array(),"text":s.text,"valid":s.valid()}))
