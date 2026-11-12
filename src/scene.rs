@@ -10,7 +10,7 @@ use bevy::{
         RenderPlugin,
         pipelined_rendering::PipelinedRenderingPlugin,
         render_resource::{Extent3d, TextureDimension, TextureFormat},
-        view::{DebandDither, Tonemapping},
+        view::{DebandDither, NoIndirectDrawing, Tonemapping},
     },
     ui::UiSystems,
     window::ExitCondition,
@@ -37,6 +37,7 @@ mod lod;
 #[cfg(test)]
 mod name_tests;
 mod names;
+mod ordering;
 mod styling;
 
 #[derive(Resource)]
@@ -240,6 +241,17 @@ impl Palette {
         let depths = &self.directories[slot % self.directories.len()];
         &depths[usize::from(depth - 1).min(depths.len() - 1)]
     }
+
+    fn directory_edge_height(&self, slot: usize, depth: u16) -> f32 {
+        let slot = slot % self.directories.len();
+        let depths = &self.directories[slot];
+        let rank = self.directories[..slot].iter().map(Vec::len).sum::<usize>()
+            + usize::from(depth.saturating_sub(1)).min(depths.len() - 1);
+        let count = self.directories.iter().map(Vec::len).sum::<usize>();
+        // Separate coplanar edge tops by palette key rather than allocation order.
+        0.01 * model::count_u32(u32::try_from(rank).expect("palette rank fits u32"))
+            / model::count_u32(u32::try_from(count).expect("palette size fits u32"))
+    }
 }
 
 #[derive(Default)]
@@ -437,6 +449,7 @@ pub(super) fn preview(simulation: Simulation, title: String) {
             }),
             ..default()
         }))
+        .add_plugins(ordering::StableTransparency)
         .insert_resource(SceneTarget(RenderTarget::default()))
         .insert_resource(Frame {
             index: 0,
@@ -467,6 +480,7 @@ pub(super) fn headless(
             .disable::<WinitPlugin>()
             .disable::<PipelinedRenderingPlugin>(),
     );
+    app.add_plugins(ordering::StableTransparency);
     let mut image =
         Image::new_target_texture(WIDTH, HEIGHT, TextureFormat::Rgba8UnormSrgb, None);
     image.asset_usage = RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD;
@@ -478,18 +492,22 @@ pub(super) fn headless(
 
 fn setup(world: &mut World) {
     let target = world.resource::<SceneTarget>().0.clone();
-    let camera = world
-        .spawn((
-            Camera3d::default(),
-            Hdr,
-            target.clone(),
-            Tonemapping::None,
-            DebandDither::Disabled,
-            Transform::from_xyz(6.0, 9.5, 12.0).looking_at(Vec3::ZERO, Vec3::NEG_Z),
-            SceneCamera,
-        ))
-        .id();
-    world.spawn((
+    let exporting = matches!(&target, RenderTarget::Image(_));
+    let mut camera = world.spawn((
+        Camera3d::default(),
+        Hdr,
+        target.clone(),
+        Tonemapping::None,
+        DebandDither::Disabled,
+        Transform::from_xyz(6.0, 9.5, 12.0).looking_at(Vec3::ZERO, Vec3::NEG_Z),
+        SceneCamera,
+    ));
+    // Indirect GPU compaction can reorder translucent instances within a batch.
+    if exporting {
+        camera.insert(NoIndirectDrawing);
+    }
+    let camera = camera.id();
+    let mut avatar_camera = world.spawn((
         Camera3d {
             depth_load_op: Camera3dDepthLoadOp::Clear(0.0),
             ..default()
@@ -506,6 +524,9 @@ fn setup(world: &mut World) {
         DebandDither::Disabled,
         AvatarCamera,
     ));
+    if exporting {
+        avatar_camera.insert(NoIndirectDrawing);
+    }
     let theme = world.resource::<Playback>().0.theme().clone();
     let palette = Palette::new(world, &theme);
     repository_regions(world);
@@ -1212,13 +1233,16 @@ fn sync_files(
         }
     }
     if seen != pools.files.len() {
-        pools.files.retain(|id, entity| {
-            let keep = layout.file(*id).is_some();
-            if !keep {
-                world.despawn(*entity);
-            }
-            keep
-        });
+        let mut removed: Vec<_> = pools
+            .files
+            .keys()
+            .copied()
+            .filter(|id| layout.file(*id).is_none())
+            .collect();
+        removed.sort_unstable();
+        for id in removed {
+            world.despawn(pools.files.remove(&id).expect("removed file is pooled"));
+        }
     }
 }
 
@@ -1393,9 +1417,11 @@ fn sync_directory_edges(
             }
             let parent = layout.dir(dir.parent?);
             let width = simulation.theme().directory_edge_width(dir.depth) * dir.scale;
+            let height =
+                palette.directory_edge_height(pools.hues.slots[index], dir.depth);
             Some((
-                ground(parent.position) - Vec3::Y * 0.05,
-                ground(dir.position) - Vec3::Y * 0.05,
+                ground(parent.position) + Vec3::Y * (height - 0.05),
+                ground(dir.position) + Vec3::Y * (height - 0.05),
                 palette.directory(pools.hues.slots[index], dir.depth),
                 width * dir.parent.map_or(1.0, |parent| pools.lod.detail[parent]),
                 dir.repository,
@@ -3685,6 +3711,35 @@ mod tests {
             palette.directory(0, 1),
             palette.directory(theme.directories.len(), 1)
         );
+    }
+
+    #[test]
+    fn directory_edge_layers_separate_colours_without_growing_with_history() {
+        let mut world = World::new();
+        world.init_resource::<Assets<Mesh>>();
+        world.init_resource::<Assets<Image>>();
+        world.init_resource::<Assets<StandardMaterial>>();
+        let palette = Palette::new(&mut world, &Theme::neon());
+        let mut heights = Vec::new();
+        for slot in 0..palette.directories.len() {
+            for depth in 1..=4 {
+                let height = palette.directory_edge_height(slot, depth);
+                assert!((0.0..0.01).contains(&height));
+                assert!(!heights.contains(&height));
+                heights.push(height);
+                assert_eq!(
+                    height,
+                    palette.directory_edge_height(
+                        slot + palette.directories.len() * 100_000,
+                        depth
+                    )
+                );
+            }
+            assert_eq!(
+                palette.directory_edge_height(slot, 4),
+                palette.directory_edge_height(slot, u16::MAX)
+            );
+        }
     }
 
     #[test]

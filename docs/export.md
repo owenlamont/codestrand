@@ -26,6 +26,12 @@ options as preview. By default, the camera uses the fit-to-scene view. Explicit 
 times keep export independent of rendering speed. Each capture is confirmed
 written before export completes. Export needs a working graphics adapter.
 
+Bit-identical frames require the same build, graphics adapter, backend and driver,
+repository history, options and portrait assets. Use cached or local portraits
+offline: leave `--fetch-avatars` off and keep the avatar cache unchanged between
+exports. Live fetching can change portraits with network availability, deadlines
+and cache expiry. Fetch portraits before making repeatable captures.
+
 ## Stream a video to FFmpeg
 
 ```sh
@@ -141,6 +147,6 @@ eye/focus, or up parallel to the view. A later invalid pose can leave partial ou
 Right/forward turns >90°/frame fail; add a key, raise fps, or lengthen the move.
 
 The same inputs, including fps, produce the same logical camera poses regardless
-of render delays. Pixel equality is limited to the same graphics backend and driver.
-Camera paths affect export only; preview controls remain independent. Close-zoom
-names still enter at 48 pixels and leave below 40 pixels during camera moves.
+of render delays. Pixel equality is limited to the same graphics adapter, backend
+and driver. Camera paths affect export only; preview controls remain independent.
+Close-zoom names still enter at 48 pixels and leave below 40 pixels during camera moves.
