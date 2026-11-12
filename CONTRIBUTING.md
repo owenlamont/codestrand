@@ -25,16 +25,8 @@ export and visual inspection:
 cargo test --locked --test render_export -- --ignored
 ```
 
-CI runs CPU tests on Linux, macOS and Windows. A separate Ubuntu job runs all three
-ignored `render_export` tests with Mesa lavapipe, including repeat-export pixel
-equality and render-pacing independence. No graphics tests are skipped in that job.
-The headless exporter needs no xvfb or display server.
-
-The software-render job installs `mesa-vulkan-drivers`, `libvulkan1` and
-`vulkan-tools` with apt. `WGPU_BACKEND=vulkan` and `WGPU_ADAPTER_NAME=llvmpipe`
-select the software adapter; `VK_DRIVER_FILES` restricts Vulkan to Mesa's
-`lvp_icd*.json` driver manifest. `vulkaninfo --summary` records the adapter and Mesa
-version in the job log. The job uses the same Rust-input filter as the CPU matrix.
+CI runs the CPU tests on Linux, macOS and Windows, and a separate Ubuntu job runs the
+ignored `render_export` tests on Mesa's lavapipe software Vulkan adapter.
 
 Before tagging, update `CHANGELOG.md` and regenerate third-party notices after
 dependency changes. The release workflow checks notice freshness and extracts the
