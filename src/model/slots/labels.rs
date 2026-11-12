@@ -4,10 +4,8 @@ use bevy::math::Rect;
 pub(super) struct Candidate {
     pub angle: f32,
     pub rect: Rect,
-    pub goal: Rect,
     pub text_pairs: usize,
     pub text_area: f32,
-    pub goal_text_pairs: usize,
     pub soft: f32,
 }
 
@@ -154,7 +152,7 @@ fn overlap(a: Rect, b: Rect) -> f32 {
 }
 
 fn interacting(a: Candidate, b: Candidate) -> bool {
-    overlap(a.rect, b.rect) > 0.0 || overlap(a.goal, b.goal) > 0.0
+    overlap(a.rect, b.rect) > 0.0
 }
 
 pub(super) fn solve(domains: &[Vec<Candidate>]) -> Assignment {
@@ -191,11 +189,11 @@ pub(super) fn solve(domains: &[Vec<Candidate>]) -> Assignment {
             component: &component,
             selected: Vec::new(),
             best: vec![0; component.len()],
-            score: (usize::MAX, f32::INFINITY, usize::MAX, f32::INFINITY),
+            score: (usize::MAX, f32::INFINITY, f32::INFINITY),
             remaining: 4096,
             exhausted: false,
         };
-        let clear = search.visit((0, 0.0, 0, 0.0));
+        let clear = search.visit((0, 0.0, 0.0));
         for (&node, &choice) in component.iter().zip(&search.best) {
             result.choices[node] = choice;
         }
@@ -210,13 +208,13 @@ struct Search<'a> {
     component: &'a [usize],
     selected: Vec<usize>,
     best: Vec<usize>,
-    score: (usize, f32, usize, f32),
+    score: (usize, f32, f32),
     remaining: usize,
     exhausted: bool,
 }
 
 impl Search<'_> {
-    fn visit(&mut self, score: (usize, f32, usize, f32)) -> bool {
+    fn visit(&mut self, score: (usize, f32, f32)) -> bool {
         if score.0 > self.score.0 || (score.0 == self.score.0 && score.1 > self.score.1)
         {
             return false;
@@ -227,14 +225,13 @@ impl Search<'_> {
                 || score
                     .1
                     .total_cmp(&self.score.1)
-                    .then(score.2.cmp(&self.score.2))
-                    .then(score.3.total_cmp(&self.score.3))
+                    .then(score.2.total_cmp(&self.score.2))
                     .is_lt()
             {
                 self.score = score;
                 self.best.clone_from(&self.selected);
             }
-            return score.0 == 0 && score.2 == 0;
+            return score.0 == 0;
         }
         if self.remaining == 0 {
             self.exhausted = true;
@@ -247,8 +244,7 @@ impl Search<'_> {
             let mut next = (
                 score.0 + candidate.text_pairs,
                 score.1 + candidate.text_area,
-                score.2 + candidate.goal_text_pairs,
-                score.3 + candidate.soft,
+                score.2 + candidate.soft,
             );
             for (previous, &selected) in self.selected.iter().enumerate() {
                 let area = overlap(
@@ -257,12 +253,6 @@ impl Search<'_> {
                 );
                 next.0 += usize::from(area > 0.0);
                 next.1 += area;
-                next.2 += usize::from(
-                    overlap(
-                        candidate.goal,
-                        self.domains[self.component[previous]][selected].goal,
-                    ) > 0.0,
-                );
             }
             self.selected.push(choice);
             let clear = self.visit(next);
@@ -284,10 +274,8 @@ mod tests {
         Candidate {
             angle: 0.0,
             rect: Rect::from_center_size(Vec2::new(x, 0.0), Vec2::splat(2.0)),
-            goal: Rect::from_center_size(Vec2::new(x, 0.0), Vec2::splat(2.0)),
             text_pairs: 0,
             text_area: 0.0,
-            goal_text_pairs: 0,
             soft: 0.0,
         }
     }
@@ -298,18 +286,6 @@ mod tests {
         let result = solve(&domains);
         assert_eq!(result.choices, [1, 0]);
         assert!(!result.exhausted);
-    }
-
-    #[test]
-    fn equal_next_poses_keep_separate_rotation_targets() {
-        let first = candidate(0.0);
-        let mut alternate = first;
-        alternate.goal = candidate(4.0).rect;
-        let mut second = candidate(8.0);
-        second.goal = first.goal;
-        let result = solve(&[vec![first, alternate], vec![second]]);
-        assert_eq!(result.choices, [1, 0]);
-        assert!(result.clear);
     }
 
     #[test]

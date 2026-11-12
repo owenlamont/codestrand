@@ -1965,14 +1965,13 @@ fn sync_labels(
                 translation: Val2::all(percent(50.0 * (label.scale - 1.0))),
                 ..default()
             });
+            let backing = if label.kind == model::LabelKind::Detail {
+                theme.detail_label_background()
+            } else {
+                theme.label_background()
+            };
             background.set_if_neq(BackgroundColor(
-                if label.kind == model::LabelKind::Detail {
-                    Color::srgba(0.015, 0.02, 0.04, 0.85 * opacity)
-                } else {
-                    theme
-                        .label_background()
-                        .with_alpha(theme.label_background().alpha() * opacity)
-                },
+                backing.with_alpha(backing.alpha() * opacity),
             ));
             let mut wanted_border = theme.label_border();
             for color in [
@@ -3217,6 +3216,50 @@ mod tests {
             point,
             distance,
         )
+    }
+
+    #[test]
+    fn detail_backings_follow_the_theme_and_fade() {
+        for name in [
+            crate::theme::ThemeName::BevelledDesktop,
+            crate::theme::ThemeName::Atlas,
+        ] {
+            let theme = name.build();
+            let mut world = World::new();
+            let camera = world.spawn_empty().id();
+            grow_labels(&mut world, 1, &theme, camera);
+            let mut label = projected_label(
+                "detail",
+                model::LabelKind::Detail,
+                Vec2::splat(100.0),
+                1.0,
+            );
+            label.0.opacity = 0.5;
+            sync_labels(&mut world, vec![label], &theme);
+            let backing = world
+                .query_filtered::<&BackgroundColor, With<Label>>()
+                .single(&world)
+                .unwrap();
+            let expected = theme.label_background();
+            assert_eq!(backing.0, expected.with_alpha(expected.alpha() * 0.5));
+        }
+    }
+
+    #[test]
+    fn optional_names_yield_even_when_detail_is_supplied_last() {
+        for optional in [model::LabelKind::Landmark, model::LabelKind::Activity] {
+            let point = Vec2::splat(100.0);
+            let chosen = place_labels(
+                vec![
+                    projected_label("optional", optional, point, 1.0),
+                    projected_label("detail", model::LabelKind::Detail, point, 1.0),
+                ],
+                20.0,
+                Vec2::new(1280.0, 720.0),
+            );
+            assert_eq!(chosen.len(), 1);
+            assert_eq!(chosen[0].0.text, "detail");
+        }
     }
 
     #[test]

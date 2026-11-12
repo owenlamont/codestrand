@@ -658,7 +658,6 @@ impl State {
                 previous,
                 future: &future,
             };
-
             let mut targets: Vec<_> = (0..32_u8)
                 .map(|i| f32::from(i) * std::f32::consts::TAU / 32.0)
                 .collect();
@@ -733,7 +732,7 @@ impl State {
                         previous.motion.goal,
                     );
                     let gain = self.name_occlusion(index, rect, &bodies, texts)
-                        - self.name_occlusion(index, selected.goal, &bodies, texts);
+                        - self.name_occlusion(index, selected.rect, &bodies, texts);
                     labels::move_name(previous, selected.angle, gain, self.tick, dt)
                 },
             );
@@ -835,7 +834,7 @@ fn eligible_angles(
             .then(a.angle.total_cmp(&b.angle))
     });
     candidates
-        .dedup_by(|a, b| a.angle.to_bits() == b.angle.to_bits() && a.goal == b.goal);
+        .dedup_by(|a, b| a.angle.to_bits() == b.angle.to_bits() && a.rect == b.rect);
     candidates
 }
 struct Rotation<'a> {
@@ -859,43 +858,34 @@ impl LabelSpace<'_> {
         target: f32,
         motion: &Rotation<'_>,
     ) -> (labels::Candidate, [f32; 4]) {
-        let (angle, angular_velocity) = (target, 0.0);
         let distance = self.radius + self.margin;
-        let rect = labels::tangent_rect(motion.body, motion.size, distance, angle);
-        let goal = labels::tangent_rect(motion.body, motion.size, distance, target);
+        let rect = labels::tangent_rect(motion.body, motion.size, distance, target);
         let cost = self.cost(index, rect);
-        let goal_cost = self.cost(index, goal);
         let clip = labels::forecast_clip(
-            angle,
-            angular_velocity,
+            target,
+            0.0,
             target,
             motion.size,
             distance,
             motion.future,
         );
         let text = self.text_cost(rect);
-        let soft = cost[2]
+        let soft = cost[2] * 2.0
             + clip * 1e8
-            + goal_cost[0]
-            + goal_cost[1] * 1e6
-            + goal_cost[2]
+            + cost[0]
+            + cost[1] * 1e6
             + motion.previous.map_or(0.0, |p| {
-                let distance = |a: f32, b: f32| {
-                    (a - b + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)
-                        - std::f32::consts::PI
-                };
-                (angular_velocity - p.angular_velocity).abs()
-                    + distance(target, p.angle).abs() * 5_000.0
-                    + distance(angle, p.angle).abs() * 50_000.0
+                let distance = (target - p.angle + std::f32::consts::PI)
+                    .rem_euclid(std::f32::consts::TAU)
+                    - std::f32::consts::PI;
+                distance.abs() * 55_000.0
             });
         (
             labels::Candidate {
-                angle,
+                angle: target,
                 rect,
-                goal,
                 text_pairs: text.0,
                 text_area: text.1,
-                goal_text_pairs: self.text_cost(goal).0,
                 soft,
             },
             [cost[0], cost[1], clip, soft],
