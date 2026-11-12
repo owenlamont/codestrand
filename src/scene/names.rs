@@ -16,7 +16,6 @@ pub(super) struct Names {
 
 pub(super) struct View {
     pub clip_from_world: Mat4,
-    pub rotation: Quat,
     pub viewport: Vec2,
 }
 
@@ -177,27 +176,16 @@ impl Names {
             let dir = layout.dir(file.dir);
             let scale = file.draw_scale(dir);
             let (point, _, opacity) = simulation.file_effect(file);
-            let rotation = Quat::from_rotation_y(
-                if layout
-                    .repositories
-                    .get(dir.repository)
-                    .is_some_and(|r| r.rotated)
-                {
-                    -std::f32::consts::FRAC_PI_2
-                } else {
-                    0.0
-                },
-            );
-            let center =
-                point + rotation * theme.file_glyph_transform.translation * scale;
+            let glyph = theme.file_glyph_transform;
+            let center = point + glyph.translation * scale;
             let half = theme.file_glyph_transform.scale * scale * 0.5;
             if opacity <= 0.001 || broad.rejects(center, half.truncate().length()) {
                 continue;
             }
             let bounds = corners(
                 center,
-                view.rotation * Vec3::X * half.x,
-                view.rotation * Vec3::Y * half.y,
+                glyph.rotation * Vec3::X * half.x,
+                glyph.rotation * Vec3::Y * half.y,
             );
             self.include(
                 (
@@ -274,7 +262,6 @@ mod tests {
                     aspect,
                     0.1,
                 ) * Mat4::from_quat(rotation).inverse(),
-                rotation,
                 viewport: Vec2::new(720.0 * aspect, 720.0),
             };
             let broad = BroadPhase::new(&view);
@@ -318,7 +305,6 @@ mod tests {
                 1.0,
                 0.1,
             ),
-            rotation: Quat::IDENTITY,
             viewport: Vec2::splat(720.0),
         };
         let quad = |center| corners(center, Vec3::X * 0.2, Vec3::Y * 0.2);

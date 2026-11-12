@@ -28,7 +28,6 @@ fn view(rotation: Quat) -> names::View {
         clip_from_world: bevy::math::proj::orthographic(
             -100.0, 100.0, -100.0, 100.0, 0.1, 1000.0,
         ) * camera.to_matrix().inverse(),
-        rotation,
         viewport: Vec2::splat(1_000_000.0),
     }
 }
@@ -106,7 +105,6 @@ fn review_directory_bounds_include_visible_sides() {
             1280.0 / 720.0,
             0.1,
         ) * camera.to_matrix().inverse(),
-        rotation,
         viewport: Vec2::new(1280.0, 720.0),
     };
     let half = sim.theme().directory_node_scale * dir.scale * 0.5;
@@ -143,5 +141,36 @@ fn review_directory_bounds_include_visible_sides() {
     assert!(
         names.targets.contains(&model::Target::Dir(index)),
         "visible directory above threshold has no permanent name"
+    );
+}
+
+#[test]
+fn tilted_camera_measures_the_flat_file_footprint() {
+    let sim = fixture();
+    let (id, file) = sim.layout().files().next().unwrap();
+    let dir = sim.layout().dir(file.dir);
+    let scale = file.draw_scale(dir);
+    let glyph = sim.theme().file_glyph_transform;
+    let (point, _, _) = sim.file_effect(file);
+    let center = point + glyph.translation * scale;
+    let rotation = Quat::from_rotation_x(-15.0_f32.to_radians());
+    let camera = Transform::from_translation(center + rotation * Vec3::Z * 10.0)
+        .with_rotation(rotation);
+    let view = names::View {
+        clip_from_world: bevy::math::proj::orthographic(
+            -2.0 * scale,
+            2.0 * scale,
+            -2.0 * scale,
+            2.0 * scale,
+            0.1,
+            1000.0,
+        ) * camera.to_matrix().inverse(),
+        viewport: Vec2::splat(720.0),
+    };
+    let mut names = names::Names::default();
+    names.sample(&sim, &view);
+    assert!(
+        !names.targets.contains(&model::Target::File(id)),
+        "foreshortened flat glyph should be below the 48px name threshold"
     );
 }

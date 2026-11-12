@@ -76,7 +76,6 @@ fn realistic_history_has_stable_framing_and_uniform_icons_at_sixty_hz() {
 }
 
 fn assert_icons(sim: &Simulation) {
-    let (focus, distance) = sim.view();
     let mut camera = crate::camera::PreviewCamera::new(sim.view());
     camera.update(
         &crate::camera::Input {
@@ -93,29 +92,15 @@ fn assert_icons(sim: &Simulation) {
             .normalize()
             .abs_diff_eq(view_direction(), 1e-5)
     );
-    let rotation = Transform::from_translation(focus + view_direction() * distance)
-        .looking_at(focus, Vec3::NEG_Z)
-        .rotation;
     for (_, file) in sim.layout().files() {
         let dir = sim.layout().dir(file.dir);
         let scale = file.visible_presence(dir);
         if scale <= 0.001 {
             continue;
         }
-        let turned = sim
-            .layout()
-            .repositories
-            .get(dir.repository)
-            .is_some_and(|r| r.rotated);
         let parent = Transform::from_translation(ground(file.position))
-            .with_scale(Vec3::splat(scale))
-            .with_rotation(Quat::from_rotation_y(if turned {
-                -std::f32::consts::FRAC_PI_2
-            } else {
-                0.0
-            }));
-        let mut glyph = sim.theme().file_glyph_transform;
-        glyph.rotation = crate::scene::glyph_rotation(parent.rotation, rotation);
+            .with_scale(Vec3::splat(scale));
+        let glyph = sim.theme().file_glyph_transform;
         let matrix = parent.to_matrix() * glyph.to_matrix();
         let points = [Vec3::NEG_X, Vec3::X, Vec3::NEG_Y, Vec3::Y]
             .map(|p| matrix.transform_point3(p * 0.5));
@@ -198,10 +183,8 @@ fn local_framing_trace() {
             for (_, file) in sim.layout().files().filter(|(_, f)| sim.layout().dir(f.dir).repository == i) {
                 let scale = file.visible_presence(sim.layout().dir(file.dir));
                 if scale <= 0.001 { continue; }
-                let parent = Transform::from_translation(ground(file.position)).with_rotation(Quat::from_rotation_y(if r.rotated {-std::f32::consts::FRAC_PI_2} else {0.0})).with_scale(Vec3::splat(scale));
-                let camera = Transform::from_translation(eye).looking_at(focus, Vec3::NEG_Z);
-                let mut glyph = theme.file_glyph_transform;
-                glyph.rotation = crate::scene::glyph_rotation(parent.rotation, camera.rotation);
+                let parent = Transform::from_translation(ground(file.position)).with_scale(Vec3::splat(scale));
+                let glyph = theme.file_glyph_transform;
                 let matrix = parent.to_matrix() * glyph.to_matrix();
                 let points = [Vec3::NEG_X * 0.5, Vec3::X * 0.5, Vec3::NEG_Y * 0.5, Vec3::Y * 0.5].map(|p| matrix.transform_point3(p));
                 let projected: Vec<_> = project(eye, focus, &points).flatten().map(|p| p * framing::VIEWPORT * 0.5).collect();
