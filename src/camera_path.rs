@@ -178,6 +178,27 @@ impl CameraPath {
         }
         Ok(Transform::from_translation(eye).looking_at(focus, up))
     }
+
+    pub(super) fn validate_step(
+        &self,
+        previous: &Transform,
+        current: &Transform,
+        frame: u32,
+    ) -> Result<(), Error> {
+        if previous.right().dot(*current.right()) < std::f32::consts::FRAC_1_SQRT_2
+            || previous.forward().dot(*current.forward())
+                < std::f32::consts::FRAC_1_SQRT_2
+        {
+            return Err(Error::Invalid {
+                path: self.name.clone(),
+                reason: format!(
+                    "output frames {}..{frame}: camera right or forward reverses or turns more than 45 degrees; add an intermediate key",
+                    frame - 1
+                ),
+            });
+        }
+        Ok(())
+    }
 }
 
 impl Keyframe {

@@ -53,6 +53,7 @@ fn example_tracks_live_targets_and_replays_identically() {
         let pose = path.pose(&sim, frame, 30).unwrap();
         if let Some(previous) = poses.last() {
             let previous: &Transform = previous;
+            path.validate_step(previous, &pose, frame).unwrap();
             assert!(pose.rotation.angle_between(previous.rotation) < 0.5);
         }
         if (60..=120).contains(&frame) {

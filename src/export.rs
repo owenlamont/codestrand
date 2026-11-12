@@ -81,12 +81,17 @@ fn render(
         }
     }
     let started = Instant::now();
+    let mut previous_camera = None;
     for index in 0..frames {
         app.world_mut().resource_mut::<scene::Frame>().index = index;
         if let Some(path) = &camera_path {
             let mut playback = app.world_mut().resource_mut::<scene::Playback>();
             playback.0.advance_to(index, fps);
             let pose = path.pose(&playback.0, index, fps)?;
+            if let Some(previous) = &previous_camera {
+                path.validate_step(previous, &pose, index)?;
+            }
+            previous_camera = Some(pose);
             app.world_mut().insert_resource(scene::ScriptedCamera(pose));
         }
         let image = capture(&mut app, &target, index)?;
