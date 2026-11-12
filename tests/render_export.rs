@@ -10,6 +10,122 @@ use std::{
 };
 
 #[test]
+#[ignore = "requires a graphics adapter; repeats sibling-directory junction exports"]
+fn sibling_directory_exports_are_identical() {
+    let scratch = tempfile::tempdir().unwrap();
+    let repository = scratch.path().join("repository");
+    let repo = gix::init_bare(&repository).unwrap();
+    let blob = repo.write_blob(b"inline fixture\n").unwrap().detach();
+    let tree = junction_tree(&repo, blob, 3);
+    let author = gix::actor::Signature {
+        name: "Fixture".into(),
+        email: "fixture@example.invalid".into(),
+        time: gix::date::Time {
+            seconds: 1_700_000_000,
+            offset: 0,
+        },
+    };
+    let commit = repo
+        .write_object(&gix::objs::Commit {
+            tree,
+            parents: std::iter::empty().collect(),
+            author: author.clone(),
+            committer: author,
+            encoding: None,
+            message: "sibling directories".into(),
+            extra_headers: Vec::new(),
+        })
+        .unwrap()
+        .detach();
+    fs::write(repository.join("HEAD"), format!("{commit}\n")).unwrap();
+    let camera = scratch.path().join("camera.toml");
+    fs::write(&camera, "fps=30\n[[key]]\nframe=0\neye={point=[0.0,12.0,0.0]}\nfocus={point=[0.0,0.0,0.0]}\n").unwrap();
+    let first = scratch.path().join("first");
+    let second = scratch.path().join("second");
+    let executable = std::env::var_os("CODESTRAND_TEST_BINARY")
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_codestrand").into());
+    for directory in [&first, &second] {
+        let log_path = directory.with_extension("log");
+        let log = fs::File::create(&log_path).unwrap();
+        let child = Command::new(&executable)
+            .arg("export")
+            .arg(directory)
+            .arg("--repository")
+            .arg(&repository)
+            .arg("--camera-path")
+            .arg(&camera)
+            .args([
+                "--start",
+                "1",
+                "--frames",
+                "24",
+                "--fps",
+                "30",
+                "--no-cache",
+            ])
+            .stdout(Stdio::from(log.try_clone().unwrap()))
+            .stderr(Stdio::from(log))
+            .spawn()
+            .unwrap();
+        assert!(
+            wait(child, &log_path).success(),
+            "{}",
+            fs::read_to_string(log_path).unwrap()
+        );
+    }
+    for frame in 0..24 {
+        let filename = format!("frame-{frame:05}.png");
+        let first = image::open(first.join(&filename)).unwrap().to_rgb8();
+        let second = image::open(second.join(&filename)).unwrap().to_rgb8();
+        assert_eq!(first.dimensions(), second.dimensions());
+        let mut count = 0;
+        let mut bounds = (u32::MAX, u32::MAX, 0, 0);
+        for (x, y, pixel) in first.enumerate_pixels() {
+            if pixel != second.get_pixel(x, y) {
+                count += 1;
+                bounds = (
+                    bounds.0.min(x),
+                    bounds.1.min(y),
+                    bounds.2.max(x),
+                    bounds.3.max(y),
+                );
+            }
+        }
+        assert_eq!(
+            count, 0,
+            "{filename}: {count} unequal pixels, inclusive bounds {bounds:?}"
+        );
+    }
+}
+
+fn junction_tree(
+    repo: &gix::Repository,
+    blob: gix::ObjectId,
+    depth: u8,
+) -> gix::ObjectId {
+    let entries = if depth == 0 {
+        vec![gix::objs::tree::Entry {
+            mode: gix::objs::tree::EntryKind::Blob.into(),
+            filename: "file.rs".into(),
+            oid: blob,
+        }]
+    } else {
+        let child = junction_tree(repo, blob, depth - 1);
+        ["a", "b", "c", "d"]
+            .into_iter()
+            .map(|name| gix::objs::tree::Entry {
+                mode: gix::objs::tree::EntryKind::Tree.into(),
+                filename: name.into(),
+                oid: child,
+            })
+            .collect()
+    };
+    repo.write_object(&gix::objs::Tree { entries })
+        .unwrap()
+        .detach()
+}
+
+#[test]
 #[ignore = "requires a graphics adapter; renders two short PNG sequences"]
 fn export_is_complete_and_independent_of_render_pacing() {
     let scratch = tempfile::tempdir().expect("temporary directory is available");
