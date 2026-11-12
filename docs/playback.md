@@ -1,7 +1,7 @@
 # Playback
 
 Preview loops the selected history. Export renders the same launch timeline at
-explicit frame times, with a fixed camera and a 1x playback multiplier.
+explicit frame times, with a 1x playback multiplier and a fitted or scripted export camera.
 
 Commit application times are precomputed for the selected history and pacing.
 The caption shows the last applied commit's date; cooling and fades advance in
@@ -55,7 +55,8 @@ floor and pan stays horizontal. Follow shortens its orbit radius at the floor wh
 keeping its aim on the contributor. Space smoothly raises the eye and restores the
 overhead view from any orientation.
 
-Export uses the fixed overhead perspective camera at explicit frame times. Default
+Export defaults to the overhead perspective camera at explicit frame times;
+[scripted paths](export.md#scripted-camera) can override the view. Default
 framing reserves space for elevated avatars and labels; clearance guarantees apply to
 the fitted view. Free orbit and zoom can crop content. File glyphs lie flat with upright
 artwork in the overhead view. Directory structures, membership rings and activity halos
@@ -180,7 +181,7 @@ same frame-scaled avatar sizing and gutter placement apply to single repositorie
 synthetic playback. The top wordmark has a separate 26-pixel reserved strip, including
 a four-pixel buffer;
 avatars, gutter routes and name labels stay below the strip, matching caption clearance.
-The 16:9 export camera stays fixed. Spacing and size floors use a fixed world scale
+The default 16:9 export camera stays fixed. Spacing and size floors use a fixed world scale
 calibrated in reference pixels; apparent ground spacing is slightly smaller to reserve
 room for elevated portraits. Preview orbit changes the projection, not the packing.
 Shared gutters separate neighbouring tiles, with no

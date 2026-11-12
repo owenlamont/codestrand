@@ -896,6 +896,10 @@ impl Simulation {
         &self.state.avatars
     }
 
+    pub(super) fn camera_events(&self) -> &[Event] {
+        &self.events
+    }
+
     /// Default field camera focus and distance along [`view_direction`].
     pub(super) fn view(&self) -> (Vec3, f32) {
         (self.state.focus, self.state.distance)

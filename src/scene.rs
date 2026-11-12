@@ -47,6 +47,9 @@ pub(super) struct Frame {
 pub(super) struct Playback(pub Simulation);
 
 #[derive(Resource)]
+pub(super) struct ScriptedCamera(pub Transform);
+
+#[derive(Resource)]
 struct SceneTarget(RenderTarget);
 
 #[derive(Component)]
@@ -1020,10 +1023,14 @@ pub(super) fn animate(world: &mut World) {
 fn sync_lod(world: &mut World, pools: &mut Pools, simulation: &Simulation) {
     let layout = simulation.layout();
     let (focus, distance) = simulation.view();
-    let (eye, focus) = world.get_resource::<PreviewCamera>().map_or(
+    let (mut eye, mut focus) = world.get_resource::<PreviewCamera>().map_or(
         (focus + model::view_direction() * distance, focus),
         PreviewCamera::pose,
     );
+    if let Some(camera) = world.get_resource::<ScriptedCamera>() {
+        eye = camera.0.translation;
+        focus = eye + *camera.0.forward();
+    }
     let height = world
         .query::<&Window>()
         .iter(world)
@@ -1716,10 +1723,13 @@ fn place_camera(world: &mut World, simulation: &Simulation) {
     let fitted = PreviewCamera::new((focus, distance));
     let camera = world.get_resource::<PreviewCamera>().unwrap_or(&fitted);
     let (eye, _) = camera.pose();
-    let rotation = camera.rotation();
+    let pose = world.get_resource::<ScriptedCamera>().map_or_else(
+        || Transform::from_translation(eye).with_rotation(camera.rotation()),
+        |camera| camera.0,
+    );
     let mut query = world.query_filtered::<&mut Transform, With<SceneCamera>>();
     if let Ok(mut transform) = query.single_mut(world) {
-        *transform = Transform::from_translation(eye).with_rotation(rotation);
+        *transform = pose;
     }
 }
 
@@ -2192,6 +2202,30 @@ fn face_portraits(world: &mut World) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scripted_pose_reaches_scene_and_avatar_camera() {
+        let simulation = Simulation::new(
+            crate::timeline::synthetic(),
+            &model::Options::default(),
+            &Theme::neon(),
+            &crate::contributors::Mappings::default(),
+        );
+        let pose =
+            Transform::from_xyz(2.0, 12.0, 0.0).looking_at(Vec3::ZERO, Vec3::NEG_Z);
+        let mut world = World::new();
+        world.insert_resource(ScriptedCamera(pose));
+        let scene = world
+            .spawn((SceneCamera, Transform::default(), Projection::default()))
+            .id();
+        let avatar = world
+            .spawn((AvatarCamera, Transform::default(), Projection::default()))
+            .id();
+        place_camera(&mut world, &simulation);
+        sync_avatar_camera(&mut world);
+        assert_eq!(*world.get::<Transform>(scene).unwrap(), pose);
+        assert_eq!(*world.get::<Transform>(avatar).unwrap(), pose);
+    }
 
     #[test]
     fn lifecycle_greys_texture_pixels_once_and_restores_the_original_material() {

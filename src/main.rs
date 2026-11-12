@@ -15,6 +15,7 @@
 mod avatars;
 mod cache;
 mod camera;
+mod camera_path;
 mod contributors;
 mod diff_samples;
 mod encoder;
@@ -123,6 +124,9 @@ enum Command {
         #[arg(long, value_enum, default_value = "neon")]
         theme: theme::ThemeName,
         directory: PathBuf,
+        /// TOML camera keyframes, with semantic targets resolved at every frame.
+        #[arg(long)]
+        camera_path: Option<PathBuf>,
         #[command(flatten)]
         source: Source,
         /// Frames to write; defaults to the whole playback.
@@ -574,21 +578,24 @@ fn run() -> anyhow::Result<()> {
             fps,
             frame_delay_ms,
             encoding,
+            camera_path,
         }) => {
-            let encoder = encoding.start(fps)?;
-            export::prepare(&directory)?;
-            let (mut simulation, title) = source.load().inspect_err(|_| {
-                let _ = std::fs::remove_dir(&directory);
-            })?;
+            let (mut simulation, title) = source.load()?;
             simulation.set_theme(theme.build());
             let frames = frames
-                .map_or_else(|| model::frames_for(simulation.duration(), fps), Ok)
-                .inspect_err(|_| {
-                    let _ = std::fs::remove_dir(&directory);
-                })?;
+                .map_or_else(|| model::frames_for(simulation.duration(), fps), Ok)?;
+            let camera_path = camera_path
+                .as_deref()
+                .map(|path| camera_path::CameraPath::load(path, &simulation))
+                .transpose()?;
+            if let Some(path) = &camera_path {
+                path.pose(&simulation, 0, fps)?;
+            }
+            let encoder = encoding.start(fps)?;
+            export::prepare(&directory)?;
             export::run(
                 &directory,
-                simulation,
+                (simulation, camera_path),
                 title,
                 frames,
                 fps,

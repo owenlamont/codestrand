@@ -4,6 +4,37 @@
 use std::{fmt::Write as _, process::Command};
 
 #[test]
+fn camera_targets_fail_before_output_or_encoder_starts() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("camera.toml");
+    let output = directory.path().join("frames");
+    for (target, expected) in [
+        ("avatar='Nobody'", "contributor \"Nobody\" not found"),
+        ("file='absent.rs'", "path \"absent.rs\" not found"),
+    ] {
+        std::fs::write(&path, format!("fps=30\n[[key]]\nframe=0\neye={{{target},offset=[0,6,8]}}\nfocus={{point=[0,0,0]}}\n")).unwrap();
+        let result = Command::new(env!("CARGO_BIN_EXE_codestrand"))
+            .arg("export")
+            .arg(&output)
+            .arg("--camera-path")
+            .arg(&path)
+            .args([
+                "--video",
+                "unused.mkv",
+                "--ffmpeg",
+                "missing-camera-test-ffmpeg",
+            ])
+            .output()
+            .unwrap();
+        let error = String::from_utf8_lossy(&result.stderr);
+        assert!(!result.status.success());
+        assert!(error.contains(expected), "{error}");
+        assert!(!error.contains("unexpected argument"), "{error}");
+        assert!(!output.exists());
+    }
+}
+
+#[test]
 fn repository_limit_is_checked_before_import_or_contributor_loading() {
     let scratch = tempfile::tempdir().unwrap();
     for index in 0..60 {

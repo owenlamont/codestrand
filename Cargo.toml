@@ -32,6 +32,7 @@ bevy = { version = "=0.20.1", default-features = false, features = [
     "bevy_winit",
     "x11",
     "bevy_render",
+    "bevy_curve",
     "bevy_core_pipeline",
     "bevy_pbr",
     "bevy_post_process",

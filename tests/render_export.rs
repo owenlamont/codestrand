@@ -58,6 +58,11 @@ fn export(directory: &Path, delay: &str) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_codestrand"))
         .arg("export")
         .arg(directory)
+        .arg("--camera-path")
+        .arg(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("docs/examples/demo-camera.toml"),
+        )
         .args(["--frames", "8", "--fps", "2", "--frame-delay-ms", delay])
         .stdout(Stdio::from(
             log.try_clone().expect("log handle can be cloned"),
