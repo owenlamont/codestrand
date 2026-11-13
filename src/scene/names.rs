@@ -9,9 +9,21 @@ const EXIT_PIXELS: f32 = 40.0;
 
 #[derive(Default)]
 pub(super) struct Names {
+    sampled: Option<Sample>,
+    #[cfg(test)]
+    samples: usize,
     seconds: Option<f32>,
     pub targets: BTreeSet<Target>,
     pub labels: Vec<Label>,
+}
+
+#[derive(PartialEq)]
+struct Sample {
+    seconds: u32,
+    theme: crate::theme::ThemeName,
+    rate: u32,
+    clip_from_world: Mat4,
+    viewport: Vec2,
 }
 
 pub(super) struct View {
@@ -159,7 +171,26 @@ fn cuboid_faces(center: Vec3, half: Vec3) -> [[Vec3; 4]; 6] {
 }
 
 impl Names {
+    pub(super) fn invalidate(&mut self) {
+        self.sampled = None;
+    }
+
     pub(super) fn sample(&mut self, simulation: &Simulation, view: &View) {
+        let sampled = Sample {
+            seconds: simulation.seconds().to_bits(),
+            theme: simulation.theme().name,
+            rate: simulation.playback_multiplier().to_bits(),
+            clip_from_world: view.clip_from_world,
+            viewport: view.viewport,
+        };
+        if self.sampled.as_ref() == Some(&sampled) {
+            return;
+        }
+        self.sampled = Some(sampled);
+        #[cfg(test)]
+        {
+            self.samples += 1;
+        }
         if self
             .seconds
             .is_none_or(|previous| simulation.seconds() < previous)
@@ -250,6 +281,95 @@ impl Names {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sampled() -> (Names, Simulation, View) {
+        let mut simulation = Simulation::new(
+            crate::timeline::synthetic(),
+            &crate::model::Options::default(),
+            &crate::theme::Theme::neon(),
+            &crate::contributors::Mappings::default(),
+        );
+        simulation.advance_to(60, 60);
+        let (id, file) = simulation.layout().files().next().unwrap();
+        let point = simulation.file_effect(id, file).0;
+        let view = View {
+            clip_from_world: bevy::math::proj::perspective_infinite_reverse(
+                std::f32::consts::FRAC_PI_4,
+                1.0,
+                0.01,
+            ) * Transform::from_translation(point + Vec3::Y * 4.0)
+                .looking_at(point, Vec3::NEG_Z)
+                .to_matrix()
+                .inverse(),
+            viewport: Vec2::splat(720.0),
+        };
+        let mut names = Names::default();
+        names.sample(&simulation, &view);
+        (names, simulation, view)
+    }
+
+    #[test]
+    fn unchanged_sample_reuses_targets_and_labels() {
+        let (mut names, simulation, view) = sampled();
+        assert!(!names.labels.is_empty());
+        let targets = names.targets.clone();
+        let labels: Vec<_> = names
+            .labels
+            .iter()
+            .map(|label| label.text.clone())
+            .collect();
+        names.sample(&simulation, &view);
+        assert_eq!(names.samples, 1);
+        assert_eq!(names.targets, targets);
+        assert_eq!(
+            names
+                .labels
+                .iter()
+                .map(|label| label.text.clone())
+                .collect::<Vec<_>>(),
+            labels
+        );
+    }
+
+    #[test]
+    fn theme_change_resamples_static_names() {
+        let (mut names, mut simulation, view) = sampled();
+        simulation.set_theme(crate::theme::ThemeName::Phosphor.build());
+        names.sample(&simulation, &view);
+        assert_eq!(names.samples, 2);
+    }
+
+    #[test]
+    fn viewport_change_resamples_static_names() {
+        let (mut names, simulation, mut view) = sampled();
+        view.viewport *= 2.0;
+        names.sample(&simulation, &view);
+        assert_eq!(names.samples, 2);
+    }
+
+    #[test]
+    fn camera_change_resamples_static_names() {
+        let (mut names, simulation, mut view) = sampled();
+        view.clip_from_world = Mat4::from_translation(Vec3::X);
+        names.sample(&simulation, &view);
+        assert_eq!(names.samples, 2);
+    }
+
+    #[test]
+    fn tick_change_resamples_names() {
+        let (mut names, mut simulation, view) = sampled();
+        simulation.advance_to(61, 60);
+        names.sample(&simulation, &view);
+        assert_eq!(names.samples, 2);
+    }
+
+    #[test]
+    fn rate_change_resamples_names() {
+        let (mut names, mut simulation, view) = sampled();
+        simulation.change_rate(2.0);
+        names.sample(&simulation, &view);
+        assert_eq!(names.samples, 2);
+    }
 
     #[test]
     fn broad_phase_rejects_only_subthreshold_footprints() {

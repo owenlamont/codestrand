@@ -909,6 +909,7 @@ fn preview_clock(world: &mut World, mut elapsed: Local<std::time::Duration>) {
         world.resource_mut::<Playback>().0.restart();
         if let Some(mut pools) = world.get_resource_mut::<Pools>() {
             pools.sync_stamp = None;
+            pools.names.invalidate();
         }
     }
     world.resource_mut::<Frame>().index = model::preview_frame(*elapsed, fps);
