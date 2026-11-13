@@ -29,6 +29,8 @@ enum Mode {
 #[derive(Default)]
 pub(super) struct Input {
     pub pan: Vec2,
+    pub aim: Vec2,
+    pub first_person: bool,
     pub orbit: Vec2,
     pub zoom: f32,
     pub cycle: bool,
@@ -74,7 +76,9 @@ impl PreviewCamera {
                 self.cycle(avatars);
             }
             if input.pan != Vec2::ZERO
-                || ((input.orbit != Vec2::ZERO || input.zoom != 0.0)
+                || ((input.orbit != Vec2::ZERO
+                    || input.aim != Vec2::ZERO
+                    || input.zoom != 0.0)
                     && matches!(self.mode, Mode::Fit | Mode::Reset { .. }))
             {
                 self.mode = Mode::Free;
@@ -108,7 +112,9 @@ impl PreviewCamera {
                 let old_distance = self.distance;
                 self.rotation = (self.rotation
                     * Quat::from_rotation_y(-input.orbit.x * 0.004)
-                    * Quat::from_rotation_x(input.orbit.y * 0.004))
+                    * Quat::from_rotation_x(input.orbit.y * 0.004)
+                    * Quat::from_rotation_y(-input.aim.x * 0.003)
+                    * Quat::from_rotation_x(-input.aim.y * 0.003))
                 .normalize();
                 self.distance =
                     (self.distance * (-input.zoom * 0.12).exp()).clamp(1.0, 20_000.0);
@@ -124,29 +130,43 @@ impl PreviewCamera {
                         self.focus = old_eye - self.rotation * Vec3::Z * self.distance;
                     }
                 } else {
-                    let back = self.rotation * Vec3::Z;
-                    let orbit_eye = self.focus + back * old_distance;
-                    let eye = if orbit_eye.y < EYE_FLOOR {
-                        old_eye.with_y(EYE_FLOOR)
-                    } else {
-                        orbit_eye
-                    };
-                    let eye = eye + back * (self.distance - old_distance);
-                    self.focus =
-                        eye.with_y(eye.y.max(EYE_FLOOR)) - back * self.distance;
-                    let right = (self.rotation * Vec3::X).with_y(0.0).normalize_or(
-                        (self.rotation * Vec3::NEG_Z)
-                            .with_y(0.0)
-                            .normalize_or(Vec3::X),
-                    );
-                    let forward = Vec3::Y.cross(right);
-                    self.focus += (right * input.pan.x + forward * input.pan.y)
-                        * self.distance
-                        * 0.7
-                        * dt.min(0.1);
+                    self.move_free(input, old_eye, old_distance, dt);
                 }
             }
         }
+    }
+
+    fn move_free(&mut self, input: &Input, old_eye: Vec3, old_distance: f32, dt: f32) {
+        let back = self.rotation * Vec3::Z;
+        let orbit_eye = if input.first_person {
+            old_eye
+        } else {
+            self.focus + back * old_distance
+        };
+        let eye = if orbit_eye.y < EYE_FLOOR {
+            old_eye.with_y(EYE_FLOOR)
+        } else {
+            orbit_eye
+        };
+        let eye = eye + back * (self.distance - old_distance);
+        self.focus = eye.with_y(eye.y.max(EYE_FLOOR)) - back * self.distance;
+        let right = (self.rotation * Vec3::X).with_y(0.0).normalize_or(
+            (self.rotation * Vec3::NEG_Z)
+                .with_y(0.0)
+                .normalize_or(Vec3::X),
+        );
+        let forward = Vec3::Y.cross(right);
+        let (right, forward) = if input.first_person {
+            (self.rotation * Vec3::X, self.rotation * Vec3::NEG_Z)
+        } else {
+            (right, forward)
+        };
+        self.focus += (right * input.pan.x + forward * input.pan.y)
+            * self.distance
+            * 0.7
+            * dt.min(0.1);
+        let eye = self.focus + back * self.distance;
+        self.focus.y += (EYE_FLOOR - eye.y).max(0.0);
     }
 
     fn cycle(&mut self, avatars: &[Avatar]) {
@@ -215,6 +235,115 @@ mod tests {
         theme::Theme,
         timeline::{self, Event},
     };
+
+    #[test]
+    fn captured_aim_turns_about_the_eye_without_pitch_limits_or_frame_scaling() {
+        let view = (Vec3::Y * 20.0, 10.0);
+        for dt in [0.0, 0.01, 0.1] {
+            let mut camera = PreviewCamera::new(view);
+            let eye = camera.pose().0;
+            let initial = camera.rotation();
+            let aim = Vec2::new(200.0, 1200.0);
+            camera.update(
+                &Input {
+                    aim,
+                    first_person: true,
+                    ..Default::default()
+                },
+                view,
+                &[],
+                dt,
+            );
+            let expected = initial
+                * Quat::from_rotation_y(-aim.x * 0.003)
+                * Quat::from_rotation_x(-aim.y * 0.003);
+            assert!(camera.rotation().abs_diff_eq(expected, 1e-6));
+            assert!(camera.pose().0.abs_diff_eq(eye, 1e-5));
+            assert!((camera.rotation().length() - 1.0).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn captured_movement_follows_the_new_aim_and_stops_at_the_floor() {
+        let view = (Vec3::Y * 20.0, 10.0);
+        for pan in [Vec2::X, Vec2::Y, Vec2::ONE.normalize()] {
+            let mut camera = PreviewCamera::new(view);
+            let eye = camera.pose().0;
+            camera.update(
+                &Input {
+                    aim: Vec2::new(100.0, -200.0),
+                    first_person: true,
+                    pan,
+                    ..Default::default()
+                },
+                view,
+                &[],
+                0.1,
+            );
+            let expected = camera.rotation() * Vec3::new(pan.x, 0.0, -pan.y) * 0.7;
+            assert!(camera.pose().0.abs_diff_eq(eye + expected, 1e-5));
+        }
+        let mut camera = PreviewCamera::new((Vec3::ZERO, 2.0));
+        for _ in 0..100 {
+            camera.update(
+                &Input {
+                    first_person: true,
+                    pan: Vec2::Y,
+                    ..Default::default()
+                },
+                view,
+                &[],
+                0.1,
+            );
+            assert!(camera.pose().0.y >= EYE_FLOOR);
+        }
+    }
+
+    #[test]
+    fn captured_aim_keeps_follow_and_movement_releases_follow() {
+        let simulation = avatars();
+        let view = (Vec3::ZERO, 60.0);
+        let mut camera = PreviewCamera::new(view);
+        camera.update(
+            &Input {
+                cycle: true,
+                ..Default::default()
+            },
+            view,
+            simulation.avatars(),
+            10.0,
+        );
+        camera.update(
+            &Input {
+                first_person: true,
+                aim: Vec2::new(100.0, 200.0),
+                ..Default::default()
+            },
+            view,
+            simulation.avatars(),
+            0.1,
+        );
+        assert_eq!(camera.mode, following(&simulation.avatars()[0]));
+        assert!(
+            camera
+                .pose()
+                .1
+                .abs_diff_eq(simulation.avatars()[0].position, 1e-5)
+        );
+        let eye = camera.pose().0;
+        camera.update(
+            &Input {
+                first_person: true,
+                pan: Vec2::X,
+                ..Default::default()
+            },
+            view,
+            simulation.avatars(),
+            0.0,
+        );
+        assert_eq!(camera.mode, Mode::Free);
+        assert!(camera.pose().0.abs_diff_eq(eye, 1e-5));
+    }
 
     #[test]
     fn pan_speed_is_independent_of_pitch_and_roll() {

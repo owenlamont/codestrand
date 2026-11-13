@@ -4,7 +4,6 @@ use bevy::{
     asset::RenderAssetUsages,
     camera::{Camera3dDepthLoadOp, Hdr, RenderTarget, visibility::RenderLayers},
     image::ImageSampler,
-    input::mouse::{AccumulatedMouseScroll, MouseScrollUnit},
     prelude::*,
     render::{
         RenderPlugin,
@@ -18,7 +17,7 @@ use bevy::{
 };
 
 use crate::{
-    camera::{Input, PreviewCamera},
+    camera::PreviewCamera,
     layout::Layout,
     model::{self, Simulation},
     theme::Theme,
@@ -39,6 +38,7 @@ mod lod;
 #[cfg(test)]
 mod name_tests;
 mod names;
+mod navigation;
 mod ordering;
 mod settings;
 mod styling;
@@ -860,12 +860,6 @@ fn preview_clock(world: &mut World, mut elapsed: Local<std::time::Duration>) {
         world.resource_mut::<Playback>().0.restart();
     }
     world.resource_mut::<Frame>().index = model::preview_frame(*elapsed, fps);
-    if world
-        .resource::<ButtonInput<KeyCode>>()
-        .just_pressed(KeyCode::Escape)
-    {
-        world.write_message(AppExit::Success);
-    }
 }
 
 fn preview_direction(
@@ -1122,44 +1116,8 @@ fn themed_glyph_image(svg: &str, theme: &Theme) -> Image {
     image
 }
 
-fn preview_camera(world: &mut World, mut drag_from: Local<Option<Vec2>>) {
-    let mut windows = world.query::<&Window>();
-    let cursor = windows
-        .iter(world)
-        .find(|window| window.focused)
-        .map(Window::cursor_position);
-    let previous = drag_from.take();
-    let mut input = Input::default();
-    if let Some(cursor) = cursor
-        && !settings::captures_camera(world)
-    {
-        let keys = world.resource::<ButtonInput<KeyCode>>();
-        let axis = |positive, negative| {
-            f32::from(u8::from(keys.pressed(positive)))
-                - f32::from(u8::from(keys.pressed(negative)))
-        };
-        input.pan = Vec2::new(
-            axis(KeyCode::KeyD, KeyCode::KeyA),
-            axis(KeyCode::KeyW, KeyCode::KeyS),
-        )
-        .normalize_or_zero();
-        input.cycle = keys.just_pressed(KeyCode::Tab);
-        input.reset = keys.just_pressed(KeyCode::Space);
-        let dragging = world
-            .resource::<ButtonInput<MouseButton>>()
-            .pressed(MouseButton::Right);
-        // WSLg reports raw device motion as absolute positions, so orbit follows the cursor.
-        if let (true, Some(from), Some(to)) = (dragging, previous, cursor) {
-            input.orbit = to - from;
-        }
-        *drag_from = cursor.filter(|_| dragging);
-        let scroll = world.resource::<AccumulatedMouseScroll>();
-        input.zoom = scroll.delta.y
-            * match scroll.unit {
-                MouseScrollUnit::Line => 1.0,
-                MouseScrollUnit::Pixel => 0.01,
-            };
-    }
+fn preview_camera(world: &mut World, mut navigation: Local<navigation::State>) {
+    let input = navigation.read(world);
     let dt = world.resource::<Time<Real>>().delta_secs();
     world.resource_scope(|world, mut camera: Mut<PreviewCamera>| {
         let projection = camera_projection(world);

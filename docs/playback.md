@@ -41,14 +41,17 @@ macOS discovers installed fonts through CoreText and Library/Fonts directories.
 
 | Input | Action |
 | --- | --- |
-| Escape | Close preview |
-| F10 | Open or close display settings; camera controls pause while open |
+| Escape | Release captured mouse; otherwise close preview |
+| C | Capture or release the mouse while display settings are closed |
+| Left click in viewport | Capture the mouse while display settings are closed |
+| Mouse movement (captured) | Aim directly without holding a button |
+| F10 | Open or close display settings; release capture and pause camera controls |
 | F11 | Toggle borderless fullscreen on the current monitor |
 | `[` | Halve live speed, down to 0.125x |
 | `]` | Double live speed, up to 8x |
 | `,` / `.` | Previous or next theme |
-| WASD | Pan; return from contributor follow to free camera |
-| Right mouse drag | Orbit horizontally and vertically, without pitch limits |
+| WASD | Move relative to captured aim; otherwise pan; release contributor follow |
+| Right drag (released) | Orbit horizontally and vertically, without pitch limits |
 | Scroll wheel | Zoom; scroll the preset list when over display settings |
 | Tab | Follow or cycle visible contributors |
 | Space | Restore the fit-to-scene camera over half a second |
@@ -56,6 +59,13 @@ macOS discovers installed fonts through CoreText and Library/Fonts directories.
 The caption shows the live multiplier, theme, camera mode and follow target. Following
 returns to free camera when the target fades out. Preview controls do not change
 the exported camera or timeline.
+
+Preview starts with the cursor released. Capture hides and locks the cursor; C or
+Escape releases capture, and another Escape closes preview. Opening F10 settings or
+losing window focus also releases capture. Closing settings or returning to the window
+does not recapture: press C or click the viewport again. Clicks in letterbox bars do
+not capture. Capture and release discard that frame's mouse motion to avoid a jump.
+Mouse aim uses 0.003 radians per mouse count, independent of frame time.
 
 Display settings have a scrollable preset list with a draggable scrollbar. Monitor native
 is first; other choices are grouped by aspect ratio, then ascending pixel size.
@@ -83,11 +93,14 @@ The default camera looks straight down at the centre of the repository tile area
 Repository tiles are rectangles in world coordinates. Preview rotation has no pitch
 limits or pole lock. The eye stays at least 1.2 world units above the file plane,
 above the glass and file geometry, and can look up at contributors at height 3.2.
-Vertical drag rotates around the camera's right axis; horizontal drag rotates around
-the camera's up axis, so both controls follow the screen when upside down. Orbit and
-zoom retain the followed contributor as the aim; panning releases follow. At the floor,
-Free orbit turns about the eye instead of crossing the plane; zoom slides along the
-floor and pan stays horizontal. Follow shortens its orbit radius at the floor while
+Vertical mouse motion rotates around the camera's right axis; horizontal motion rotates
+around the camera's up axis, so both controls follow the screen when upside down. Captured
+mouse aim turns about the eye in free mode; WASD moves along the camera's forward and
+right axes, with downward movement stopped at the floor. Right-drag orbit remains
+available with the cursor released. Orbit, captured aim and zoom retain the followed
+contributor as the aim; WASD releases follow. At the floor, free orbit turns about the eye
+instead of crossing the plane; zoom slides along the floor and released-cursor pan stays
+horizontal. Follow shortens its orbit radius at the floor while
 keeping its aim on the contributor. Space smoothly raises the eye and restores the
 overhead view from any orientation.
 
