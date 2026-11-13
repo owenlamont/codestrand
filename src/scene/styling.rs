@@ -11,20 +11,8 @@ use super::{
 };
 use crate::theme::{AvatarStyle, BeamStyle, FontStyle};
 
-pub(super) const GREEK_FONT: &[u8] =
-    include_bytes!("../../assets/fonts/CodestrandGreek.ttf");
-
-pub(super) fn label_font(
-    primary: Handle<Font>,
-    fallback: Handle<Font>,
-    greek: Handle<Font>,
-) -> FontSource {
-    FontSource::list([
-        primary.into(),
-        fallback.into(),
-        greek.into(),
-        FontSource::sans_serif(),
-    ])
+pub(super) fn label_font(primary: Handle<Font>, fallback: Handle<Font>) -> FontSource {
+    FontSource::list([primary.into(), fallback.into(), FontSource::sans_serif()])
 }
 
 #[derive(Default)]
@@ -85,7 +73,6 @@ pub(super) struct Styles {
     territory_mesh: Handle<Mesh>,
     grounds: Vec<(crate::theme::ThemeName, Handle<Image>)>,
     fonts: Vec<(FontStyle, Handle<Font>)>,
-    greek: Handle<Font>,
     pub(super) beams: Vec<Handle<StandardMaterial>>,
     pub(super) territories: Vec<Handle<StandardMaterial>>,
     territory_pool: Vec<Entity>,
@@ -166,9 +153,6 @@ pub(super) fn setup(world: &mut World, theme: &Theme) {
         )
     })
     .collect();
-    let greek = world
-        .resource_mut::<Assets<Font>>()
-        .add(Font::from_bytes(GREEK_FONT.to_vec()));
     let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
     let beams = (0..16).map(|_| materials.add(theme.edge.clone())).collect();
     let territories = (0..36).map(|_| materials.add(theme.edge.clone())).collect();
@@ -179,7 +163,6 @@ pub(super) fn setup(world: &mut World, theme: &Theme) {
         backdrop_material,
         grounds,
         fonts,
-        greek,
         beams,
         territories,
         territory_pool: Vec::new(),
@@ -328,7 +311,7 @@ pub(super) fn apply(world: &mut World, theme: &Theme) {
             } else {
                 font.clone()
             };
-            text.font = label_font(primary, fallback.clone(), styles.greek.clone());
+            text.font = label_font(primary, fallback.clone());
         }
         for (mut node, mut background, mut border) in world.query_filtered::<(&mut Node, &mut BackgroundColor, &mut BorderColor), With<Label>>().iter_mut(world) {
             node.border = UiRect::all(px(if theme.label_style == crate::theme::LabelStyle::Bevelled { 2.0 } else { 0.0 }));
@@ -712,7 +695,7 @@ mod tests {
                 .unwrap()
                 .1
                 .clone();
-            let expected = label_font(expected, fallback, styles.greek.clone());
+            let expected = label_font(expected, fallback);
             let mut visible = 0;
             for (text, font, color, shadow, visibility, transform) in world
                 .query_filtered::<(

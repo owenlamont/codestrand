@@ -61,19 +61,12 @@ fn oblique_names_stay_tangent_to_the_projected_portrait() {
 }
 
 #[test]
-fn contributor_fonts_shape_accents_and_non_latin_letters() {
+fn bundled_plex_shapes_accents_and_cyrillic() {
     let (app, font) = font_app(Fonts::Bundled);
     assert_name_glyphs(
         app,
         &font,
-        [
-            "Fernando Pérez-García",
-            "João Moreno",
-            "Ελληνικά",
-            "ε\u{301}",
-            "ῳ",
-            "Кириллица",
-        ],
+        ["Fernando Pérez-García", "João Moreno", "Кириллица"],
     );
 }
 
@@ -95,7 +88,11 @@ fn system_font_fallback_shapes_installed_scripts() {
             return;
         }
     }
-    assert_name_glyphs(app, &font, ["Ελληνικά", "अभिजीत बोडस", "中文"]);
+    assert_name_glyphs(
+        app,
+        &font,
+        ["Ελληνικά", "ε\u{301}", "ῳ", "अभिजीत बोडस", "中文"],
+    );
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -123,13 +120,9 @@ fn font_app(environment: Fonts) -> (App, TextFont) {
         .add(Font::from_bytes(
             include_bytes!("../../assets/fonts/IBMPlexMono-Regular.ttf").to_vec(),
         ));
-    let greek = app
-        .world_mut()
-        .resource_mut::<Assets<Font>>()
-        .add(Font::from_bytes(styling::GREEK_FONT.to_vec()));
     app.update();
     let font = TextFont {
-        font: styling::label_font(Handle::default(), plex, greek),
+        font: styling::label_font(Handle::default(), plex),
         ..TextFont::from_font_size(14.0)
     };
     (app, font)

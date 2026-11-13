@@ -21,7 +21,6 @@ include = [
   "/pyproject.toml",
   "/rust-toolchain.toml",
   "/src/**",
-  "/vendor/**",
 ]
 
 [dependencies]
@@ -63,9 +62,6 @@ fontique = { version = "0.11", default-features = false, features = ["fontconfig
 
 [dev-dependencies]
 fontique = { version = "0.11", default-features = false }
-
-[patch.crates-io]
-fontique = { path = "vendor/fontique" }
 
 [profile.dev]
 debug = 0

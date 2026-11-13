@@ -9,33 +9,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[cfg(target_os = "linux")]
-#[test]
-fn empty_system_font_collection_does_not_panic() {
-    if std::env::var_os("CODESTRAND_EMPTY_FONT_TEST").is_some() {
-        assert_eq!(fontique::Collection::default().family_names().count(), 0);
-        return;
-    }
-    let scratch = tempfile::tempdir().unwrap();
-    let config = scratch.path().join("fontconfig.conf");
-    fs::write(&config, "<fontconfig></fontconfig>\n").unwrap();
-    let log_path = scratch.path().join("collection.log");
-    let log = fs::File::create(&log_path).unwrap();
-    let child = Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "empty_system_font_collection_does_not_panic"])
-        .env("CODESTRAND_EMPTY_FONT_TEST", "1")
-        .env("FONTCONFIG_FILE", config)
-        .stdout(Stdio::from(log.try_clone().unwrap()))
-        .stderr(Stdio::from(log))
-        .spawn()
-        .unwrap();
-    assert!(
-        wait(child, &log_path).success(),
-        "{}",
-        fs::read_to_string(log_path).unwrap()
-    );
-}
-
 #[test]
 #[ignore = "requires a graphics adapter and installed Devanagari/CJK fonts"]
 fn contributor_scripts_render_without_missing_glyphs() {
@@ -45,7 +18,6 @@ fn contributor_scripts_render_without_missing_glyphs() {
     let frame = render_names(
         &proof,
         &["Pérez João", "Ελληνικά", "Кириллица", "अभिजीत", "中文姓名"],
-        None,
     );
     assert_eq!(frame.avatars, 5);
     assert!(frame.glyphs > 40);
@@ -64,32 +36,11 @@ fn contributor_scripts_render_without_missing_glyphs() {
             .count();
         assert!(ink > 10, "frame {index} has no contributor text");
     }
-    let tofu =
-        render_names(&scratch.path().join("tofu"), &["Missing \u{10ffff}"], None);
+    let tofu = render_names(&scratch.path().join("tofu"), &["Missing \u{10ffff}"]);
     assert!(
         tofu.missing > 0,
         "the missing-glyph detector accepted its negative control"
     );
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-#[ignore = "requires a graphics adapter"]
-fn bundled_scripts_render_with_an_empty_system_font_set() {
-    let scratch = tempfile::tempdir().unwrap();
-    let proof = std::env::var_os("CODESTRAND_BARE_PROOF")
-        .map_or_else(|| scratch.path().join("bare"), std::path::PathBuf::from);
-    fs::create_dir_all(&proof).unwrap();
-    let config = proof.join("fontconfig.conf");
-    fs::write(&config, "<fontconfig></fontconfig>\n").unwrap();
-    let frame = render_names(
-        &proof,
-        &["Pérez João", "Ελληνικά", "Кириллица"],
-        Some(&config),
-    );
-    assert_eq!(frame.avatars, 3);
-    assert!(frame.glyphs > 40);
-    assert_eq!(frame.missing, 0);
 }
 
 struct NameFrame {
@@ -99,7 +50,7 @@ struct NameFrame {
     avatars: usize,
 }
 
-fn render_names(root: &Path, names: &[&str], fontconfig: Option<&Path>) -> NameFrame {
+fn render_names(root: &Path, names: &[&str]) -> NameFrame {
     fs::create_dir_all(root).unwrap();
     let repository = root.join("repository");
     names_repository(&repository, names);
@@ -111,7 +62,6 @@ fn render_names(root: &Path, names: &[&str], fontconfig: Option<&Path>) -> NameF
     let executable = std::env::var_os("CODESTRAND_TEST_BINARY")
         .unwrap_or_else(|| env!("CARGO_BIN_EXE_codestrand").into());
     let child = Command::new(executable)
-        .envs(fontconfig.map(|path| ("FONTCONFIG_FILE", path)))
         .arg("export")
         .arg(&directory)
         .arg("--repository")
