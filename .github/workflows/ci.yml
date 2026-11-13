@@ -40,7 +40,8 @@ jobs:
         if: steps.changes.outputs.rust == 'true'
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y mesa-vulkan-drivers libvulkan1 vulkan-tools fonts-noto-core fonts-noto-cjk
+          sudo apt-get install --no-install-recommends -y mesa-vulkan-drivers libvulkan1 vulkan-tools \
+            fonts-noto-core fonts-noto-cjk libwayland-dev libxkbcommon-dev
       - name: Install pinned Rust toolchain
         if: steps.changes.outputs.rust == 'true'
         run: rustup show
@@ -107,11 +108,12 @@ jobs:
       - name: Install pinned Rust toolchain
         if: steps.changes.outputs.rust == 'true'
         run: rustup show
-      - name: Install script fonts
+      - name: Install Linux build dependencies and script fonts
         if: steps.changes.outputs.rust == 'true' && runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y fonts-noto-core fonts-noto-cjk
+          sudo apt-get install --no-install-recommends -y fonts-noto-core fonts-noto-cjk \
+            libwayland-dev libxkbcommon-dev
       - name: Restore Cargo cache
         if: steps.changes.outputs.rust == 'true'
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
