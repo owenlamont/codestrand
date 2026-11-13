@@ -29,6 +29,8 @@ Text falls back from the selected theme font to bundled IBM Plex Mono for accent
 and Cyrillic names, then to installed system fonts for other scripts. Install
 fonts covering the required scripts on export machines; use the same fonts when
 comparing frames across machines.
+Linux system-font discovery also uses the optional Fontconfig runtime library;
+without Fontconfig, the bundled fonts remain available.
 
 ## Controls
 
