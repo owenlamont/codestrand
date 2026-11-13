@@ -1,0 +1,23 @@
+fps = 30
+
+[[key]]
+frame = 0
+eye = { directory = "tests", offset = [0.0, 27.0, 0.0] }
+focus = { directory = "tests" }
+up = [0.0, 0.0, -1.0]
+
+[[key]]
+frame = 60
+eye = { directory = "tests", offset = [0.0, 27.0, 0.0] }
+focus = { directory = "tests" }
+
+[[key]]
+frame = 150
+eye = { avatar = "Owen Lamont", offset = [4.0, 1.4, 7.5] }
+focus = { directory = "src" }
+up = [0.0, 1.0, 0.0]
+
+[[key]]
+frame = 330
+eye = { avatar = "Owen Lamont", offset = [-3.5, 1.0, 8.0] }
+focus = { directory = "src" }

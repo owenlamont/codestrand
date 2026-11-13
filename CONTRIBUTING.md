@@ -63,3 +63,19 @@ Cloudflare Pages deploys `main` to <https://codestrand.pages.dev/> through its G
 integration, so the repository holds no deployment credentials or workflow. The
 Cloudflare build installs the latest Zensical rather than the locked version:
 `pip install zensical && zensical build --clean --strict`, output directory `site`.
+
+### README montage
+
+`docs/assets/montage.webp` appears in the README and on the docs home page. It is
+excluded from the crate, PyPI and npm packages. Regenerate it with a release build,
+FFmpeg with libwebp, and complete clones at the commits pinned in the script:
+
+```sh
+uv run --script scripts/readme_montage.py target/release/codestrand /path/to/clones /path/to/new-output --fetch-avatars
+cp /path/to/new-output/montage.webp docs/assets/montage.webp
+```
+
+Shots, themes, pacing and trims are in `scripts/readme_montage.py`; camera paths and
+the contributor manifest are in `scripts/readme_montage/`. Portraits are fetched live
+from GitHub and are not committed, so faces can differ between runs. Inspect the
+exported frames before replacing the image.
