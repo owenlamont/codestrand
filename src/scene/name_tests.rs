@@ -185,7 +185,13 @@ fn assert_name_glyphs(
 
 #[test]
 fn close_names_cannot_cover_the_caption_or_heading() {
-    for y in [0.0, 690.0, 700.0] {
+    for (viewport, y) in [
+        (Vec2::new(1280.0, 720.0), 0.0),
+        (Vec2::new(1280.0, 720.0), 690.0),
+        (Vec2::new(1280.0, 720.0), 700.0),
+        (Vec2::new(1920.0, 1080.0), 700.0),
+        (Vec2::new(960.0, 540.0), 24.0),
+    ] {
         let chosen = place_labels(
             vec![(
                 model::Label {
@@ -200,9 +206,12 @@ fn close_names_cannot_cover_the_caption_or_heading() {
                 1.0,
             )],
             20.0,
-            Vec2::new(1280.0, 720.0),
+            viewport,
         );
-        assert!(chosen.is_empty(), "label at y={y} covers frame text");
+        assert!(
+            chosen.is_empty(),
+            "label at y={y} covers frame text in {viewport}"
+        );
     }
 }
 
