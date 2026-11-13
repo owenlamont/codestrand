@@ -1,5 +1,28 @@
 use super::*;
 
+#[test]
+fn close_names_cannot_cover_the_caption_or_heading() {
+    for y in [0.0, 690.0, 700.0] {
+        let chosen = place_labels(
+            vec![(
+                model::Label {
+                    position: Vec3::ZERO,
+                    text: "file-ignores.md".into(),
+                    kind: model::LabelKind::Detail,
+                    scale: 0.7,
+                    opacity: 1.0,
+                    priority: 0.0,
+                },
+                Vec2::new(200.0, y),
+                1.0,
+            )],
+            20.0,
+            Vec2::new(1280.0, 720.0),
+        );
+        assert!(chosen.is_empty(), "label at y={y} covers frame text");
+    }
+}
+
 fn fixture() -> Simulation {
     let mut events = crate::timeline::synthetic();
     events.truncate(1);

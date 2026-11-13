@@ -1961,11 +1961,16 @@ fn place_labels(
             continue;
         }
         let rect = model::label_rect(point, &label.text, label.scale, height);
-        if (label.kind != model::LabelKind::Detail
-            && (rect.min.x < 0.0
-                || rect.min.y < 0.0
-                || rect.max.x > viewport.x
-                || rect.max.y > viewport.y))
+        let frame_scale = viewport.y / 720.0;
+        if rect.min.y
+            < (model::caption::BAR_HEIGHT + model::caption::BUFFER) * frame_scale
+            || rect.max.y
+                > (model::caption::MULTI_TOP - model::caption::BUFFER) * frame_scale
+            || (label.kind != model::LabelKind::Detail
+                && (rect.min.x < 0.0
+                    || rect.min.y < 0.0
+                    || rect.max.x > viewport.x
+                    || rect.max.y > viewport.y))
             || (!matches!(
                 label.kind,
                 model::LabelKind::Avatar | model::LabelKind::Detail
