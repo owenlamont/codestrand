@@ -71,7 +71,7 @@ excluded from the crate, PyPI and npm packages. Regenerate it with a release bui
 FFmpeg with libwebp, and complete clones at the commits pinned in the script:
 
 ```sh
-uv run --script scripts/readme_montage.py target/release/codestrand   /path/to/clones /path/to/new-output --fetch-avatars
+uv run --script scripts/readme_montage.py target/release/codestrand /path/to/clones /path/to/new-output --fetch-avatars
 cp /path/to/new-output/montage.webp docs/assets/montage.webp
 ```
 
