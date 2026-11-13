@@ -32,8 +32,10 @@ For slow source-checkout playback, use `cargo run --locked --release -- preview`
 ## Source build fails
 
 Install the Rust toolchain and native build prerequisites. Linux release builds
-install ALSA, systemd/udev, X11, Xcursor, Xi, Xrandr and xkbcommon development
-packages. Package names differ by distribution. Windows source builds need the
+install ALSA, systemd/udev, X11, Xcursor, Xi, Xrandr, Wayland, EGL and xkbcommon
+development packages. Wayland support requires `libwayland-dev` and `libxkbcommon-dev`
+on Debian/Ubuntu, or `wayland-devel` and `libxkbcommon-devel` on Fedora.
+Package names differ by distribution. Windows source builds need the
 MSVC C++ build tools; macOS builds need the Xcode command-line tools.
 
 ## Export directory already exists

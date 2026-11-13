@@ -31,6 +31,7 @@ bevy = { version = "=0.20.1", default-features = false, features = [
     "multi_threaded",
     "bevy_winit",
     "x11",
+    "wayland",
     "bevy_render",
     "bevy_curve",
     "bevy_core_pipeline",
