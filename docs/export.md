@@ -59,7 +59,7 @@ codestrand export wide-diff --repository /path/to/repository \
   --diff-text-distance 4 --frames 60 --fps 30
 ```
 
-Repeatable frames require the same build, graphics adapter, backend and driver,
+Matching frames require the same build, graphics adapter, backend and driver,
 repository history, options and portrait assets. Even then, a few frames can differ
 by single pixels between runs; `frames.csv` stays identical. Use cached or local
 portraits offline: leave `--fetch-avatars` off and keep the avatar cache unchanged
