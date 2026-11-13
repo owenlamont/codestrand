@@ -10,7 +10,7 @@ Watch the [feature tour video](https://youtu.be/gmueXAHnvAE).
 ### Added
 
 - Native Wayland preview windows on Linux alongside X11 support.
-  ([#139](https://github.com/owenlamont/codestrand/issues/139))
+  ([#144](https://github.com/owenlamont/codestrand/pull/144))
 - Play several local repositories as tiles on one shared timeline, from repeated
   `--repository` flags or `--repositories-file`, with contributors travelling along
   gutters between tiles. Adds `--travel-cap`, `--bot-travel`, `--avatar-scale`,
