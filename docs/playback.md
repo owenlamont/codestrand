@@ -42,18 +42,42 @@ macOS discovers installed fonts through CoreText and Library/Fonts directories.
 | Input | Action |
 | --- | --- |
 | Escape | Close preview |
+| F10 | Open or close display settings; camera controls pause while open |
+| F11 | Toggle borderless fullscreen on the current monitor |
 | `[` | Halve live speed, down to 0.125x |
 | `]` | Double live speed, up to 8x |
 | `,` / `.` | Previous or next theme |
 | WASD | Pan; return from contributor follow to free camera |
 | Right mouse drag | Orbit horizontally and vertically, without pitch limits |
-| Scroll wheel | Zoom |
+| Scroll wheel | Zoom; scroll the preset list when over display settings |
 | Tab | Follow or cycle visible contributors |
 | Space | Restore the fit-to-scene camera over half a second |
 
 The caption shows the live multiplier, theme, camera mode and follow target. Following
 returns to free camera when the target fades out. Preview controls do not change
 the exported camera or timeline.
+
+Display settings have a scrollable preset list with a draggable scrollbar. Monitor native
+is first; other choices are grouped by aspect ratio, then ascending pixel size.
+Ratios use conventional display names: 3440×1440 is labelled 21:9.
+
+| Aspect | Presets (physical pixels) |
+| --- | --- |
+| 16:9 | 1280×720, 1600×900, 1920×1080, 2560×1440, 3840×2160 |
+| 16:10 | 1280×800, 1920×1200, 2560×1600 |
+| 21:9 | 2560×1080, 3440×1440, 3840×1600 |
+| 32:9 | 3840×1080, 5120×1440 |
+
+Choices exceeding either dimension of the current monitor are greyed out with a reason
+and cannot be selected. Windowed choices resize the window after restoring normal
+window placement; the desktop may further constrain the actual window size.
+
+In borderless fullscreen, presets keep fullscreen and render at exactly the selected
+pixel size, centred with black bars around the unused monitor area. No preset is
+upscaled. Monitor native fills the display. Captions and other UI stay inside the
+rendered viewport, scaled by its height rather than the full monitor height.
+F11 restores the previous windowed size and position. Playback continues while
+settings are open; mouse wheel input over the panel scrolls instead of zooming.
 
 The default camera looks straight down at the centre of the repository tile area.
 Repository tiles are rectangles in world coordinates. Preview rotation has no pitch

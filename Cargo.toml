@@ -37,6 +37,8 @@ bevy = { version = "=0.20.1", default-features = false, features = [
     "bevy_pbr",
     "bevy_post_process",
     "bevy_ui_render",
+    "bevy_ui_widgets",
+    "ui_picking",
     "default_font",
     "system_font_discovery",
     "png",
