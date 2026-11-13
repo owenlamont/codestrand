@@ -25,6 +25,9 @@ export and visual inspection:
 cargo test --locked --test render_export -- --ignored
 ```
 
+CI runs the CPU tests on Linux, macOS and Windows, and a separate Ubuntu job runs the
+ignored `render_export` tests on Mesa's lavapipe software Vulkan adapter.
+
 Before tagging, update `CHANGELOG.md` and regenerate third-party notices after
 dependency changes. The release workflow checks notice freshness and extracts the
 matching changelog section:

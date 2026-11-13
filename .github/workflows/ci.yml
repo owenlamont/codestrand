@@ -16,6 +16,51 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  render-export:
+    name: Render export (lavapipe)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      WGPU_BACKEND: vulkan
+      WGPU_ADAPTER_NAME: llvmpipe
+      CARGO_BUILD_JOBS: 2
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - name: Classify Rust inputs
+        id: changes
+        run: |
+          rust=$(bash scripts/ci_rust.sh)
+          echo "rust=$rust" >> "$GITHUB_OUTPUT"
+      - name: Install Mesa lavapipe
+        if: steps.changes.outputs.rust == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y mesa-vulkan-drivers libvulkan1 vulkan-tools
+      - name: Install pinned Rust toolchain
+        if: steps.changes.outputs.rust == 'true'
+        run: rustup show
+      - name: Restore Cargo cache
+        if: steps.changes.outputs.rust == 'true'
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
+        with:
+          shared-key: render-export
+      - name: Run graphics export tests
+        if: steps.changes.outputs.rust == 'true'
+        timeout-minutes: 35
+        run: |
+          icds=(/usr/share/vulkan/icd.d/lvp_icd*.json)
+          test "${#icds[@]}" -eq 1
+          test -f "${icds[0]}"
+          export VK_DRIVER_FILES="${icds[0]}"
+          export XDG_RUNTIME_DIR="$RUNNER_TEMP/xdg-runtime"
+          mkdir -m 700 "$XDG_RUNTIME_DIR"
+          vulkaninfo --summary
+          cargo test --locked --test render_export -- --ignored
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
