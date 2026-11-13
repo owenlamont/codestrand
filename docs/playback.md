@@ -369,7 +369,7 @@ to keep the overview readable.
 
 In repository playback, sampled added lines descend from the contributor; removed
 lines rise from the file and smoothly fade to transparent. The camera-facing snippet
-is the fragment, following the same path, phase and fade envelope above beams, with
+is the fragment, following the same path and phase above beams, with
 a text shadow and theme backing for contrast. Text and plain prisms crossfade; fully
 visible snippets replace their prisms. Extra fragments stay plain. Every theme supplies
 added/removed colours; Atlas uses dark ink on its light ground. Snippets use alpha
@@ -381,6 +381,8 @@ Snippet text keeps the font's natural proportions with equal X and Y scaling.
 Lines are cut at 88 characters. Samples smoothly appear between 6 and 14 projected
 beam-diameter pixels. Visible text stays between 14 and 20 logical pixels high, making
 close oblique shots readable while the overview keeps plain fragments.
+Text holds full contrast through the first three quarters of the fragment's alpha
+fade, then fades out with the backing.
 Overlapping snippets may overlap freely without collision or viewport-edge hiding.
 Files inside collapsed subtrees show no sample text; LOD keeps its fragment behaviour.
 

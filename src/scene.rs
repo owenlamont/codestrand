@@ -2252,7 +2252,7 @@ fn diff_samples(world: &mut World, camera: &Camera, transform: &GlobalTransform)
                 origin,
                 scale,
                 extent,
-                color.with_alpha(line.alpha * visibility),
+                color.with_alpha((line.alpha * 4.0).min(1.0) * visibility),
             ))
         })
         .collect();
@@ -2886,7 +2886,9 @@ mod tests {
                     world.get::<TextColor>(text).unwrap().0.alpha(),
                     world.get::<TextShadow>(text).unwrap().color.alpha(),
                 ] {
-                    assert!((alpha - line.alpha * opacity).abs() < 0.0001);
+                    assert!(
+                        (alpha - (line.alpha * 4.0).min(1.0) * opacity).abs() < 0.0001
+                    );
                 }
                 assert_sample_layout(&world, text, pixels);
                 assert_eq!(world.get::<Visibility>(text), Some(&Visibility::Inherited));
