@@ -3,6 +3,65 @@ use bevy::mesh::VertexAttributeValues;
 use clap::Parser;
 
 #[test]
+fn export_lod_crosses_threshold_using_the_rendered_camera_pose() {
+    let mut events = crate::timeline::synthetic();
+    events.truncate(1);
+    events[0].changes = ["folder/one.rs", "folder/two.rs"]
+        .map(|path| crate::timeline::FileChange {
+            path: path.into(),
+            ..default()
+        })
+        .to_vec();
+    let mut sim = Simulation::new(
+        events,
+        &model::Options {
+            start: 1,
+            ..default()
+        },
+        &Theme::neon(),
+        &crate::contributors::Mappings::default(),
+    );
+    sim.advance_to(600, 60);
+    let (low, high) = sim
+        .layout()
+        .files()
+        .map(|(_, file)| file.position)
+        .chain(
+            sim.layout()
+                .dirs()
+                .filter(|(_, dir)| dir.live && dir.parent.is_some())
+                .map(|(_, dir)| dir.position),
+        )
+        .fold(
+            (Vec2::splat(f32::INFINITY), Vec2::splat(f32::NEG_INFINITY)),
+            |(low, high), point| {
+                (
+                    low.min(point - Vec2::splat(0.4)),
+                    high.max(point + Vec2::splat(0.4)),
+                )
+            },
+        );
+    let radius = (high - low).length() * 0.5;
+    let focus = ground((low + high) * 0.5);
+    for pixels in [31.0, 41.0] {
+        let mut world = World::new();
+        let distance = radius * 720.0 / (pixels * (model::framing::FOV * 0.5).tan());
+        world.spawn((
+            SceneCamera,
+            Transform::from_translation(focus + Vec3::Y * distance)
+                .looking_at(focus, Vec3::NEG_Z),
+            Projection::Perspective(PerspectiveProjection {
+                aspect_ratio: 1.6,
+                ..default()
+            }),
+        ));
+        let mut pools = Pools::default();
+        sync_lod(&mut world, &mut pools, &sim);
+        assert_eq!(!pools.lod.glyphs.is_empty(), pixels < 32.0);
+    }
+}
+
+#[test]
 fn collapsing_option_defaults_on_and_accepts_only_on_or_off() {
     for command in [vec!["preview"], vec!["export", "unused"]] {
         for (flags, expected) in [

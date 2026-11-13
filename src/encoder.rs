@@ -35,7 +35,11 @@ fn executable(explicit: Option<&Path>, environment: Option<OsString>) -> PathBuf
 }
 
 impl Options {
-    pub(super) fn start(&self, fps: u16) -> anyhow::Result<Option<Encoder>> {
+    pub(super) fn start(
+        &self,
+        fps: u16,
+        resolution: crate::resolution::Resolution,
+    ) -> anyhow::Result<Option<Encoder>> {
         let Some(output) = &self.video else {
             return Ok(None);
         };
@@ -65,7 +69,7 @@ impl Options {
             result.context("FFmpeg could not encode with libx264; install a libx264-enabled build or select another encoder with repeated --ffmpeg-arg options")?;
         }
         let mut encode = command(&path);
-        encode.args(input_args(fps, "1280x720"));
+        encode.args(input_args(fps, &resolution.to_string()));
         encode.args(output_args(&self.ffmpeg_arg));
         encode.arg(output);
         Encoder::spawn(&mut encode).map(Some)
@@ -351,13 +355,16 @@ fn main() {
             ffmpeg: Some(binary.clone()),
             ffmpeg_arg: vec!["custom".into()],
         };
-        let mut encoder = options.start(30).unwrap().unwrap();
+        let mut encoder = options
+            .start(30, crate::resolution::Resolution::default())
+            .unwrap()
+            .unwrap();
         encoder.write(vec![1, 2, 3, 4]).unwrap();
         encoder.finish().unwrap();
         assert_eq!(std::fs::read(&output).unwrap(), [1, 2, 3, 4]);
         assert!(
             options
-                .start(30)
+                .start(30, crate::resolution::Resolution::default())
                 .err()
                 .unwrap()
                 .to_string()
@@ -382,9 +389,17 @@ fn main() {
             ffmpeg: Some(scratch.path().join("missing")),
             ffmpeg_arg: Vec::new(),
         };
-        let error = options.start(30).err().unwrap();
+        let error = options
+            .start(30, crate::resolution::Resolution::default())
+            .err()
+            .unwrap();
         assert!(format!("{error:#}").contains("PNG export still works"));
-        assert!(Options::default().start(30).unwrap().is_none());
+        assert!(
+            Options::default()
+                .start(30, crate::resolution::Resolution::default())
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -395,7 +410,10 @@ fn main() {
             ffmpeg: Some(binary.clone()),
             ffmpeg_arg: Vec::new(),
         };
-        let mut encoder = options.start(30).unwrap().unwrap();
+        let mut encoder = options
+            .start(30, crate::resolution::Resolution::default())
+            .unwrap()
+            .unwrap();
         encoder.write(vec![5; 12]).unwrap();
         encoder.finish().unwrap();
         let no_x264 = scratch
@@ -405,7 +423,10 @@ fn main() {
         let output = scratch.path().join("unavailable.mp4");
         options.video = Some(output.clone());
         options.ffmpeg = Some(no_x264);
-        let error = options.start(30).err().unwrap();
+        let error = options
+            .start(30, crate::resolution::Resolution::default())
+            .err()
+            .unwrap();
         let message = format!("{error:#}");
         assert!(message.contains("Unknown encoder 'libx264'"));
         assert!(message.contains("--ffmpeg-arg"));
