@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     fs::{self, File},
     io::{BufWriter, Write},
     path::Path,
@@ -23,6 +24,7 @@ use bevy::{
 use crate::{model::Simulation, scene};
 
 const WAIT_LIMIT: Duration = Duration::from_secs(30);
+const MAX_PENDING_CAPTURES: usize = 4;
 
 pub(super) fn prepare(directory: &Path) -> anyhow::Result<()> {
     fs::create_dir(directory)
@@ -67,54 +69,49 @@ fn render(
         manifest,
         "frame,seconds,commit,files,avatars,beams,glyphs,missing_glyphs"
     )?;
-    let started = Instant::now();
-    while app.plugins_state() != PluginsState::Ready {
-        if started.elapsed() > WAIT_LIMIT {
-            bail!("renderer plugins were not ready within 30 seconds");
-        }
-        bevy::tasks::tick_global_task_pools_on_main_thread();
-        thread::sleep(Duration::from_millis(1));
-    }
-    app.finish();
-    app.cleanup();
-    validate_target(&app, &target)?;
-
-    loop {
-        update(&mut app)?;
-        if started.elapsed() > WAIT_LIMIT {
-            bail!("text and rendering pipelines were not ready within 30 seconds");
-        }
-        if ready(&mut app) {
-            break;
-        }
-    }
+    initialize(&mut app, &target)?;
     let started = Instant::now();
     let mut previous_camera = None;
+    let mut captures = Captures::default();
     for index in 0..frames {
-        app.world_mut().resource_mut::<scene::Frame>().index = index;
-        if let Some(path) = &camera_path {
-            let mut playback = app.world_mut().resource_mut::<scene::Playback>();
-            playback.0.advance_to(index, fps);
-            let pose = path.pose(&playback.0, index, fps)?;
-            if let Some(previous) = &previous_camera {
-                path.validate_step(previous, &pose, index)?;
+        let camera = (|| -> anyhow::Result<()> {
+            if let Some(path) = &camera_path {
+                let mut playback = app.world_mut().resource_mut::<scene::Playback>();
+                playback.0.advance_to(index, fps);
+                let pose = path.pose(&playback.0, index, fps)?;
+                if let Some(previous) = &previous_camera {
+                    path.validate_step(previous, &pose, index)?;
+                }
+                previous_camera = Some(pose);
+                app.world_mut().insert_resource(scene::ScriptedCamera(pose));
             }
-            previous_camera = Some(pose);
-            app.world_mut().insert_resource(scene::ScriptedCamera(pose));
+            Ok(())
+        })();
+        if let Err(error) = camera {
+            captures.finish(
+                index,
+                || update(&mut app),
+                |index, image| write_frame(directory, &mut encoder, index, image),
+            )?;
+            manifest.flush()?;
+            if let Some(encoder) = &mut encoder {
+                encoder.finish()?;
+            }
+            return Err(error);
         }
-        let image = capture(&mut app, &target, index)?;
-        let pixels = image
-            .try_into_dynamic()
-            .context("convert captured frame")?
-            .to_rgb8();
-        if let Some(encoder) = &mut encoder {
-            encoder.write(pixels.into_raw())?;
-        } else {
-            let path = directory.join(format!("frame-{index:05}.png"));
-            pixels
-                .save(&path)
-                .with_context(|| format!("write frame {}", path.display()))?;
-        }
+        app.world_mut().resource_mut::<scene::Frame>().index = index;
+        // Bevy's retained transparent phases need a second update after material changes.
+        update(&mut app)?;
+        let sender = captures.request();
+        app.world_mut()
+            .spawn(Screenshot::image(target.clone()))
+            .observe(move |event: On<ScreenshotCaptured>| {
+                let _ = sender.send(event.image.clone());
+            });
+        update(&mut app)?;
+        captures.write_ready(|index, image| {
+            write_frame(directory, &mut encoder, index, image)
+        })?;
         let (glyphs, missing_glyphs) = glyph_coverage(&mut app);
         let playback = &app.world().resource::<scene::Playback>().0;
         writeln!(
@@ -130,8 +127,14 @@ fn render(
                 .count(),
             playback.beams().len()
         )?;
+        while captures.pending.len() >= MAX_PENDING_CAPTURES {
+            update(&mut app)?;
+            captures.write_ready(|index, image| {
+                write_frame(directory, &mut encoder, index, image)
+            })?;
+        }
         thread::sleep(Duration::from_millis(u64::from(delay_ms)));
-        if index % u32::from(fps) == 0 || index + 1 == frames {
+        if index % u32::from(fps) == 0 && index + 1 < frames {
             eprintln!(
                 "Exported {}/{} frames ({:.1}s elapsed)",
                 index + 1,
@@ -140,6 +143,15 @@ fn render(
             );
         }
     }
+    captures.finish(
+        frames,
+        || update(&mut app),
+        |index, image| write_frame(directory, &mut encoder, index, image),
+    )?;
+    eprintln!(
+        "Exported {frames}/{frames} frames ({:.1}s elapsed)",
+        started.elapsed().as_secs_f32()
+    );
     manifest.flush()?;
     if let Some(encoder) = &mut encoder {
         encoder.finish()?;
@@ -148,6 +160,52 @@ fn render(
         "Export complete: {}",
         crate::terminal_escape(&directory.to_string_lossy())
     );
+    Ok(())
+}
+
+fn initialize(app: &mut App, target: &Handle<Image>) -> anyhow::Result<()> {
+    let started = Instant::now();
+    while app.plugins_state() != PluginsState::Ready {
+        if started.elapsed() > WAIT_LIMIT {
+            bail!("renderer plugins were not ready within 30 seconds");
+        }
+        bevy::tasks::tick_global_task_pools_on_main_thread();
+        thread::sleep(Duration::from_millis(1));
+    }
+    app.finish();
+    app.cleanup();
+    validate_target(app, target)?;
+
+    loop {
+        update(app)?;
+        if started.elapsed() > WAIT_LIMIT {
+            bail!("text and rendering pipelines were not ready within 30 seconds");
+        }
+        if ready(app) {
+            break;
+        }
+    }
+    Ok(())
+}
+
+fn write_frame(
+    directory: &Path,
+    encoder: &mut Option<crate::encoder::Encoder>,
+    index: u32,
+    image: Image,
+) -> anyhow::Result<()> {
+    let pixels = image
+        .try_into_dynamic()
+        .context("convert captured frame")?
+        .to_rgb8();
+    if let Some(encoder) = encoder {
+        encoder.write(pixels.into_raw())?;
+    } else {
+        let path = directory.join(format!("frame-{index:05}.png"));
+        pixels
+            .save(&path)
+            .with_context(|| format!("write frame {}", path.display()))?;
+    }
     Ok(())
 }
 
@@ -208,26 +266,58 @@ fn ready(app: &mut App) -> bool {
             .is_none()
 }
 
-fn capture(app: &mut App, target: &Handle<Image>, frame: u32) -> anyhow::Result<Image> {
-    let (sender, receiver) = mpsc::channel();
-    app.world_mut()
-        .spawn(Screenshot::image(target.clone()))
-        .observe(move |event: On<ScreenshotCaptured>| {
-            let _ = sender.send(event.image.clone());
-        });
-    let started = Instant::now();
-    loop {
-        update(app)?;
-        match receiver.try_recv() {
-            Ok(image) => return Ok(image),
-            Err(mpsc::TryRecvError::Disconnected) => {
-                bail!("capture channel disconnected at frame {frame}")
+#[derive(Default)]
+struct Captures {
+    pending: VecDeque<(mpsc::Receiver<Image>, Instant)>,
+    written: u32,
+}
+
+impl Captures {
+    fn request(&mut self) -> mpsc::Sender<Image> {
+        let (sender, receiver) = mpsc::channel();
+        self.pending.push_back((receiver, Instant::now()));
+        sender
+    }
+
+    fn write_ready(
+        &mut self,
+        mut write: impl FnMut(u32, Image) -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        while let Some((receiver, started)) = self.pending.front() {
+            match receiver.try_recv() {
+                Ok(image) => {
+                    write(self.written, image)?;
+                    self.written += 1;
+                    self.pending.pop_front();
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    bail!("capture channel disconnected at frame {}", self.written)
+                }
+                Err(mpsc::TryRecvError::Empty) => {
+                    if started.elapsed() > WAIT_LIMIT {
+                        bail!("capture timed out at frame {}", self.written);
+                    }
+                    break;
+                }
             }
-            Err(mpsc::TryRecvError::Empty) => {}
         }
-        if started.elapsed() > WAIT_LIMIT {
-            bail!("capture timed out at frame {frame}");
+        Ok(())
+    }
+
+    fn finish(
+        &mut self,
+        frames: u32,
+        mut update: impl FnMut() -> anyhow::Result<()>,
+        mut write: impl FnMut(u32, Image) -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        while !self.pending.is_empty() {
+            update()?;
+            self.write_ready(&mut write)?;
         }
+        if self.written != frames {
+            bail!("captured {} frames but expected {frames}", self.written);
+        }
+        Ok(())
     }
 }
 
@@ -253,6 +343,76 @@ mod tests {
         timeline,
     };
     use bevy::{color::ColorToPacked, prelude::IntoScheduleConfigs};
+
+    #[test]
+    fn captures_write_in_request_order_once() {
+        let mut captures = Captures::default();
+        let first = captures.request();
+        let second = captures.request();
+        second.send(Image::default()).unwrap();
+        let mut written = Vec::new();
+        captures
+            .write_ready(|index, _| {
+                written.push(index);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(written, [] as [u32; 0]);
+        first.send(Image::default()).unwrap();
+        for _ in 0..2 {
+            captures
+                .write_ready(|index, _| {
+                    written.push(index);
+                    Ok(())
+                })
+                .unwrap();
+        }
+        assert_eq!(written, [0, 1]);
+    }
+
+    #[test]
+    fn captures_drain_delayed_tail() {
+        let mut captures = Captures::default();
+        let sender = captures.request();
+        let mut updates = 0;
+        let mut written = Vec::new();
+        captures
+            .finish(
+                1,
+                || {
+                    updates += 1;
+                    if updates == 2 {
+                        sender.send(Image::default()).unwrap();
+                    }
+                    Ok(())
+                },
+                |index, _| {
+                    written.push(index);
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert_eq!(updates, 2);
+        assert_eq!(written, [0]);
+    }
+
+    #[test]
+    fn captures_reject_manifest_count_mismatch() {
+        let error = Captures::default()
+            .finish(1, || Ok(()), |_, _| Ok(()))
+            .unwrap_err();
+        assert_eq!(error.to_string(), "captured 0 frames but expected 1");
+    }
+
+    #[test]
+    fn captures_reject_expired_pending_frame() {
+        let mut captures = Captures::default();
+        let _sender = captures.request();
+        captures.pending.front_mut().unwrap().1 =
+            Instant::now().checked_sub(WAIT_LIMIT).unwrap();
+        let error = captures.write_ready(|_, _| Ok(())).unwrap_err();
+        assert_eq!(error.to_string(), "capture timed out at frame 0");
+    }
 
     #[test]
     #[ignore = "requires a graphics adapter; writes a live theme-switch sequence"]
