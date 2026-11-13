@@ -239,6 +239,22 @@ pub(super) struct Avatar {
     slot_origin: Option<(usize, slots::Dock, Vec2)>,
 }
 
+impl Avatar {
+    pub(super) fn label_rect(
+        &self,
+        body: Vec2,
+        size: Vec2,
+        radius: f32,
+    ) -> bevy::math::Rect {
+        let angle = self
+            .name_visibility
+            .placement
+            .as_ref()
+            .map_or(0.0, |p| -p.angle);
+        slots::labels::tangent_rect(body, size, radius, angle)
+    }
+}
+
 pub(super) struct Beam {
     pub author: usize,
     pub from: Vec3,

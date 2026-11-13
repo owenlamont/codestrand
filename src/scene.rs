@@ -1997,6 +1997,14 @@ fn sync_labels(
     chosen: Vec<(model::Label, Vec2, f32)>,
     theme: &Theme,
 ) {
+    let overlay = world
+        .query_filtered::<Entity, With<AvatarCamera>>()
+        .single(world)
+        .ok();
+    let scene = world
+        .query_filtered::<Entity, With<SceneCamera>>()
+        .single(world)
+        .ok();
     let mut query = world.query_filtered::<(
         &mut Text,
         &mut Node,
@@ -2007,6 +2015,7 @@ fn sync_labels(
         &mut BackgroundColor,
         &mut BorderColor,
         &mut TextShadow,
+        Option<&mut UiTargetCamera>,
     ), With<Label>>();
     let (emphasis_color, landmark_color) = (theme.label_emphasis, theme.label_landmark);
     let mut chosen = chosen.into_iter();
@@ -2022,10 +2031,20 @@ fn sync_labels(
             mut background,
             mut border,
             mut shadow,
+            target,
         ),
     ) in query.iter_mut(world).enumerate()
     {
         if let Some((label, point, _)) = chosen.next() {
+            if let Some(mut target) = target
+                && let Some(camera) = if label.kind == model::LabelKind::Avatar {
+                    overlay
+                } else {
+                    scene
+                }
+            {
+                target.set_if_neq(UiTargetCamera(camera));
+            }
             z_index.set_if_neq(ZIndex(
                 i32::try_from(index).expect("label pool fits in i32"),
             ));
@@ -2044,16 +2063,7 @@ fn sync_labels(
             background.set_if_neq(BackgroundColor(
                 backing.with_alpha(backing.alpha() * opacity),
             ));
-            let mut wanted_border = theme.label_border();
-            for color in [
-                &mut wanted_border.top,
-                &mut wanted_border.right,
-                &mut wanted_border.bottom,
-                &mut wanted_border.left,
-            ] {
-                color.set_alpha(color.alpha() * opacity);
-            }
-            border.set_if_neq(wanted_border);
+            border.set_if_neq(faded_label_border(theme, opacity));
             let wanted_shadow = theme
                 .label_shadow
                 .color
@@ -2089,6 +2099,19 @@ fn sync_labels(
     }
 }
 
+fn faded_label_border(theme: &Theme, opacity: f32) -> BorderColor {
+    let mut border = theme.label_border();
+    for color in [
+        &mut border.top,
+        &mut border.right,
+        &mut border.bottom,
+        &mut border.left,
+    ] {
+        color.set_alpha(color.alpha() * opacity);
+    }
+    border
+}
+
 fn labels(world: &mut World) {
     let mut camera_query =
         world.query_filtered::<(&Camera, &GlobalTransform), With<SceneCamera>>();
@@ -2100,6 +2123,7 @@ fn labels(world: &mut World) {
     let playback = world.resource::<Playback>();
     let geometry = playback.0.theme();
     let lod = &world.resource::<Pools>().lod;
+    let mut avatars = playback.0.avatars().iter().filter(|a| a.presence > 0.0);
     let wanted = playback
         .0
         .labels_with_names(
@@ -2112,11 +2136,23 @@ fn labels(world: &mut World) {
         .into_iter()
         .chain(world.resource::<Pools>().names.labels.iter().cloned())
         .filter_map(|label| {
-            let point = camera.world_to_viewport(&transform, label.position).ok()?;
-            let anchor = if label.kind == model::LabelKind::Avatar {
-                label.position - geometry.avatar_label_offset
+            let (point, anchor) = if label.kind == model::LabelKind::Avatar {
+                let avatar = avatars.next()?;
+                (
+                    project_avatar_name(
+                        &camera,
+                        &transform,
+                        &playback.0,
+                        avatar,
+                        &label,
+                    )?,
+                    avatar.position,
+                )
             } else {
-                label.position
+                (
+                    camera.world_to_viewport(&transform, label.position).ok()?,
+                    label.position,
+                )
             };
             let distance = transform.translation().distance_squared(anchor);
             Some((label, point, distance))
@@ -2141,6 +2177,33 @@ fn labels(world: &mut World) {
     grow_labels(world, chosen.len(), &theme, camera_entity);
     sync_labels(world, chosen, &theme);
     caption::update(world);
+}
+
+fn project_avatar_name(
+    camera: &Camera,
+    transform: &GlobalTransform,
+    simulation: &Simulation,
+    avatar: &model::Avatar,
+    label: &model::Label,
+) -> Option<Vec2> {
+    let body = camera.world_to_viewport(transform, avatar.position).ok()?;
+    let radius = simulation.theme().avatar_radius
+        * avatar.presence
+        * simulation.scale()
+        * simulation.avatar_disc_scale()
+        * avatar.projection_scale
+        * avatar.lifecycle_scale.max(0.001);
+    let edge = camera
+        .world_to_viewport(transform, avatar.position + transform.right() * radius)
+        .ok()?;
+    let size = model::label_rect(
+        Vec2::ZERO,
+        &label.text,
+        label.scale,
+        simulation.theme().label_height,
+    )
+    .size();
+    Some(avatar.label_rect(body, size, body.distance(edge) + 2.0).min)
 }
 
 fn diff_samples(world: &mut World, camera: &Camera, transform: &GlobalTransform) {
@@ -3251,8 +3314,18 @@ mod tests {
         assert!(label_query.iter(world).any(|(text, visibility, _)| {
             text.0 == expected_name && *visibility == Visibility::Inherited
         }));
-        for (_, _, target) in label_query.iter(world) {
-            assert_eq!(target.0, scene);
+        let overlay = world
+            .query_filtered::<Entity, With<AvatarCamera>>()
+            .single(world)
+            .unwrap();
+        for (text, _, target) in label_query.iter(world) {
+            let contributor = world
+                .resource::<Playback>()
+                .0
+                .avatars()
+                .iter()
+                .any(|a| text.0 == a.name || text.0 == a.name.to_uppercase());
+            assert_eq!(target.0, if contributor { overlay } else { scene });
         }
         world.clear_trackers();
         labels(world);

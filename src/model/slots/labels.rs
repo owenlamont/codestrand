@@ -103,7 +103,7 @@ pub(super) fn move_name(
     (angle, velocity, motion)
 }
 
-pub(super) fn tangent_rect(
+pub(in crate::model) fn tangent_rect(
     body: bevy::math::Vec2,
     size: bevy::math::Vec2,
     distance: f32,

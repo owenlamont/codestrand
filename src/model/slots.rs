@@ -1,7 +1,7 @@
 use std::sync::Arc;
 pub(crate) mod diagnostics;
 mod envelopes;
-mod labels;
+pub(super) mod labels;
 #[cfg(test)]
 mod motion_tests;
 pub(super) use envelopes::Snapshots;
