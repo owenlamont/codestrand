@@ -84,6 +84,71 @@ mod tests {
     }
 
     #[test]
+    fn small_persistent_name_overlaps_clear_at_the_normal_turning_speed() {
+        let mut sim = simulation();
+        sim.advance_to(180, 60);
+        sim.state.avatars.truncate(2);
+        sim.state.pulses.clear();
+        let scale = sim.state.name_scale();
+        let size =
+            rect(Vec2::ZERO, "Contributor 0", scale, sim.theme().label_height).size();
+        let distance = sim.state.avatar_radius() + 4.0 / 3.0;
+        for (index, avatar) in sim.state.avatars.iter_mut().enumerate() {
+            let body =
+                Vec2::new((super::super::count(index) - 0.5) * size.x * 0.9, 280.0);
+            avatar.position = super::super::slots::world(body);
+            avatar.name = format!("Contributor {index}");
+            avatar.presence = 1.0;
+            let angle = std::f32::consts::FRAC_PI_2;
+            let bounds =
+                super::super::slots::labels::tangent_rect(body, size, distance, angle);
+            avatar.name_visibility.placement = Some(Placement {
+                point: Vec2::new(bounds.min.x, bounds.max.y),
+                body,
+                angle,
+                angular_velocity: 0.0,
+                commit: 0,
+                text: avatar.name.clone(),
+                scale,
+                motion: Motion {
+                    goal: angle,
+                    ..Default::default()
+                },
+            });
+        }
+        let travel = super::super::travel::Plan::default();
+        for _ in 0..300 {
+            let angles: Vec<_> = sim
+                .state
+                .avatars
+                .iter()
+                .map(|a| a.name_visibility.placement.as_ref().unwrap().angle)
+                .collect();
+            sim.state.tick += 1;
+            sim.state.place_names(1.0 / 60.0, &travel, &[]);
+            for (avatar, angle) in sim.state.avatars.iter().zip(angles) {
+                assert!(
+                    (avatar.name_visibility.placement.as_ref().unwrap().angle - angle)
+                        .abs()
+                        <= 30.0_f32.to_radians() / 60.0 + 1e-6
+                );
+            }
+        }
+        let bounds: Vec<_> = sim
+            .state
+            .avatars
+            .iter()
+            .map(|a| {
+                super::super::titles::label_bounds(&sim, &sim.state.avatar_label(a))
+            })
+            .collect();
+        assert!(
+            bounds[0].intersect(bounds[1]).is_empty(),
+            "persistent overlap: {bounds:?}"
+        );
+    }
+
+    #[test]
     fn crowded_long_names_elide_only_after_full_names_cannot_fit() {
         let mut sim = simulation();
         sim.advance_to(180, 60);

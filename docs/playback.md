@@ -25,8 +25,8 @@ embedded monospace Fira Mono font, even when another theme uses proportional lab
 CLI playback uses the same six fixed columns for single repositories and synthetic
 history. The synthetic repository column is named `Synthetic history`.
 
-Text falls back from the selected theme font to bundled IBM Plex Mono for accented,
-Greek and Cyrillic names, then to installed system fonts for other scripts. Install
+Text falls back from the selected theme font to bundled IBM Plex Mono for accented
+and Cyrillic names, then to installed system fonts for other scripts. Install
 fonts covering the required scripts on export machines; use the same fonts when
 comparing frames across machines.
 
@@ -215,7 +215,7 @@ Different content shapes can leave space inside a uniformly fitted tile.
 
 Contributor names orbit at no more than 30 degrees per playback second, with a
 three-second minimum between direction reversals. A new position must reduce the
-occluded fraction of the name by at least a quarter for 0.75 playback seconds before
+currently occluded text area by at least a quarter for 0.75 playback seconds before
 the name moves. Brief overlap is preferable to fast or oscillating text.
 
 Close zoom keeps inactive file and directory names visible. Names appear when the

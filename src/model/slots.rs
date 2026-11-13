@@ -803,8 +803,10 @@ impl State {
                         distance,
                         previous.motion.goal,
                     );
-                    let gain = self.name_occlusion(index, rect, &bodies, texts)
-                        - self.name_occlusion(index, selected.rect, &bodies, texts);
+                    let covered = self.name_occlusion(index, rect, &bodies, texts);
+                    let gain = (covered
+                        - self.name_occlusion(index, selected.rect, &bodies, texts))
+                        / covered.max(1e-6);
                     labels::move_name(previous, selected.angle, gain, self.tick, dt)
                 },
             );
@@ -848,10 +850,6 @@ impl State {
         );
         let mut covered = area - overlap(frame);
         covered += texts.iter().map(|&r| overlap(r)).sum::<f32>();
-        covered += content_obstacles(self)
-            .iter()
-            .map(|&(_, r)| overlap(r))
-            .sum::<f32>();
         for (other, avatar) in self.avatars.iter().enumerate() {
             if other == index || avatar.presence <= 0.0 {
                 continue;
