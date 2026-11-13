@@ -108,7 +108,7 @@ hooks = [{ id = "rumdl" }]
 
 [[repos]]
 repo = "https://github.com/owenlamont/ryl-pre-commit"
-rev = "v0.28.0"
+rev = "v0.29.0"
 hooks = [
   { id = "ryl-check", args = ["--fix"] },
   { id = "ryl-check-markdown", args = ["--fix"] },
@@ -118,7 +118,7 @@ hooks = [
 
 [[repos]]
 repo = "https://github.com/adhtruong/mirrors-typos"
-rev = "v1.51.1"
+rev = "v1.52.0"
 hooks = [{ id = "typos", args = ["--force-exclude"] }]
 
 [[repos]]
