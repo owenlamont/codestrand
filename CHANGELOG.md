@@ -88,11 +88,11 @@ Watch the [feature tour video](https://youtu.be/gmueXAHnvAE).
   ([#92](https://github.com/owenlamont/codestrand/pull/92),
   [#95](https://github.com/owenlamont/codestrand/pull/95),
   [#96](https://github.com/owenlamont/codestrand/pull/96))
-- Repeated exports of one input no longer differ across many frames; rare
-  single-pixel differences remain.
+- Repeated exports of one input no longer differ across many frames; single-pixel
+  differences in a few frames remain.
   ([#113](https://github.com/owenlamont/codestrand/pull/113))
-- Accented, Cyrillic and other non-Latin contributor names render through bundled
-  IBM Plex Mono and installed system fonts.
+- Contributor names with accented, Cyrillic or other non-ASCII characters render
+  through bundled IBM Plex Mono and installed system fonts.
   ([#122](https://github.com/owenlamont/codestrand/pull/122))
 
 ## v0.1.1
