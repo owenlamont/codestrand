@@ -6,6 +6,4 @@ max_concurrency = 16
 accept = ["200..=299", "429", "503", "504"]
 exclude = [
   '^https?://(localhost|127\.0\.0\.1|0\.0\.0\.0)([:/]|$)',
-  # The montage reaches main with this change; remove once it has merged.
-  '^https://raw\.githubusercontent\.com/owenlamont/codestrand/main/docs/assets/montage\.webp$',
 ]
