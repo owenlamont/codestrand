@@ -3,7 +3,6 @@ use bevy::{
     input::mouse::{AccumulatedMouseScroll, MouseScrollUnit},
     prelude::*,
     ui::RelativeCursorPosition,
-    ui_widgets::{ControlOrientation, Scrollbar, ScrollbarThumb},
     window::{
         Monitor, MonitorSelection, OnMonitor, PrimaryWindow, WindowMode, WindowPosition,
     },
@@ -12,6 +11,7 @@ use bevy::{
 use super::{AvatarCamera, SceneCamera};
 
 mod presets;
+mod scrollbar;
 
 type PreviewCameras = Or<(With<SceneCamera>, With<AvatarCamera>)>;
 
@@ -420,21 +420,5 @@ fn setup_presets(row: &mut ChildSpawnerCommands) {
             }
         })
         .id();
-    row.spawn((
-        Node {
-            width: px(14),
-            flex_shrink: 0.0,
-            ..default()
-        },
-        BackgroundColor(Color::srgb(0.10, 0.12, 0.16)),
-        Scrollbar {
-            target: list,
-            orientation: ControlOrientation::Vertical,
-            min_thumb_length: 24.0,
-        },
-        children![(
-            ScrollbarThumb::default(),
-            BackgroundColor(Color::srgb(0.5, 0.6, 0.7))
-        )],
-    ));
+    row.spawn(scrollbar::widget(list));
 }
