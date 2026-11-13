@@ -600,6 +600,7 @@ impl State {
         travel: &super::travel::Plan,
         dt: f32,
         texts: &[Rect],
+        displayed: &[String],
     ) -> (Vec<usize>, Vec<Vec<labels::Candidate>>) {
         let mut obstacles = tile_obstacles(self);
         obstacles.extend(texts.iter().map(|&rect| (usize::MAX, rect)));
@@ -623,7 +624,7 @@ impl State {
             let Some(body) = bodies[index] else { continue };
             let size = super::names::rect(
                 Vec2::ZERO,
-                &avatar.name,
+                &displayed[index],
                 self.name_scale(),
                 self.geometry.label_height,
             )
@@ -685,6 +686,56 @@ impl State {
         }
         (authors, domains)
     }
+    fn assign_names(
+        &self,
+        dt: f32,
+        travel: &super::travel::Plan,
+        texts: &[Rect],
+    ) -> NameAssignment {
+        let bodies = self.name_bodies();
+        let mut displayed: Vec<_> = self
+            .avatars
+            .iter()
+            .map(|a| {
+                a.name_visibility
+                    .placement
+                    .as_ref()
+                    .map_or_else(|| a.name.clone(), |p| p.text.clone())
+            })
+            .collect();
+        let (mut authors, mut domains) =
+            self.label_domains(&bodies, travel, dt, texts, &displayed);
+        let mut assignment = labels::solve(&domains);
+        for limit in [24, 16, 10] {
+            let fits = assignment.clear
+                && domains
+                    .iter()
+                    .zip(&assignment.choices)
+                    .all(|(domain, &choice)| {
+                        super::caption::outside(domain[choice].rect, 0.5) <= 0.001
+                    });
+            if fits {
+                break;
+            }
+            if displayed.iter().all(|text| text.chars().count() <= limit) {
+                continue;
+            }
+            displayed = displayed
+                .iter()
+                .map(|text| super::names::elide(text, limit))
+                .collect();
+            (authors, domains) =
+                self.label_domains(&bodies, travel, dt, texts, &displayed);
+            assignment = labels::solve(&domains);
+        }
+        NameAssignment {
+            authors,
+            domains,
+            assignment,
+            displayed,
+        }
+    }
+
     pub(super) fn place_slot_names(
         &mut self,
         dt: f32,
@@ -697,8 +748,12 @@ impl State {
             avatar.name_visibility.opacity = 0.0;
         }
         let bodies = self.name_bodies();
-        let (authors, domains) = self.label_domains(&bodies, travel, dt, texts);
-        let assignment = labels::solve(&domains);
+        let NameAssignment {
+            authors,
+            domains,
+            assignment,
+            displayed,
+        } = self.assign_names(dt, travel, texts);
         for ((index, candidates), choice) in
             authors.into_iter().zip(domains).zip(assignment.choices)
         {
@@ -706,7 +761,7 @@ impl State {
             let body = bodies[index].expect("projected visible avatar");
             let size = super::names::rect(
                 Vec2::ZERO,
-                &self.avatars[index].name,
+                &displayed[index],
                 self.name_scale(),
                 self.geometry.label_height,
             )
@@ -740,7 +795,7 @@ impl State {
             let placement = super::names::Placement {
                 point: Vec2::new(rect.min.x, rect.max.y),
                 body: bodies[index].expect("projected visible avatar"),
-                text: self.avatars[index].name.clone(),
+                text: displayed[index].clone(),
                 scale: self.name_scale(),
                 angle,
                 angular_velocity,
@@ -843,6 +898,13 @@ struct Rotation<'a> {
     previous: Option<&'a super::names::Placement>,
     future: &'a [Vec2],
 }
+struct NameAssignment {
+    authors: Vec<usize>,
+    domains: Vec<Vec<labels::Candidate>>,
+    assignment: labels::Assignment,
+    displayed: Vec<String>,
+}
+
 struct LabelSpace<'a> {
     bodies: &'a [Option<Vec2>],
     obstacles: &'a [(usize, Rect)],

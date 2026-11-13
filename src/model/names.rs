@@ -4,6 +4,16 @@ pub(super) fn scale(active: usize) -> f32 {
     (1.0 / (1.0 + super::count(active.saturating_sub(3)) * 0.035).sqrt()).max(0.72)
 }
 
+pub(super) fn elide(text: &str, limit: usize) -> String {
+    if text.chars().count() <= limit {
+        return text.to_owned();
+    }
+    text.chars()
+        .take(limit.saturating_sub(1))
+        .chain(['…'])
+        .collect()
+}
+
 pub(crate) fn rect(point: Vec2, text: &str, scale: f32, height: f32) -> Rect {
     let width = 8.0 + 8.6 * super::count(text.chars().count()) * scale;
     Rect::from_corners(point, point + Vec2::new(width, height * scale + 4.0))
@@ -71,6 +81,52 @@ mod tests {
             &crate::theme::Theme::neon(),
             &crate::contributors::Mappings::default(),
         )
+    }
+
+    #[test]
+    fn crowded_long_names_elide_only_after_full_names_cannot_fit() {
+        let mut sim = simulation();
+        sim.advance_to(180, 60);
+        sim.state.avatars.truncate(6);
+        sim.state.pulses.clear();
+        for (index, avatar) in sim.state.avatars.iter_mut().enumerate() {
+            avatar.position = super::super::slots::world(Vec2::new(
+                -400.0 + super::super::count(index) * 160.0,
+                300.0,
+            ));
+            avatar.name = format!("Contributor {index} {}", "long name ".repeat(20));
+            avatar.presence = 1.0;
+            avatar.name_visibility.placement = None;
+        }
+        sim.state.place_names(1.0 / 60.0, &sim.travel, &[]);
+        let names: Vec<_> = sim
+            .state
+            .avatars
+            .iter()
+            .map(|a| sim.state.avatar_label(a))
+            .collect();
+        assert!(names.iter().any(|l| l.text.ends_with('…')));
+        let rectangles: Vec<_> = names
+            .iter()
+            .map(|l| super::super::titles::label_bounds(&sim, l))
+            .collect();
+        for (index, rect) in rectangles.iter().enumerate() {
+            assert_eq!(super::super::caption::outside(*rect, 0.0), 0.0);
+            assert!(
+                rectangles[..index]
+                    .iter()
+                    .all(|other| rect.intersect(*other).is_empty())
+            );
+        }
+        sim.state.place_names(1.0 / 60.0, &sim.travel, &[]);
+        assert_eq!(
+            names.iter().map(|l| &l.text).collect::<Vec<_>>(),
+            sim.state
+                .avatars
+                .iter()
+                .map(|a| &a.name_visibility.placement.as_ref().unwrap().text)
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
