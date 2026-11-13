@@ -340,7 +340,7 @@ impl Anchor {
             Some(Target::File(id)) => simulation
                 .layout()
                 .file(*id)
-                .map(|file| simulation.file_effect(file).0),
+                .map(|file| simulation.file_effect(*id, file).0),
             Some(Target::Directory(index)) => {
                 let dir = simulation.layout().dir(*index);
                 Some(Vec3::new(

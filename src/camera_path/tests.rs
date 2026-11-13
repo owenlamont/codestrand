@@ -103,15 +103,14 @@ fn review_renamed_file_keeps_identity_for_old_and_new_names() {
     }
     for frame in [180, 45, 180] {
         sim.advance_to(frame, 60);
-        let target = sim
+        let (id, target) = sim
             .layout()
             .files()
             .find(|(_, file)| {
                 file.path.ends_with("/old.rs") || file.path.ends_with("/new.rs")
             })
-            .unwrap()
-            .1;
-        let expected = sim.file_effect(target).0 + Vec3::Y * 8.0;
+            .unwrap();
+        let expected = sim.file_effect(id, target).0 + Vec3::Y * 8.0;
         assert!(expected.x.abs() + expected.z.abs() > 0.01);
         for path in &paths {
             assert!(
@@ -264,18 +263,15 @@ fn targets_require_positions_and_report_ambiguous_repositories() {
     .unwrap();
     let path = CameraPath::load(&file, &sim).unwrap();
     sim.advance_to(600, 30);
-    let target = sim
+    let (id, target) = sim
         .layout()
         .files()
         .find(|(_, file)| file.path == "1/src/main.rs")
-        .unwrap()
-        .1;
-    assert!(
-        path.pose(&sim, 600, 30)
-            .unwrap()
-            .translation
-            .abs_diff_eq(sim.file_effect(target).0 + Vec3::new(0.0, 6.0, 8.0), 0.0001)
-    );
+        .unwrap();
+    assert!(path.pose(&sim, 600, 30).unwrap().translation.abs_diff_eq(
+        sim.file_effect(id, target).0 + Vec3::new(0.0, 6.0, 8.0),
+        0.0001
+    ));
 }
 
 #[test]
