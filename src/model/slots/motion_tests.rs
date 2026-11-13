@@ -113,7 +113,7 @@ fn label_reversals_remain_three_seconds_apart_across_stops_and_commits() {
 }
 
 #[test]
-fn label_hysteresis_requires_a_large_sustained_gain() {
+fn label_hysteresis_ignores_brief_relative_gains() {
     let mut sim = fixture();
     let initial = sim.state.avatars[0]
         .name_visibility
@@ -126,7 +126,7 @@ fn label_hysteresis_requires_a_large_sustained_gain() {
         Rect::from_center_size(full.center(), full.size() * Vec2::new(0.1, 1.0));
     for tick in 0..120 {
         let blocked = if tick < 60 { small } else { full };
-        let texts = if tick >= 104 {
+        let texts = if tick % 60 >= 44 {
             Vec::new()
         } else {
             vec![blocked]
