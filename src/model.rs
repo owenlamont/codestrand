@@ -9,7 +9,7 @@ use bevy::math::{Vec2, Vec3};
 use crate::{
     contributors::{Contributor, Key, Mappings},
     layout::Layout,
-    theme::{Geometry, Theme},
+    theme::{BeamStyle, Geometry, Theme},
     timeline::{Event, Kind},
 };
 
@@ -160,13 +160,12 @@ impl Pulse {
         &self,
         age: f32,
         envelope: f32,
-        from: Vec3,
-        to: Vec3,
+        beam: (BeamStyle, Vec3, Vec3),
         target: Target,
         change: (u32, bool),
     ) -> impl Iterator<Item = Fragment> {
         let (lines, rising) = change;
-        diff_fragments(age, envelope, from, to, lines, rising)
+        diff_fragments(age, envelope, beam, lines, rising)
             .enumerate()
             .filter(move |(piece, _)| self.fragment_arrives(age, *piece, lines))
             .map(move |(_, fragment)| fragment.with_beam(self.author, target))
@@ -759,7 +758,11 @@ impl Simulation {
         match file.state {
             crate::layout::Presence::Arriving => {
                 if let Some(avatar) = self.state.avatars.get(file.author) {
-                    position = avatar.position.lerp(position, file.presence);
+                    position = self.theme.beam_style.point(
+                        avatar.position,
+                        position,
+                        file.presence,
+                    );
                 }
                 (position, grey, alpha)
             }
@@ -1038,7 +1041,7 @@ impl Simulation {
                     beams.push(Beam {
                         author: pulse.author,
                         from,
-                        to: to + Vec3::Y * 0.12,
+                        to,
                         width: envelope * (1.0 + weight.log2() * 0.35).min(3.0),
                     });
                 }
@@ -1099,8 +1102,7 @@ impl Simulation {
                         pulse.fragments(
                             age,
                             envelope,
-                            from,
-                            to,
+                            (self.theme.beam_style, from, to),
                             target,
                             (count, rising),
                         ),
@@ -1543,8 +1545,7 @@ fn project(
 fn diff_fragments(
     age: f32,
     envelope: f32,
-    from: Vec3,
-    to: Vec3,
+    beam: (BeamStyle, Vec3, Vec3),
     lines: u32,
     rising: bool,
 ) -> impl Iterator<Item = Fragment> {
@@ -1552,11 +1553,8 @@ fn diff_fragments(
     (0..pieces).map(move |piece| {
         let phase =
             (age * FRAGMENT_SPEED + count_u32(piece) / count_u32(pieces)).fract();
-        let position = if rising {
-            to + Vec3::new(0.15, 0.2 + phase * 2.2, -0.1)
-        } else {
-            from.lerp(to + Vec3::Y * 0.2, phase)
-        };
+        let (style, from, to) = beam;
+        let position = style.point(from, to, if rising { 1.0 - phase } else { phase });
         Fragment {
             #[cfg(test)]
             beam: None,
@@ -1722,14 +1720,103 @@ mod tests {
     }
 
     #[test]
+    fn fragments_follow_beam_curve_for_every_style() {
+        for (name, frame) in crate::theme::ThemeName::ALL
+            .into_iter()
+            .flat_map(|name| [35, 45, 55].map(move |frame| (name, frame)))
+        {
+            let mut events = crate::timeline::synthetic();
+            events.truncate(1);
+            events[0].changes.truncate(1);
+            events[0].changes[0].insertions = 1;
+            events[0].changes[0].removals = 1;
+            events[0].changes[0].samples = [true, false]
+                .map(|added| crate::diff_samples::Sample {
+                    added,
+                    text: "sample".to_owned(),
+                })
+                .to_vec();
+            let theme = name.build();
+            let mut sim = super::Simulation::new(
+                events,
+                &super::Options::default(),
+                &theme,
+                &crate::contributors::Mappings::default(),
+            );
+            sim.advance_to(frame, 60);
+            let beam = &sim.beams()[0];
+            let age = sim.seconds() - sim.state.pulses[0].start;
+            let phase = (age * super::FRAGMENT_SPEED).fract();
+            let fragments = sim.fragments();
+            assert_eq!(fragments.len(), 2);
+            for fragment in &fragments {
+                let t = if fragment.rising { 1.0 - phase } else { phase };
+                let mut expected = beam.from.lerp(beam.to, t);
+                if matches!(theme.beam_style, crate::theme::BeamStyle::Arch) {
+                    expected.y += t * (1.0 - t) * beam.from.distance(beam.to);
+                }
+                assert!(
+                    fragment.position.distance(expected) < 0.0001,
+                    "{} at {frame}, rising={}: {:?} != {expected:?}",
+                    name.title(),
+                    fragment.rising,
+                    fragment.position
+                );
+            }
+            let lines = sim.diff_lines();
+            assert_eq!(lines.len(), 2);
+            for line in lines {
+                assert_eq!(line.position, fragments[line.fragment].position);
+            }
+        }
+    }
+
+    #[test]
+    fn arriving_files_follow_beam_curve_for_every_style() {
+        for name in crate::theme::ThemeName::ALL {
+            let mut events = crate::timeline::synthetic();
+            events.truncate(1);
+            events[0].changes.truncate(1);
+            let theme = name.build();
+            let mut sim = super::Simulation::new(
+                events,
+                &super::Options::default(),
+                &theme,
+                &crate::contributors::Mappings::default(),
+            );
+            for frame in [65, 70, 75] {
+                sim.advance_to(frame, 60);
+                let file = sim.layout().files().next().unwrap().1;
+                assert_eq!(file.state, crate::layout::Presence::Arriving);
+                assert!(file.presence > 0.0 && file.presence < 1.0);
+                let from = sim.avatars()[file.author].position;
+                let to = super::ground(file.position);
+                let t = file.presence;
+                let mut expected = from.lerp(to, t);
+                if matches!(theme.beam_style, crate::theme::BeamStyle::Arch) {
+                    expected.y += t * (1.0 - t) * from.distance(to);
+                }
+                assert!(
+                    sim.file_effect(file).0.distance(expected) < 0.0001,
+                    "{} at {frame}",
+                    name.title()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn rising_fragments_fade_continuously_across_the_phase_wrap() {
         let samples: Vec<_> = (0_u16..=2000)
             .map(|step| {
                 super::diff_fragments(
                     f32::from(step) / 1100.0,
                     1.0,
-                    super::Vec3::Y * 4.0,
-                    super::Vec3::ZERO,
+                    (
+                        super::BeamStyle::Straight,
+                        super::Vec3::Y * 4.0,
+                        super::Vec3::ZERO,
+                    ),
                     1,
                     true,
                 )

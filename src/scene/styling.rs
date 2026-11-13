@@ -342,14 +342,7 @@ pub(super) fn beam_segments(
         BeamStyle::Arch | BeamStyle::Ants => 16_u16,
         _ => 1,
     };
-    let point = |t: f32| {
-        from.lerp(to, t)
-            + Vec3::Y
-                * match theme.beam_style {
-                    BeamStyle::Arch => 4.0 * t * (1.0 - t) * from.distance(to) * 0.25,
-                    _ => 0.0,
-                }
-    };
+    let point = |t: f32| theme.beam_style.point(from, to, t);
     let mut segments: Vec<_> = (0..count)
         .map(|i| {
             (
@@ -634,7 +627,6 @@ mod tests {
         let mut world = active_code_world();
         let seconds = world.resource::<Playback>().0.seconds();
         let lines = world.resource::<Playback>().0.diff_lines();
-        let anchor = lines[0].position;
         let extent = 0.07 * lines[0].scale * 500.0 / 48.0;
         let camera = Camera {
             computed: bevy::camera::ComputedCameraValues {
@@ -653,10 +645,10 @@ mod tests {
             super::super::switch_theme(&mut world, name);
             let theme = name.build();
             assert_eq!(world.resource::<Playback>().0.seconds(), seconds);
-            assert_eq!(
-                world.resource::<Playback>().0.diff_lines()[0].position,
-                anchor
-            );
+            let current = world.resource::<Playback>().0.diff_lines();
+            assert_eq!(current[0].scale, lines[0].scale);
+            assert_eq!(current[0].alpha, lines[0].alpha);
+            let anchor = current[0].position;
             let mut pools = world.remove_resource::<Pools>().unwrap();
             pools.lod.detail =
                 vec![1.0; world.resource::<Playback>().0.layout().dir_count()];
@@ -888,6 +880,26 @@ mod tests {
         for name in ThemeName::ALL {
             let theme = name.build();
             let segments = beam_segments(&theme, from, to);
+            let count = match theme.beam_style {
+                BeamStyle::Arch | BeamStyle::Ants => 16_u16,
+                _ => 1,
+            };
+            for (i, (a, b, _)) in (0..count).zip(&segments) {
+                assert_eq!(
+                    *a,
+                    theme
+                        .beam_style
+                        .point(from, to, f32::from(i) / f32::from(count))
+                );
+                assert_eq!(
+                    *b,
+                    theme.beam_style.point(
+                        from,
+                        to,
+                        f32::from(i + 1) / f32::from(count)
+                    )
+                );
+            }
             assert_eq!(segments[0].0, from);
             let endpoint = if matches!(theme.beam_style, BeamStyle::Construction) {
                 0

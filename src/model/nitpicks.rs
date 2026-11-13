@@ -95,7 +95,7 @@ pub(super) fn assert_labels_and_beams(sim: &Simulation) {
     let beams = sim.beams();
     for fragment in sim.fragments() {
         let (author, target) = fragment.beam.expect("fragment belongs to a pulse");
-        let to = sim.state.point(target).unwrap() + Vec3::Y * 0.12;
+        let to = sim.state.point(target).unwrap();
         assert!(
             beams.iter().any(|b| b.author == author && b.to == to),
             "orphan fragment at {}",

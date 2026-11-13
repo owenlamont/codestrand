@@ -24,6 +24,20 @@ pub(crate) enum BeamStyle {
     Hot,
 }
 
+impl BeamStyle {
+    pub(crate) fn point(self, from: Vec3, to: Vec3, t: f32) -> Vec3 {
+        let height = match self {
+            Self::Arch => 4.0 * t * (1.0 - t) * from.distance(to) * 0.25,
+            Self::Straight
+            | Self::Construction
+            | Self::Ants
+            | Self::Ink
+            | Self::Hot => 0.0,
+        };
+        from.lerp(to, t) + Vec3::Y * height
+    }
+}
+
 #[derive(Clone, Copy, Default)]
 pub(crate) enum AvatarStyle {
     #[default]
