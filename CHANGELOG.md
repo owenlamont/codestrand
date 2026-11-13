@@ -26,8 +26,7 @@ Watch the [feature tour video](https://youtu.be/gmueXAHnvAE).
 - Six more themes, `phosphor`, `outrun`, `blueprint`, `bevelled-desktop`, `atlas` and
   `forge`, chosen with `--theme` and switched live in preview with `,` and `.`.
   ([#71](https://github.com/owenlamont/codestrand/pull/71),
-  [#83](https://github.com/owenlamont/codestrand/pull/83),
-  [#130](https://github.com/owenlamont/codestrand/pull/130))
+  [#83](https://github.com/owenlamont/codestrand/pull/83))
 - Files heat up on each touch and cool with `--heat-half-life`.
   ([#77](https://github.com/owenlamont/codestrand/pull/77))
 - Sampled added and removed source lines travel beside changed files;
@@ -91,6 +90,8 @@ Watch the [feature tour video](https://youtu.be/gmueXAHnvAE).
 - Repeated exports of one input no longer differ across many frames; single-pixel
   differences in a few frames remain.
   ([#113](https://github.com/owenlamont/codestrand/pull/113))
+- Diff fragments and arriving files follow each theme's beam curves.
+  ([#130](https://github.com/owenlamont/codestrand/pull/130))
 - Contributor names with accented, Cyrillic or other non-ASCII characters render
   through bundled IBM Plex Mono and installed system fonts.
   ([#122](https://github.com/owenlamont/codestrand/pull/122))
