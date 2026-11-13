@@ -11,6 +11,10 @@ use super::{
 };
 use crate::theme::{AvatarStyle, BeamStyle, FontStyle};
 
+pub(super) fn label_font(primary: Handle<Font>, fallback: Handle<Font>) -> FontSource {
+    FontSource::list([primary.into(), fallback.into(), FontSource::sans_serif()])
+}
+
 #[derive(Default)]
 struct Territories {
     revision: Option<u64>,
@@ -295,14 +299,19 @@ pub(super) fn apply(world: &mut World, theme: &Theme) {
             .find(|(kind, _)| *kind == code_style)
             .map(|(_, handle)| handle.clone())
             .unwrap_or_default();
-        for (mut text, snippet) in world
-            .query_filtered::<(&mut TextFont, Option<&super::DiffSample>), Without<super::caption::CaptionText>>().iter_mut(world)
+        let fallback = styles.fonts.iter().find(|(kind, _)| *kind == FontStyle::Plex)
+            .expect("embedded Plex fallback").1.clone();
+        for (mut text, snippet, caption) in world
+            .query::<(&mut TextFont, Option<&super::DiffSample>, Option<&super::caption::CaptionText>)>().iter_mut(world)
         {
-            text.font = if snippet.is_some() {
+            let primary = if caption.is_some() {
+                Handle::default()
+            } else if snippet.is_some() {
                 code_font.clone()
             } else {
                 font.clone()
-            }.into();
+            };
+            text.font = label_font(primary, fallback.clone());
         }
         for (mut node, mut background, mut border) in world.query_filtered::<(&mut Node, &mut BackgroundColor, &mut BorderColor), With<Label>>().iter_mut(world) {
             node.border = UiRect::all(px(if theme.label_style == crate::theme::LabelStyle::Bevelled { 2.0 } else { 0.0 }));
@@ -672,13 +681,21 @@ mod tests {
             } else {
                 theme.font
             };
-            let expected = world
-                .resource::<Styles>()
+            let styles = world.resource::<Styles>();
+            let expected = styles
                 .fonts
                 .iter()
                 .find(|(style, _)| *style == kind)
                 .map(|(_, handle)| handle.clone())
                 .unwrap_or_default();
+            let fallback = styles
+                .fonts
+                .iter()
+                .find(|(kind, _)| *kind == FontStyle::Plex)
+                .unwrap()
+                .1
+                .clone();
+            let expected = label_font(expected, fallback);
             let mut visible = 0;
             for (text, font, color, shadow, visibility, transform) in world
                 .query_filtered::<(
@@ -691,7 +708,7 @@ mod tests {
                 ), With<DiffSample>>()
                 .iter(&world)
             {
-                assert_eq!(font.font, expected.clone().into());
+                assert_eq!(font.font, expected);
                 if *visibility == Visibility::Hidden {
                     continue;
                 }

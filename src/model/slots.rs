@@ -1,7 +1,7 @@
 use std::sync::Arc;
 pub(crate) mod diagnostics;
 mod envelopes;
-mod labels;
+pub(super) mod labels;
 #[cfg(test)]
 mod motion_tests;
 pub(super) use envelopes::Snapshots;
@@ -600,6 +600,7 @@ impl State {
         travel: &super::travel::Plan,
         dt: f32,
         texts: &[Rect],
+        displayed: &[String],
     ) -> (Vec<usize>, Vec<Vec<labels::Candidate>>) {
         let mut obstacles = tile_obstacles(self);
         obstacles.extend(texts.iter().map(|&rect| (usize::MAX, rect)));
@@ -623,7 +624,7 @@ impl State {
             let Some(body) = bodies[index] else { continue };
             let size = super::names::rect(
                 Vec2::ZERO,
-                &avatar.name,
+                &displayed[index],
                 self.name_scale(),
                 self.geometry.label_height,
             )
@@ -685,6 +686,73 @@ impl State {
         }
         (authors, domains)
     }
+    fn assign_names(
+        &self,
+        dt: f32,
+        travel: &super::travel::Plan,
+        texts: &[Rect],
+    ) -> NameAssignment {
+        let bodies = self.name_bodies();
+        let mut displayed: Vec<_> = self
+            .avatars
+            .iter()
+            .map(|a| {
+                a.name_visibility
+                    .placement
+                    .as_ref()
+                    .map_or_else(|| a.name.clone(), |p| p.text.clone())
+            })
+            .collect();
+        let (mut authors, mut domains) =
+            self.label_domains(&bodies, travel, dt, texts, &displayed);
+        let mut assignment = labels::solve(&domains);
+        for limit in [24, 16, 10] {
+            let fits = assignment.clear
+                && domains
+                    .iter()
+                    .zip(&assignment.choices)
+                    .all(|(domain, &choice)| {
+                        super::caption::outside(domain[choice].rect, 0.5) <= 0.001
+                    });
+            if fits {
+                break;
+            }
+            let rectangles: Vec<_> = domains
+                .iter()
+                .zip(&assignment.choices)
+                .map(|(domain, &choice)| domain[choice].rect)
+                .collect();
+            let mut shortened = false;
+            for (node, &index) in authors.iter().enumerate() {
+                if displayed[index].chars().count() <= limit {
+                    continue;
+                }
+                let candidate = domains[node][assignment.choices[node]];
+                if candidate.text_pairs > 0
+                    || super::caption::outside(candidate.rect, 0.5) > 0.001
+                    || rectangles.iter().enumerate().any(|(other, rect)| {
+                        other != node && !candidate.rect.intersect(*rect).is_empty()
+                    })
+                {
+                    displayed[index] = super::names::elide(&displayed[index], limit);
+                    shortened = true;
+                }
+            }
+            if !shortened {
+                continue;
+            }
+            (authors, domains) =
+                self.label_domains(&bodies, travel, dt, texts, &displayed);
+            assignment = labels::solve(&domains);
+        }
+        NameAssignment {
+            authors,
+            domains,
+            assignment,
+            displayed,
+        }
+    }
+
     pub(super) fn place_slot_names(
         &mut self,
         dt: f32,
@@ -695,10 +763,15 @@ impl State {
             avatar.name_visibility.placement = None;
             avatar.name_visibility.visible = false;
             avatar.name_visibility.opacity = 0.0;
+            avatar.name_visibility.full_clear_since = None;
         }
         let bodies = self.name_bodies();
-        let (authors, domains) = self.label_domains(&bodies, travel, dt, texts);
-        let assignment = labels::solve(&domains);
+        let NameAssignment {
+            authors,
+            domains,
+            assignment,
+            displayed,
+        } = self.assign_names(dt, travel, texts);
         for ((index, candidates), choice) in
             authors.into_iter().zip(domains).zip(assignment.choices)
         {
@@ -706,7 +779,7 @@ impl State {
             let body = bodies[index].expect("projected visible avatar");
             let size = super::names::rect(
                 Vec2::ZERO,
-                &self.avatars[index].name,
+                &displayed[index],
                 self.name_scale(),
                 self.geometry.label_height,
             )
@@ -731,8 +804,10 @@ impl State {
                         distance,
                         previous.motion.goal,
                     );
-                    let gain = self.name_occlusion(index, rect, &bodies, texts)
-                        - self.name_occlusion(index, selected.rect, &bodies, texts);
+                    let covered = self.name_occlusion(index, rect, &bodies, texts);
+                    let gain = (covered
+                        - self.name_occlusion(index, selected.rect, &bodies, texts))
+                        / covered.max(1e-6);
                     labels::move_name(previous, selected.angle, gain, self.tick, dt)
                 },
             );
@@ -740,7 +815,7 @@ impl State {
             let placement = super::names::Placement {
                 point: Vec2::new(rect.min.x, rect.max.y),
                 body: bodies[index].expect("projected visible avatar"),
-                text: self.avatars[index].name.clone(),
+                text: displayed[index].clone(),
                 scale: self.name_scale(),
                 angle,
                 angular_velocity,
@@ -753,6 +828,52 @@ impl State {
             visibility.placement = Some(placement);
             visibility.joint_exhausted = assignment.exhausted;
             visibility.joint_clear = assignment.clear;
+        }
+        self.recover_name_lengths(&bodies, texts);
+    }
+
+    fn recover_name_lengths(&mut self, bodies: &[Option<Vec2>], texts: &[Rect]) {
+        for (index, body) in bodies.iter().enumerate() {
+            let avatar = &self.avatars[index];
+            let full = (*body)
+                .zip(avatar.name_visibility.placement.as_ref())
+                .filter(|(_, placement)| {
+                    avatar.presence > 0.0 && placement.text != avatar.name
+                })
+                .map(|(body, placement)| {
+                    let size = super::names::rect(
+                        Vec2::ZERO,
+                        &avatar.name,
+                        self.name_scale(),
+                        self.geometry.label_height,
+                    )
+                    .size();
+                    labels::tangent_rect(
+                        body,
+                        size,
+                        self.avatar_radius() + 4.0 / 3.0,
+                        placement.angle,
+                    )
+                })
+                .filter(|rect| {
+                    super::caption::outside(*rect, 0.5) <= 0.001
+                        && self.name_occlusion(index, *rect, bodies, texts) <= 0.0
+                });
+            let avatar = &mut self.avatars[index];
+            let Some(rect) = full else {
+                avatar.name_visibility.full_clear_since = None;
+                continue;
+            };
+            let since = avatar
+                .name_visibility
+                .full_clear_since
+                .get_or_insert(self.tick);
+            if self.tick.saturating_sub(*since) >= labels::DWELL_TICKS {
+                let placement = avatar.name_visibility.placement.as_mut().unwrap();
+                placement.point = Vec2::new(rect.min.x, rect.max.y);
+                placement.text.clone_from(&avatar.name);
+                avatar.name_visibility.full_clear_since = None;
+            }
         }
     }
 
@@ -776,10 +897,6 @@ impl State {
         );
         let mut covered = area - overlap(frame);
         covered += texts.iter().map(|&r| overlap(r)).sum::<f32>();
-        covered += content_obstacles(self)
-            .iter()
-            .map(|&(_, r)| overlap(r))
-            .sum::<f32>();
         for (other, avatar) in self.avatars.iter().enumerate() {
             if other == index || avatar.presence <= 0.0 {
                 continue;
@@ -843,6 +960,13 @@ struct Rotation<'a> {
     previous: Option<&'a super::names::Placement>,
     future: &'a [Vec2],
 }
+struct NameAssignment {
+    authors: Vec<usize>,
+    domains: Vec<Vec<labels::Candidate>>,
+    assignment: labels::Assignment,
+    displayed: Vec<String>,
+}
+
 struct LabelSpace<'a> {
     bodies: &'a [Option<Vec2>],
     obstacles: &'a [(usize, Rect)],

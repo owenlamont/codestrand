@@ -583,6 +583,7 @@ fn setup(world: &mut World) {
             TextFont::from_font_size(24.0),
             UiTransform::default(),
             TextColor(theme.diff_added),
+            BackgroundColor(theme.detail_label_background()),
             theme.label_shadow,
             TextLayout::new(Justify::Left, bevy::text::LineBreak::NoWrap),
             Node {
@@ -1961,11 +1962,17 @@ fn place_labels(
             continue;
         }
         let rect = model::label_rect(point, &label.text, label.scale, height);
-        if (label.kind != model::LabelKind::Detail
-            && (rect.min.x < 0.0
-                || rect.min.y < 0.0
-                || rect.max.x > viewport.x
-                || rect.max.y > viewport.y))
+        if rect.min.y < model::caption::BAR_HEIGHT + model::caption::BUFFER
+            || (rect.max.y > model::caption::MULTI_TOP - model::caption::BUFFER
+                && rect.min.y
+                    < model::caption::MULTI_TOP
+                        + model::caption::BAR_HEIGHT
+                        + model::caption::BUFFER)
+            || (label.kind != model::LabelKind::Detail
+                && (rect.min.x < 0.0
+                    || rect.min.y < 0.0
+                    || rect.max.x > viewport.x
+                    || rect.max.y > viewport.y))
             || (!matches!(
                 label.kind,
                 model::LabelKind::Avatar | model::LabelKind::Detail
@@ -1992,6 +1999,14 @@ fn sync_labels(
     chosen: Vec<(model::Label, Vec2, f32)>,
     theme: &Theme,
 ) {
+    let overlay = world
+        .query_filtered::<Entity, With<AvatarCamera>>()
+        .single(world)
+        .ok();
+    let scene = world
+        .query_filtered::<Entity, With<SceneCamera>>()
+        .single(world)
+        .ok();
     let mut query = world.query_filtered::<(
         &mut Text,
         &mut Node,
@@ -2002,6 +2017,7 @@ fn sync_labels(
         &mut BackgroundColor,
         &mut BorderColor,
         &mut TextShadow,
+        Option<&mut UiTargetCamera>,
     ), With<Label>>();
     let (emphasis_color, landmark_color) = (theme.label_emphasis, theme.label_landmark);
     let mut chosen = chosen.into_iter();
@@ -2017,10 +2033,20 @@ fn sync_labels(
             mut background,
             mut border,
             mut shadow,
+            target,
         ),
     ) in query.iter_mut(world).enumerate()
     {
         if let Some((label, point, _)) = chosen.next() {
+            if let Some(mut target) = target
+                && let Some(camera) = if label.kind == model::LabelKind::Avatar {
+                    overlay
+                } else {
+                    scene
+                }
+            {
+                target.set_if_neq(UiTargetCamera(camera));
+            }
             z_index.set_if_neq(ZIndex(
                 i32::try_from(index).expect("label pool fits in i32"),
             ));
@@ -2039,16 +2065,7 @@ fn sync_labels(
             background.set_if_neq(BackgroundColor(
                 backing.with_alpha(backing.alpha() * opacity),
             ));
-            let mut wanted_border = theme.label_border();
-            for color in [
-                &mut wanted_border.top,
-                &mut wanted_border.right,
-                &mut wanted_border.bottom,
-                &mut wanted_border.left,
-            ] {
-                color.set_alpha(color.alpha() * opacity);
-            }
-            border.set_if_neq(wanted_border);
+            border.set_if_neq(faded_label_border(theme, opacity));
             let wanted_shadow = theme
                 .label_shadow
                 .color
@@ -2084,6 +2101,19 @@ fn sync_labels(
     }
 }
 
+fn faded_label_border(theme: &Theme, opacity: f32) -> BorderColor {
+    let mut border = theme.label_border();
+    for color in [
+        &mut border.top,
+        &mut border.right,
+        &mut border.bottom,
+        &mut border.left,
+    ] {
+        color.set_alpha(color.alpha() * opacity);
+    }
+    border
+}
+
 fn labels(world: &mut World) {
     let mut camera_query =
         world.query_filtered::<(&Camera, &GlobalTransform), With<SceneCamera>>();
@@ -2095,6 +2125,7 @@ fn labels(world: &mut World) {
     let playback = world.resource::<Playback>();
     let geometry = playback.0.theme();
     let lod = &world.resource::<Pools>().lod;
+    let mut avatars = playback.0.avatars().iter().filter(|a| a.presence > 0.0);
     let wanted = playback
         .0
         .labels_with_names(
@@ -2107,11 +2138,23 @@ fn labels(world: &mut World) {
         .into_iter()
         .chain(world.resource::<Pools>().names.labels.iter().cloned())
         .filter_map(|label| {
-            let point = camera.world_to_viewport(&transform, label.position).ok()?;
-            let anchor = if label.kind == model::LabelKind::Avatar {
-                label.position - geometry.avatar_label_offset
+            let (point, anchor) = if label.kind == model::LabelKind::Avatar {
+                let avatar = avatars.next()?;
+                (
+                    project_avatar_name(
+                        &camera,
+                        &transform,
+                        &playback.0,
+                        avatar,
+                        &label,
+                    )?,
+                    avatar.position,
+                )
             } else {
-                label.position
+                (
+                    camera.world_to_viewport(&transform, label.position).ok()?,
+                    label.position,
+                )
             };
             let distance = transform.translation().distance_squared(anchor);
             Some((label, point, distance))
@@ -2138,10 +2181,38 @@ fn labels(world: &mut World) {
     caption::update(world);
 }
 
+fn project_avatar_name(
+    camera: &Camera,
+    transform: &GlobalTransform,
+    simulation: &Simulation,
+    avatar: &model::Avatar,
+    label: &model::Label,
+) -> Option<Vec2> {
+    let body = camera.world_to_viewport(transform, avatar.position).ok()?;
+    let radius = simulation.theme().avatar_radius
+        * avatar.presence
+        * simulation.scale()
+        * simulation.avatar_disc_scale()
+        * avatar.projection_scale
+        * avatar.lifecycle_scale.max(0.001);
+    let edge = camera
+        .world_to_viewport(transform, avatar.position + transform.right() * radius)
+        .ok()?;
+    let size = model::label_rect(
+        Vec2::ZERO,
+        &label.text,
+        label.scale,
+        simulation.theme().label_height,
+    )
+    .size();
+    Some(avatar.label_rect(body, size, body.distance(edge) + 2.0).min)
+}
+
 fn diff_samples(world: &mut World, camera: &Camera, transform: &GlobalTransform) {
     let playback = &world.resource::<Playback>().0;
     let theme = playback.theme();
     let sample_shadow = theme.label_shadow;
+    let sample_backing = theme.detail_label_background();
 
     let mut replacements = Vec::new();
     let wanted: Vec<_> = playback
@@ -2161,7 +2232,7 @@ fn diff_samples(world: &mut World, camera: &Camera, transform: &GlobalTransform)
             if visibility == 0.0 {
                 return None;
             }
-            let size = projected;
+            let size = projected.clamp(14.0, 20.0);
             let color = if line.sample.added {
                 theme.diff_added
             } else {
@@ -2173,7 +2244,7 @@ fn diff_samples(world: &mut World, camera: &Camera, transform: &GlobalTransform)
                 u8::try_from(text.chars().count() + 2)
                     .expect("snippet is capped at 88 characters"),
             );
-            let scale = Vec2::splat(size / 24.0 * (8.0 / (90.0 * 0.6)));
+            let scale = Vec2::splat(size / 24.0);
             let extent = Vec2::new(columns * 24.0 * 0.6, 24.0 * 1.2);
             let origin = point - extent * 0.5;
             replacements.push((line.fragment, visibility));
@@ -2182,7 +2253,7 @@ fn diff_samples(world: &mut World, camera: &Camera, transform: &GlobalTransform)
                 origin,
                 scale,
                 extent,
-                color.with_alpha(line.alpha * visibility),
+                color.with_alpha((line.alpha * 4.0).min(1.0) * visibility),
             ))
         })
         .collect();
@@ -2204,6 +2275,15 @@ fn diff_samples(world: &mut World, camera: &Camera, transform: &GlobalTransform)
         }
         set_visible(world, entity, opacity < 1.0);
     }
+    sync_diff_samples(world, wanted, sample_shadow, sample_backing);
+}
+
+fn sync_diff_samples(
+    world: &mut World,
+    wanted: Vec<(String, Vec2, Vec2, Vec2, Color)>,
+    sample_shadow: TextShadow,
+    sample_backing: Color,
+) {
     let mut wanted = wanted.into_iter();
     let mut query = world.query_filtered::<(
         &mut Text,
@@ -2212,9 +2292,17 @@ fn diff_samples(world: &mut World, camera: &Camera, transform: &GlobalTransform)
         &mut TextColor,
         &mut TextShadow,
         &mut Visibility,
+        Option<&mut BackgroundColor>,
     ), With<DiffSample>>();
-    for (mut text, mut node, mut ui_transform, mut color, mut shadow, mut visibility) in
-        query.iter_mut(world)
+    for (
+        mut text,
+        mut node,
+        mut ui_transform,
+        mut color,
+        mut shadow,
+        mut visibility,
+        background,
+    ) in query.iter_mut(world)
     {
         if let Some((value, point, scale, extent, ink)) = wanted.next() {
             text.set_if_neq(Text::new(value));
@@ -2224,6 +2312,12 @@ fn diff_samples(world: &mut World, camera: &Camera, transform: &GlobalTransform)
             node.height = px(extent.y);
             ui_transform.scale = scale;
             color.set_if_neq(TextColor(ink));
+            if let Some(mut background) = background {
+                let backing = sample_backing;
+                background.set_if_neq(BackgroundColor(
+                    backing.with_alpha(backing.alpha() * ink.alpha()),
+                ));
+            }
             *shadow = sample_shadow;
             shadow.color = shadow.color.with_alpha(shadow.color.alpha() * ink.alpha());
             visibility.set_if_neq(Visibility::Inherited);
@@ -2478,8 +2572,12 @@ mod tests {
         );
         let scale = world.get::<UiTransform>(text).unwrap().scale;
         assert_eq!(scale.x, scale.y);
+        assert!(
+            scale.y * 24.0 >= 14.0,
+            "diff text is smaller than 14 pixels"
+        );
         let width = 90.0 * 24.0 * 0.6 * scale.x;
-        assert!((width - pixels * 8.0).abs() < 0.001);
+        assert!((width - 90.0 * pixels.clamp(14.0, 20.0) * 0.6).abs() < 0.02);
     }
 
     #[test]
@@ -2735,11 +2833,11 @@ mod tests {
             .id();
         world.insert_resource(Playback(simulation));
         for (pixels, opacity) in [
-            (16.0, 0.0),
-            (32.0, 0.5),
-            (48.0, 1.0),
-            (32.0, 0.5),
-            (16.0, 0.0),
+            (4.0, 0.0),
+            (10.0, 0.5),
+            (16.0, 1.0),
+            (10.0, 0.5),
+            (4.0, 0.0),
         ] {
             let mut pools = world.remove_resource::<Pools>().unwrap_or_default();
             pools.lod.detail =
@@ -2789,7 +2887,9 @@ mod tests {
                     world.get::<TextColor>(text).unwrap().0.alpha(),
                     world.get::<TextShadow>(text).unwrap().color.alpha(),
                 ] {
-                    assert!((alpha - line.alpha * opacity).abs() < 0.0001);
+                    assert!(
+                        (alpha - (line.alpha * 4.0).min(1.0) * opacity).abs() < 0.0001
+                    );
                 }
                 assert_sample_layout(&world, text, pixels);
                 assert_eq!(world.get::<Visibility>(text), Some(&Visibility::Inherited));
@@ -3246,8 +3346,18 @@ mod tests {
         assert!(label_query.iter(world).any(|(text, visibility, _)| {
             text.0 == expected_name && *visibility == Visibility::Inherited
         }));
-        for (_, _, target) in label_query.iter(world) {
-            assert_eq!(target.0, scene);
+        let overlay = world
+            .query_filtered::<Entity, With<AvatarCamera>>()
+            .single(world)
+            .unwrap();
+        for (text, _, target) in label_query.iter(world) {
+            let contributor = world
+                .resource::<Playback>()
+                .0
+                .avatars()
+                .iter()
+                .any(|a| text.0 == a.name || text.0 == a.name.to_uppercase());
+            assert_eq!(target.0, if contributor { overlay } else { scene });
         }
         world.clear_trackers();
         labels(world);

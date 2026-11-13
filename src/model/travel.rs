@@ -494,12 +494,16 @@ impl Simulation {
                 needed.max(60)
             } else {
                 needed
-            };
+            }
+            .min(cap);
+            if needed == 0 {
+                continue;
+            }
             let commit = self.offset + trip.commit;
             if let Some((_, ticks)) = result.iter_mut().find(|(i, _)| *i == commit) {
                 *ticks = ticks.saturating_add(needed).min(cap);
             } else if needed > 0 {
-                result.push((commit, needed.min(cap)));
+                result.push((commit, needed));
             }
         }
         result.sort_unstable_by_key(|p| p.0);
@@ -1003,6 +1007,12 @@ mod tests {
         sim.travel.trips[0].route = Route::new(&[Vec2::ZERO, Vec2::X], 480.0);
         sim.travel.trips[0].failure = Some("occupied_window");
         assert_eq!(sim.adjust_travel_padding(&options, &[(0, 120)]), [(0, 180)]);
+        sim.travel.trips[0].route = Route::new(&[Vec2::ZERO, Vec2::X * 1000.0], 480.0);
+        let capped = super::super::Options {
+            travel_cap: super::super::TravelCap::Seconds(0.0),
+            ..Default::default()
+        };
+        assert_eq!(sim.adjust_travel_padding(&capped, &[]), []);
     }
 
     #[test]

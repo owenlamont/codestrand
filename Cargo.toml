@@ -38,6 +38,7 @@ bevy = { version = "=0.20.1", default-features = false, features = [
     "bevy_post_process",
     "bevy_ui_render",
     "default_font",
+    "system_font_discovery",
     "png",
 ] }
 clap = { version = "4", features = ["derive"] }
@@ -54,6 +55,13 @@ sha2 = "0.11"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }
 cap-std = "4.0.3"
 cap-fs-ext = "4.0.3"
+
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
+# Bevy does not forward Fontique's optional Fontconfig loading feature.
+fontique = { version = "0.11", default-features = false, features = ["fontconfig-dlopen"] }
+
+[dev-dependencies]
+fontique = { version = "0.11", default-features = false }
 
 [profile.dev]
 debug = 0

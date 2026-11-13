@@ -9,6 +9,9 @@ codestrand export frames --repository /path/to/repository --commits 20
 The output directory (`frames` here) must not already exist. Without `--repository`,
 export uses the synthetic demo. Export writes `frame-00000.png` onwards and a
 `frames.csv` logical-state manifest. Frames are 1280×720.
+The final `glyphs` and `missing_glyphs` columns count visible text-layout glyphs
+used for each captured frame. A nonzero missing count indicates unavailable glyphs;
+install fonts covering the contributor names' scripts before exporting again.
 
 By default the whole playback is exported at 30 fps. To make a short capture:
 

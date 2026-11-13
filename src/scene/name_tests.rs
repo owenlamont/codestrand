@@ -1,5 +1,220 @@
 use super::*;
 
+#[test]
+fn oblique_names_stay_tangent_to_the_projected_portrait() {
+    let mut sim = Simulation::new(
+        crate::timeline::synthetic(),
+        &model::Options::default(),
+        &Theme::neon(),
+        &crate::contributors::Mappings::default(),
+    );
+    sim.advance_to(60, 60);
+    let avatar = sim.avatars().iter().find(|a| a.presence > 0.0).unwrap();
+    let label = sim
+        .labels()
+        .into_iter()
+        .find(|l| l.kind == model::LabelKind::Avatar)
+        .unwrap();
+    for offset in [Vec3::new(0.0, 20.0, 0.0), Vec3::new(4.0, 1.4, 7.5)] {
+        let transform = GlobalTransform::from(
+            Transform::from_translation(avatar.position + offset)
+                .looking_at(avatar.position, Vec3::NEG_Z),
+        );
+        let camera = Camera {
+            computed: bevy::camera::ComputedCameraValues {
+                clip_from_view: bevy::math::proj::perspective_infinite_reverse(
+                    model::framing::FOV,
+                    1280.0 / 720.0,
+                    0.1,
+                ),
+                target_info: Some(bevy::camera::RenderTargetInfo {
+                    physical_size: UVec2::new(1280, 720),
+                    scale_factor: 1.0,
+                }),
+                ..default()
+            },
+            ..default()
+        };
+        let point =
+            project_avatar_name(&camera, &transform, &sim, avatar, &label).unwrap();
+        let body = camera
+            .world_to_viewport(&transform, avatar.position)
+            .unwrap();
+        let radius = sim.theme().avatar_radius
+            * avatar.presence
+            * sim.scale()
+            * sim.avatar_disc_scale()
+            * avatar.projection_scale
+            * avatar.lifecycle_scale;
+        let edge = camera
+            .world_to_viewport(&transform, avatar.position + transform.right() * radius)
+            .unwrap();
+        let rect = model::label_rect(
+            point,
+            &label.text,
+            label.scale,
+            sim.theme().label_height,
+        );
+        let gap = body.distance(body.clamp(rect.min, rect.max)) - body.distance(edge);
+        assert!((gap - 2.0).abs() < 0.001, "portrait gap={gap}");
+    }
+}
+
+#[test]
+fn bundled_plex_shapes_accents_and_cyrillic() {
+    let (app, font) = font_app(Fonts::Bundled);
+    assert_name_glyphs(
+        app,
+        &font,
+        ["Fernando Pérez-García", "João Moreno", "Кириллица"],
+    );
+}
+
+#[test]
+fn system_font_fallback_shapes_installed_scripts() {
+    let (mut app, font) = font_app(Fonts::System);
+    if cfg!(target_os = "linux") {
+        let mut cx = app.world_mut().resource_mut::<bevy::text::FontCx>();
+        let noto = cx.collection.family_id("Noto Sans Devanagari").is_some()
+            && cx.collection.family_id("Noto Sans CJK SC").is_some();
+        if !noto {
+            assert!(
+                std::env::var_os("CODESTRAND_REQUIRE_SYSTEM_FONTS").is_none(),
+                "install fonts-noto-core and fonts-noto-cjk"
+            );
+            eprintln!(
+                "system-script shaping skipped: Noto Devanagari/CJK fonts absent"
+            );
+            return;
+        }
+    }
+    assert_name_glyphs(
+        app,
+        &font,
+        ["Ελληνικά", "ε\u{301}", "ῳ", "अभिजीत बोडस", "中文"],
+    );
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Fonts {
+    Bundled,
+    System,
+}
+
+fn font_app(environment: Fonts) -> (App, TextFont) {
+    use bevy::text::{FontCx, TextPlugin};
+    let mut app = App::new();
+    app.add_plugins((
+        MinimalPlugins,
+        bevy::asset::AssetPlugin::default(),
+        TextPlugin,
+    ));
+    app.world_mut().resource_mut::<FontCx>().collection =
+        fontique::Collection::new(fontique::CollectionOptions {
+            system_fonts: environment == Fonts::System,
+            ..Default::default()
+        });
+    let plex = app
+        .world_mut()
+        .resource_mut::<Assets<Font>>()
+        .add(Font::from_bytes(
+            include_bytes!("../../assets/fonts/IBMPlexMono-Regular.ttf").to_vec(),
+        ));
+    app.update();
+    let font = TextFont {
+        font: styling::label_font(Handle::default(), plex),
+        ..TextFont::from_font_size(14.0)
+    };
+    (app, font)
+}
+
+fn assert_name_glyphs(
+    mut app: App,
+    font: &TextFont,
+    texts: impl IntoIterator<Item = &'static str>,
+) {
+    use bevy::text::*;
+    let world = app.world_mut();
+    let fonts = world.remove_resource::<Assets<Font>>().unwrap();
+    let mut cx = world.remove_resource::<FontCx>().unwrap();
+    for text in texts {
+        let mut computed = ComputedTextBlock::default();
+        TextPipeline::default()
+            .update_buffer(
+                &fonts,
+                [(
+                    Entity::PLACEHOLDER,
+                    0,
+                    TextElement::Text {
+                        text,
+                        font,
+                        color: Color::WHITE,
+                        line_height: LineHeight::default(),
+                        letter_spacing: LetterSpacing::default(),
+                    },
+                )]
+                .into_iter(),
+                LineBreak::NoWrap,
+                Justify::Left,
+                TextBounds::UNBOUNDED,
+                1.0,
+                &mut computed,
+                &mut cx,
+                &mut LayoutCx::default(),
+                Vec2::new(1280.0, 720.0),
+                RemSize::default(),
+            )
+            .unwrap();
+        let glyphs: Vec<_> = computed
+            .buffer()
+            .lines()
+            .flat_map(|line| line.runs())
+            .flat_map(|run| {
+                run.clusters()
+                    .flat_map(|cluster| cluster.glyphs())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert_ne!(glyphs.len(), 0);
+        assert!(
+            glyphs.iter().all(|glyph| glyph.id != 0),
+            "missing glyph in {text}"
+        );
+    }
+}
+
+#[test]
+fn close_names_cannot_cover_the_caption_or_heading() {
+    for (viewport, y) in [
+        (Vec2::new(1280.0, 720.0), 0.0),
+        (Vec2::new(1280.0, 720.0), 690.0),
+        (Vec2::new(1280.0, 720.0), 700.0),
+        (Vec2::new(1920.0, 1080.0), 700.0),
+        (Vec2::new(960.0, 540.0), 24.0),
+    ] {
+        let chosen = place_labels(
+            vec![(
+                model::Label {
+                    position: Vec3::ZERO,
+                    text: "file-ignores.md".into(),
+                    kind: model::LabelKind::Detail,
+                    scale: 0.7,
+                    opacity: 1.0,
+                    priority: 0.0,
+                },
+                Vec2::new(200.0, y),
+                1.0,
+            )],
+            20.0,
+            viewport,
+        );
+        assert!(
+            chosen.is_empty(),
+            "label at y={y} covers frame text in {viewport}"
+        );
+    }
+}
+
 fn fixture() -> Simulation {
     let mut events = crate::timeline::synthetic();
     events.truncate(1);
