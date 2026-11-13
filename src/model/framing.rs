@@ -234,6 +234,8 @@ mod tests {
                 (VIEWPORT, FOV),
                 (Vec2::new(720.0, 1280.0), 0.6),
                 (Vec2::new(1920.0, 600.0), 1.0),
+                (Vec2::new(1152.0, 720.0), FOV),
+                (Vec2::new(2560.0, 720.0), FOV),
             ] {
                 let projection = PerspectiveProjection {
                     fov,

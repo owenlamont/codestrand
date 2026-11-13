@@ -24,6 +24,7 @@ mod history;
 mod layout;
 mod model;
 mod repositories;
+mod resolution;
 mod scene;
 mod theme;
 mod timeline;
@@ -124,6 +125,9 @@ enum Command {
         #[arg(long, value_enum, default_value = "neon")]
         theme: theme::ThemeName,
         directory: PathBuf,
+        /// Native output size; each side 64–8192, at most 33,554,432 pixels.
+        #[arg(long, default_value_t = resolution::Resolution::default())]
+        resolution: resolution::Resolution,
         /// TOML camera keyframes, with semantic targets resolved at every frame.
         #[arg(long)]
         camera_path: Option<PathBuf>,
@@ -590,6 +594,7 @@ fn run() -> anyhow::Result<()> {
             fps,
             frame_delay_ms,
             encoding,
+            resolution,
             camera_path,
         }) => {
             let (mut simulation, title) = source.load()?;
@@ -603,11 +608,11 @@ fn run() -> anyhow::Result<()> {
             if let Some(path) = &camera_path {
                 path.pose(&simulation, 0, fps)?;
             }
-            let encoder = encoding.start(fps)?;
+            let encoder = encoding.start(fps, resolution)?;
             export::prepare(&directory)?;
             export::run(
                 &directory,
-                (simulation, camera_path),
+                (simulation, camera_path, resolution),
                 title,
                 frames,
                 fps,

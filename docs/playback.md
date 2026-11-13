@@ -3,6 +3,10 @@
 Preview loops the selected history. Export renders the same launch timeline at
 explicit frame times, with a 1x playback multiplier and a fitted or scripted export camera.
 
+Preview renders at the window's physical resolution, including on HiDPI displays.
+Resizing or maximising keeps a 720-logical-pixel-high UI: text scales with height,
+and wider windows show more scene. See [Export](export.md) for native output sizes.
+
 Commit application times are precomputed for the selected history and pacing.
 The caption shows the last applied commit's date; cooling and fades advance in
 playback seconds. Seeking or restarting replays the same fixed simulation ticks.

@@ -10,6 +10,54 @@ use std::{
 };
 
 #[test]
+#[ignore = "requires a graphics adapter"]
+fn native_4k_and_ultrawide_exports_repeat_byte_identically() {
+    let scratch = tempfile::tempdir().unwrap();
+    for (resolution, dimensions) in
+        [("3840x2160", (3840, 2160)), ("5120x1440", (5120, 1440))]
+    {
+        let mut previous = Vec::new();
+        for repeat in 0..2 {
+            let directory = scratch.path().join(format!("{resolution}-{repeat}"));
+            let log_path = directory.with_extension("log");
+            let log = fs::File::create(&log_path).unwrap();
+            let child = Command::new(env!("CARGO_BIN_EXE_codestrand"))
+                .arg("export")
+                .arg(&directory)
+                .args(["--resolution", resolution, "--frames", "2", "--fps", "2"])
+                .stdout(Stdio::from(log.try_clone().unwrap()))
+                .stderr(Stdio::from(log))
+                .spawn()
+                .unwrap();
+            assert!(
+                wait(child, &log_path).success(),
+                "{}",
+                fs::read_to_string(&log_path).unwrap()
+            );
+            let frames: Vec<_> = (0..2)
+                .map(|frame| {
+                    let path = directory.join(format!("frame-{frame:05}.png"));
+                    let image = image::open(&path).unwrap().to_rgb8();
+                    assert_eq!(image.dimensions(), dimensions);
+                    assert!(
+                        image
+                            .pixels()
+                            .any(|pixel| pixel.0.iter().any(|&channel| channel > 100))
+                    );
+                    fs::read(path).unwrap()
+                })
+                .collect();
+            if repeat == 1 {
+                assert!(
+                    previous == frames,
+                    "repeat changed PNG bytes at {resolution}"
+                );
+            }
+            previous = frames;
+        }
+    }
+}
+#[test]
 #[ignore = "requires a graphics adapter and installed Devanagari/CJK fonts"]
 fn contributor_scripts_render_without_missing_glyphs() {
     let scratch = tempfile::tempdir().unwrap();

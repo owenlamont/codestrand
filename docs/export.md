@@ -8,10 +8,29 @@ codestrand export frames --repository /path/to/repository --commits 20
 
 The output directory (`frames` here) must not already exist. Without `--repository`,
 export uses the synthetic demo. Export writes `frame-00000.png` onwards and a
-`frames.csv` logical-state manifest. Frames are 1280×720.
+`frames.csv` logical-state manifest. Frames default to 1280×720.
 The final `glyphs` and `missing_glyphs` columns count visible text-layout glyphs
 used for each captured frame. A nonzero missing count indicates unavailable glyphs;
 install fonts covering the contributor names' scripts before exporting again.
+
+Select a native render size with `--resolution WIDTHxHEIGHT`:
+
+```sh
+codestrand export hd-frames --resolution 1920x1080 --frames 2
+codestrand export uhd-frames --resolution 3840x2160 --frames 2
+```
+
+Each side accepts 64–8192 pixels, with at most 33,554,432 pixels per frame
+(including 7680×4320). The graphics adapter must support the selected texture size
+and have enough memory. Both PNG and video exports render at the selected size
+from the start. No upscaling is used. The default H.264 encoder needs even dimensions;
+use PNGs or a suitable custom encoder for odd dimensions.
+
+Export and preview share a 720-logical-pixel-high UI. Text, captions, labels and
+diff snippets scale with frame height; wider aspect ratios reveal more scene
+without stretching it. Preview renders at the window's physical resolution,
+including after resize, maximise or fullscreen and with display scaling enabled.
+Display scaling does not multiply the height-based text size a second time.
 
 By default the whole playback is exported at 30 fps. To make a short capture:
 

@@ -31,7 +31,11 @@ pub(super) fn prepare(directory: &Path) -> anyhow::Result<()> {
 
 pub(super) fn run(
     directory: &Path,
-    (simulation, camera_path): (Simulation, Option<crate::camera_path::CameraPath>),
+    (simulation, camera_path, resolution): (
+        Simulation,
+        Option<crate::camera_path::CameraPath>,
+        crate::resolution::Resolution,
+    ),
     title: String,
     frames: u32,
     fps: u16,
@@ -40,7 +44,7 @@ pub(super) fn run(
 ) -> anyhow::Result<()> {
     render(
         directory,
-        scene::headless(simulation, title, fps),
+        scene::headless(simulation, title, fps, resolution),
         frames,
         fps,
         delay_ms,
@@ -73,6 +77,7 @@ fn render(
     }
     app.finish();
     app.cleanup();
+    validate_target(&app, &target)?;
 
     loop {
         update(&mut app)?;
@@ -143,6 +148,29 @@ fn render(
         "Export complete: {}",
         crate::terminal_escape(&directory.to_string_lossy())
     );
+    Ok(())
+}
+
+fn validate_target(app: &App, target: &Handle<Image>) -> anyhow::Result<()> {
+    let limit = app
+        .world()
+        .resource::<RenderDevice>()
+        .limits()
+        .max_texture_dimension_2d;
+    let size = app
+        .world()
+        .resource::<bevy::prelude::Assets<Image>>()
+        .get(target)
+        .expect("export render target")
+        .size();
+    if size.x > limit || size.y > limit {
+        bail!(
+            "export resolution {}x{} exceeds the graphics adapter's {limit}-pixel texture limit",
+            size.x,
+            size.y
+        );
+    }
+
     Ok(())
 }
 
@@ -269,6 +297,7 @@ mod tests {
             simulation,
             "Live theme switch / portrait fixture".to_owned(),
             5,
+            crate::resolution::Resolution::default(),
         );
         app.add_systems(
             bevy::prelude::Update,

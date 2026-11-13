@@ -446,6 +446,7 @@ fn app(simulation: Simulation, title: String) -> App {
         .init_resource::<Pools>()
         .init_resource::<GreyTextures>()
         .add_systems(Startup, setup)
+        .add_systems(PreUpdate, scale_ui)
         .add_systems(Update, animate)
         .add_systems(
             PostUpdate,
@@ -488,6 +489,7 @@ pub(super) fn headless(
     simulation: Simulation,
     title: String,
     fps: u16,
+    resolution: crate::resolution::Resolution,
 ) -> (App, Handle<Image>) {
     let mut app = app(simulation, title);
     app.add_plugins(
@@ -505,13 +507,107 @@ pub(super) fn headless(
             .disable::<PipelinedRenderingPlugin>(),
     );
     app.add_plugins(ordering::StableTransparency);
-    let mut image =
-        Image::new_target_texture(WIDTH, HEIGHT, TextureFormat::Rgba8UnormSrgb, None);
+    let mut image = Image::new_target_texture(
+        u32::from(resolution.width),
+        u32::from(resolution.height),
+        TextureFormat::Rgba8UnormSrgb,
+        None,
+    );
     image.asset_usage = RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD;
     let target = app.world_mut().resource_mut::<Assets<Image>>().add(image);
-    app.insert_resource(SceneTarget(target.clone().into()))
+    app.insert_resource(ExportResolution(resolution))
+        .insert_resource(SceneTarget(target.clone().into()))
         .insert_resource(Frame { index: 0, fps });
     (app, target)
+}
+
+#[derive(Resource)]
+struct ExportResolution(crate::resolution::Resolution);
+
+fn scale_ui(
+    windows: Query<&Window>,
+    export: Option<Res<ExportResolution>>,
+    mut scale: ResMut<UiScale>,
+) {
+    let height = windows.iter().next().map_or_else(
+        || export.map_or(720.0, |size| f32::from(size.0.height)),
+        Window::height,
+    );
+    let next = crate::resolution::ui_scale(height);
+    if scale.0.to_bits() != next.to_bits() {
+        scale.0 = next;
+    }
+}
+
+fn camera_ui_scale(camera: &Camera) -> f32 {
+    crate::resolution::ui_scale(
+        camera.logical_viewport_size().map_or(720.0, |size| size.y),
+    )
+}
+
+fn reference_viewport(camera: &Camera) -> Vec2 {
+    camera
+        .logical_viewport_size()
+        .unwrap_or(model::framing::VIEWPORT)
+        / camera_ui_scale(camera)
+}
+
+#[cfg(test)]
+mod scaling_tests {
+    use super::*;
+
+    #[test]
+    fn window_resize_and_display_scaling_keep_720_ui_rows() {
+        let mut app = App::new();
+        app.init_resource::<UiScale>().add_systems(Update, scale_ui);
+        let entity = app.world_mut().spawn(Window::default()).id();
+        for (width, height) in [
+            (1280, 720),
+            (1920, 1080),
+            (3840, 2160),
+            (2560, 1600),
+            (3440, 1440),
+            (5120, 1440),
+        ] {
+            for dpi in [1.0, 1.25, 1.5, 2.0] {
+                let mut window = app.world_mut().get_mut::<Window>(entity).unwrap();
+                window.resolution.set_scale_factor(dpi);
+                window.resolution.set_physical_resolution(width, height);
+                app.update();
+                let scale = app.world().resource::<UiScale>().0;
+                let camera = Camera {
+                    computed: bevy::camera::ComputedCameraValues {
+                        target_info: Some(bevy::camera::RenderTargetInfo {
+                            physical_size: UVec2::new(width, height),
+                            scale_factor: dpi,
+                        }),
+                        ..default()
+                    },
+                    ..default()
+                };
+                assert!((camera_ui_scale(&camera) - scale).abs() < 0.001);
+                assert!((reference_viewport(&camera).y - 720.0).abs() < 0.001);
+                let window = app.world().get::<Window>(entity).unwrap();
+                assert!((window.height() / scale - 720.0).abs() < 0.001);
+                let physical_height = window.height() * dpi;
+                assert!((scale * dpi - physical_height / 720.0).abs() < 0.001);
+                assert!(
+                    (window.width() / scale / 720.0 - window.width() / window.height())
+                        .abs()
+                        < 0.001
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn export_uses_the_same_ui_scale_as_a_window() {
+        let mut app = App::new();
+        app.init_resource::<UiScale>().add_systems(Update, scale_ui);
+        app.insert_resource(ExportResolution("3840x2160".parse().unwrap()));
+        app.update();
+        assert_eq!(app.world().resource::<UiScale>().0, 3.0);
+    }
 }
 
 fn setup(world: &mut World) {
@@ -1084,11 +1180,14 @@ fn sync_lod(world: &mut World, pools: &mut Pools, simulation: &Simulation) {
         eye = camera.0.translation;
         focus = eye + *camera.0.forward();
     }
-    let height = world
-        .query::<&Window>()
-        .iter(world)
-        .next()
-        .map_or(720.0, Window::height);
+    if let Ok(pose) = world
+        .query_filtered::<&Transform, With<SceneCamera>>()
+        .single(world)
+    {
+        eye = pose.translation;
+        focus = eye + *pose.forward();
+    }
+    let height = 720.0;
     let fov = world
         .query_filtered::<&Projection, With<SceneCamera>>()
         .iter(world)
@@ -1127,9 +1226,7 @@ fn sync_lod(world: &mut World, pools: &mut Pools, simulation: &Simulation) {
         let view = names::View {
             clip_from_world: projection.get_clip_from_view()
                 * transform.to_matrix().inverse(),
-            viewport: camera
-                .logical_viewport_size()
-                .unwrap_or(Vec2::new(1280.0, 720.0)),
+            viewport: reference_viewport(camera),
         };
         pools.names.sample(simulation, &view);
         pools.lod.expand_names(layout, &pools.names.targets);
@@ -1807,7 +1904,7 @@ fn camera_projection(world: &mut World) -> Option<(f32, Vec2)> {
         let Projection::Perspective(projection) = projection else {
             return None;
         };
-        Some((projection.fov, camera.logical_viewport_size()?))
+        Some((projection.fov, reference_viewport(camera)))
     })
 }
 
@@ -2152,7 +2249,8 @@ fn labels(world: &mut World) {
                 )
             } else {
                 (
-                    camera.world_to_viewport(&transform, label.position).ok()?,
+                    camera.world_to_viewport(&transform, label.position).ok()?
+                        / camera_ui_scale(&camera),
                     label.position,
                 )
             };
@@ -2162,7 +2260,7 @@ fn labels(world: &mut World) {
     let chosen = place_labels(
         wanted.collect(),
         geometry.label_height,
-        camera.logical_viewport_size().unwrap_or_default(),
+        reference_viewport(&camera),
     );
     let theme = geometry.clone();
     let points: Vec<_> = chosen
@@ -2188,7 +2286,8 @@ fn project_avatar_name(
     avatar: &model::Avatar,
     label: &model::Label,
 ) -> Option<Vec2> {
-    let body = camera.world_to_viewport(transform, avatar.position).ok()?;
+    let body = camera.world_to_viewport(transform, avatar.position).ok()?
+        / camera_ui_scale(camera);
     let radius = simulation.theme().avatar_radius
         * avatar.presence
         * simulation.scale()
@@ -2197,7 +2296,8 @@ fn project_avatar_name(
         * avatar.lifecycle_scale.max(0.001);
     let edge = camera
         .world_to_viewport(transform, avatar.position + transform.right() * radius)
-        .ok()?;
+        .ok()?
+        / camera_ui_scale(camera);
     let size = model::label_rect(
         Vec2::ZERO,
         &label.text,
@@ -2219,13 +2319,15 @@ fn diff_samples(world: &mut World, camera: &Camera, transform: &GlobalTransform)
         .diff_lines_for_detail(|dir| world.resource::<Pools>().lod.detail[dir])
         .into_iter()
         .filter_map(|line| {
-            let point = camera.world_to_viewport(transform, line.position).ok()?;
+            let point = camera.world_to_viewport(transform, line.position).ok()?
+                / camera_ui_scale(camera);
             let top = camera
                 .world_to_viewport(
                     transform,
                     line.position + transform.up() * (0.07 * line.scale),
                 )
-                .ok()?;
+                .ok()?
+                / camera_ui_scale(camera);
             let projected = point.distance(top);
             let visibility =
                 crate::diff_samples::sample_visibility(projected) * line.detail;
@@ -2847,7 +2949,7 @@ mod tests {
             });
             let prism = pools.fragments[line.fragment];
             world.insert_resource(pools);
-            let extent = 0.07 * line.scale * 500.0 / pixels;
+            let extent = 0.07 * line.scale * 360.0 / pixels;
             let camera = Camera {
                 computed: bevy::camera::ComputedCameraValues {
                     clip_from_view: bevy::math::proj::orthographic(
