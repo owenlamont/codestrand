@@ -59,10 +59,11 @@ codestrand export wide-diff --repository /path/to/repository \
   --diff-text-distance 4 --frames 60 --fps 30
 ```
 
-Bit-identical frames require the same build, graphics adapter, backend and driver,
-repository history, options and portrait assets. Use cached or local portraits
-offline: leave `--fetch-avatars` off and keep the avatar cache unchanged between
-exports. Live fetching can change portraits with network availability, deadlines
+Repeatable frames require the same build, graphics adapter, backend and driver,
+repository history, options and portrait assets. Even then, a few frames can differ
+by single pixels between runs; `frames.csv` stays identical. Use cached or local
+portraits offline: leave `--fetch-avatars` off and keep the avatar cache unchanged
+between exports. Live fetching can change portraits with network availability, deadlines
 and cache expiry. Fetch portraits before making repeatable captures.
 
 ## Stream a video to FFmpeg
@@ -180,6 +181,7 @@ eye/focus, or up parallel to the view. A later invalid pose can leave partial ou
 Right/forward turns >90°/frame fail; add a key, raise fps, or lengthen the move.
 
 The same inputs, including fps, produce the same logical camera poses regardless
-of render delays. Pixel equality is limited to the same graphics adapter, backend
-and driver. Camera paths affect export only; preview controls remain independent.
+of render delays. Rendered pixels can differ across graphics adapters, backends and
+drivers, and slightly between runs. Camera paths affect export only; preview controls
+remain independent.
 Close-zoom names still enter at 48 pixels and leave below 40 pixels during camera moves.
