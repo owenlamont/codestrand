@@ -256,6 +256,7 @@ fn collapsing_off_restores_files_immediately_through_rewind_and_theme_switch() {
                 ..default()
             }),
         ));
+        sync_lod(&mut world, &mut pools, &sim);
         sync_files(&mut world, &palette, &mut pools, &sim);
         assert_eq!(pools.lod.glyphs, [] as [usize; 0]);
         assert_ne!(pools.names.targets, std::collections::BTreeSet::new());
@@ -269,6 +270,7 @@ fn collapsing_off_restores_files_immediately_through_rewind_and_theme_switch() {
             let palette = world.remove_resource::<Palette>().unwrap();
             let mut sim = world.remove_resource::<Playback>().unwrap().0;
             sim.advance_to(0, 30);
+            sync_lod(&mut world, &mut pools, &sim);
             sync_files(&mut world, &palette, &mut pools, &sim);
             sync_structure(&mut world, &palette, &mut pools, &sim);
             assert_eq!(pools.lod.detail, vec![1.0; sim.layout().dir_count()]);
