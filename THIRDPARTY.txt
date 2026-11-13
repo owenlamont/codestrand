@@ -2066,8 +2066,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ================================================================================
 Community Data License Agreement Permissive 2.0 (CDLA-Permissive-2.0)
 Used by:
-  webpki-root-certs 1.0.11
-  Source: https://crates.io/api/v1/crates/webpki-root-certs/1.0.11/download
+  webpki-root-certs 1.0.12
+  Source: https://crates.io/api/v1/crates/webpki-root-certs/1.0.12/download
 
 # Community Data License Agreement - Permissive - Version 2.0
 
@@ -2877,8 +2877,8 @@ THIS SOFTWARE.
 ================================================================================
 ISC License (ISC)
 Used by:
-  rustls-webpki 0.103.16
-  Source: https://crates.io/api/v1/crates/rustls-webpki/0.103.16/download
+  rustls-webpki 0.103.17
+  Source: https://crates.io/api/v1/crates/rustls-webpki/0.103.17/download
 
 Except as otherwise noted, this project is licensed under the following
 (ISC-style) terms:
@@ -3071,8 +3071,8 @@ DEALINGS IN THE SOFTWARE.
 ================================================================================
 MIT License (MIT)
 Used by:
-  cc 1.11.0
-  Source: https://crates.io/api/v1/crates/cc/1.11.0/download
+  cc 1.11.1
+  Source: https://crates.io/api/v1/crates/cc/1.11.1/download
   cfg-if 1.0.5
   Source: https://crates.io/api/v1/crates/cfg-if/1.0.5/download
   filetime 0.2.29
@@ -3164,8 +3164,8 @@ DEALINGS IN THE SOFTWARE.
 ================================================================================
 MIT License (MIT)
 Used by:
-  errno 0.3.14
-  Source: https://crates.io/api/v1/crates/errno/0.3.14/download
+  errno 0.3.15
+  Source: https://crates.io/api/v1/crates/errno/0.3.15/download
 
 Copyright (c) 2014 Chris Wong
 
@@ -3242,8 +3242,8 @@ DEALINGS IN THE SOFTWARE.
 ================================================================================
 MIT License (MIT)
 Used by:
-  uuid 1.29.0
-  Source: https://crates.io/api/v1/crates/uuid/1.29.0/download
+  uuid 1.29.2
+  Source: https://crates.io/api/v1/crates/uuid/1.29.2/download
 
 Copyright (c) 2014 The Rust Project Developers
 Copyright (c) 2018 Ashley Mannix, Christopher Armstrong, Dylan DPC, Hunar Roop Kahlon
@@ -3303,8 +3303,8 @@ IN THE SOFTWARE.
 ================================================================================
 MIT License (MIT)
 Used by:
-  flate2 1.1.10
-  Source: https://crates.io/api/v1/crates/flate2/1.1.10/download
+  flate2 1.1.11
+  Source: https://crates.io/api/v1/crates/flate2/1.1.11/download
 
 Copyright (c) 2014-2026 Alex Crichton
 
@@ -3616,8 +3616,8 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 ================================================================================
 MIT License (MIT)
 Used by:
-  fixedbitset 0.5.7
-  Source: https://crates.io/api/v1/crates/fixedbitset/0.5.7/download
+  fixedbitset 0.5.9
+  Source: https://crates.io/api/v1/crates/fixedbitset/0.5.9/download
 
 Copyright (c) 2015-2017
 
@@ -4396,8 +4396,8 @@ DEALINGS IN THE SOFTWARE.
 ================================================================================
 MIT License (MIT)
 Used by:
-  arc-swap 1.9.3
-  Source: https://crates.io/api/v1/crates/arc-swap/1.9.3/download
+  arc-swap 1.9.5
+  Source: https://crates.io/api/v1/crates/arc-swap/1.9.5/download
 
 Copyright (c) 2017 arc-swap developers
 
@@ -4729,8 +4729,8 @@ DEALINGS IN THE SOFTWARE.
 ================================================================================
 MIT License (MIT)
 Used by:
-  smallvec 1.16.4
-  Source: https://crates.io/api/v1/crates/smallvec/1.16.4/download
+  smallvec 1.16.5
+  Source: https://crates.io/api/v1/crates/smallvec/1.16.5/download
 
 Copyright (c) 2018 The Servo Project Developers
 
@@ -5603,8 +5603,8 @@ SOFTWARE.
 ================================================================================
 MIT License (MIT)
 Used by:
-  const-oid 0.10.2
-  Source: https://crates.io/api/v1/crates/const-oid/0.10.2/download
+  const-oid 0.10.3
+  Source: https://crates.io/api/v1/crates/const-oid/0.10.3/download
   cpufeatures 0.3.1
   Source: https://crates.io/api/v1/crates/cpufeatures/0.3.1/download
 
@@ -5838,8 +5838,8 @@ DEALINGS IN THE SOFTWARE.
 ================================================================================
 MIT License (MIT)
 Used by:
-  rustls-pki-types 1.15.1
-  Source: https://crates.io/api/v1/crates/rustls-pki-types/1.15.1/download
+  rustls-pki-types 1.16.0
+  Source: https://crates.io/api/v1/crates/rustls-pki-types/1.16.0/download
 
 Copyright (c) 2023 Dirkjan Ochtman <dirkjan@ochtman.nl>
 
@@ -5997,8 +5997,8 @@ DEALINGS IN THE SOFTWARE.
 ================================================================================
 MIT License (MIT)
 Used by:
-  annotate-snippets 0.12.17
-  Source: https://crates.io/api/v1/crates/annotate-snippets/0.12.17/download
+  annotate-snippets 0.12.18
+  Source: https://crates.io/api/v1/crates/annotate-snippets/0.12.18/download
   anstream 1.0.0
   Source: https://crates.io/api/v1/crates/anstream/1.0.0/download
   anstyle-parse 1.0.0
@@ -6023,18 +6023,18 @@ Used by:
   Source: https://crates.io/api/v1/crates/is_terminal_polyfill/1.70.2/download
   once_cell_polyfill 1.70.2
   Source: https://crates.io/api/v1/crates/once_cell_polyfill/1.70.2/download
-  serde_spanned 1.1.2
-  Source: https://crates.io/api/v1/crates/serde_spanned/1.1.2/download
-  toml 1.1.8+spec-1.1.0
-  Source: https://crates.io/api/v1/crates/toml/1.1.8+spec-1.1.0/download
-  toml_datetime 1.1.2+spec-1.1.0
-  Source: https://crates.io/api/v1/crates/toml_datetime/1.1.2+spec-1.1.0/download
-  toml_edit 0.25.17+spec-1.1.0
-  Source: https://crates.io/api/v1/crates/toml_edit/0.25.17+spec-1.1.0/download
+  serde_spanned 1.1.3
+  Source: https://crates.io/api/v1/crates/serde_spanned/1.1.3/download
+  toml 1.2.1+spec-1.1.0
+  Source: https://crates.io/api/v1/crates/toml/1.2.1+spec-1.1.0/download
+  toml_datetime 1.1.3+spec-1.1.0
+  Source: https://crates.io/api/v1/crates/toml_datetime/1.1.3+spec-1.1.0/download
+  toml_edit 0.25.19+spec-1.1.0
+  Source: https://crates.io/api/v1/crates/toml_edit/0.25.19+spec-1.1.0/download
   toml_parser 1.1.5+spec-1.1.0
   Source: https://crates.io/api/v1/crates/toml_parser/1.1.5+spec-1.1.0/download
-  toml_writer 1.1.3+spec-1.1.0
-  Source: https://crates.io/api/v1/crates/toml_writer/1.1.3+spec-1.1.0/download
+  toml_writer 1.2.0+spec-1.1.0
+  Source: https://crates.io/api/v1/crates/toml_writer/1.2.0+spec-1.1.0/download
 
 Copyright (c) Individual contributors
 
@@ -6636,8 +6636,8 @@ SOFTWARE.
 ================================================================================
 MIT License (MIT)
 Used by:
-  crc32fast 1.5.4
-  Source: https://crates.io/api/v1/crates/crc32fast/1.5.4/download
+  crc32fast 1.5.5
+  Source: https://crates.io/api/v1/crates/crc32fast/1.5.5/download
 
 MIT License
 
@@ -6742,8 +6742,8 @@ SOFTWARE.
 ================================================================================
 MIT License (MIT)
 Used by:
-  ureq 3.5.1
-  Source: https://crates.io/api/v1/crates/ureq/3.5.1/download
+  ureq 3.5.2
+  Source: https://crates.io/api/v1/crates/ureq/3.5.2/download
 
 MIT License
 
@@ -7049,24 +7049,24 @@ SOFTWARE.
 ================================================================================
 MIT License (MIT)
 Used by:
-  naga-types 30.0.1
-  Source: https://crates.io/api/v1/crates/naga-types/30.0.1/download
-  naga 30.0.1
-  Source: https://crates.io/api/v1/crates/naga/30.0.1/download
-  wgpu-core-deps-apple 30.0.1
-  Source: https://crates.io/api/v1/crates/wgpu-core-deps-apple/30.0.1/download
-  wgpu-core-deps-windows-linux-android 30.0.1
-  Source: https://crates.io/api/v1/crates/wgpu-core-deps-windows-linux-android/30.0.1/download
-  wgpu-core 30.0.1
-  Source: https://crates.io/api/v1/crates/wgpu-core/30.0.1/download
-  wgpu-hal 30.0.1
-  Source: https://crates.io/api/v1/crates/wgpu-hal/30.0.1/download
-  wgpu-naga-bridge 30.0.1
-  Source: https://crates.io/api/v1/crates/wgpu-naga-bridge/30.0.1/download
-  wgpu-types 30.0.1
-  Source: https://crates.io/api/v1/crates/wgpu-types/30.0.1/download
-  wgpu 30.0.1
-  Source: https://crates.io/api/v1/crates/wgpu/30.0.1/download
+  naga-types 30.0.2
+  Source: https://crates.io/api/v1/crates/naga-types/30.0.2/download
+  naga 30.0.2
+  Source: https://crates.io/api/v1/crates/naga/30.0.2/download
+  wgpu-core-deps-apple 30.0.2
+  Source: https://crates.io/api/v1/crates/wgpu-core-deps-apple/30.0.2/download
+  wgpu-core-deps-windows-linux-android 30.0.2
+  Source: https://crates.io/api/v1/crates/wgpu-core-deps-windows-linux-android/30.0.2/download
+  wgpu-core 30.0.2
+  Source: https://crates.io/api/v1/crates/wgpu-core/30.0.2/download
+  wgpu-hal 30.0.2
+  Source: https://crates.io/api/v1/crates/wgpu-hal/30.0.2/download
+  wgpu-naga-bridge 30.0.2
+  Source: https://crates.io/api/v1/crates/wgpu-naga-bridge/30.0.2/download
+  wgpu-types 30.0.2
+  Source: https://crates.io/api/v1/crates/wgpu-types/30.0.2/download
+  wgpu 30.0.2
+  Source: https://crates.io/api/v1/crates/wgpu/30.0.2/download
 
 MIT License
 
@@ -7255,30 +7255,50 @@ Used by:
   Source: https://crates.io/api/v1/crates/windows-sys/0.52.0/download
   windows-sys 0.59.0
   Source: https://crates.io/api/v1/crates/windows-sys/0.59.0/download
+  windows-sys 0.60.2
+  Source: https://crates.io/api/v1/crates/windows-sys/0.60.2/download
   windows-sys 0.61.2
   Source: https://crates.io/api/v1/crates/windows-sys/0.61.2/download
   windows-targets 0.52.6
   Source: https://crates.io/api/v1/crates/windows-targets/0.52.6/download
+  windows-targets 0.53.5
+  Source: https://crates.io/api/v1/crates/windows-targets/0.53.5/download
   windows-threading 0.2.1
   Source: https://crates.io/api/v1/crates/windows-threading/0.2.1/download
   windows 0.62.2
   Source: https://crates.io/api/v1/crates/windows/0.62.2/download
   windows_aarch64_gnullvm 0.52.6
   Source: https://crates.io/api/v1/crates/windows_aarch64_gnullvm/0.52.6/download
+  windows_aarch64_gnullvm 0.53.1
+  Source: https://crates.io/api/v1/crates/windows_aarch64_gnullvm/0.53.1/download
   windows_aarch64_msvc 0.52.6
   Source: https://crates.io/api/v1/crates/windows_aarch64_msvc/0.52.6/download
+  windows_aarch64_msvc 0.53.1
+  Source: https://crates.io/api/v1/crates/windows_aarch64_msvc/0.53.1/download
   windows_i686_gnu 0.52.6
   Source: https://crates.io/api/v1/crates/windows_i686_gnu/0.52.6/download
+  windows_i686_gnu 0.53.1
+  Source: https://crates.io/api/v1/crates/windows_i686_gnu/0.53.1/download
   windows_i686_gnullvm 0.52.6
   Source: https://crates.io/api/v1/crates/windows_i686_gnullvm/0.52.6/download
+  windows_i686_gnullvm 0.53.1
+  Source: https://crates.io/api/v1/crates/windows_i686_gnullvm/0.53.1/download
   windows_i686_msvc 0.52.6
   Source: https://crates.io/api/v1/crates/windows_i686_msvc/0.52.6/download
+  windows_i686_msvc 0.53.1
+  Source: https://crates.io/api/v1/crates/windows_i686_msvc/0.53.1/download
   windows_x86_64_gnu 0.52.6
   Source: https://crates.io/api/v1/crates/windows_x86_64_gnu/0.52.6/download
+  windows_x86_64_gnu 0.53.1
+  Source: https://crates.io/api/v1/crates/windows_x86_64_gnu/0.53.1/download
   windows_x86_64_gnullvm 0.52.6
   Source: https://crates.io/api/v1/crates/windows_x86_64_gnullvm/0.52.6/download
+  windows_x86_64_gnullvm 0.53.1
+  Source: https://crates.io/api/v1/crates/windows_x86_64_gnullvm/0.53.1/download
   windows_x86_64_msvc 0.52.6
   Source: https://crates.io/api/v1/crates/windows_x86_64_msvc/0.52.6/download
+  windows_x86_64_msvc 0.53.1
+  Source: https://crates.io/api/v1/crates/windows_x86_64_msvc/0.53.1/download
 
 MIT License
 
@@ -7361,10 +7381,10 @@ SOFTWARE.
 ================================================================================
 MIT License (MIT)
 Used by:
-  zune-core 0.5.1
-  Source: https://crates.io/api/v1/crates/zune-core/0.5.1/download
-  zune-jpeg 0.5.12
-  Source: https://crates.io/api/v1/crates/zune-jpeg/0.5.12/download
+  zune-core 0.5.3
+  Source: https://crates.io/api/v1/crates/zune-core/0.5.3/download
+  zune-jpeg 0.5.15
+  Source: https://crates.io/api/v1/crates/zune-jpeg/0.5.15/download
 
 MIT License
 
@@ -7809,8 +7829,8 @@ Used by:
   Source: https://crates.io/api/v1/crates/io-lifetimes/2.0.4/download
   io-lifetimes 3.0.1
   Source: https://crates.io/api/v1/crates/io-lifetimes/3.0.1/download
-  itoa 1.0.18
-  Source: https://crates.io/api/v1/crates/itoa/1.0.18/download
+  itoa 1.0.19
+  Source: https://crates.io/api/v1/crates/itoa/1.0.19/download
   lazy_static 1.5.1
   Source: https://crates.io/api/v1/crates/lazy_static/1.5.1/download
   lexical-core 1.0.6
@@ -7887,8 +7907,8 @@ Used by:
   Source: https://crates.io/api/v1/crates/smol_str/0.2.2/download
   syn 2.0.119
   Source: https://crates.io/api/v1/crates/syn/2.0.119/download
-  syn 3.0.9
-  Source: https://crates.io/api/v1/crates/syn/3.0.9/download
+  syn 3.0.10
+  Source: https://crates.io/api/v1/crates/syn/3.0.10/download
   thiserror-impl 1.0.69
   Source: https://crates.io/api/v1/crates/thiserror-impl/1.0.69/download
   thiserror-impl 2.0.21
@@ -7971,8 +7991,8 @@ DEALINGS IN THE SOFTWARE.
 ================================================================================
 MIT License (MIT)
 Used by:
-  winnow 1.0.4
-  Source: https://crates.io/api/v1/crates/winnow/1.0.4/download
+  winnow 1.0.5
+  Source: https://crates.io/api/v1/crates/winnow/1.0.5/download
 
 Permission is hereby granted, free of charge, to any person obtaining
 a copy of this software and associated documentation files (the
@@ -8281,14 +8301,14 @@ Used by:
   Source: https://crates.io/api/v1/crates/byteorder-lite/0.1.0/download
   byteorder 1.5.0
   Source: https://crates.io/api/v1/crates/byteorder/1.5.0/download
-  jiff-core 0.1.2
-  Source: https://crates.io/api/v1/crates/jiff-core/0.1.2/download
+  jiff-core 0.1.5
+  Source: https://crates.io/api/v1/crates/jiff-core/0.1.5/download
   jiff-tzdb-platform 0.1.3
   Source: https://crates.io/api/v1/crates/jiff-tzdb-platform/0.1.3/download
   jiff-tzdb 0.1.9
   Source: https://crates.io/api/v1/crates/jiff-tzdb/0.1.9/download
-  jiff 0.2.39
-  Source: https://crates.io/api/v1/crates/jiff/0.2.39/download
+  jiff 0.2.43
+  Source: https://crates.io/api/v1/crates/jiff/0.2.43/download
   memchr 2.8.3
   Source: https://crates.io/api/v1/crates/memchr/2.8.3/download
   walkdir 2.5.0
