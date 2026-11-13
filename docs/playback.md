@@ -369,18 +369,18 @@ to keep the overview readable.
 
 In repository playback, sampled added lines descend from the contributor; removed
 lines rise from the file and smoothly fade to transparent. The camera-facing snippet
-is the fragment, following the same path, phase and scale envelope above beams, with
-a text shadow for contrast. Text and plain prisms crossfade; fully visible snippets
-replace their prisms. Extra fragments stay plain. Every theme supplies added/removed
-colours; Atlas uses dark ink on its light ground. Snippets use alpha blending and the
-theme's monospace font, with IBM Plex Mono for Atlas code beside its serif labels.
+is the fragment, following the same path, phase and fade envelope above beams, with
+a text shadow and theme backing for contrast. Text and plain prisms crossfade; fully
+visible snippets replace their prisms. Extra fragments stay plain. Every theme supplies
+added/removed colours; Atlas uses dark ink on its light ground. Snippets use alpha
+blending and the theme's monospace font, with IBM Plex Mono for Atlas code beside its
+serif labels.
 Theme switching restyles active snippets without restarting their motion or fade.
 
 Snippet text keeps the font's natural proportions with equal X and Y scaling.
-Lines are cut at 88 characters; the fixed uniform size fits 88 characters plus the
-direction prefix within eight beam diameters, before the fragment scale envelope. Text
-never grows to a minimum screen size: samples smoothly appear between 24 and 40
-projected beam-diameter pixels, requiring the camera to be very close to the fragment.
+Lines are cut at 88 characters. Samples smoothly appear between 6 and 14 projected
+beam-diameter pixels. Visible text stays between 14 and 20 logical pixels high, making
+close oblique shots readable while the overview keeps plain fragments.
 Overlapping snippets may overlap freely without collision or viewport-edge hiding.
 Files inside collapsed subtrees show no sample text; LOD keeps its fragment behaviour.
 
