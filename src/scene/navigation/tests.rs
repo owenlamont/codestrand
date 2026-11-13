@@ -198,6 +198,60 @@ fn clicks_capture_only_inside_the_letterboxed_viewport() {
         .press(MouseButton::Left);
     state.read(&mut world);
     assert!(state.captured);
+    world.resource_mut::<ButtonInput<MouseButton>>().clear();
+    assert_eq!(state.read(&mut world).lift, 0.0);
+    assert_eq!(state.read(&mut world).lift, 0.0);
+    world.resource_mut::<ButtonInput<MouseButton>>().reset_all();
+    state.read(&mut world);
+    world
+        .resource_mut::<ButtonInput<MouseButton>>()
+        .press(MouseButton::Left);
+    assert_eq!(state.read(&mut world).lift, 1.0);
+}
+
+#[test]
+fn captured_buttons_move_continuously_and_both_cancel() {
+    let (mut world, _) = fixture();
+    let mut state = State::default();
+    world
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::KeyC);
+    state.read(&mut world);
+    world.resource_mut::<ButtonInput<KeyCode>>().reset_all();
+    for (buttons, expected) in [
+        (vec![MouseButton::Left], 1.0),
+        (vec![MouseButton::Right], -1.0),
+        (vec![MouseButton::Left, MouseButton::Right], 0.0),
+        (vec![], 0.0),
+    ] {
+        world.resource_mut::<ButtonInput<MouseButton>>().reset_all();
+        state.read(&mut world);
+        for button in buttons {
+            world
+                .resource_mut::<ButtonInput<MouseButton>>()
+                .press(button);
+        }
+        assert_eq!(state.read(&mut world).lift, expected);
+        world.resource_mut::<ButtonInput<MouseButton>>().clear();
+        assert_eq!(state.read(&mut world).lift, expected);
+    }
+}
+
+#[test]
+fn released_buttons_orbit_without_lift() {
+    let (mut world, _) = fixture();
+    let mut state = State::default();
+    world
+        .resource_mut::<ButtonInput<MouseButton>>()
+        .press(MouseButton::Left);
+    assert_eq!(state.camera_input(&world, Some(Vec2::ZERO)).lift, 0.0);
+    world
+        .resource_mut::<ButtonInput<MouseButton>>()
+        .press(MouseButton::Right);
+    state.camera_input(&world, Some(Vec2::ZERO));
+    let input = state.camera_input(&world, Some(Vec2::new(12.0, -8.0)));
+    assert_eq!(input.lift, 0.0);
+    assert_eq!(input.orbit, Vec2::new(12.0, -8.0));
 }
 
 #[test]

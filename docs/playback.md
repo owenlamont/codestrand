@@ -45,6 +45,7 @@ macOS discovers installed fonts through CoreText and Library/Fonts directories.
 | C | Capture or release the mouse while display settings are closed |
 | Left click in viewport | Capture the mouse while display settings are closed |
 | Mouse movement (captured) | Aim directly without holding a button |
+| Hold left / right button (captured) | Move along camera up / down; both cancel |
 | F10 | Open or close display settings; release capture and pause camera controls |
 | F11 | Toggle borderless fullscreen on the current monitor |
 | `[` | Halve live speed, down to 0.125x |
@@ -66,6 +67,9 @@ losing window focus also releases capture. Closing settings or returning to the 
 does not recapture: press C or click the viewport again. Clicks in letterbox bars do
 not capture. Capture and release discard that frame's mouse motion to avoid a jump.
 Mouse aim uses 0.003 radians per mouse count, independent of frame time.
+Held mouse buttons move at the WASD speed along the camera's local up axis,
+including pitch and roll. Descending stops at floor clearance. The left click that
+captures the mouse cannot move the camera until released and pressed again.
 
 Display settings have a scrollable preset list with a draggable scrollbar. Monitor native
 is first; other choices are grouped by aspect ratio, then ascending pixel size.

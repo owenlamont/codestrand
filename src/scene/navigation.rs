@@ -10,6 +10,7 @@ use crate::camera::Input;
 #[derive(Default)]
 pub(super) struct State {
     captured: bool,
+    suppress_left: bool,
     panel_was_open: bool,
     drag_from: Option<Vec2>,
     focus_events: MessageCursor<WindowFocused>,
@@ -98,6 +99,11 @@ impl State {
         };
         let was_captured = self.captured;
         let exit = self.transition(&controls);
+        let left_held = world
+            .resource::<ButtonInput<MouseButton>>()
+            .pressed(MouseButton::Left);
+        self.suppress_left =
+            left_held && (self.suppress_left || (self.captured && !was_captured));
         if let Some(mut options) = world.get_mut::<CursorOptions>(entity) {
             options.grab_mode = if self.captured {
                 CursorGrabMode::Locked
@@ -142,6 +148,12 @@ impl State {
         };
         if self.captured {
             input.aim = world.resource::<AccumulatedMouseMotion>().delta;
+            let mouse = world.resource::<ButtonInput<MouseButton>>();
+            input.lift = f32::from(u8::from(mouse.pressed(MouseButton::Left)))
+                - f32::from(u8::from(mouse.pressed(MouseButton::Right)));
+            if self.suppress_left {
+                input.lift = input.lift.min(0.0);
+            }
         } else if world
             .resource::<ButtonInput<MouseButton>>()
             .pressed(MouseButton::Right)

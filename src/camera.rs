@@ -29,6 +29,7 @@ enum Mode {
 #[derive(Default)]
 pub(super) struct Input {
     pub pan: Vec2,
+    pub lift: f32,
     pub aim: Vec2,
     pub first_person: bool,
     pub orbit: Vec2,
@@ -76,6 +77,7 @@ impl PreviewCamera {
                 self.cycle(avatars);
             }
             if input.pan != Vec2::ZERO
+                || input.lift != 0.0
                 || ((input.orbit != Vec2::ZERO
                     || input.aim != Vec2::ZERO
                     || input.zoom != 0.0)
@@ -161,7 +163,13 @@ impl PreviewCamera {
         } else {
             (right, forward)
         };
-        self.focus += (right * input.pan.x + forward * input.pan.y)
+        let up = if input.first_person {
+            self.rotation * Vec3::Y
+        } else {
+            Vec3::ZERO
+        };
+        self.focus += (right * input.pan.x + forward * input.pan.y + up * input.lift)
+            .clamp_length_max(1.0)
             * self.distance
             * 0.7
             * dt.min(0.1);
@@ -235,6 +243,86 @@ mod tests {
         theme::Theme,
         timeline::{self, Event},
     };
+
+    #[test]
+    fn captured_lift_follows_pitched_and_rolled_up_at_wasd_speed() {
+        let view = (Vec3::Y * 20.0, 10.0);
+        let rotation = Quat::from_rotation_x(std::f32::consts::FRAC_PI_4)
+            * Quat::from_rotation_z(std::f32::consts::FRAC_PI_4);
+        for lift in [-1.0, 1.0] {
+            let mut camera = PreviewCamera::new(view);
+            camera.mode = Mode::Free;
+            camera.rotation = rotation;
+            let eye = camera.pose().0;
+            for step in [1.0, 2.0] {
+                camera.update(
+                    &Input {
+                        first_person: true,
+                        lift,
+                        ..Default::default()
+                    },
+                    view,
+                    &[],
+                    0.1,
+                );
+                let displacement = camera.pose().0 - eye;
+                assert!(displacement.abs_diff_eq(
+                    Vec3::new(-0.5_f32.sqrt(), 0.5, 0.5) * lift * 0.7 * step,
+                    1e-5
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn captured_descent_stops_at_clearance_and_lift_releases_follow() {
+        let view = (Vec3::Y * EYE_FLOOR, 10.0);
+        let mut camera = PreviewCamera::new(view);
+        camera.mode = Mode::Free;
+        camera.rotation = Quat::from_rotation_x(std::f32::consts::FRAC_PI_4);
+        camera.focus = Vec3::Y * EYE_FLOOR - camera.rotation * Vec3::Z * 10.0;
+        let eye = camera.pose().0;
+        camera.update(
+            &Input {
+                first_person: true,
+                lift: -1.0,
+                ..Default::default()
+            },
+            view,
+            &[],
+            0.1,
+        );
+        assert!((camera.pose().0.y - EYE_FLOOR).abs() < 1e-5);
+        assert!(camera.pose().0.z < eye.z - 0.4);
+        assert_eq!(
+            camera.rotation(),
+            Quat::from_rotation_x(std::f32::consts::FRAC_PI_4)
+        );
+
+        let simulation = avatars();
+        camera.update(
+            &Input {
+                cycle: true,
+                ..Default::default()
+            },
+            view,
+            simulation.avatars(),
+            1.0,
+        );
+        let eye = camera.pose().0;
+        camera.update(
+            &Input {
+                first_person: true,
+                lift: 1.0,
+                ..Default::default()
+            },
+            view,
+            simulation.avatars(),
+            0.0,
+        );
+        assert_eq!(camera.mode, Mode::Free);
+        assert!(camera.pose().0.abs_diff_eq(eye, 1e-5));
+    }
 
     #[test]
     fn captured_aim_turns_about_the_eye_without_pitch_limits_or_frame_scaling() {
