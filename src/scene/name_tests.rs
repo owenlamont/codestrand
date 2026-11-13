@@ -62,6 +62,16 @@ fn oblique_names_stay_tangent_to_the_projected_portrait() {
 
 #[test]
 fn contributor_fonts_shape_accents_and_non_latin_letters() {
+    assert_name_glyphs(["Fernando Pérez-García", "João Moreno", "Кириллица"]);
+}
+
+#[test]
+#[ignore = "requires installed Greek, Devanagari and CJK fonts"]
+fn system_font_fallback_shapes_installed_scripts() {
+    assert_name_glyphs(["Ελληνικά", "अभिजीत बोडस", "中文"]);
+}
+
+fn assert_name_glyphs(texts: impl IntoIterator<Item = &'static str>) {
     use bevy::text::*;
     let mut app = App::new();
     app.add_plugins((
@@ -83,14 +93,6 @@ fn contributor_fonts_shape_accents_and_non_latin_letters() {
     let world = app.world_mut();
     let fonts = world.remove_resource::<Assets<Font>>().unwrap();
     let mut cx = world.remove_resource::<FontCx>().unwrap();
-    let texts = [
-        "Fernando Pérez-García",
-        "João Moreno",
-        "Ελληνικά",
-        "Кириллица",
-    ];
-    #[cfg(windows)]
-    let texts = texts.into_iter().chain(["अभिजीत बोडस", "中文"]);
     for text in texts {
         let mut computed = ComputedTextBlock::default();
         TextPipeline::default()
