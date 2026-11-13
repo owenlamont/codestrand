@@ -77,6 +77,10 @@ Watch the [feature tour video](https://youtu.be/gmueXAHnvAE).
   ([#107](https://github.com/owenlamont/codestrand/pull/107))
 - Faster preview on large repositories.
   ([#112](https://github.com/owenlamont/codestrand/pull/112))
+- Faster export, with frames unchanged: PNG frames are encoded off the render thread
+  and each frame needs fewer render passes. Preview no longer redoes file and name
+  work on frames where playback has not advanced.
+  ([#142](https://github.com/owenlamont/codestrand/pull/142))
 - New binary-helix logo.
   ([#61](https://github.com/owenlamont/codestrand/pull/61),
   [#69](https://github.com/owenlamont/codestrand/pull/69))

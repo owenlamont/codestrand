@@ -41,6 +41,8 @@ mod names;
 mod navigation;
 mod ordering;
 mod settings;
+#[cfg(test)]
+mod static_tests;
 mod styling;
 
 #[derive(Resource)]
@@ -316,6 +318,7 @@ impl DirectoryHues {
 
 #[derive(Resource, Default)]
 struct Pools {
+    sync_stamp: Option<SyncStamp>,
     lod: lod::Lod,
     names: names::Names,
     aggregates: Vec<Entity>,
@@ -327,6 +330,44 @@ struct Pools {
     hues: DirectoryHues,
     avatars: Vec<Entity>,
     grid: Vec<Entity>,
+}
+
+#[derive(PartialEq)]
+struct SyncStamp {
+    seconds: u32,
+    theme: crate::theme::ThemeName,
+    collapse: bool,
+    rate: u32,
+    detail: Vec<f32>,
+    glyph: Vec<f32>,
+    size: Vec<f32>,
+    glyphs: Vec<usize>,
+}
+
+impl SyncStamp {
+    fn matches(&self, simulation: &Simulation, lod: &lod::Lod) -> bool {
+        self.seconds == simulation.seconds().to_bits()
+            && self.theme == simulation.theme().name
+            && self.collapse == simulation.collapse_directories
+            && self.rate == simulation.playback_multiplier().to_bits()
+            && self.detail == lod.detail
+            && self.glyph == lod.glyph
+            && self.size == lod.size
+            && self.glyphs == lod.glyphs
+    }
+
+    fn new(simulation: &Simulation, lod: &lod::Lod) -> Self {
+        Self {
+            seconds: simulation.seconds().to_bits(),
+            theme: simulation.theme().name,
+            collapse: simulation.collapse_directories,
+            rate: simulation.playback_multiplier().to_bits(),
+            detail: lod.detail.clone(),
+            glyph: lod.glyph.clone(),
+            size: lod.size.clone(),
+            glyphs: lod.glyphs.clone(),
+        }
+    }
 }
 
 #[derive(Component)]
@@ -368,15 +409,23 @@ fn grey_texture(world: &mut World, source: &Handle<Image>) -> Handle<Image> {
     texture
 }
 
-fn restore_lifecycle_materials(world: &mut World) {
+fn restore_lifecycle_materials(world: &mut World) -> bool {
     let updates: Vec<_> = world
-        .query::<(Entity, &LifecycleMaterial)>()
+        .query::<(Entity, &LifecycleMaterial, Option<&RenderLayers>)>()
         .iter(world)
-        .map(|(entity, material)| (entity, material.original.clone()))
+        .map(|(entity, material, layers)| {
+            (
+                entity,
+                material.original.clone(),
+                layers != Some(&RenderLayers::layer(AVATAR_LAYER)),
+            )
+        })
         .collect();
-    for (entity, handle) in updates {
+    let restored = updates.iter().any(|(_, _, scene)| *scene);
+    for (entity, handle, _) in updates {
         world.entity_mut(entity).insert(MeshMaterial3d(handle));
     }
+    restored
 }
 
 fn lifecycle_material(world: &mut World, entity: Entity, grey: f32, alpha: f32) {
@@ -858,6 +907,10 @@ fn preview_clock(world: &mut World, mut elapsed: Local<std::time::Duration>) {
                 .expect("loop period fits in u64 nanoseconds"),
         );
         world.resource_mut::<Playback>().0.restart();
+        if let Some(mut pools) = world.get_resource_mut::<Pools>() {
+            pools.sync_stamp = None;
+            pools.names.invalidate();
+        }
     }
     world.resource_mut::<Frame>().index = model::preview_frame(*elapsed, fps);
 }
@@ -1140,7 +1193,7 @@ fn preview_camera(world: &mut World, mut navigation: Local<navigation::State>) {
 }
 
 pub(super) fn animate(world: &mut World) {
-    restore_lifecycle_materials(world);
+    let restored = restore_lifecycle_materials(world);
     let frame = world.resource::<Frame>();
     let (index, fps) = (frame.index, frame.fps);
     world.resource_scope(|world, mut playback: Mut<Playback>| {
@@ -1149,8 +1202,17 @@ pub(super) fn animate(world: &mut World) {
             world.resource_scope(|world, mut pools: Mut<Pools>| {
                 let simulation = &playback.0;
                 place_camera(world, simulation);
-                sync_files(world, &palette, &mut pools, simulation);
-                sync_structure(world, &palette, &mut pools, simulation);
+                sync_lod(world, &mut pools, simulation);
+                if restored
+                    || !pools
+                        .sync_stamp
+                        .as_ref()
+                        .is_some_and(|stamp| stamp.matches(simulation, &pools.lod))
+                {
+                    sync_files(world, &palette, &mut pools, simulation);
+                    sync_structure(world, &palette, &mut pools, simulation);
+                    pools.sync_stamp = Some(SyncStamp::new(simulation, &pools.lod));
+                }
                 sync_activity(world, &palette, &mut pools, simulation);
                 sync_repository_regions(world, simulation);
             });
@@ -1264,7 +1326,6 @@ fn sync_files(
     pools: &mut Pools,
     simulation: &Simulation,
 ) {
-    sync_lod(world, pools, simulation);
     let layout = simulation.layout();
     pools.hues.sync(layout);
     let mut seen = 0;
@@ -3915,6 +3976,7 @@ mod tests {
         );
         for frame in [0, 18, 120, 240, 0, 240] {
             simulation.advance_to(frame, 30);
+            sync_lod(&mut world, &mut pools, &simulation);
             sync_files(&mut world, &palette, &mut pools, &simulation);
             sync_structure(&mut world, &palette, &mut pools, &simulation);
             assert_eq!(
@@ -4043,6 +4105,7 @@ mod tests {
             (18, paths[0]),
         ] {
             simulation.advance_to(frame, 30);
+            sync_lod(&mut world, &mut pools, &simulation);
             sync_files(&mut world, &palette, &mut pools, &simulation);
             let entity = pools.files[&0];
             assert_eq!(*original.get_or_insert(entity), entity);
@@ -4091,6 +4154,7 @@ mod tests {
         let palette = Palette::new(&mut world, &Theme::neon());
         let mut pools = Pools::default();
         world.insert_resource(Time::<Real>::default());
+        sync_lod(&mut world, &mut pools, &simulation);
         sync_files(&mut world, &palette, &mut pools, &simulation);
         let (focus, distance) = simulation.view();
         let mut fallback = lod::Lod::default();
@@ -4111,12 +4175,14 @@ mod tests {
         world
             .resource_mut::<Time<Real>>()
             .advance_by(std::time::Duration::from_secs(1));
+        sync_lod(&mut world, &mut pools, &simulation);
         sync_files(&mut world, &palette, &mut pools, &simulation);
         assert_eq!(pools.files.len(), simulation.layout().files().count());
         world.insert_resource(PreviewCamera::new((Vec3::ZERO, 20000.0)));
         world
             .resource_mut::<Time<Real>>()
             .advance_by(std::time::Duration::from_secs(1));
+        sync_lod(&mut world, &mut pools, &simulation);
         sync_files(&mut world, &palette, &mut pools, &simulation);
         assert!(pools.lod.glyph.iter().any(|&weight| weight > 0.0));
         let hidden: Vec<_> = pools
@@ -4137,6 +4203,7 @@ mod tests {
         world
             .resource_mut::<Time<Real>>()
             .advance_by(std::time::Duration::from_secs(1));
+        sync_lod(&mut world, &mut pools, &simulation);
         sync_files(&mut world, &palette, &mut pools, &simulation);
         assert_eq!(pools.files.len(), simulation.layout().files().count());
         assert!(
@@ -4227,6 +4294,7 @@ mod tests {
         let mut pools = Pools::default();
         for (frame, slot) in [(18, 0), (45, 1), (18, 0), (45, 1)] {
             simulation.advance_to(frame, 30);
+            sync_lod(&mut world, &mut pools, &simulation);
             sync_files(&mut world, &palette, &mut pools, &simulation);
             assert_eq!(pools.files.len(), 1);
             let entity = pools.files[&0];
@@ -4290,6 +4358,7 @@ mod tests {
             .init_asset::<StandardMaterial>();
         let palette = Palette::new(app.world_mut(), &Theme::neon());
         let mut pools = Pools::default();
+        sync_lod(app.world_mut(), &mut pools, &simulation);
         sync_files(app.world_mut(), &palette, &mut pools, &simulation);
         app.update();
         app.world_mut()
@@ -4298,6 +4367,7 @@ mod tests {
         let material_count = app.world().resource::<Assets<StandardMaterial>>().len();
         let mut mutations = 0;
         for _ in 0..60 {
+            sync_lod(app.world_mut(), &mut pools, &simulation);
             sync_files(app.world_mut(), &palette, &mut pools, &simulation);
             app.update();
             mutations += app
