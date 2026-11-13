@@ -25,6 +25,11 @@ embedded monospace Fira Mono font, even when another theme uses proportional lab
 CLI playback uses the same six fixed columns for single repositories and synthetic
 history. The synthetic repository column is named `Synthetic history`.
 
+Text falls back from the selected theme font to bundled IBM Plex Mono for accented,
+Greek and Cyrillic names, then to installed system fonts for other scripts. Install
+fonts covering the required scripts on export machines; use the same fonts when
+comparing frames across machines.
+
 ## Controls
 
 | Input | Action |

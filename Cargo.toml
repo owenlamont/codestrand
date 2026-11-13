@@ -38,6 +38,7 @@ bevy = { version = "=0.20.1", default-features = false, features = [
     "bevy_post_process",
     "bevy_ui_render",
     "default_font",
+    "system_font_discovery",
     "png",
 ] }
 clap = { version = "4", features = ["derive"] }

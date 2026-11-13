@@ -1,6 +1,83 @@
 use super::*;
 
 #[test]
+fn contributor_fonts_shape_accents_and_non_latin_letters() {
+    use bevy::text::*;
+    let mut app = App::new();
+    app.add_plugins((
+        MinimalPlugins,
+        bevy::asset::AssetPlugin::default(),
+        TextPlugin,
+    ));
+    let plex = app
+        .world_mut()
+        .resource_mut::<Assets<Font>>()
+        .add(Font::from_bytes(
+            include_bytes!("../../assets/fonts/IBMPlexMono-Regular.ttf").to_vec(),
+        ));
+    app.update();
+    let font = TextFont {
+        font: styling::label_font(Handle::default(), plex),
+        ..TextFont::from_font_size(14.0)
+    };
+    let world = app.world_mut();
+    let fonts = world.remove_resource::<Assets<Font>>().unwrap();
+    let mut cx = world.remove_resource::<FontCx>().unwrap();
+    let texts = [
+        "Fernando Pérez-García",
+        "João Moreno",
+        "Ελληνικά",
+        "Кириллица",
+    ];
+    #[cfg(windows)]
+    let texts = texts.into_iter().chain(["अभिजीत बोडस", "中文"]);
+    for text in texts {
+        let mut computed = ComputedTextBlock::default();
+        TextPipeline::default()
+            .update_buffer(
+                &fonts,
+                [(
+                    Entity::PLACEHOLDER,
+                    0,
+                    TextElement::Text {
+                        text,
+                        font: &font,
+                        color: Color::WHITE,
+                        line_height: LineHeight::default(),
+                        letter_spacing: LetterSpacing::default(),
+                    },
+                )]
+                .into_iter(),
+                LineBreak::NoWrap,
+                Justify::Left,
+                TextBounds::UNBOUNDED,
+                1.0,
+                &mut computed,
+                &mut cx,
+                &mut LayoutCx::default(),
+                Vec2::new(1280.0, 720.0),
+                RemSize::default(),
+            )
+            .unwrap();
+        let glyphs: Vec<_> = computed
+            .buffer()
+            .lines()
+            .flat_map(|line| line.runs())
+            .flat_map(|run| {
+                run.clusters()
+                    .flat_map(|cluster| cluster.glyphs())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert!(glyphs.len() >= 4);
+        assert!(
+            glyphs.iter().all(|glyph| glyph.id != 0),
+            "missing glyph in {text}"
+        );
+    }
+}
+
+#[test]
 fn close_names_cannot_cover_the_caption_or_heading() {
     for y in [0.0, 690.0, 700.0] {
         let chosen = place_labels(
