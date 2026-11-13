@@ -87,7 +87,7 @@ mod tests {
     fn crowded_long_names_elide_only_after_full_names_cannot_fit() {
         let mut sim = simulation();
         sim.advance_to(180, 60);
-        sim.state.avatars.truncate(6);
+        sim.state.avatars.truncate(7);
         sim.state.pulses.clear();
         for (index, avatar) in sim.state.avatars.iter_mut().enumerate() {
             avatar.position = super::super::slots::world(Vec2::new(
@@ -98,6 +98,9 @@ mod tests {
             avatar.presence = 1.0;
             avatar.name_visibility.placement = None;
         }
+        let quiet = sim.state.avatars.last_mut().unwrap();
+        quiet.name = "Uncrowded contributor".into();
+        quiet.position = super::super::slots::world(Vec2::new(0.0, -200.0));
         sim.state.place_names(1.0 / 60.0, &sim.travel, &[]);
         let names: Vec<_> = sim
             .state
@@ -106,6 +109,7 @@ mod tests {
             .map(|a| sim.state.avatar_label(a))
             .collect();
         assert!(names.iter().any(|l| l.text.ends_with('…')));
+        assert_eq!(names.last().unwrap().text, "Uncrowded contributor");
         let rectangles: Vec<_> = names
             .iter()
             .map(|l| super::super::titles::label_bounds(&sim, l))

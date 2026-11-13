@@ -717,13 +717,22 @@ impl State {
             if fits {
                 break;
             }
-            if displayed.iter().all(|text| text.chars().count() <= limit) {
-                continue;
-            }
-            displayed = displayed
+            let rectangles: Vec<_> = domains
                 .iter()
-                .map(|text| super::names::elide(text, limit))
+                .zip(&assignment.choices)
+                .map(|(domain, &choice)| domain[choice].rect)
                 .collect();
+            for (node, &index) in authors.iter().enumerate() {
+                let candidate = domains[node][assignment.choices[node]];
+                if candidate.text_pairs > 0
+                    || super::caption::outside(candidate.rect, 0.5) > 0.001
+                    || rectangles.iter().enumerate().any(|(other, rect)| {
+                        other != node && !candidate.rect.intersect(*rect).is_empty()
+                    })
+                {
+                    displayed[index] = super::names::elide(&displayed[index], limit);
+                }
+            }
             (authors, domains) =
                 self.label_domains(&bodies, travel, dt, texts, &displayed);
             assignment = labels::solve(&domains);
