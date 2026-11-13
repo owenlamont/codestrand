@@ -37,6 +37,9 @@ uv run --script scripts/licenses.py
 uv run --script scripts/changelog.py extract v0.1.1
 ```
 
+Dependabot groups Cargo requirement and GitHub Actions updates into one weekly PR.
+The weekly update workflow separately refreshes Cargo.lock and prek hook pins.
+
 ## Documentation
 
 Zensical renders `docs/` using `zensical.toml`. Follow the locked `docs` dependency
