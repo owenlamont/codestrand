@@ -45,14 +45,14 @@ macOS discovers installed fonts through CoreText and Library/Fonts directories.
 | C | Capture or release the mouse while display settings are closed |
 | Left click in viewport | Capture the mouse while display settings are closed |
 | Mouse movement (captured) | Aim directly without holding a button |
-| Hold left / right button (captured) | Move along camera up / down; both cancel |
+| Hold left / right button (captured) | Move along world Y up / down; both cancel |
 | F10 | Open or close display settings; release capture and pause camera controls |
 | F11 | Toggle borderless fullscreen on the current monitor |
 | `[` | Halve live speed, down to 0.125x |
 | `]` | Double live speed, up to 8x |
 | `,` / `.` | Previous or next theme |
-| WASD | Move relative to captured aim; otherwise pan; release contributor follow |
-| Right drag (released) | Orbit horizontally and vertically, without pitch limits |
+| WASD | Move horizontally relative to yaw; release contributor follow |
+| Right drag (released) | Orbit with world-Y yaw and pitch clamped to ±90° |
 | Scroll wheel | Zoom; scroll the preset list when over display settings |
 | Tab | Follow or cycle visible contributors |
 | Space | Restore the fit-to-scene camera over half a second |
@@ -67,8 +67,8 @@ losing window focus also releases capture. Closing settings or returning to the 
 does not recapture: press C or click the viewport again. Clicks in letterbox bars do
 not capture. Capture and release discard that frame's mouse motion to avoid a jump.
 Mouse aim uses 0.003 radians per mouse count, independent of frame time.
-Held mouse buttons move at the WASD speed along the camera's local up axis,
-including pitch and roll. Descending stops at floor clearance. The left click that
+Held mouse buttons move at the WASD speed along world Y, independent of pitch.
+Descending stops at floor clearance. The left click that
 captures the mouse cannot move the camera until released and pressed again.
 
 Display settings have a scrollable preset list with a draggable scrollbar. Monitor native
@@ -94,19 +94,23 @@ F11 restores the previous windowed size and position. Playback continues while
 settings are open; mouse wheel input over the panel scrolls instead of zooming.
 
 The default camera looks straight down at the centre of the repository tile area.
-Repository tiles are rectangles in world coordinates. Preview rotation has no pitch
-limits or pole lock. The eye stays at least 1.2 world units above the file plane,
+Repository tiles are rectangles in world coordinates. Preview stores yaw and pitch
+explicitly, with no roll. Yaw rotates about world Y; pitch rotates about the camera's
+local right axis and clamps to −90° through +90°, inclusive. The camera can look
+exactly straight down or up, and yaw still rotates the view at either pole.
+Camera up never opposes world up. The eye stays at least 1.2 world units above the plane,
 above the glass and file geometry, and can look up at contributors at height 3.2.
-Vertical mouse motion rotates around the camera's right axis; horizontal motion rotates
-around the camera's up axis, so both controls follow the screen when upside down. Captured
-mouse aim turns about the eye in free mode; WASD moves along the camera's forward and
-right axes, with downward movement stopped at the floor. Right-drag orbit remains
-available with the cursor released. Orbit, captured aim and zoom retain the followed
-contributor as the aim; WASD releases follow. At the floor, free orbit turns about the eye
-instead of crossing the plane; zoom slides along the floor and released-cursor pan stays
-horizontal. Follow shortens its orbit radius at the floor while
-keeping its aim on the contributor. Space smoothly raises the eye and restores the
-overhead view from any orientation.
+Vertical mouse motion changes pitch; horizontal motion changes yaw. Captured mouse
+aim turns about the eye in free mode. WASD uses forward and right from yaw alone,
+stays horizontal and remains well-defined when looking straight down or up.
+Right-drag orbit remains available with the cursor released.
+Orbit, captured aim and zoom retain the followed
+contributor as the aim; WASD or button elevation releases follow. Released right-drag
+and follow orbit use the same yaw and pitch limits. At the floor, free orbit turns about
+the eye instead of crossing the plane; zoom slides along the floor.
+Follow shortens its orbit radius at the floor while keeping its aim on the contributor.
+Space smoothly raises the eye and restores the
+overhead view with yaw 0°, pitch −90° and camera up pointing toward −Z.
 
 Export defaults to the overhead perspective camera at explicit frame times;
 [scripted paths](export.md#scripted-camera) can override the view. Default

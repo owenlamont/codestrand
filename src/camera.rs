@@ -1,3 +1,5 @@
+use std::f32::consts::{FRAC_PI_2, PI, TAU};
+
 use bevy::{
     math::{Quat, Vec2, Vec3},
     prelude::Resource,
@@ -21,7 +23,8 @@ enum Mode {
     Reset {
         eye: Vec3,
         distance: f32,
-        rotation: Quat,
+        yaw: f32,
+        pitch: f32,
         elapsed: f32,
     },
 }
@@ -43,7 +46,8 @@ pub(super) struct PreviewCamera {
     mode: Mode,
     focus: Vec3,
     distance: f32,
-    rotation: Quat,
+    yaw: f32,
+    pitch: f32,
 }
 
 impl PreviewCamera {
@@ -52,7 +56,8 @@ impl PreviewCamera {
             mode: Mode::Fit,
             focus: view.0,
             distance: view.1,
-            rotation: Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
+            yaw: 0.0,
+            pitch: -FRAC_PI_2,
         }
     }
 
@@ -69,7 +74,8 @@ impl PreviewCamera {
             self.mode = Mode::Reset {
                 eye: self.pose().0,
                 distance: self.distance,
-                rotation: self.rotation,
+                yaw: self.yaw,
+                pitch: self.pitch,
                 elapsed: 0.0,
             };
         } else {
@@ -87,7 +93,7 @@ impl PreviewCamera {
             }
         }
         if was_following && self.mode == Mode::Free {
-            self.focus = previous_eye - self.rotation * Vec3::Z * self.distance;
+            self.focus = previous_eye - self.rotation() * Vec3::Z * self.distance;
         }
         let old_eye = self.pose().0;
         match &mut self.mode {
@@ -95,7 +101,8 @@ impl PreviewCamera {
             Mode::Reset {
                 eye,
                 distance,
-                rotation,
+                yaw,
+                pitch,
                 elapsed,
             } => {
                 *elapsed += dt;
@@ -103,21 +110,22 @@ impl PreviewCamera {
                 let ease = weight * weight * (3.0 - 2.0 * weight);
                 let default = Self::new(view);
                 self.distance = *distance + (default.distance - *distance) * ease;
-                self.rotation = rotation.slerp(default.rotation, ease);
-                self.focus = eye.lerp(default.pose().0, ease)
-                    - self.rotation * Vec3::Z * self.distance;
+                self.yaw = *yaw * (1.0 - ease);
+                self.pitch = *pitch + (-FRAC_PI_2 - *pitch) * ease;
+                let eye = eye.lerp(default.pose().0, ease);
+                self.focus = eye - self.rotation() * Vec3::Z * self.distance;
                 if weight >= 1.0 {
                     *self = default;
                 }
             }
             Mode::Free | Mode::Follow { .. } => {
                 let old_distance = self.distance;
-                self.rotation = (self.rotation
-                    * Quat::from_rotation_y(-input.orbit.x * 0.004)
-                    * Quat::from_rotation_x(input.orbit.y * 0.004)
-                    * Quat::from_rotation_y(-input.aim.x * 0.003)
-                    * Quat::from_rotation_x(-input.aim.y * 0.003))
-                .normalize();
+                self.yaw = (self.yaw - input.orbit.x * 0.004 - input.aim.x * 0.003
+                    + PI)
+                    .rem_euclid(TAU)
+                    - PI;
+                self.pitch = (self.pitch + input.orbit.y * 0.004 - input.aim.y * 0.003)
+                    .clamp(-FRAC_PI_2, FRAC_PI_2);
                 self.distance =
                     (self.distance * (-input.zoom * 0.12).exp()).clamp(1.0, 20_000.0);
                 if let Mode::Follow { key, .. } = &self.mode {
@@ -129,7 +137,8 @@ impl PreviewCamera {
                             self.focus.lerp(avatar.position, 1.0 - (-dt / 0.3).exp());
                     } else {
                         self.mode = Mode::Free;
-                        self.focus = old_eye - self.rotation * Vec3::Z * self.distance;
+                        self.focus =
+                            old_eye - self.rotation() * Vec3::Z * self.distance;
                     }
                 } else {
                     self.move_free(input, old_eye, old_distance, dt);
@@ -139,7 +148,7 @@ impl PreviewCamera {
     }
 
     fn move_free(&mut self, input: &Input, old_eye: Vec3, old_distance: f32, dt: f32) {
-        let back = self.rotation * Vec3::Z;
+        let back = self.rotation() * Vec3::Z;
         let orbit_eye = if input.first_person {
             old_eye
         } else {
@@ -152,27 +161,10 @@ impl PreviewCamera {
         };
         let eye = eye + back * (self.distance - old_distance);
         self.focus = eye.with_y(eye.y.max(EYE_FLOOR)) - back * self.distance;
-        let right = (self.rotation * Vec3::X).with_y(0.0).normalize_or(
-            (self.rotation * Vec3::NEG_Z)
-                .with_y(0.0)
-                .normalize_or(Vec3::X),
-        );
-        let forward = Vec3::Y.cross(right);
-        let (right, forward) = if input.first_person {
-            (self.rotation * Vec3::X, self.rotation * Vec3::NEG_Z)
-        } else {
-            (right, forward)
-        };
-        let up = if input.first_person {
-            self.rotation * Vec3::Y
-        } else {
-            Vec3::ZERO
-        };
-        self.focus += (right * input.pan.x + forward * input.pan.y + up * input.lift)
-            .clamp_length_max(1.0)
-            * self.distance
-            * 0.7
-            * dt.min(0.1);
+        let yaw = Quat::from_rotation_y(self.yaw);
+        let movement = yaw * Vec3::new(input.pan.x, input.lift, -input.pan.y);
+        self.focus +=
+            movement.clamp_length_max(1.0) * self.distance * 0.7 * dt.min(0.1);
         let eye = self.focus + back * self.distance;
         self.focus.y += (EYE_FLOOR - eye.y).max(0.0);
     }
@@ -200,7 +192,7 @@ impl PreviewCamera {
         let direction = if self.mode == Mode::Fit {
             model::view_direction()
         } else {
-            self.rotation * Vec3::Z
+            self.rotation() * Vec3::Z
         };
         let distance = if matches!(self.mode, Mode::Follow { .. }) && direction.y < 0.0
         {
@@ -214,7 +206,7 @@ impl PreviewCamera {
     }
 
     pub(super) fn rotation(&self) -> Quat {
-        self.rotation
+        Quat::from_rotation_y(self.yaw) * Quat::from_rotation_x(self.pitch)
     }
 
     pub(super) fn caption(&self) -> String {
@@ -245,14 +237,13 @@ mod tests {
     };
 
     #[test]
-    fn captured_lift_follows_pitched_and_rolled_up_at_wasd_speed() {
+    fn captured_lift_follows_world_y_at_wasd_speed() {
         let view = (Vec3::Y * 20.0, 10.0);
-        let rotation = Quat::from_rotation_x(std::f32::consts::FRAC_PI_4)
-            * Quat::from_rotation_z(std::f32::consts::FRAC_PI_4);
         for lift in [-1.0, 1.0] {
             let mut camera = PreviewCamera::new(view);
             camera.mode = Mode::Free;
-            camera.rotation = rotation;
+            camera.yaw = 0.7;
+            camera.pitch = -0.4;
             let eye = camera.pose().0;
             for step in [1.0, 2.0] {
                 camera.update(
@@ -266,10 +257,7 @@ mod tests {
                     0.1,
                 );
                 let displacement = camera.pose().0 - eye;
-                assert!(displacement.abs_diff_eq(
-                    Vec3::new(-0.5_f32.sqrt(), 0.5, 0.5) * lift * 0.7 * step,
-                    1e-5
-                ));
+                assert!(displacement.abs_diff_eq(Vec3::Y * lift * 0.7 * step, 1e-5));
             }
         }
     }
@@ -279,8 +267,8 @@ mod tests {
         let view = (Vec3::Y * EYE_FLOOR, 10.0);
         let mut camera = PreviewCamera::new(view);
         camera.mode = Mode::Free;
-        camera.rotation = Quat::from_rotation_x(std::f32::consts::FRAC_PI_4);
-        camera.focus = Vec3::Y * EYE_FLOOR - camera.rotation * Vec3::Z * 10.0;
+        camera.pitch = std::f32::consts::FRAC_PI_4;
+        camera.focus = Vec3::Y * EYE_FLOOR - camera.rotation() * Vec3::Z * 10.0;
         let eye = camera.pose().0;
         camera.update(
             &Input {
@@ -293,7 +281,7 @@ mod tests {
             0.1,
         );
         assert!((camera.pose().0.y - EYE_FLOOR).abs() < 1e-5);
-        assert!(camera.pose().0.z < eye.z - 0.4);
+        assert!(camera.pose().0.abs_diff_eq(eye, 1e-5));
         assert_eq!(
             camera.rotation(),
             Quat::from_rotation_x(std::f32::consts::FRAC_PI_4)
@@ -325,13 +313,14 @@ mod tests {
     }
 
     #[test]
-    fn captured_aim_turns_about_the_eye_without_pitch_limits_or_frame_scaling() {
+    fn captured_aim_turns_about_the_eye_without_frame_scaling() {
         let view = (Vec3::Y * 20.0, 10.0);
         for dt in [0.0, 0.01, 0.1] {
             let mut camera = PreviewCamera::new(view);
+            camera.mode = Mode::Free;
+            camera.pitch = 0.0;
             let eye = camera.pose().0;
-            let initial = camera.rotation();
-            let aim = Vec2::new(200.0, 1200.0);
+            let aim = Vec2::new(200.0, 200.0);
             camera.update(
                 &Input {
                     aim,
@@ -342,8 +331,7 @@ mod tests {
                 &[],
                 dt,
             );
-            let expected = initial
-                * Quat::from_rotation_y(-aim.x * 0.003)
+            let expected = Quat::from_rotation_y(-aim.x * 0.003)
                 * Quat::from_rotation_x(-aim.y * 0.003);
             assert!(camera.rotation().abs_diff_eq(expected, 1e-6));
             assert!(camera.pose().0.abs_diff_eq(eye, 1e-5));
@@ -352,7 +340,7 @@ mod tests {
     }
 
     #[test]
-    fn captured_movement_follows_the_new_aim_and_stops_at_the_floor() {
+    fn captured_movement_follows_new_yaw_and_stays_above_the_floor() {
         let view = (Vec3::Y * 20.0, 10.0);
         for pan in [Vec2::X, Vec2::Y, Vec2::ONE.normalize()] {
             let mut camera = PreviewCamera::new(view);
@@ -368,7 +356,8 @@ mod tests {
                 &[],
                 0.1,
             );
-            let expected = camera.rotation() * Vec3::new(pan.x, 0.0, -pan.y) * 0.7;
+            let expected =
+                Quat::from_rotation_y(camera.yaw) * Vec3::new(pan.x, 0.0, -pan.y) * 0.7;
             assert!(camera.pose().0.abs_diff_eq(eye + expected, 1e-5));
         }
         let mut camera = PreviewCamera::new((Vec3::ZERO, 2.0));
@@ -434,63 +423,38 @@ mod tests {
     }
 
     #[test]
-    fn pan_speed_is_independent_of_pitch_and_roll() {
+    fn horizontal_movement_uses_yaw_at_both_poles() {
         let view = (Vec3::Y * 20.0, 10.0);
-        for (pitch, roll) in [
-            (-90.0_f32, 0.0_f32),
-            (-90.0 - 0.004_f32.to_degrees(), 0.0),
-            (-90.0 + 0.004_f32.to_degrees(), 0.0),
-            (-45.0, 0.0),
-            (0.0, 0.0),
-            (-90.0, 180.0),
-            (-45.0, 180.0),
-            (0.0, 180.0),
-        ] {
-            for pan in [Vec2::X, Vec2::Y, Vec2::ONE.normalize()] {
-                let mut camera = PreviewCamera::new(view);
-                camera.mode = Mode::Free;
-                camera.rotation = Quat::from_rotation_y(0.7)
-                    * Quat::from_rotation_x(pitch.to_radians())
-                    * Quat::from_rotation_z(roll.to_radians());
-                let eye = camera.pose().0;
-                let rotation = camera.rotation();
-                let screen = |point: Vec3| {
-                    let local = rotation.conjugate() * (point - eye);
-                    Vec2::new(local.x, local.y) / -local.z
-                };
-                let ground = view.0.with_y(0.0);
-                camera.update(
-                    &Input {
-                        pan,
-                        ..Default::default()
-                    },
-                    view,
-                    &[],
-                    0.1,
-                );
-                let displacement = camera.focus - view.0;
-                assert!(displacement.y.abs() < 1e-5);
-                assert!(
-                    (displacement.length() - 0.7).abs() < 1e-5,
-                    "pitch {pitch}, roll {roll}, pan {pan:?}: {displacement:?}"
-                );
-                let projected = screen(ground + displacement) - screen(ground);
-                if pan == Vec2::X {
-                    assert!(
-                        projected.x > 0.0 && projected.y.abs() < 1e-5,
-                        "D reversed or skewed at pitch {pitch}, roll {roll}: {projected:?}"
+        for pitch in [-FRAC_PI_2, 0.0, FRAC_PI_2] {
+            for first_person in [false, true] {
+                for (yaw, pan, expected) in [
+                    (0.0, Vec2::X, Vec3::X),
+                    (0.0, Vec2::Y, Vec3::NEG_Z),
+                    (FRAC_PI_2, Vec2::X, Vec3::NEG_Z),
+                    (FRAC_PI_2, Vec2::Y, Vec3::NEG_X),
+                ] {
+                    let mut camera = PreviewCamera::new(view);
+                    camera.mode = Mode::Free;
+                    camera.yaw = yaw;
+                    camera.pitch = pitch;
+                    let eye = camera.pose().0;
+                    camera.update(
+                        &Input {
+                            pan,
+                            first_person,
+                            ..Default::default()
+                        },
+                        view,
+                        &[],
+                        0.1,
                     );
-                }
-                if pan == Vec2::Y {
-                    assert!(
-                        projected.y > 0.0 && projected.x.abs() < 1e-5,
-                        "W reversed or skewed at pitch {pitch}, roll {roll}: {projected:?}"
-                    );
+                    let displacement = camera.pose().0 - eye;
+                    assert!(displacement.abs_diff_eq(expected * 0.7, 1e-5));
+                    assert!(displacement.y.abs() < 1e-5);
                 }
             }
         }
     }
-
     #[test]
     fn floor_turns_about_the_eye_and_follow_releases_without_a_jump() {
         let view = (Vec3::ZERO, 60.0);
@@ -618,6 +582,10 @@ mod tests {
         let (eye, focus) = camera.pose();
         assert_eq!(focus, view.0);
         assert!((eye - focus).normalize().abs_diff_eq(Vec3::Y, 1e-6));
+        assert_eq!(camera.yaw, 0.0);
+        assert_eq!(camera.pitch, -FRAC_PI_2);
+        assert_eq!(camera.rotation(), Quat::from_rotation_x(-FRAC_PI_2));
+        assert!((camera.rotation() * Vec3::Y).abs_diff_eq(Vec3::NEG_Z, 1e-6));
     }
 
     #[test]
@@ -776,71 +744,134 @@ mod tests {
     }
 
     #[test]
-    fn orbit_has_no_lock_or_snap_through_poles_horizon_and_nadir() {
-        let view = (Vec3::ZERO, 60.0);
+    fn pitch_clamps_and_world_yaw_still_turns_at_both_poles_in_every_mode() {
+        let view = (Vec3::Y * 20.0, 10.0);
         let simulation = avatars();
-        for follow in [false, true] {
+        for (follow, captured) in
+            [(false, false), (false, true), (true, false), (true, true)]
+        {
             for direction in [-1.0, 1.0] {
                 let mut camera = PreviewCamera::new(view);
                 camera.update(
                     &Input {
                         cycle: follow,
-                        ..Input::default()
+                        ..Default::default()
                     },
                     view,
                     simulation.avatars(),
-                    0.1,
+                    1.0,
                 );
-                let mut previous = camera.rotation();
-                let expected = if follow {
-                    following(&simulation.avatars()[0])
-                } else {
-                    Mode::Free
+                let motion = Vec2::Y * direction * 10_000.0;
+                let mut input = Input {
+                    first_person: captured,
+                    ..Default::default()
                 };
-                let mut low = 1.0_f32;
-                let mut high = -1.0_f32;
-                for _ in 0..2000 {
+                if captured {
+                    input.aim = -motion;
+                } else {
+                    input.orbit = motion;
+                }
+                camera.update(&input, view, simulation.avatars(), 0.1);
+                assert_eq!(camera.pitch, direction * FRAC_PI_2);
+                camera.update(&input, view, simulation.avatars(), 0.1);
+                assert_eq!(camera.pitch, direction * FRAC_PI_2);
+                let before = camera.rotation();
+                input.aim = Vec2::ZERO;
+                input.orbit = Vec2::ZERO;
+                if captured {
+                    input.aim.x = 100.0;
+                } else {
+                    input.orbit.x = 100.0;
+                }
+                camera.update(&input, view, simulation.avatars(), 0.1);
+                assert!(before.angle_between(camera.rotation()) > 0.29);
+                assert_eq!(camera.pitch, direction * FRAC_PI_2);
+                assert!(
+                    (camera.rotation() * Vec3::NEG_Z)
+                        .abs_diff_eq(Vec3::Y * direction, 1e-6)
+                );
+                let right = camera.rotation() * Vec3::X;
+                assert!(right.abs_diff_eq(
+                    Vec3::new(camera.yaw.cos(), 0.0, -camera.yaw.sin()),
+                    1e-6
+                ));
+                assert_upright(&camera);
+                assert_eq!(matches!(camera.mode, Mode::Follow { .. }), follow);
+            }
+        }
+    }
+
+    fn assert_upright(camera: &PreviewCamera) {
+        let q = camera.rotation();
+        assert!((-FRAC_PI_2..=FRAC_PI_2).contains(&camera.pitch));
+        assert!((q * Vec3::X).y.abs() < 1e-6);
+        assert!((q * Vec3::Y).y >= -1e-6);
+        assert!((q.length() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn arbitrary_aim_orbit_and_reset_sequences_never_introduce_roll() {
+        let view = (Vec3::Y * 20.0, 10.0);
+        let simulation = avatars();
+        for follow in [false, true] {
+            let mut camera = PreviewCamera::new(view);
+            camera.update(
+                &Input {
+                    cycle: follow,
+                    ..Default::default()
+                },
+                view,
+                simulation.avatars(),
+                1.0,
+            );
+            for aim in [
+                Vec2::new(2000.0, -3000.0),
+                Vec2::new(-1200.0, 400.0),
+                Vec2::new(100.0, 5000.0),
+            ] {
+                for orbit in [Vec2::new(1800.0, 40.0), Vec2::new(-4000.0, -800.0)] {
                     camera.update(
                         &Input {
-                            orbit: Vec2::new(0.0, direction * 4.0),
-                            ..Input::default()
+                            aim,
+                            orbit,
+                            ..Default::default()
                         },
                         view,
                         simulation.avatars(),
                         0.1,
                     );
-                    let q = camera.rotation();
-                    let [right, up, back] = [Vec3::X, Vec3::Y, Vec3::Z].map(|v| q * v);
-                    assert!(q.is_finite());
-                    assert!((q.length() - 1.0).abs() < 1e-5);
-                    assert!(right.dot(up).abs() < 1e-5 && up.dot(back).abs() < 1e-5);
-                    assert!((right.cross(up) - back).length() < 1e-5);
-                    assert!(previous.angle_between(q) < 0.017);
-                    let (eye, focus) = camera.pose();
-                    assert!((eye - focus).normalize().abs_diff_eq(back, 1e-5));
-                    low = low.min(back.y);
-                    high = high.max(back.y);
-                    assert_eq!(camera.mode, expected);
-                    previous = q;
+                    assert_upright(&camera);
                 }
-                assert!(low < -0.999 && high > 0.999);
-                let before = camera.rotation();
+            }
+            let eye = camera.pose().0;
+            let rotation = camera.rotation();
+            camera.update(
+                &Input {
+                    reset: true,
+                    ..Default::default()
+                },
+                view,
+                simulation.avatars(),
+                0.0,
+            );
+            assert!(camera.pose().0.abs_diff_eq(eye, 1e-5));
+            assert_eq!(camera.rotation(), rotation);
+            for _ in 0..31 {
                 camera.update(
-                    &Input {
-                        orbit: Vec2::X * 20.0,
-                        ..Input::default()
-                    },
+                    &Input::default(),
                     view,
                     simulation.avatars(),
-                    0.1,
+                    1.0 / 60.0,
                 );
-                assert!(before.angle_between(camera.rotation()) > 0.07);
+                assert_upright(&camera);
             }
+            assert_eq!(camera.yaw, 0.0);
+            assert_eq!(camera.pitch, -FRAC_PI_2);
+            assert!((camera.rotation() * Vec3::Y).abs_diff_eq(Vec3::NEG_Z, 1e-6));
         }
     }
-
     #[test]
-    fn reset_from_floor_slerps_to_overhead_without_a_jump() {
+    fn reset_from_floor_eases_to_overhead_without_a_jump() {
         let view = (Vec3::ZERO, 60.0);
         let mut camera = PreviewCamera::new(view);
         camera.update(
@@ -863,7 +894,7 @@ mod tests {
             &[],
             0.0,
         );
-        assert!(before.angle_between(camera.rotation()) < 1e-5);
+        assert_eq!(before, camera.rotation());
         for _ in 0..31 {
             camera.update(&Input::default(), view, &[], 1.0 / 60.0);
             assert!(camera.pose().0.y >= EYE_FLOOR);
@@ -876,7 +907,7 @@ mod tests {
     fn pan_is_planar_and_relative_to_yaw_and_zoom_is_bounded() {
         let view = (Vec3::ZERO, 10.0);
         let mut camera = PreviewCamera::new(view);
-        camera.rotation = PreviewCamera::new(view).rotation;
+        camera.yaw = 0.0;
         camera.update(
             &Input {
                 pan: Vec2::Y,
@@ -887,9 +918,7 @@ mod tests {
             0.5,
         );
         assert!(camera.focus.abs_diff_eq(Vec3::new(0.0, 0.0, -0.7), 0.0001));
-        camera.rotation =
-            bevy::math::Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)
-                * PreviewCamera::new(view).rotation;
+        camera.yaw = FRAC_PI_2;
         camera.update(
             &Input {
                 pan: Vec2::X,
