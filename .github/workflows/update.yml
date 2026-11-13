@@ -23,6 +23,13 @@ jobs:
       - name: Update Rust dependencies
         run: cargo update
 
+      - uses: prefix-dev/setup-pixi@9936258fee697aff89b3fed6ca1f80a382ef694e  # v0.11.3
+        with:
+          run-install: false
+
+      - name: Refresh third-party notices
+        run: uv run --script scripts/licenses.py
+
       - name: Install prek
         run: uv tool install prek==0.5.7
 
@@ -58,9 +65,8 @@ jobs:
           body: |-
             Automated dependency and linter refresh:
             - Ran `cargo update`
+            - Regenerated `THIRDPARTY.txt`
             - Ran `prek autoupdate --cooldown-days 7`
-
-            — Codex
           branch: bot/update-deps-and-linters
           author: GitHub Actions <actions@github.com>
           delete-branch: true
