@@ -99,11 +99,10 @@ impl State {
         };
         let was_captured = self.captured;
         let exit = self.transition(&controls);
-        let left_held = world
-            .resource::<ButtonInput<MouseButton>>()
-            .pressed(MouseButton::Left);
-        self.suppress_left =
-            left_held && (self.suppress_left || (self.captured && !was_captured));
+        let mouse = world.resource::<ButtonInput<MouseButton>>();
+        self.suppress_left = mouse.pressed(MouseButton::Left)
+            && ((self.suppress_left && !mouse.just_released(MouseButton::Left))
+                || (self.captured && !was_captured));
         if let Some(mut options) = world.get_mut::<CursorOptions>(entity) {
             options.grab_mode = if self.captured {
                 CursorGrabMode::Locked

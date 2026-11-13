@@ -210,6 +210,48 @@ fn clicks_capture_only_inside_the_letterboxed_viewport() {
 }
 
 #[test]
+fn same_frame_release_and_repress_rearms_captured_lift() {
+    for (button, expected) in [(MouseButton::Left, 1.0), (MouseButton::Right, -1.0)] {
+        let (mut world, _) = fixture();
+        let mut state = State::default();
+        world
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(button);
+        world
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyC);
+        state.read(&mut world);
+        world.resource_mut::<ButtonInput<KeyCode>>().reset_all();
+        world.resource_mut::<ButtonInput<MouseButton>>().clear();
+        state.read(&mut world);
+        let mut mouse = world.resource_mut::<ButtonInput<MouseButton>>();
+        mouse.release(button);
+        mouse.press(button);
+        assert!(mouse.just_released(button));
+        assert!(mouse.pressed(button));
+        assert_eq!(state.read(&mut world).lift, expected);
+    }
+}
+
+#[test]
+fn release_and_repress_on_a_new_capture_still_suppresses_the_capture_click() {
+    let (mut world, _) = fixture();
+    let mut state = State::default();
+    let mut mouse = world.resource_mut::<ButtonInput<MouseButton>>();
+    mouse.press(MouseButton::Left);
+    mouse.release(MouseButton::Left);
+    mouse.press(MouseButton::Left);
+    world
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::KeyC);
+    assert_eq!(state.read(&mut world).lift, 0.0);
+    assert!(state.captured);
+    world.resource_mut::<ButtonInput<KeyCode>>().reset_all();
+    world.resource_mut::<ButtonInput<MouseButton>>().clear();
+    assert_eq!(state.read(&mut world).lift, 0.0);
+}
+
+#[test]
 fn captured_buttons_move_continuously_and_both_cancel() {
     let (mut world, _) = fixture();
     let mut state = State::default();
