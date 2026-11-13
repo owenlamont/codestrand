@@ -8,6 +8,8 @@ all affected files; diff fragments show additions and removals.
 
 ![Codestrand playing Git histories in seven themes: repositories appear, grow and are archived, contributors send beams to changed files, and the camera flies in behind an avatar](assets/montage.webp)
 
+Watch the [feature tour on YouTube](https://youtu.be/gmueXAHnvAE).
+
 Codestrand is a **layout study**, with seven steady themes, labels, contributor
 portraits and a mostly planar scene. Preview and export share a repeatable
 simulation, including playback of multiple repositories. Export writes PNG frames or
