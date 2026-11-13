@@ -11,7 +11,7 @@ hooks = [
   { id = "check-symlinks" },
   { id = "check-toml" },
   { id = "check-yaml" },
-  { id = "check-added-large-files" },
+  { id = "check-added-large-files", exclude = '^docs/assets/montage\.webp$' },
   { id = "no-commit-to-branch", args = ["--branch", "main"] },
   { id = "pretty-format-json", args = ["--autofix"] },
   { id = "mixed-line-ending", args = ["--fix=lf"] },

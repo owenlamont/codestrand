@@ -6,6 +6,8 @@ Watch a Git repository take shape over time. Files keep persistent positions whi
 contributors glide above the directory graph. Each commit connects a contributor to
 all affected files; diff fragments show additions and removals.
 
+![Codestrand playing Git histories in seven themes: repositories appear, grow and are archived, contributors send beams to changed files, and the camera flies in behind an avatar](assets/montage.webp)
+
 Codestrand is a **layout study**, with a steady neon theme, labels, contributor
 portraits and a mostly planar scene. Preview and PNG export share a deterministic
 simulation, including playback of multiple repositories. Built-in video encoding is
