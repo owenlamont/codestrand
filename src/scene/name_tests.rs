@@ -62,34 +62,85 @@ fn oblique_names_stay_tangent_to_the_projected_portrait() {
 
 #[test]
 fn contributor_fonts_shape_accents_and_non_latin_letters() {
-    assert_name_glyphs(["Fernando Pérez-García", "João Moreno", "Кириллица"]);
+    let (app, font) = font_app(Fonts::Bundled);
+    assert_name_glyphs(
+        app,
+        &font,
+        [
+            "Fernando Pérez-García",
+            "João Moreno",
+            "Ελληνικά",
+            "ε\u{301}",
+            "ῳ",
+            "Кириллица",
+        ],
+    );
 }
 
 #[test]
-#[ignore = "requires installed Greek, Devanagari and CJK fonts"]
 fn system_font_fallback_shapes_installed_scripts() {
-    assert_name_glyphs(["Ελληνικά", "अभिजीत बोडस", "中文"]);
+    let (mut app, font) = font_app(Fonts::System);
+    if cfg!(target_os = "linux") {
+        let mut cx = app.world_mut().resource_mut::<bevy::text::FontCx>();
+        let noto = cx.collection.family_id("Noto Sans Devanagari").is_some()
+            && cx.collection.family_id("Noto Sans CJK SC").is_some();
+        if !noto {
+            assert!(
+                std::env::var_os("CODESTRAND_REQUIRE_SYSTEM_FONTS").is_none(),
+                "install fonts-noto-core and fonts-noto-cjk"
+            );
+            eprintln!(
+                "system-script shaping skipped: Noto Devanagari/CJK fonts absent"
+            );
+            return;
+        }
+    }
+    assert_name_glyphs(app, &font, ["Ελληνικά", "अभिजीत बोडस", "中文"]);
 }
 
-fn assert_name_glyphs(texts: impl IntoIterator<Item = &'static str>) {
-    use bevy::text::*;
+#[derive(Clone, Copy, PartialEq)]
+enum Fonts {
+    Bundled,
+    System,
+}
+
+fn font_app(environment: Fonts) -> (App, TextFont) {
+    use bevy::text::{FontCx, TextPlugin};
     let mut app = App::new();
     app.add_plugins((
         MinimalPlugins,
         bevy::asset::AssetPlugin::default(),
         TextPlugin,
     ));
+    app.world_mut().resource_mut::<FontCx>().collection =
+        fontique::Collection::new(fontique::CollectionOptions {
+            system_fonts: environment == Fonts::System,
+            ..Default::default()
+        });
     let plex = app
         .world_mut()
         .resource_mut::<Assets<Font>>()
         .add(Font::from_bytes(
             include_bytes!("../../assets/fonts/IBMPlexMono-Regular.ttf").to_vec(),
         ));
+    let greek = app
+        .world_mut()
+        .resource_mut::<Assets<Font>>()
+        .add(Font::from_bytes(styling::GREEK_FONT.to_vec()));
     app.update();
     let font = TextFont {
-        font: styling::label_font(Handle::default(), plex),
+        font: styling::label_font(Handle::default(), plex, greek),
         ..TextFont::from_font_size(14.0)
     };
+    (app, font)
+}
+
+fn assert_name_glyphs(
+    mut app: App,
+    font: &TextFont,
+    texts: impl IntoIterator<Item = &'static str>,
+) {
+    use bevy::text::*;
     let world = app.world_mut();
     let fonts = world.remove_resource::<Assets<Font>>().unwrap();
     let mut cx = world.remove_resource::<FontCx>().unwrap();
@@ -103,7 +154,7 @@ fn assert_name_glyphs(texts: impl IntoIterator<Item = &'static str>) {
                     0,
                     TextElement::Text {
                         text,
-                        font: &font,
+                        font,
                         color: Color::WHITE,
                         line_height: LineHeight::default(),
                         letter_spacing: LetterSpacing::default(),
@@ -131,7 +182,7 @@ fn assert_name_glyphs(texts: impl IntoIterator<Item = &'static str>) {
                     .collect::<Vec<_>>()
             })
             .collect();
-        assert!(glyphs.len() >= 2);
+        assert_ne!(glyphs.len(), 0);
         assert!(
             glyphs.iter().all(|glyph| glyph.id != 0),
             "missing glyph in {text}"

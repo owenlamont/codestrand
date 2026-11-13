@@ -26,11 +26,13 @@ CLI playback uses the same six fixed columns for single repositories and synthet
 history. The synthetic repository column is named `Synthetic history`.
 
 Text falls back from the selected theme font to bundled IBM Plex Mono for accented
-and Cyrillic names, then to installed system fonts for other scripts. Install
+and Cyrillic names, a small bundled Greek subset, then to installed system fonts for
+other scripts. Latin, Greek and Cyrillic remain available without system fonts. Install
 fonts covering the required scripts on export machines; use the same fonts when
 comparing frames across machines.
 Linux system-font discovery also uses the optional Fontconfig runtime library;
 without Fontconfig, the bundled fonts remain available.
+macOS discovers installed fonts through CoreText and Library/Fonts directories.
 
 ## Controls
 

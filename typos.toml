@@ -6,3 +6,4 @@ PNGs = "PNGs"
 
 [default.extend-words]
 lod = "lod"
+wdth = "wdth"

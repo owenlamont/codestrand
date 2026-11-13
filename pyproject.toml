@@ -29,6 +29,7 @@ Repository = "https://github.com/owenlamont/codestrand"
 Issues = "https://github.com/owenlamont/codestrand/issues"
 
 [tool.maturin]
+include = [{ path = "vendor/**/*", format = "sdist" }]
 bindings = "bin"
 sdist = true
 

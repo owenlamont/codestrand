@@ -10,14 +10,14 @@ use std::{
 use anyhow::{Context, bail};
 use bevy::{
     app::PluginsState,
-    prelude::{App, Handle, Image, On, Text},
+    prelude::{App, Handle, Image, InheritedVisibility, On, Text},
     render::{
         RenderApp,
         render_resource::{PipelineCache, PollType},
         renderer::RenderDevice,
         view::screenshot::{Screenshot, ScreenshotCaptured},
     },
-    text::TextLayoutInfo,
+    text::{ComputedTextBlock, TextLayoutInfo},
 };
 
 use crate::{model::Simulation, scene};
@@ -59,7 +59,10 @@ fn render(
     camera_path: Option<&crate::camera_path::CameraPath>,
 ) -> anyhow::Result<()> {
     let mut manifest = BufWriter::new(File::create(directory.join("frames.csv"))?);
-    writeln!(manifest, "frame,seconds,commit,files,avatars,beams")?;
+    writeln!(
+        manifest,
+        "frame,seconds,commit,files,avatars,beams,glyphs,missing_glyphs"
+    )?;
     let started = Instant::now();
     while app.plugins_state() != PluginsState::Ready {
         if started.elapsed() > WAIT_LIMIT {
@@ -107,10 +110,11 @@ fn render(
                 .save(&path)
                 .with_context(|| format!("write frame {}", path.display()))?;
         }
+        let (glyphs, missing_glyphs) = glyph_coverage(&mut app);
         let playback = &app.world().resource::<scene::Playback>().0;
         writeln!(
             manifest,
-            "{index},{:.9},{},{},{},{}",
+            "{index},{:.9},{},{},{},{},{glyphs},{missing_glyphs}",
             playback.seconds(),
             playback.commit(),
             playback.layout().present_files(),
@@ -140,6 +144,21 @@ fn render(
         crate::terminal_escape(&directory.to_string_lossy())
     );
     Ok(())
+}
+
+fn glyph_coverage(app: &mut App) -> (usize, usize) {
+    let world = app.world_mut();
+    let mut query = world.query::<(&ComputedTextBlock, &InheritedVisibility)>();
+    let (mut total, mut missing) = (0, 0);
+    for (text, _) in query.iter(world).filter(|(_, visibility)| visibility.get()) {
+        for run in text.buffer().lines().flat_map(|line| line.runs()) {
+            for glyph in run.clusters().flat_map(|cluster| cluster.glyphs()) {
+                total += 1;
+                missing += usize::from(glyph.id == 0);
+            }
+        }
+    }
+    (total, missing)
 }
 
 fn ready(app: &mut App) -> bool {
