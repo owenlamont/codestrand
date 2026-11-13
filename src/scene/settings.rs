@@ -14,7 +14,9 @@ impl Plugin for PreviewSettingsPlugin {
             .add_systems(Startup, setup.after(super::setup))
             .add_systems(
                 Update,
-                (clicks, controls).chain().before(super::preview_camera),
+                (apply_windowed, clicks, controls)
+                    .chain()
+                    .before(super::preview_camera),
             );
     }
 }
@@ -23,16 +25,19 @@ impl Plugin for PreviewSettingsPlugin {
 struct Settings {
     open: bool,
     windowed: Option<(UVec2, WindowPosition)>,
+    pending_windowed: Option<(UVec2, WindowPosition)>,
 }
 
 impl Settings {
     fn toggle_fullscreen(&mut self, window: &mut Window) {
         if let Some((size, position)) = self.windowed.take() {
             window.mode = WindowMode::Windowed;
-            window.position = position;
-            window.resolution.set_physical_resolution(size.x, size.y);
+            window.set_maximized(false);
+            self.pending_windowed = Some((size, position));
         } else {
-            self.windowed = Some((window.resolution.physical_size(), window.position));
+            self.windowed = Some(self.pending_windowed.take().unwrap_or_else(|| {
+                (window.resolution.physical_size(), window.position)
+            }));
             window.mode = WindowMode::BorderlessFullscreen(MonitorSelection::Current);
         }
     }
@@ -42,8 +47,28 @@ impl Settings {
             self.toggle_fullscreen(window);
         }
         window.set_maximized(false);
-        window.resolution.set_physical_resolution(size.x, size.y);
+        let position = self
+            .pending_windowed
+            .map_or(window.position, |(_, position)| position);
+        self.pending_windowed = Some((size, position));
     }
+
+    fn apply_windowed(&mut self, window: &mut Window) {
+        if window.mode == WindowMode::Windowed
+            && let Some((size, position)) = self.pending_windowed.take()
+        {
+            window.position = position;
+            window.resolution.set_physical_resolution(size.x, size.y);
+        }
+    }
+}
+
+// Apply size after Winit restores placement on fullscreen exit or unmaximizing.
+fn apply_windowed(
+    mut settings: ResMut<Settings>,
+    mut window: Single<&mut Window, With<PrimaryWindow>>,
+) {
+    settings.apply_windowed(&mut window);
 }
 
 pub(super) fn captures_camera(world: &World) -> bool {
@@ -208,6 +233,7 @@ mod tests {
             window.position = WindowPosition::At(IVec2::ZERO);
             settings.toggle_fullscreen(&mut window);
             assert_eq!(window.mode, WindowMode::Windowed);
+            settings.apply_windowed(&mut window);
             assert_eq!(window.resolution.physical_size(), UVec2::new(1536, 864));
             assert_eq!(window.position, WindowPosition::At(IVec2::new(-1500, 120)));
         }
@@ -219,14 +245,80 @@ mod tests {
         window.resolution.set_scale_factor(2.0);
         let mut settings = Settings::default();
         settings.resize(&mut window, UVec2::new(1920, 1080));
+        settings.apply_windowed(&mut window);
         assert_eq!(window.resolution.physical_size(), UVec2::new(1920, 1080));
         settings.toggle_fullscreen(&mut window);
         settings.resize(&mut window, UVec2::new(2560, 1440));
         assert_eq!(window.mode, WindowMode::Windowed);
+        settings.apply_windowed(&mut window);
         assert_eq!(window.resolution.physical_size(), UVec2::new(2560, 1440));
         settings.toggle_fullscreen(&mut window);
         settings.toggle_fullscreen(&mut window);
+        settings.apply_windowed(&mut window);
         assert_eq!(window.resolution.physical_size(), UVec2::new(2560, 1440));
+    }
+
+    #[test]
+    fn windowed_preset_waits_until_after_unmaximizing() {
+        let mut window = Window::default();
+        let mut settings = Settings::default();
+        settings.resize(&mut window, UVec2::new(1920, 1080));
+        assert_eq!(window.resolution.physical_size(), UVec2::new(1280, 720));
+        window.resolution.set_physical_resolution(800, 600);
+        settings.apply_windowed(&mut window);
+        assert_eq!(window.resolution.physical_size(), UVec2::new(1920, 1080));
+        assert!(settings.pending_windowed.is_none());
+    }
+
+    #[test]
+    fn fullscreen_sized_preset_applies_on_the_update_after_windowed_restore() {
+        let saved_position = WindowPosition::At(IVec2::new(120, 80));
+        let mut window = Window {
+            position: saved_position,
+            ..default()
+        };
+        let mut settings = Settings {
+            open: true,
+            ..default()
+        };
+        settings.toggle_fullscreen(&mut window);
+        window.resolution.set_physical_resolution(1920, 1080);
+        window.position = WindowPosition::At(IVec2::ZERO);
+        let mut app = App::new();
+        app.insert_resource(settings)
+            .init_resource::<ButtonInput<MouseButton>>()
+            .add_systems(Update, (apply_windowed, clicks).chain());
+        let entity = app.world_mut().spawn((window, PrimaryWindow)).id();
+        app.world_mut().spawn((
+            Action::Resize(UVec2::new(1920, 1080)),
+            RelativeCursorPosition {
+                cursor_over: true,
+                normalized: Some(Vec2::ZERO),
+            },
+            BackgroundColor::default(),
+        ));
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Left);
+        app.update();
+        let mut window = app.world_mut().get_mut::<Window>(entity).unwrap();
+        assert_eq!(window.mode, WindowMode::Windowed);
+        assert_eq!(window.resolution.physical_size(), UVec2::new(1920, 1080));
+        window.resolution.set_physical_resolution(1280, 720);
+        window.position = saved_position;
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .reset_all();
+        app.update();
+        let window = app.world().get::<Window>(entity).unwrap();
+        assert_eq!(window.resolution.physical_size(), UVec2::new(1920, 1080));
+        assert_eq!(window.position, saved_position);
+        assert!(
+            app.world()
+                .resource::<Settings>()
+                .pending_windowed
+                .is_none()
+        );
     }
 
     #[test]
@@ -234,7 +326,7 @@ mod tests {
         let mut app = App::new();
         app.init_resource::<Settings>()
             .init_resource::<ButtonInput<MouseButton>>()
-            .add_systems(Update, clicks);
+            .add_systems(Update, (apply_windowed, clicks).chain());
         let window = app
             .world_mut()
             .spawn((Window::default(), PrimaryWindow))
@@ -256,6 +348,10 @@ mod tests {
             1280
         );
         app.world_mut().resource_mut::<Settings>().open = true;
+        app.update();
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .reset_all();
         app.update();
         assert_eq!(
             app.world()
