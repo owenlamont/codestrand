@@ -21,10 +21,12 @@ use bevy::{
     text::{ComputedTextBlock, TextLayoutInfo},
 };
 
-use crate::{model::Simulation, scene};
+use crate::{encoder::Encoder, model::Simulation, scene};
 
 const WAIT_LIMIT: Duration = Duration::from_secs(30);
 const MAX_PENDING_CAPTURES: usize = 4;
+
+mod png;
 
 pub(super) fn prepare(directory: &Path) -> anyhow::Result<()> {
     fs::create_dir(directory)
@@ -70,96 +72,115 @@ fn render(
         "frame,seconds,commit,files,avatars,beams,glyphs,missing_glyphs"
     )?;
     initialize(&mut app, &target)?;
+    let mut png = encoder.is_none().then(png::Writer::new).transpose()?;
     let started = Instant::now();
     let mut previous_camera = None;
     let mut captures = Captures::default();
-    for index in 0..frames {
-        let camera = (|| -> anyhow::Result<()> {
-            if let Some(path) = &camera_path {
-                let mut playback = app.world_mut().resource_mut::<scene::Playback>();
-                playback.0.advance_to(index, fps);
-                let pose = path.pose(&playback.0, index, fps)?;
-                if let Some(previous) = &previous_camera {
-                    path.validate_step(previous, &pose, index)?;
-                }
-                previous_camera = Some(pose);
-                app.world_mut().insert_resource(scene::ScriptedCamera(pose));
+    let rendered = (|| -> anyhow::Result<()> {
+        for index in 0..frames {
+            if let Err(error) = place_export_camera(
+                &mut app,
+                camera_path,
+                &mut previous_camera,
+                (index, fps),
+            ) {
+                captures.finish(
+                    index,
+                    || update(&mut app),
+                    |index, image| {
+                        write_frame(directory, &mut encoder, png.as_mut(), index, image)
+                    },
+                )?;
+                return Err(error);
             }
-            Ok(())
-        })();
-        if let Err(error) = camera {
-            captures.finish(
-                index,
-                || update(&mut app),
-                |index, image| write_frame(directory, &mut encoder, index, image),
-            )?;
-            manifest.flush()?;
-            if let Some(encoder) = &mut encoder {
-                encoder.finish()?;
-            }
-            return Err(error);
-        }
-        app.world_mut().resource_mut::<scene::Frame>().index = index;
-        // Bevy's retained transparent phases need a second update after material changes.
-        update(&mut app)?;
-        let sender = captures.request();
-        app.world_mut()
-            .spawn(Screenshot::image(target.clone()))
-            .observe(move |event: On<ScreenshotCaptured>| {
-                let _ = sender.send(event.image.clone());
-            });
-        update(&mut app)?;
-        captures.write_ready(|index, image| {
-            write_frame(directory, &mut encoder, index, image)
-        })?;
-        let (glyphs, missing_glyphs) = glyph_coverage(&mut app);
-        let playback = &app.world().resource::<scene::Playback>().0;
-        writeln!(
-            manifest,
-            "{index},{:.9},{},{},{},{},{glyphs},{missing_glyphs}",
-            playback.seconds(),
-            playback.commit(),
-            playback.layout().present_files(),
-            playback
-                .avatars()
-                .iter()
-                .filter(|avatar| avatar.presence > 0.0)
-                .count(),
-            playback.beams().len()
-        )?;
-        while captures.pending.len() >= MAX_PENDING_CAPTURES {
+            app.world_mut().resource_mut::<scene::Frame>().index = index;
+            // Bevy's retained transparent phases need a second update after material changes.
+            update(&mut app)?;
+            let sender = captures.request();
+            app.world_mut()
+                .spawn(Screenshot::image(target.clone()))
+                .observe(move |event: On<ScreenshotCaptured>| {
+                    let _ = sender.send(event.image.clone());
+                });
             update(&mut app)?;
             captures.write_ready(|index, image| {
-                write_frame(directory, &mut encoder, index, image)
+                write_frame(directory, &mut encoder, png.as_mut(), index, image)
             })?;
+            let (glyphs, missing_glyphs) = glyph_coverage(&mut app);
+            let playback = &app.world().resource::<scene::Playback>().0;
+            writeln!(
+                manifest,
+                "{index},{:.9},{},{},{},{},{glyphs},{missing_glyphs}",
+                playback.seconds(),
+                playback.commit(),
+                playback.layout().present_files(),
+                playback
+                    .avatars()
+                    .iter()
+                    .filter(|avatar| avatar.presence > 0.0)
+                    .count(),
+                playback.beams().len()
+            )?;
+            while captures.pending.len() >= MAX_PENDING_CAPTURES {
+                update(&mut app)?;
+                captures.write_ready(|index, image| {
+                    write_frame(directory, &mut encoder, png.as_mut(), index, image)
+                })?;
+            }
+            thread::sleep(Duration::from_millis(u64::from(delay_ms)));
+            if index % u32::from(fps) == 0 && index + 1 < frames {
+                eprintln!(
+                    "Exported {}/{} frames ({:.1}s elapsed)",
+                    index + 1,
+                    frames,
+                    started.elapsed().as_secs_f32()
+                );
+            }
         }
-        thread::sleep(Duration::from_millis(u64::from(delay_ms)));
-        if index % u32::from(fps) == 0 && index + 1 < frames {
-            eprintln!(
-                "Exported {}/{} frames ({:.1}s elapsed)",
-                index + 1,
-                frames,
-                started.elapsed().as_secs_f32()
-            );
-        }
+        captures.finish(
+            frames,
+            || update(&mut app),
+            |index, image| {
+                write_frame(directory, &mut encoder, png.as_mut(), index, image)
+            },
+        )?;
+        Ok(())
+    })();
+    let png_result = png.map_or(Ok(()), png::Writer::finish);
+    if let Err(error) = rendered {
+        manifest.flush()?;
+        encoder.as_mut().map_or(Ok(()), Encoder::finish)?;
+        return Err(error);
     }
-    captures.finish(
-        frames,
-        || update(&mut app),
-        |index, image| write_frame(directory, &mut encoder, index, image),
-    )?;
+    png_result?;
     eprintln!(
         "Exported {frames}/{frames} frames ({:.1}s elapsed)",
         started.elapsed().as_secs_f32()
     );
     manifest.flush()?;
-    if let Some(encoder) = &mut encoder {
-        encoder.finish()?;
-    }
+    encoder.as_mut().map_or(Ok(()), Encoder::finish)?;
     eprintln!(
         "Export complete: {}",
         crate::terminal_escape(&directory.to_string_lossy())
     );
+    Ok(())
+}
+
+fn place_export_camera(
+    app: &mut App,
+    path: Option<&crate::camera_path::CameraPath>,
+    previous: &mut Option<bevy::prelude::Transform>,
+    (index, fps): (u32, u16),
+) -> anyhow::Result<()> {
+    let Some(path) = path else { return Ok(()) };
+    let mut playback = app.world_mut().resource_mut::<scene::Playback>();
+    playback.0.advance_to(index, fps);
+    let pose = path.pose(&playback.0, index, fps)?;
+    if let Some(previous) = previous {
+        path.validate_step(previous, &pose, index)?;
+    }
+    *previous = Some(pose);
+    app.world_mut().insert_resource(scene::ScriptedCamera(pose));
     Ok(())
 }
 
@@ -191,21 +212,21 @@ fn initialize(app: &mut App, target: &Handle<Image>) -> anyhow::Result<()> {
 fn write_frame(
     directory: &Path,
     encoder: &mut Option<crate::encoder::Encoder>,
+    png: Option<&mut png::Writer>,
     index: u32,
     image: Image,
 ) -> anyhow::Result<()> {
+    if let Some(png) = png {
+        return png.write(directory.join(format!("frame-{index:05}.png")), image);
+    }
     let pixels = image
         .try_into_dynamic()
         .context("convert captured frame")?
         .to_rgb8();
-    if let Some(encoder) = encoder {
-        encoder.write(pixels.into_raw())?;
-    } else {
-        let path = directory.join(format!("frame-{index:05}.png"));
-        pixels
-            .save(&path)
-            .with_context(|| format!("write frame {}", path.display()))?;
-    }
+    encoder
+        .as_mut()
+        .expect("video encoder exists when the PNG worker is absent")
+        .write(pixels.into_raw())?;
     Ok(())
 }
 
