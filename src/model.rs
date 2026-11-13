@@ -51,6 +51,14 @@ const FRAGMENT_TARGETS: usize = 24;
 const SETTLE_TICKS: u32 = 1200;
 const DIR_LABELS: usize = 20;
 
+fn check_travel_pass(pass: u32) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        pass <= 32,
+        "avatar travel planning did not converge within 32 passes; shorten the history or reduce the playback times"
+    );
+    Ok(())
+}
+
 pub(super) struct Options {
     pub contributor_inactivity_days: u32,
     pub repository_ends: Vec<Option<i64>>,
@@ -469,10 +477,7 @@ impl Simulation {
         let mut compactions = 0;
         loop {
             pass += 1;
-            anyhow::ensure!(
-                pass <= 32,
-                "avatar travel planning did not converge within 32 passes; shorten the history or use capped travel"
-            );
+            check_travel_pass(pass)?;
             if pass > 1 || padding.iter().any(|&(_, ticks)| ticks > 0) {
                 let schedule = Schedule::with_padding(
                     &events[options.selected_range(events.len())],
@@ -1662,6 +1667,14 @@ fn prior_activity(events: &[Event], count: usize) -> Vec<bool> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn convergence_limit_does_not_recommend_an_already_capped_policy() {
+        assert!(super::check_travel_pass(32).is_ok());
+        let error = super::check_travel_pass(33).unwrap_err().to_string();
+        assert!(error.contains("32 passes"));
+        assert!(error.contains("shorten the history"));
+        assert!(!error.contains("use capped travel"));
+    }
     #[test]
     fn repository_size_taper_preserves_small_portraits_and_halves_at_thirty() {
         assert_eq!(super::repository_avatar_factor(1), 1.0);
