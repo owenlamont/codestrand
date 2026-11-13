@@ -583,11 +583,12 @@ mod tests {
         let mut sim = playback(vec![event, deletion], &options);
         at(&mut sim, 0.75);
         let (id, file) = sim.layout().files().next().unwrap();
-        assert!(sim.file_effect(file).0.y > 0.0);
+        assert!(sim.file_effect(id, file).0.y > 0.0);
         at(&mut sim, 1.5);
-        assert_eq!(sim.file_effect(sim.layout().file(id).unwrap()).0.y, 0.0);
+        assert_eq!(sim.file_effect(id, sim.layout().file(id).unwrap()).0.y, 0.0);
         at(&mut sim, 11.0);
-        let (position, grey, alpha) = sim.file_effect(sim.layout().file(id).unwrap());
+        let (position, grey, alpha) =
+            sim.file_effect(id, sim.layout().file(id).unwrap());
         assert_eq!(grey, 1.0);
         assert!(position.y > 0.0 && alpha > 0.0 && alpha < 1.0);
         at(&mut sim, 11.8);

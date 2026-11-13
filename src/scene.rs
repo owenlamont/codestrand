@@ -1293,7 +1293,7 @@ fn sync_files(
         });
         seen += 1;
         set_visible(world, entity, true);
-        let (position, grey, alpha) = simulation.file_effect(file);
+        let (position, grey, alpha) = simulation.file_effect(id, file);
         if let Some(mut transform) = world.get_mut::<Transform>(entity) {
             transform.set_if_neq(Transform::from_translation(position).with_scale(
                 Vec3::splat(file.draw_scale(layout.dir(file.dir)) * detail),

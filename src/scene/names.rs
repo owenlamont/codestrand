@@ -176,7 +176,7 @@ impl Names {
         for (id, file) in layout.files() {
             let dir = layout.dir(file.dir);
             let scale = file.draw_scale(dir);
-            let (point, _, opacity) = simulation.file_effect(file);
+            let (point, _, opacity) = simulation.file_effect(id, file);
             let center = point + glyph.translation * scale;
             let half = glyph.scale * scale * 0.5;
             if opacity <= 0.001 || broad.rejects(center, half.truncate().length()) {

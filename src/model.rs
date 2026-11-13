@@ -41,6 +41,7 @@ const PULSE_SECONDS: f32 = 1.3;
 const FRAGMENT_SPEED: f32 = 1.1;
 const FRAGMENT_FLIGHT: f32 = 1.0 / FRAGMENT_SPEED;
 const ADD_DELAY: f32 = 0.2;
+const AGGREGATED_ARRIVAL_FLIGHT: f32 = 0.8;
 const DELETE_DELAY: f32 = 0.0;
 const MIN_AVATAR_HEIGHT: f32 = 3.2;
 
@@ -156,6 +157,16 @@ struct Pulse {
 }
 
 impl Pulse {
+    fn directory_target(&self, mut dir: usize, layout: &Layout) -> Option<Target> {
+        loop {
+            let target = Target::Dir(dir);
+            if self.targets.iter().any(|&(drawn, ..)| drawn == target) {
+                return Some(target);
+            }
+            dir = layout.dir(dir).parent?;
+        }
+    }
+
     fn fragments(
         &self,
         age: f32,
@@ -751,20 +762,17 @@ impl Simulation {
         (u.min(0.2) * 5.0, 1.0 - u, u * self.scale() * 1.5)
     }
 
-    pub(super) fn file_effect(&self, file: &crate::layout::File) -> (Vec3, f32, f32) {
+    pub(super) fn file_effect(
+        &self,
+        id: u64,
+        file: &crate::layout::File,
+    ) -> (Vec3, f32, f32) {
         let dir = self.layout().dir(file.dir);
         let (grey, alpha, rise) = self.repository_effect(dir.repository);
-        let mut position = ground(file.position) + Vec3::Y * rise;
+        let position = ground(file.position) + Vec3::Y * rise;
         match file.state {
             crate::layout::Presence::Arriving => {
-                if let Some(avatar) = self.state.avatars.get(file.author) {
-                    position = self.theme.beam_style.point(
-                        avatar.position,
-                        position,
-                        file.presence,
-                    );
-                }
-                (position, grey, alpha)
+                (self.arrival_position(id, file, position), grey, alpha)
             }
             crate::layout::Presence::Leaving => (
                 position + Vec3::Y * (1.0 - file.presence) * self.scale(),
@@ -773,6 +781,37 @@ impl Simulation {
             ),
             crate::layout::Presence::Present => (position, grey, alpha),
         }
+    }
+
+    fn arrival_position(&self, id: u64, file: &crate::layout::File, to: Vec3) -> Vec3 {
+        let Some(avatar) = self.state.avatars.get(file.author) else {
+            return to;
+        };
+        let endpoint = self
+            .state
+            .pulses
+            .iter()
+            .rev()
+            .find(|pulse| {
+                pulse.author == file.author && pulse.touched.binary_search(&id).is_ok()
+            })
+            .filter(|pulse| pulse.aggregated)
+            .and_then(|pulse| pulse.directory_target(file.dir, self.layout()))
+            .and_then(|target| self.state.point(target));
+        let Some(endpoint) = endpoint else {
+            return self
+                .theme
+                .beam_style
+                .point(avatar.position, to, file.presence);
+        };
+        let flight = (file.presence / AGGREGATED_ARRIVAL_FLIGHT).min(1.0);
+        let settle = ((file.presence - AGGREGATED_ARRIVAL_FLIGHT)
+            / (1.0 - AGGREGATED_ARRIVAL_FLIGHT))
+            .max(0.0);
+        self.theme
+            .beam_style
+            .point(avatar.position, endpoint, flight)
+            .lerp(to, settle)
     }
 
     pub(super) fn restart(&mut self) {
@@ -1786,7 +1825,7 @@ mod tests {
             );
             for frame in [65, 70, 75] {
                 sim.advance_to(frame, 60);
-                let file = sim.layout().files().next().unwrap().1;
+                let (id, file) = sim.layout().files().next().unwrap();
                 assert_eq!(file.state, crate::layout::Presence::Arriving);
                 assert!(file.presence > 0.0 && file.presence < 1.0);
                 let from = sim.avatars()[file.author].position;
@@ -1797,9 +1836,91 @@ mod tests {
                     expected.y += t * (1.0 - t) * from.distance(to);
                 }
                 assert!(
-                    sim.file_effect(file).0.distance(expected) < 0.0001,
+                    sim.file_effect(id, file).0.distance(expected) < 0.0001,
                     "{} at {frame}",
                     name.title()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn arriving_files_follow_aggregated_beams_before_settling() {
+        for (count, nested, frame) in
+            [(24, false), (25, false), (25, true)].into_iter().flat_map(
+                |(count, nested)| [60, 70].map(move |frame| (count, nested, frame)),
+            )
+        {
+            let mut events = crate::timeline::synthetic();
+            events.truncate(1);
+            events[0].changes = (0..count)
+                .map(|i| crate::timeline::FileChange {
+                    path: if nested {
+                        format!("src/dir{i}/file.rs")
+                    } else {
+                        format!("src/file{i}.rs")
+                    },
+                    insertions: 1,
+                    removals: 1,
+                    ..Default::default()
+                })
+                .collect();
+            let theme = crate::theme::ThemeName::Outrun.build();
+            let mut sim = super::Simulation::new(
+                events,
+                &super::Options::default(),
+                &theme,
+                &crate::contributors::Mappings::default(),
+            );
+            sim.advance_to(frame, 60);
+            let aggregated = count > super::BEAM_LIMIT;
+            let beams = sim.beams();
+            assert_eq!(beams.len(), if aggregated { 1 } else { count });
+            for (id, file) in sim.layout().files() {
+                assert_eq!(file.state, crate::layout::Presence::Arriving);
+                let endpoint = if aggregated {
+                    beams[0].to
+                } else {
+                    super::ground(file.position)
+                };
+                let flight = if aggregated { 0.8 } else { 1.0 };
+                let expected = theme.beam_style.point(
+                    sim.avatars()[file.author].position,
+                    endpoint,
+                    file.presence / flight,
+                );
+                assert!(
+                    sim.file_effect(id, file).0.distance(expected) < 0.0001,
+                    "{count} files, nested={nested}, frame={frame}, file={id}"
+                );
+                let mut settled = file.clone();
+                settled.presence = 1.0;
+                assert_eq!(
+                    sim.file_effect(id, &settled).0,
+                    super::ground(file.position)
+                );
+                if aggregated {
+                    settled.presence = 0.8;
+                    assert!(
+                        sim.file_effect(id, &settled).0.distance(endpoint) < 0.0001
+                    );
+                    settled.presence = 0.9;
+                    assert!(
+                        sim.file_effect(id, &settled)
+                            .0
+                            .distance(endpoint.lerp(super::ground(file.position), 0.5))
+                            < 0.0001
+                    );
+                }
+            }
+            let pulse = &sim.state.pulses[0];
+            for fragment in sim.fragments() {
+                let (_, target) = fragment.beam.unwrap();
+                assert!(pulse.targets.iter().any(|&(drawn, ..)| drawn == target));
+                assert!(
+                    beams
+                        .iter()
+                        .any(|beam| beam.to == sim.state.point(target).unwrap())
                 );
             }
         }
