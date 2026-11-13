@@ -75,5 +75,7 @@ uv run --script scripts/readme_montage.py target/release/codestrand /path/to/clo
 cp /path/to/new-output/montage.webp docs/assets/montage.webp
 ```
 
-Shots, themes, pacing and trims are in `scripts/readme_montage.py`; camera paths are in
-`scripts/readme_montage/`. Inspect the exported frames before replacing the image.
+Shots, themes, pacing and trims are in `scripts/readme_montage.py`; camera paths and
+the contributor manifest are in `scripts/readme_montage/`. Portraits are fetched live
+from GitHub and are not committed, so faces can differ between runs. Inspect the
+exported frames before replacing the image.

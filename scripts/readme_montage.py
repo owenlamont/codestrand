@@ -1,15 +1,17 @@
 # /// script
 # requires-python = ">=3.15"
-# dependencies = ["typer>=0.26.7"]
+# dependencies = ["tomli-w>=1.2", "typer>=0.26.7"]
 # ///
 
 import shutil
 import subprocess
+import tomllib
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Final
 
+import tomli_w
 import typer
 
 _CAMERAS: Final = Path(__file__).parent / "readme_montage"
@@ -157,12 +159,17 @@ def _verify_pins(*, git: str, repositories: Path) -> None:
 
 
 def _manifest(*, path: Path, repositories: Path, names: Sequence[str]) -> Path:
-    entries = [
-        f"[[repositories]]\npath = '{repositories / name}'\n"
-        + ("archived = true\n" if name == "uv-secure" else "")
-        for name in names
-    ]
-    path.write_text("".join(entries), encoding="utf-8")
+    document = {
+        "repositories": [
+            {"path": str(repositories / name)}
+            | ({"archived": True} if name == "uv-secure" else {})
+            for name in names
+        ]
+    }
+    text = tomli_w.dumps(document)
+    if tomllib.loads(text) != document:
+        raise typer.BadParameter(f"Repository paths under {repositories} are not TOML")
+    path.write_text(text, encoding="utf-8")
     return path
 
 
@@ -194,9 +201,6 @@ def main(
     output: Annotated[
         Path, typer.Argument(help="New output directory; must not exist.")
     ],
-    contributors: Annotated[
-        Path | None, typer.Option(help="Contributor TOML passed to every export.")
-    ] = None,
     fetch_avatars: Annotated[
         bool, typer.Option(help="Fetch portraits before each export.")
     ] = False,
@@ -205,8 +209,9 @@ def main(
 
     REPOSITORIES holds complete clones named after each pin in this script, checked
     out at that commit: owenlamont/{uv-secure,ryl,aiomoto,pyglobegl,codestrand},
-    astral-sh/{ruff,uv,ty} and microsoft/vscode. Portraits come from the avatar cache
-    unless --fetch-avatars is passed. Frames stay in OUTPUT for inspection.
+    astral-sh/{ruff,uv,ty} and microsoft/vscode. Every export uses the contributor
+    manifest beside the camera paths. Portraits come from the avatar cache unless
+    --fetch-avatars is passed. Frames stay in OUTPUT for inspection.
     """
     binary = binary.resolve(strict=True)
     repositories = repositories.resolve(strict=True)
@@ -237,9 +242,9 @@ def main(
             for name in ("codestrand", "ryl", "vscode")
         },
     }
-    shared: list[str | Path] = ["--fetch-avatars"] if fetch_avatars else []
-    if contributors is not None:
-        shared += ["--contributors", contributors.resolve(strict=True)]
+    shared: list[str | Path] = ["--contributors", _CAMERAS / "contributors.toml"]
+    if fetch_avatars:
+        shared.append("--fetch-avatars")
     inputs: list[str | Path] = []
     for shot in _SHOTS:
         frames = output / shot.name
