@@ -358,6 +358,7 @@ pub(super) struct Simulation {
     envelopes: Vec<slots::Envelope>,
     pub repository_boundary: crate::repositories::Boundary,
     pub(super) collapse_directories: bool,
+    pub(super) diff_text_distance: f32,
     pub repository_label_plane: crate::repositories::LabelPlane,
     events: Vec<Event>,
     offset: usize,
@@ -599,18 +600,7 @@ impl Simulation {
             slot_records: BTreeMap::new(),
             titles: BTreeMap::new(),
         };
-        for event in &events[..start] {
-            let author = state.author(
-                event
-                    .contributor
-                    .as_ref()
-                    .expect("contributors are resolved"),
-                0.0,
-            );
-            for change in &event.changes {
-                apply(&mut state.layout, change, author);
-            }
-        }
+        state.apply_history(&events[..start]);
         if start > 0 {
             state.layout.plan_time(
                 layout_starts.starts[start.min(layout_starts.starts.len() - 1)]
@@ -642,6 +632,7 @@ impl Simulation {
             envelopes: Vec::new(),
             repository_boundary: crate::repositories::Boundary::default(),
             collapse_directories: true,
+            diff_text_distance: 1.0,
             repository_label_plane: crate::repositories::LabelPlane::default(),
             events,
             offset: start,
@@ -1326,6 +1317,21 @@ impl Simulation {
 }
 
 impl State {
+    fn apply_history(&mut self, events: &[Event]) {
+        for event in events {
+            let author = self.author(
+                event
+                    .contributor
+                    .as_ref()
+                    .expect("contributors are resolved"),
+                0.0,
+            );
+            for change in &event.changes {
+                apply(&mut self.layout, change, author);
+            }
+        }
+    }
+
     fn avatar_radius(&self) -> f32 {
         6.5 * self.avatar_scale * self.avatar_size * ARRIVAL_SCALE + 1.0
     }

@@ -2356,8 +2356,10 @@ fn diff_samples(world: &mut World, camera: &Camera, transform: &GlobalTransform)
                 line.position + transform.up() * (0.07 * line.scale),
             )?;
             let projected = point.distance(top);
-            let visibility =
-                crate::diff_samples::sample_visibility(projected) * line.detail;
+            let visibility = crate::diff_samples::sample_visibility(
+                projected,
+                playback.diff_text_distance,
+            ) * line.detail;
             if visibility == 0.0 {
                 return None;
             }
@@ -2927,6 +2929,30 @@ mod tests {
 
     #[test]
     fn samples_replace_prisms_and_restore_them_when_zooming_out() {
+        check_sample_crossfade(
+            1.0,
+            &[
+                (4.0, 1.0, 0.0),
+                (10.0, 1.0, 0.5),
+                (16.0, 1.0, 1.0),
+                (10.0, 1.0, 0.5),
+                (4.0, 1.0, 0.0),
+            ],
+        );
+        check_sample_crossfade(
+            4.0,
+            &[
+                (2.5, 1.0, 0.5),
+                (4.0, 1.0, 1.0),
+                (4.0, 0.5, 0.5),
+                (4.0, 0.0, 0.0),
+                (4.0, 1.0, 1.0),
+                (1.0, 1.0, 0.0),
+            ],
+        );
+    }
+
+    fn check_sample_crossfade(distance: f32, cases: &[(f32, f32, f32)]) {
         let mut events = crate::timeline::synthetic();
         events.truncate(1);
         events[0].changes.truncate(1);
@@ -2943,6 +2969,7 @@ mod tests {
             &crate::contributors::Mappings::default(),
         );
         simulation.advance_to(45, 60);
+        simulation.diff_text_distance = distance;
         let line = simulation.diff_lines().pop().unwrap();
         let mut world = World::new();
         world.init_resource::<Assets<Mesh>>();
@@ -2961,16 +2988,10 @@ mod tests {
             ))
             .id();
         world.insert_resource(Playback(simulation));
-        for (pixels, opacity) in [
-            (4.0, 0.0),
-            (10.0, 0.5),
-            (16.0, 1.0),
-            (10.0, 0.5),
-            (4.0, 0.0),
-        ] {
+        for &(pixels, detail, opacity) in cases {
             let mut pools = world.remove_resource::<Pools>().unwrap_or_default();
             pools.lod.detail =
-                vec![1.0; world.resource::<Playback>().0.layout().dir_count()];
+                vec![detail; world.resource::<Playback>().0.layout().dir_count()];
             world.resource_scope(|world, playback: Mut<Playback>| {
                 sync_activity(world, &palette, &mut pools, &playback.0);
             });

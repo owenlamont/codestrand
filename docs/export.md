@@ -48,6 +48,17 @@ options as preview. By default, the camera uses the fit-to-scene view. Explicit 
 times keep export independent of rendering speed. Each capture is confirmed
 written before export completes. Export needs a working graphics adapter.
 
+For readable diff snippets in wider shots, use `--diff-text-distance 4` with either
+the fitted camera or `--camera-path`. The default `1` preserves the 6–14 projected
+beam-pixel reveal; `4` moves the fade to 1.5–3.5 pixels without shrinking the
+14–20 logical-pixel text. The accepted range is `0.1`–`100`. The existing twelve-sample
+limit and collapsed-directory hiding still apply; snippets may overlap.
+
+```sh
+codestrand export wide-diff --repository /path/to/repository \
+  --diff-text-distance 4 --frames 60 --fps 30
+```
+
 Bit-identical frames require the same build, graphics adapter, backend and driver,
 repository history, options and portrait assets. Use cached or local portraits
 offline: leave `--fetch-avatars` off and keep the avatar cache unchanged between
