@@ -42,6 +42,8 @@ macOS discovers installed fonts through CoreText and Library/Fonts directories.
 | Input | Action |
 | --- | --- |
 | Escape | Close preview |
+| F10 | Open or close display settings; camera controls pause while open |
+| F11 | Toggle borderless fullscreen on the current monitor |
 | `[` | Halve live speed, down to 0.125x |
 | `]` | Double live speed, up to 8x |
 | `,` / `.` | Previous or next theme |
@@ -54,6 +56,12 @@ macOS discovers installed fonts through CoreText and Library/Fonts directories.
 The caption shows the live multiplier, theme, camera mode and follow target. Following
 returns to free camera when the target fades out. Preview controls do not change
 the exported camera or timeline.
+
+Display settings offer 1280×720, 1920×1080, 2560×1440 and 3840×2160 window sizes
+in physical pixels. Choosing a size exits fullscreen. F11 restores the previous
+windowed size and position. Fullscreen renders at the monitor's native resolution;
+windowed rendering follows the actual window size if the desktop constrains a preset.
+Playback continues while settings are open, with the same height-scaled UI.
 
 The default camera looks straight down at the centre of the repository tile area.
 Repository tiles are rectangles in world coordinates. Preview rotation has no pitch

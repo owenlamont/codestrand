@@ -40,6 +40,7 @@ mod lod;
 mod name_tests;
 mod names;
 mod ordering;
+mod settings;
 mod styling;
 
 #[derive(Resource)]
@@ -480,6 +481,7 @@ pub(super) fn preview(simulation: Simulation, title: String) {
             index: 0,
             fps: model::PREVIEW_FPS,
         })
+        .add_plugins(settings::PreviewSettingsPlugin)
         .add_systems(Update, preview_clock.before(animate))
         .add_systems(Update, preview_camera.after(animate));
     app.run();
@@ -1047,8 +1049,16 @@ pub(super) fn switch_theme(world: &mut World, name: crate::theme::ThemeName) {
     if world.contains_resource::<styling::Styles>() {
         styling::apply(world, &theme);
     }
+    recolor_text(world, &theme);
+}
+
+fn recolor_text(world: &mut World, theme: &Theme) {
     for mut color in world
-        .query_filtered::<&mut TextColor, (Without<Label>, Without<DiffSample>)>()
+        .query_filtered::<&mut TextColor, (
+            Without<Label>,
+            Without<DiffSample>,
+            Without<settings::SettingsText>,
+        )>()
         .iter_mut(world)
     {
         color.0 = theme.heading;
@@ -1101,7 +1111,9 @@ fn preview_camera(world: &mut World, mut drag_from: Local<Option<Vec2>>) {
         .map(Window::cursor_position);
     let previous = drag_from.take();
     let mut input = Input::default();
-    if let Some(cursor) = cursor {
+    if let Some(cursor) = cursor
+        && !settings::captures_camera(world)
+    {
         let keys = world.resource::<ButtonInput<KeyCode>>();
         let axis = |positive, negative| {
             f32::from(u8::from(keys.pressed(positive)))
