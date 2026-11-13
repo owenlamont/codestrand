@@ -722,7 +722,11 @@ impl State {
                 .zip(&assignment.choices)
                 .map(|(domain, &choice)| domain[choice].rect)
                 .collect();
+            let mut shortened = false;
             for (node, &index) in authors.iter().enumerate() {
+                if displayed[index].chars().count() <= limit {
+                    continue;
+                }
                 let candidate = domains[node][assignment.choices[node]];
                 if candidate.text_pairs > 0
                     || super::caption::outside(candidate.rect, 0.5) > 0.001
@@ -731,7 +735,11 @@ impl State {
                     })
                 {
                     displayed[index] = super::names::elide(&displayed[index], limit);
+                    shortened = true;
                 }
+            }
+            if !shortened {
+                continue;
             }
             (authors, domains) =
                 self.label_domains(&bodies, travel, dt, texts, &displayed);
