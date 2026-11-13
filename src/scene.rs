@@ -529,11 +529,18 @@ struct ExportResolution(crate::resolution::Resolution);
 fn scale_ui(
     windows: Query<&Window>,
     export: Option<Res<ExportResolution>>,
+    settings: Option<Res<settings::Settings>>,
     mut scale: ResMut<UiScale>,
 ) {
+    let settings = settings.map(Res::into_inner);
     let height = windows.iter().next().map_or_else(
         || export.map_or(720.0, |size| f32::from(size.0.height)),
-        Window::height,
+        |window| {
+            settings.map_or_else(
+                || window.height(),
+                |settings| settings.logical_height(window),
+            )
+        },
     );
     let next = crate::resolution::ui_scale(height);
     if scale.0.to_bits() != next.to_bits() {
@@ -552,6 +559,18 @@ fn reference_viewport(camera: &Camera) -> Vec2 {
         .logical_viewport_size()
         .unwrap_or(model::framing::VIEWPORT)
         / camera_ui_scale(camera)
+}
+
+fn project_point(
+    camera: &Camera,
+    transform: &GlobalTransform,
+    point: Vec3,
+) -> Option<Vec2> {
+    let origin = camera.logical_viewport_rect()?.min;
+    Some(
+        (camera.world_to_viewport(transform, point).ok()? - origin)
+            / camera_ui_scale(camera),
+    )
 }
 
 #[cfg(test)]
@@ -2261,8 +2280,7 @@ fn labels(world: &mut World) {
                 )
             } else {
                 (
-                    camera.world_to_viewport(&transform, label.position).ok()?
-                        / camera_ui_scale(&camera),
+                    project_point(&camera, &transform, label.position)?,
                     label.position,
                 )
             };
@@ -2298,18 +2316,18 @@ fn project_avatar_name(
     avatar: &model::Avatar,
     label: &model::Label,
 ) -> Option<Vec2> {
-    let body = camera.world_to_viewport(transform, avatar.position).ok()?
-        / camera_ui_scale(camera);
+    let body = project_point(camera, transform, avatar.position)?;
     let radius = simulation.theme().avatar_radius
         * avatar.presence
         * simulation.scale()
         * simulation.avatar_disc_scale()
         * avatar.projection_scale
         * avatar.lifecycle_scale.max(0.001);
-    let edge = camera
-        .world_to_viewport(transform, avatar.position + transform.right() * radius)
-        .ok()?
-        / camera_ui_scale(camera);
+    let edge = project_point(
+        camera,
+        transform,
+        avatar.position + transform.right() * radius,
+    )?;
     let size = model::label_rect(
         Vec2::ZERO,
         &label.text,
@@ -2331,15 +2349,12 @@ fn diff_samples(world: &mut World, camera: &Camera, transform: &GlobalTransform)
         .diff_lines_for_detail(|dir| world.resource::<Pools>().lod.detail[dir])
         .into_iter()
         .filter_map(|line| {
-            let point = camera.world_to_viewport(transform, line.position).ok()?
-                / camera_ui_scale(camera);
-            let top = camera
-                .world_to_viewport(
-                    transform,
-                    line.position + transform.up() * (0.07 * line.scale),
-                )
-                .ok()?
-                / camera_ui_scale(camera);
+            let point = project_point(camera, transform, line.position)?;
+            let top = project_point(
+                camera,
+                transform,
+                line.position + transform.up() * (0.07 * line.scale),
+            )?;
             let projected = point.distance(top);
             let visibility =
                 crate::diff_samples::sample_visibility(projected) * line.detail;
