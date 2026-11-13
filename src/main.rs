@@ -178,6 +178,9 @@ struct Source {
     /// Hide changed source lines in preview and exported frames.
     #[arg(long)]
     no_diff_samples: bool,
+    /// Diff text reveal distance multiplier (0.1–100); larger reveals farther away.
+    #[arg(long, default_value_t = 1.0, value_parser = diff_text_distance)]
+    diff_text_distance: f32,
     /// Collapse small directory subtrees into file-sized folder icons (on|off).
     #[arg(long, action = clap::ArgAction::Set, default_value = "on", value_parser = directory_collapsing)]
     collapse_directories: bool,
@@ -352,6 +355,7 @@ impl Source {
         let mut simulation = Self::playback(events, &options, &mappings, &names)?;
         simulation.repository_boundary = self.repository_boundary;
         simulation.collapse_directories = self.collapse_directories;
+        simulation.diff_text_distance = self.diff_text_distance;
         simulation.caption_style = self.caption_style;
         simulation.repository_label_plane = self.repository_label_plane;
         Ok((simulation, title))
@@ -515,6 +519,14 @@ fn avatar_size(value: &str) -> Result<f32, String> {
         .ok_or_else(|| "avatar scale must be between 0.5 and 2".to_owned())
 }
 
+fn diff_text_distance(value: &str) -> Result<f32, String> {
+    value
+        .parse::<f32>()
+        .ok()
+        .filter(|distance| (0.1..=100.0).contains(distance))
+        .ok_or_else(|| "diff text distance must be between 0.1 and 100".to_owned())
+}
+
 fn main() -> std::process::ExitCode {
     match run() {
         Ok(()) => std::process::ExitCode::SUCCESS,
@@ -636,6 +648,37 @@ fn gutter_pixels(value: &str) -> Result<f32, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn diff_text_distance_is_shared_by_preview_and_export() {
+        for command in [vec!["preview"], vec!["export", "frames"]] {
+            for value in ["0", "-1", "0.09", "101", "NaN", "inf", "bad"] {
+                let args = [
+                    vec!["codestrand"],
+                    command.clone(),
+                    vec!["--diff-text-distance", value],
+                ]
+                .concat();
+                assert!(Cli::try_parse_from(args).is_err());
+            }
+            for (flags, expected) in [
+                (vec![], 1.0),
+                (vec!["--diff-text-distance", "4"], 4.0),
+                (vec!["--diff-text-distance", "0.1"], 0.1),
+                (vec!["--diff-text-distance", "100"], 100.0),
+            ] {
+                let args = [vec!["codestrand"], command.clone(), flags].concat();
+                let cli = Cli::try_parse_from(args).unwrap();
+                let (Command::Preview { source, .. } | Command::Export { source, .. }) =
+                    cli.command.unwrap()
+                else {
+                    panic!("playback command")
+                };
+                let (simulation, _) = source.load().unwrap();
+                assert_eq!(simulation.diff_text_distance, expected);
+            }
+        }
+    }
+
     #[test]
     fn gutter_accepts_zero_and_rejects_nonfinite_or_out_of_range_values() {
         for value in ["0", "4", "20"] {

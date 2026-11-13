@@ -90,8 +90,8 @@ fn sensitive_line(text: &str) -> bool {
         || (text.contains('@') && text.contains('.'))
 }
 
-pub(super) fn sample_visibility(on_screen_px: f32) -> f32 {
-    let weight = ((on_screen_px - 6.0) / 8.0).clamp(0.0, 1.0);
+pub(super) fn sample_visibility(on_screen_px: f32, distance: f32) -> f32 {
+    let weight = ((on_screen_px * distance - 6.0) / 8.0).clamp(0.0, 1.0);
     weight * weight * (3.0 - 2.0 * weight)
 }
 
@@ -127,15 +127,30 @@ mod tests {
     #[test]
     fn visibility_hides_overview_and_smoothly_reveals_detail() {
         for size in [0.0, 1.0, 4.0, 5.9, 6.0] {
-            assert_eq!(sample_visibility(size), 0.0);
+            assert_eq!(sample_visibility(size, 1.0), 0.0);
         }
-        assert_eq!(sample_visibility(10.0), 0.5);
-        assert_eq!(sample_visibility(14.0), 1.0);
-        assert_eq!(sample_visibility(48.0), 1.0);
+        assert_eq!(sample_visibility(10.0, 1.0), 0.5);
+        assert_eq!(sample_visibility(14.0, 1.0), 1.0);
+        assert_eq!(sample_visibility(48.0, 1.0), 1.0);
         let values: Vec<_> = (0_u16..=480)
-            .map(|i| sample_visibility(f32::from(i) / 10.0))
+            .map(|i| sample_visibility(f32::from(i) / 10.0, 1.0))
             .collect();
         assert!(values.windows(2).all(|pair| pair[0] <= pair[1]));
+    }
+
+    #[test]
+    fn distance_scales_the_whole_reveal_without_changing_the_curve() {
+        for distance in [0.1, 0.5, 2.0, 4.0, 100.0] {
+            assert_eq!(sample_visibility(6.0 / distance, distance), 0.0);
+            assert_eq!(sample_visibility(10.0 / distance, distance), 0.5);
+            assert_eq!(sample_visibility(14.0 / distance, distance), 1.0);
+            let values: Vec<_> = (0_u16..=480)
+                .map(|i| sample_visibility(f32::from(i) / 10.0, distance))
+                .collect();
+            assert!(values.windows(2).all(|pair| pair[0] <= pair[1]));
+        }
+        assert_eq!(sample_visibility(4.0, 1.0), 0.0);
+        assert_eq!(sample_visibility(4.0, 4.0), 1.0);
     }
 
     #[test]

@@ -410,7 +410,11 @@ Theme switching restyles active snippets without restarting their motion or fade
 
 Snippet text keeps the font's natural proportions with equal X and Y scaling.
 Lines are cut at 88 characters. Samples smoothly appear between 6 and 14 projected
-beam-diameter pixels. Visible text stays between 14 and 20 logical pixels high, making
+beam-diameter pixels by default. `--diff-text-distance 4` reveals samples at four times
+the camera range: the same fade spans 1.5–3.5 pixels. Preview and export accept
+`--diff-text-distance` from `0.1` through `100`, default `1`; values below `1` require
+a closer view. The multiplier affects only the reveal, including scripted export
+cameras. Visible text stays between 14 and 20 logical pixels high, making
 close oblique shots readable while the overview keeps plain fragments.
 Text holds full contrast through the first three quarters of the fragment's alpha
 fade, then fades out with the backing.
