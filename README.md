@@ -3,9 +3,12 @@
 ![Codestrand logo](https://raw.githubusercontent.com/owenlamont/codestrand/main/assets/codestrand.svg)
 
 A Git history visualiser with persistent file positions, gliding contributors and
-animated diff fragments. Preview a local repository or export numbered PNG frames.
+animated diff fragments. Preview a local repository or export numbered PNG frames or
+video.
 
 ![Codestrand playing Git histories in seven themes: repositories appear, grow and are archived, contributors send beams to changed files, and the camera flies in behind an avatar](https://raw.githubusercontent.com/owenlamont/codestrand/main/docs/assets/montage.webp)
+
+Watch the [feature tour on YouTube](https://youtu.be/gmueXAHnvAE).
 
 **Status: layout study.** Video export uses your installed FFmpeg.
 Licensed MIT OR Apache-2.0.
