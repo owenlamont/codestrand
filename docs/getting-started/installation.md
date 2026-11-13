@@ -1,9 +1,8 @@
 # Installation
 
 Codestrand ships as a native binary. Choose a channel matching your tools.
-The guides describe current `main`. Published releases are v0.1.1, which lacks
-`--seconds-per-day`, `--fetch-avatars`, the `[` / `]` playback speed keys and the
-avatar cache. Until the next release (0.2.0), build from `main` to use these features:
+The guides describe current `main`, which can be ahead of the latest release. If an
+option in the guides is missing from `--help`, build from `main`:
 
 ```sh
 cargo install --locked --git https://github.com/owenlamont/codestrand --branch main

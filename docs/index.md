@@ -10,10 +10,10 @@ all affected files; diff fragments show additions and removals.
 
 Watch the [feature tour on YouTube](https://youtu.be/gmueXAHnvAE).
 
-Codestrand is a **layout study**, with a steady neon theme, labels, contributor
-portraits and a mostly planar scene. Preview and PNG export share a deterministic
-simulation, including playback of multiple repositories. Built-in video encoding is
-not implemented.
+Codestrand is a **layout study**, with seven steady themes, labels, contributor
+portraits and a mostly planar scene. Preview and export share a repeatable
+simulation, including playback of multiple repositories. Export writes PNG frames or
+streams video to your installed FFmpeg.
 
 ## Start here
 
