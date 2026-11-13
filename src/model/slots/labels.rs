@@ -18,7 +18,7 @@ pub(super) struct Assignment {
 pub(super) const ANGULAR_SPEED: f32 = std::f32::consts::PI / 6.0;
 pub(super) const ANGULAR_ACCELERATION: f32 = std::f32::consts::PI / 3.0;
 const GAIN: f32 = 0.25;
-const DWELL_TICKS: u64 = 45;
+pub(super) const DWELL_TICKS: u64 = 45;
 const REVERSAL_TICKS: u64 = 180;
 
 #[cfg(test)]

@@ -763,6 +763,7 @@ impl State {
             avatar.name_visibility.placement = None;
             avatar.name_visibility.visible = false;
             avatar.name_visibility.opacity = 0.0;
+            avatar.name_visibility.full_clear_since = None;
         }
         let bodies = self.name_bodies();
         let NameAssignment {
@@ -827,6 +828,52 @@ impl State {
             visibility.placement = Some(placement);
             visibility.joint_exhausted = assignment.exhausted;
             visibility.joint_clear = assignment.clear;
+        }
+        self.recover_name_lengths(&bodies, texts);
+    }
+
+    fn recover_name_lengths(&mut self, bodies: &[Option<Vec2>], texts: &[Rect]) {
+        for (index, body) in bodies.iter().enumerate() {
+            let avatar = &self.avatars[index];
+            let full = (*body)
+                .zip(avatar.name_visibility.placement.as_ref())
+                .filter(|(_, placement)| {
+                    avatar.presence > 0.0 && placement.text != avatar.name
+                })
+                .map(|(body, placement)| {
+                    let size = super::names::rect(
+                        Vec2::ZERO,
+                        &avatar.name,
+                        self.name_scale(),
+                        self.geometry.label_height,
+                    )
+                    .size();
+                    labels::tangent_rect(
+                        body,
+                        size,
+                        self.avatar_radius() + 4.0 / 3.0,
+                        placement.angle,
+                    )
+                })
+                .filter(|rect| {
+                    super::caption::outside(*rect, 0.5) <= 0.001
+                        && self.name_occlusion(index, *rect, bodies, texts) <= 0.0
+                });
+            let avatar = &mut self.avatars[index];
+            let Some(rect) = full else {
+                avatar.name_visibility.full_clear_since = None;
+                continue;
+            };
+            let since = avatar
+                .name_visibility
+                .full_clear_since
+                .get_or_insert(self.tick);
+            if self.tick.saturating_sub(*since) >= labels::DWELL_TICKS {
+                let placement = avatar.name_visibility.placement.as_mut().unwrap();
+                placement.point = Vec2::new(rect.min.x, rect.max.y);
+                placement.text.clone_from(&avatar.name);
+                avatar.name_visibility.full_clear_since = None;
+            }
         }
     }
 
