@@ -99,9 +99,12 @@ struct Palette {
     cube: Handle<Mesh>,
     root_cube: Handle<Mesh>,
     directory_cubes: Vec<Vec<Handle<Mesh>>>,
-    sphere: Handle<Mesh>,
+    directory_folders: Vec<Vec<Handle<Mesh>>>,
+    avatar_spheres: Vec<Handle<Mesh>>,
+    avatar_discs: Vec<Handle<Mesh>>,
     disc: Handle<Mesh>,
     beam: Handle<Mesh>,
+    segment_beams: Vec<Handle<Mesh>>,
     edge: Handle<StandardMaterial>,
     floor: Handle<StandardMaterial>,
     grid: Handle<StandardMaterial>,
@@ -125,25 +128,25 @@ impl Palette {
         let mut meshes = world.resource_mut::<Assets<Mesh>>();
         let cube = meshes.add(Cuboid::default());
         let folder = meshes.add(folder_mesh());
-        let sphere = meshes.add(styling::avatar_mesh(theme));
         let disc = meshes.add(Circle::new(theme.avatar_radius));
         let beam = meshes.add(Cylinder::new(0.035, 1.0));
         let glyph_mesh = meshes.add(Rectangle::default());
-        let membership_mesh =
-            meshes.add(styling::ring_mesh(theme, theme.membership_radii));
+        let ring = styling::ring_mesh(theme, theme.membership_radii);
+        let membership_mesh = meshes.add(ring.clone());
         let activity_mesh = meshes.add(styling::ring_mesh(theme, theme.activity_radii));
         // Export sorts opaque mesh bins, but instances within a bin retain insertion order.
         let root_cube = meshes.add(Cuboid::default());
+        let [avatar_spheres, avatar_discs, segment_beams] =
+            Self::colour_meshes(&mut meshes, theme);
         let mut per_directory = |mesh: Mesh| -> Vec<Vec<Handle<Mesh>>> {
-            theme
-                .directories
-                .iter()
+            let slots = theme.directories.iter();
+            slots
                 .map(|depths| depths.iter().map(|_| meshes.add(mesh.clone())).collect())
                 .collect()
         };
         let directory_cubes = per_directory(Cuboid::default().into());
-        let directory_rings =
-            per_directory(styling::ring_mesh(theme, theme.membership_radii));
+        let directory_folders = per_directory(folder_mesh());
+        let directory_rings = per_directory(ring);
         let glyph_textures = Self::preload_glyphs(world, theme);
         let textures = &glyph_textures
             .iter()
@@ -195,9 +198,12 @@ impl Palette {
             cube,
             root_cube,
             directory_cubes,
-            sphere,
+            directory_folders,
+            avatar_spheres,
+            avatar_discs,
             disc,
             beam,
+            segment_beams,
             edge,
             floor,
             grid,
@@ -278,6 +284,22 @@ impl Palette {
 
     fn directory_cube(&self, slot: usize, depth: u16) -> &Handle<Mesh> {
         Self::directory_mesh(&self.root_cube, &self.directory_cubes, slot, depth)
+    }
+
+    fn colour_meshes(
+        meshes: &mut Assets<Mesh>,
+        theme: &Theme,
+    ) -> [Vec<Handle<Mesh>>; 3] {
+        [
+            (theme.avatars.len(), styling::avatar_mesh(theme)),
+            (theme.avatars.len(), Circle::new(theme.avatar_radius).into()),
+            (styling::BEAM_SEGMENTS, Cylinder::new(0.035, 1.0).into()),
+        ]
+        .map(|(count, mesh)| (0..count).map(|_| meshes.add(mesh.clone())).collect())
+    }
+
+    fn directory_folder(&self, slot: usize, depth: u16) -> &Handle<Mesh> {
+        Self::directory_mesh(&self.folder, &self.directory_folders, slot, depth)
     }
 
     fn membership_ring(&self, slot: usize, depth: u16) -> &Handle<Mesh> {
@@ -1074,14 +1096,18 @@ pub(super) fn switch_theme(world: &mut World, name: crate::theme::ThemeName) {
     }
     world.resource_scope(|world, palette: Mut<Palette>| {
         let mut meshes = world.resource_mut::<Assets<Mesh>>();
-        *meshes
-            .get_mut(&palette.sphere)
-            .expect("palette avatar mesh remains allocated") =
-            styling::avatar_mesh(&theme);
-        *meshes
-            .get_mut(&palette.disc)
-            .expect("palette portrait mesh remains allocated") =
-            Circle::new(theme.avatar_radius).into();
+        for sphere in &palette.avatar_spheres {
+            *meshes
+                .get_mut(sphere)
+                .expect("palette avatar mesh remains allocated") =
+                styling::avatar_mesh(&theme);
+        }
+        for disc in std::iter::once(&palette.disc).chain(&palette.avatar_discs) {
+            *meshes
+                .get_mut(disc)
+                .expect("palette portrait mesh remains allocated") =
+                Circle::new(theme.avatar_radius).into();
+        }
         for ring in std::iter::once(&palette.membership_mesh)
             .chain(palette.directory_rings.iter().flatten())
         {
@@ -1732,11 +1758,9 @@ fn sync_structure(
     );
     for (&entity, &index) in pool.iter().zip(glyphs) {
         let dir = layout.dir(index);
-        set_material(
-            world,
-            entity,
-            palette.directory(pools.hues.slots[index], dir.depth),
-        );
+        let slot = pools.hues.slots[index];
+        set_mesh(world, entity, palette.directory_folder(slot, dir.depth));
+        set_material(world, entity, palette.directory(slot, dir.depth));
         let (grey, alpha, rise) = simulation.repository_effect(dir.repository);
         if let Some(mut transform) = world.get_mut::<Transform>(entity) {
             let mut folder = folder_transform(
@@ -1898,14 +1922,15 @@ fn sync_activity(
     let avatars = simulation.avatars();
     while pools.avatars.len() < avatars.len() {
         let index = pools.avatars.len();
+        let colour = index % palette.avatars.len();
         let entity = world
             .spawn((
                 Mesh3d(if avatars[index].portrait.is_some() {
-                    palette.disc.clone()
+                    palette.avatar_discs[colour].clone()
                 } else {
-                    palette.sphere.clone()
+                    palette.avatar_spheres[colour].clone()
                 }),
-                MeshMaterial3d(palette.avatars[index % palette.avatars.len()].clone()),
+                MeshMaterial3d(palette.avatars[colour].clone()),
                 Transform::default(),
                 Visibility::Hidden,
                 RenderLayers::layer(AVATAR_LAYER),
@@ -4109,12 +4134,20 @@ mod tests {
         let theme = Theme::neon();
         let palette = Palette::new(&mut world, &theme);
         let slot_meshes = |palette: &Palette| -> Vec<_> {
-            [&palette.root_cube, &palette.membership_mesh]
-                .into_iter()
-                .chain(palette.directory_cubes.iter().flatten())
-                .chain(palette.directory_rings.iter().flatten())
-                .map(Handle::id)
-                .collect()
+            [
+                &palette.root_cube,
+                &palette.membership_mesh,
+                &palette.folder,
+            ]
+            .into_iter()
+            .chain(palette.directory_cubes.iter().flatten())
+            .chain(palette.directory_rings.iter().flatten())
+            .chain(palette.directory_folders.iter().flatten())
+            .chain(&palette.avatar_spheres)
+            .chain(&palette.avatar_discs)
+            .chain(&palette.segment_beams)
+            .map(Handle::id)
+            .collect()
         };
         let handles = slot_meshes(&palette);
         let unique: std::collections::HashSet<_> = handles.iter().copied().collect();
