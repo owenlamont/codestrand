@@ -323,16 +323,10 @@ impl Space<'_> {
         motion: &Turn<'_>,
     ) -> (Candidate, [f32; 4]) {
         let distance = self.radius + self.margin;
-        let rect = labels::tangent_rect(motion.body, motion.size, distance, target);
+        let rect = tangent_rect(motion.body, motion.size, distance, target);
         let cost = self.cost(index, rect);
-        let clip = labels::forecast_clip(
-            target,
-            0.0,
-            target,
-            motion.size,
-            distance,
-            motion.future,
-        );
+        let clip =
+            forecast_clip(target, 0.0, target, motion.size, distance, motion.future);
         let text = self.text_cost(rect);
         let soft = cost[2] * 2.0
             + clip * 1e8
@@ -419,6 +413,44 @@ impl Space<'_> {
                 ) * 20_000.0,
         ]
     }
+}
+
+fn tangent_rect(body: Vec2, size: Vec2, distance: f32, angle: f32) -> Rect {
+    let direction = Vec2::from_angle(angle);
+    let axis = direction.abs();
+    let half = size * 0.5;
+    let tx = (half.x + distance) / axis.x.max(1e-8);
+    let ty = (half.y + distance) / axis.y.max(1e-8);
+    let radius = if tx * axis.y <= half.y {
+        tx
+    } else if ty * axis.x <= half.x {
+        ty
+    } else {
+        let b = axis.dot(half);
+        b + (b * b - half.length_squared() + distance * distance)
+            .max(0.0)
+            .sqrt()
+    };
+    Rect::from_center_size(body + direction * radius, size)
+}
+
+fn forecast_clip(
+    mut angle: f32,
+    mut velocity: f32,
+    target: f32,
+    size: Vec2,
+    distance: f32,
+    future: &[Vec2],
+) -> f32 {
+    let mut maximum = 0.0_f32;
+    for &body in future {
+        (angle, velocity) =
+            labels::steer(angle, velocity, target, 4.0 * tick_seconds());
+        let rect = tangent_rect(body, size, distance, angle);
+        let outside = caption::outside(rect, 16.0);
+        maximum = maximum.max(outside);
+    }
+    maximum
 }
 
 fn overlap(a: Rect, b: Rect) -> f32 {
@@ -625,19 +657,19 @@ fn name_state(state: &State) -> Vec<(Vec<u32>, String)> {
 fn name_assignment_matches_the_reference_on_every_tick() {
     let mut sim = crowd();
     MODE.set(Mode::Checked);
-    for frame in 0..=420 {
+    for frame in 0..=900 {
         sim.advance_to(frame, 60);
     }
-    let end = name_state(&sim.state);
     sim.advance_to(240, 60);
-    for frame in 0..=168 {
+    let rewound = name_state(&sim.state);
+    for frame in 0..=96 {
         sim.advance_to(frame, 24);
     }
     MODE.set(Mode::Production);
-    assert_eq!(name_state(&sim.state), end);
+    assert_eq!(name_state(&sim.state), rewound);
 
     let seen = SEEN.take();
-    assert_eq!(seen.ticks, 420 + 240 + 420);
+    assert_eq!(seen.ticks, 900 + 240 + 240);
     assert!(seen.largest_component >= 3, "{seen:?}");
     assert!(seen.exhausted > 0, "{seen:?}");
     assert!(seen.retries > 0, "{seen:?}");
