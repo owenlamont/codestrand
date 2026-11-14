@@ -63,6 +63,9 @@ cap-fs-ext = "4.0.3"
 # Bevy does not forward Fontique's optional Fontconfig loading feature.
 fontique = { version = "0.11", default-features = false, features = ["fontconfig-dlopen"] }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Console"] }
+
 [dev-dependencies]
 fontique = { version = "0.11", default-features = false }
 

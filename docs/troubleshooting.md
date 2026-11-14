@@ -27,6 +27,9 @@ still imports the history; the first load of a large repository can take time.
 Both preview and export need a working graphics adapter. Preview also needs a
 windowing environment. Update graphics drivers and try a local desktop session
 for preview. `inspect` works without a GPU.
+On Windows, preview started without a terminal, such as from a shortcut, closes the
+console Windows opened for it once the history has loaded; a later start-up failure is
+appended to `%LOCALAPPDATA%\codestrand\preview-error.log`.
 For slow source-checkout playback, use `cargo run --locked --release -- preview`.
 
 ## Source build fails

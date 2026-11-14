@@ -1,4 +1,4 @@
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 #![deny(
     clippy::all,
     clippy::pedantic,
@@ -16,6 +16,8 @@ mod avatars;
 mod cache;
 mod camera;
 mod camera_path;
+#[cfg(any(windows, test))]
+mod console;
 mod contributors;
 mod diff_samples;
 mod encoder;
@@ -596,6 +598,8 @@ fn run() -> anyhow::Result<()> {
         Some(Command::Preview { source, theme }) => {
             let (mut simulation, title) = source.load()?;
             simulation.set_theme(theme.build());
+            #[cfg(windows)]
+            console::release_if_alone();
             scene::preview(simulation, title);
         }
         Some(Command::Export {
