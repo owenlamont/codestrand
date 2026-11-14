@@ -11,6 +11,7 @@ Watch the [feature tour video](https://youtu.be/gmueXAHnvAE).
 
 - `--start-date YYYY-MM-DD` selects playback from a UTC author date, settling earlier
   commits before playback.
+  ([#152](https://github.com/owenlamont/codestrand/pull/152))
 - Native Wayland preview windows on Linux alongside X11 support.
   ([#144](https://github.com/owenlamont/codestrand/pull/144))
 - Play several local repositories as tiles on one shared timeline, from repeated
@@ -95,6 +96,7 @@ Watch the [feature tour video](https://youtu.be/gmueXAHnvAE).
 ### Fixed
 
 - Duplicate repository paths now report an error naming both input spellings.
+  ([#152](https://github.com/owenlamont/codestrand/pull/152))
 - Moving translucent surfaces sort at their current positions, fixing stale overlap
   order after movement and material changes.
   ([performance issue 143](https://github.com/owenlamont/codestrand/issues/143))
