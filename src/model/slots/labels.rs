@@ -109,6 +109,15 @@ pub(in crate::model) fn tangent_rect(
     distance: f32,
     angle: f32,
 ) -> Rect {
+    Rect::from_center_size(body + tangent_offset(size, distance, angle), size)
+}
+
+/// Where a label's centre sits from its avatar when held at `angle`.
+fn tangent_offset(
+    size: bevy::math::Vec2,
+    distance: f32,
+    angle: f32,
+) -> bevy::math::Vec2 {
     let direction = bevy::math::Vec2::from_angle(angle);
     let axis = direction.abs();
     let half = size * 0.5;
@@ -124,8 +133,27 @@ pub(in crate::model) fn tangent_rect(
             .max(0.0)
             .sqrt()
     };
-    Rect::from_center_size(body + direction * radius, size)
+    direction * radius
 }
+
+/// [`forecast_clip`] for a label resting at `angle` and steered to stay there.
+pub(super) fn resting_clip(
+    angle: f32,
+    size: bevy::math::Vec2,
+    distance: f32,
+    future: &[bevy::math::Vec2],
+) -> f32 {
+    let offset = tangent_offset(size, distance, angle);
+    future
+        .iter()
+        .map(|&body| {
+            let rect = Rect::from_center_size(body + offset, size);
+            crate::model::caption::outside(rect, 16.0)
+        })
+        .fold(0.0, f32::max)
+}
+
+#[cfg(test)]
 pub(super) fn forecast_clip(
     mut angle: f32,
     mut velocity: f32,
@@ -155,6 +183,21 @@ fn interacting(a: Candidate, b: Candidate) -> bool {
     overlap(a.rect, b.rect) > 0.0
 }
 
+/// The rectangle enclosing every candidate of one name.
+fn reach(domain: &[Candidate]) -> Rect {
+    domain
+        .iter()
+        .map(|candidate| candidate.rect)
+        .reduce(|a, b| a.union(b))
+        .unwrap_or_default()
+}
+
+/// Whether two names' candidates can overlap, or overlap by an area that is not a
+/// number, given the [`reach`] of each.
+fn touching(a: Rect, b: Rect) -> bool {
+    overlap(a, b) != 0.0
+}
+
 pub(super) fn solve(domains: &[Vec<Candidate>]) -> Assignment {
     let mut result = Assignment {
         choices: vec![0; domains.len()],
@@ -162,6 +205,7 @@ pub(super) fn solve(domains: &[Vec<Candidate>]) -> Assignment {
         clear: true,
     };
     let mut seen = vec![false; domains.len()];
+    let reaches: Vec<_> = domains.iter().map(|domain| reach(domain)).collect();
     for root in 0..domains.len() {
         if seen[root] {
             continue;
@@ -173,6 +217,7 @@ pub(super) fn solve(domains: &[Vec<Candidate>]) -> Assignment {
             let node = component[cursor];
             for other in 0..domains.len() {
                 if !seen[other]
+                    && touching(reaches[node], reaches[other])
                     && domains[node]
                         .iter()
                         .any(|a| domains[other].iter().any(|b| interacting(*a, *b)))
@@ -184,9 +229,21 @@ pub(super) fn solve(domains: &[Vec<Candidate>]) -> Assignment {
             cursor += 1;
         }
         component.sort_by_key(|&node| (domains[node].len(), node));
+        let neighbours: Vec<Vec<_>> = component
+            .iter()
+            .enumerate()
+            .map(|(depth, &node)| {
+                (0..depth)
+                    .filter(|&earlier| {
+                        touching(reaches[node], reaches[component[earlier]])
+                    })
+                    .collect()
+            })
+            .collect();
         let mut search = Search {
             domains,
             component: &component,
+            neighbours: &neighbours,
             selected: Vec::new(),
             best: vec![0; component.len()],
             score: (usize::MAX, f32::INFINITY, f32::INFINITY),
@@ -206,6 +263,8 @@ pub(super) fn solve(domains: &[Vec<Candidate>]) -> Assignment {
 struct Search<'a> {
     domains: &'a [Vec<Candidate>],
     component: &'a [usize],
+    /// For each depth, the earlier depths whose names can overlap this one.
+    neighbours: &'a [Vec<usize>],
     selected: Vec<usize>,
     best: Vec<usize>,
     score: (usize, f32, f32),
@@ -246,10 +305,11 @@ impl Search<'_> {
                 score.1 + candidate.text_area,
                 score.2 + candidate.soft,
             );
-            for (previous, &selected) in self.selected.iter().enumerate() {
+            for &previous in &self.neighbours[depth] {
                 let area = overlap(
                     candidate.rect,
-                    self.domains[self.component[previous]][selected].rect,
+                    self.domains[self.component[previous]][self.selected[previous]]
+                        .rect,
                 );
                 next.0 += usize::from(area > 0.0);
                 next.1 += area;
@@ -379,6 +439,23 @@ mod tests {
         );
         assert!(clear <= 0.001);
         assert!(clipped > 100.0);
+    }
+
+    #[test]
+    fn a_resting_forecast_matches_steering_to_the_angle_already_held() {
+        let size = Vec2::new(240.0, 24.0);
+        let leaving: Vec<_> = (0..30_u8)
+            .map(|step| Vec2::new(500.0 + 5.0 * f32::from(step), -0.0))
+            .collect();
+        let returning: Vec<_> = leaving.iter().rev().copied().collect();
+        for future in [leaving, returning] {
+            for angle in [-0.0, 0.0, 0.3, std::f32::consts::PI, -2.5, 7.0, 1e-30] {
+                let resting = resting_clip(angle, size, 15.333_333, &future);
+                let steered =
+                    forecast_clip(angle, 0.0, angle, size, 15.333_333, &future);
+                assert_eq!(resting.to_bits(), steered.to_bits(), "angle {angle}");
+            }
+        }
     }
 
     #[test]

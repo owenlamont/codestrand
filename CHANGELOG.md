@@ -83,6 +83,9 @@ Watch the [feature tour video](https://youtu.be/gmueXAHnvAE).
   ([#142](https://github.com/owenlamont/codestrand/pull/142))
 - Export renders each frame once instead of twice.
   ([performance issue 143](https://github.com/owenlamont/codestrand/issues/143))
+- Faster preview in crowded histories: placing contributor names costs about a
+  third as much, with frames unchanged.
+  ([performance issue 143](https://github.com/owenlamont/codestrand/issues/143))
 - New binary-helix logo.
   ([#61](https://github.com/owenlamont/codestrand/pull/61),
   [#69](https://github.com/owenlamont/codestrand/pull/69))

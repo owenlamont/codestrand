@@ -4,6 +4,8 @@ mod envelopes;
 pub(super) mod labels;
 #[cfg(test)]
 mod motion_tests;
+#[cfg(test)]
+pub(super) mod name_oracle;
 pub(super) use envelopes::Snapshots;
 
 use bevy::math::{Rect, Vec2, Vec3};
@@ -766,12 +768,16 @@ impl State {
             avatar.name_visibility.full_clear_since = None;
         }
         let bodies = self.name_bodies();
+        #[cfg(test)]
+        let assigned = name_oracle::assign(self, dt, travel, texts);
+        #[cfg(not(test))]
+        let assigned = self.assign_names(dt, travel, texts);
         let NameAssignment {
             authors,
             domains,
             assignment,
             displayed,
-        } = self.assign_names(dt, travel, texts);
+        } = assigned;
         for ((index, candidates), choice) in
             authors.into_iter().zip(domains).zip(assignment.choices)
         {
@@ -985,14 +991,7 @@ impl LabelSpace<'_> {
         let distance = self.radius + self.margin;
         let rect = labels::tangent_rect(motion.body, motion.size, distance, target);
         let cost = self.cost(index, rect);
-        let clip = labels::forecast_clip(
-            target,
-            0.0,
-            target,
-            motion.size,
-            distance,
-            motion.future,
-        );
+        let clip = labels::resting_clip(target, motion.size, distance, motion.future);
         let text = self.text_cost(rect);
         let soft = cost[2] * 2.0
             + clip * 1e8
