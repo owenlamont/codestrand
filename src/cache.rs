@@ -293,7 +293,7 @@ fn store(path: &Path, snapshot: &Snapshot) -> Option<()> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::process::Command;
 
     use clap::Parser;

@@ -77,8 +77,13 @@ mod tests {
     }
 
     #[test]
-    fn a_directory_at_the_log_path_gives_no_outlet() {
+    fn a_linked_directory_or_a_directory_at_the_log_path_gives_no_outlet() {
         let directory = crate::cache::test_directory().unwrap();
+        let outside = crate::cache::test_directory().unwrap();
+        let linked = directory.path().join("linked");
+        crate::cache::tests::directory_link(outside.path(), &linked);
+        assert!(open(&linked.join("preview-error.log")).is_none());
         assert!(open(directory.path()).is_none());
+        assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
     }
 }
