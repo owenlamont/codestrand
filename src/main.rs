@@ -687,17 +687,19 @@ mod tests {
             "--seconds-per-day",
             "2",
             "--max-idle-seconds",
-            "1",
+            "5",
         ])
         .unwrap();
         let Some(Command::Preview { source, .. }) = cli.command else {
             panic!("preview")
         };
         let (simulation, _) = source.load().unwrap();
-        assert_eq!(
-            simulation.scheduled_starts(),
-            model::schedule::Schedule::new(&timeline::synthetic(), 2.0, 1.0).starts
-        );
+        let starts = |rate, idle| {
+            model::schedule::Schedule::new(&timeline::synthetic(), rate, idle).starts
+        };
+        assert_eq!(simulation.scheduled_starts(), starts(2.0, 5.0));
+        assert_ne!(starts(2.0, 5.0), starts(1.0, 5.0));
+        assert_ne!(starts(2.0, 5.0), starts(2.0, 1.0));
     }
 
     #[test]
