@@ -1573,7 +1573,8 @@ pub(crate) fn box_corners(low: Vec3, high: Vec3) -> [Vec3; 8] {
     ]
 }
 
-/// Projects points to normalised screen coordinates, or `None` for one behind the eye.
+/// Projects points to normalised screen coordinates, or `None` for one within 0.5 of
+/// the eye plane or behind it.
 fn project(
     eye: Vec3,
     focus: Vec3,

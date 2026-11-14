@@ -120,7 +120,8 @@ fn interval(points: &[Vec2], axis: usize, cross: f32) -> Option<(f32, f32)> {
     (low <= high).then_some((low, high))
 }
 
-// Feasible size polygons retain S1's aspect intervals while accounting for fixed pixel gutters and floors.
+// Feasible size polygons keep the children's aspect intervals while accounting for
+// fixed pixel gutters and floors.
 fn combine(a: &[Vec2], b: &[Vec2], axis: usize, gap: f32) -> Vec<Vec2> {
     let mut coordinates: Vec<_> = a.iter().chain(b).map(|p| p[1 - axis]).collect();
     coordinates.sort_by(f32::total_cmp);
