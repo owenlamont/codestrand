@@ -40,11 +40,10 @@ impl Tile {
 
     pub(crate) fn usable(self) -> Self {
         let size = self.high - self.low;
-        let low_padding = (Vec2::splat(8.0) * 2.0 / framing::VIEWPORT).min(size * 0.2);
-        let high_padding = low_padding;
+        let padding = (Vec2::splat(8.0) * 2.0 / framing::VIEWPORT).min(size * 0.2);
         Self {
-            low: self.low + low_padding,
-            high: self.high - high_padding,
+            low: self.low + padding,
+            high: self.high - padding,
         }
     }
 

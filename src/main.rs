@@ -315,14 +315,14 @@ impl Source {
         let mut events = self.events(cache::root().as_deref(), &repositories)?;
         mappings.apply(&mut events);
         self.resolve_avatars(&mut events, &repositories);
-        let title = if repositories.is_empty() {
+        let names: Vec<_> = repositories
+            .iter()
+            .map(repositories::Repository::name)
+            .collect();
+        let title = if names.is_empty() {
             "Synthetic history".to_owned()
         } else {
-            repositories
-                .iter()
-                .map(repositories::Repository::name)
-                .collect::<Vec<_>>()
-                .join(" | ")
+            names.join(" | ")
         };
         let options = model::Options {
             contributor_inactivity_days: self.contributor_inactivity_days,
@@ -348,10 +348,6 @@ impl Source {
             avatar_size: self.avatar_scale,
             gutter: self.gutter,
         };
-        let names: Vec<_> = repositories
-            .iter()
-            .map(repositories::Repository::name)
-            .collect();
         let mut simulation = Self::playback(events, &options, &mappings, &names)?;
         simulation.repository_boundary = self.repository_boundary;
         simulation.collapse_directories = self.collapse_directories;
