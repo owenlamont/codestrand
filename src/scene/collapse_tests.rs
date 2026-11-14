@@ -222,7 +222,7 @@ fn collapsing_off_restores_files_immediately_through_rewind_and_theme_switch() {
         else {
             panic!("playback command")
         };
-        let (mut sim, _) = source.load().unwrap();
+        let (mut sim, _) = source.load(&crate::progress::Progress::default()).unwrap();
         sim.advance_to(120, 30);
         let mut world = World::new();
         world.init_resource::<Assets<Mesh>>();

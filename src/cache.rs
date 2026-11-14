@@ -528,7 +528,13 @@ mod tests {
             };
             let repositories =
                 crate::repositories::inputs(&source.repository, None).unwrap();
-            let events = source.events(Some(cache.path()), &repositories).unwrap();
+            let events = source
+                .events(
+                    Some(cache.path()),
+                    &repositories,
+                    &crate::progress::Progress::default(),
+                )
+                .unwrap();
             assert!(
                 events
                     .iter()
@@ -630,6 +636,7 @@ emails = ["author@example.invalid"]
                         source.repositories_file.as_deref(),
                     )
                     .unwrap(),
+                    &crate::progress::Progress::default(),
                 )
                 .unwrap();
             assert_eq!(events[0].author.name, b"Author");
@@ -885,6 +892,7 @@ emails = ["author@example.invalid"]
                     source.repositories_file.as_deref(),
                 )
                 .unwrap(),
+                &crate::progress::Progress::default(),
             )
             .expect("bypass imports");
         assert!(!entry(cache.path(), repo.path()).exists());
@@ -899,7 +907,8 @@ emails = ["author@example.invalid"]
                         &source.repository,
                         source.repositories_file.as_deref()
                     )
-                    .unwrap()
+                    .unwrap(),
+                    &crate::progress::Progress::default()
                 )
                 .expect("bypass imports again"),
             events
@@ -917,7 +926,8 @@ emails = ["author@example.invalid"]
                         &source.repository,
                         source.repositories_file.as_deref()
                     )
-                    .unwrap()
+                    .unwrap(),
+                    &crate::progress::Progress::default()
                 )
                 .is_err()
         );

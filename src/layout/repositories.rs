@@ -8,12 +8,18 @@ impl Layout {
         events: &[Event],
         starts: &[crate::model::Time],
         names: &[String],
+        progress: &crate::progress::Progress,
     ) -> Self {
         let mut combined = Self::empty();
         combined.dirs.clear();
         combined.dir_index.clear();
         let workers = std::thread::available_parallelism().map_or(1, usize::from);
         for first in (0..names.len()).step_by(workers) {
+            progress.report(
+                crate::progress::Stage::Directories,
+                first as u64,
+                names.len() as u64,
+            );
             let end = first.saturating_add(workers).min(names.len());
             let layouts = Self::scheduled_batch(events, starts, first..end);
             for (repository, layout) in (first..end).zip(layouts) {
@@ -320,6 +326,7 @@ mod tests {
             &events,
             &starts,
             &["Same".to_owned(), "Same".to_owned()],
+            &crate::progress::Progress::default(),
         );
         let first = layout.add("0/src/layout.rs", 0.0, 0);
         let second = layout.add("1/src/layout.rs", 0.0, 0);

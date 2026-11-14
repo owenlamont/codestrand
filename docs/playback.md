@@ -7,6 +7,10 @@ Preview renders at the window's physical resolution, including on HiDPI displays
 Resizing or maximising keeps a 720-logical-pixel-high UI: text scales with height,
 and wider windows show more scene. See [Export](export.md) for native output sizes.
 
+Planning a long history takes time before the first frame. Preview opens its window
+at once and shows the planning stage and a progress bar until playback is ready.
+Export prints the stage and its percentage to standard error at most once a second.
+
 Commit application times are precomputed for the selected history and pacing.
 The caption shows the last applied commit's date; cooling and fades advance in
 playback seconds. Seeking or restarting replays the same fixed simulation ticks.

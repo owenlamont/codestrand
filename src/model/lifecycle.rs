@@ -329,7 +329,8 @@ mod tests {
         else {
             panic!("preview arguments")
         };
-        let (simulation, _) = source.load().unwrap();
+        let (simulation, _) =
+            source.load(&crate::progress::Progress::default()).unwrap();
         let mut seen = std::collections::HashMap::new();
         let mut records = Vec::new();
         for (index, (event, &time)) in simulation
@@ -425,7 +426,7 @@ mod tests {
         .unwrap() else {
             panic!("preview fixture")
         };
-        let (mut sim, _) = source.load().unwrap();
+        let (mut sim, _) = source.load(&crate::progress::Progress::default()).unwrap();
         let output = std::env::var("CODESTRAND_GUTTER_OUTPUT").unwrap();
         std::fs::write(
             format!("{output}.trace"),

@@ -234,6 +234,11 @@ impl Simulation {
         self.restart();
         let frames = super::frames_for(self.duration(), 60).expect("bounded schedule");
         for frame in (0..=frames + STEP).step_by(STEP as usize) {
+            self.progress.report(
+                crate::progress::Stage::Titles,
+                frame.into(),
+                frames.into(),
+            );
             self.advance_to(frame, 60);
             let blocked = obstacles(self);
             let names: Vec<_> = self

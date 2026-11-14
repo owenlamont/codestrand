@@ -34,6 +34,7 @@ mod caption;
 mod collapse_tests;
 #[cfg(test)]
 mod file_sync_tests;
+mod loading;
 mod lod;
 #[cfg(test)]
 mod name_tests;
@@ -44,6 +45,8 @@ mod settings;
 #[cfg(test)]
 mod static_tests;
 mod styling;
+
+pub(super) use loading::Loading;
 
 #[derive(Resource)]
 pub(super) struct Frame {
@@ -548,38 +551,48 @@ fn lifecycle_material(world: &mut World, entity: Entity, grey: f32, alpha: f32) 
 
 fn app(simulation: Simulation, title: String) -> App {
     let mut app = App::new();
+    let theme = simulation.theme().clone();
+    app.insert_resource(ClearColor(theme.clear))
+        .insert_resource(Playback(simulation))
+        .insert_resource(Title(title))
+        .add_systems(Startup, setup);
+    add_scene_systems(&mut app);
+    app
+}
+
+/// Adds the systems that draw a planned simulation; each waits for `Playback`.
+fn add_scene_systems(app: &mut App) {
     let label_system = labels
         .after(bevy::camera::CameraUpdateSystems)
         .after(bevy::transform::TransformSystems::Propagate)
         .before(UiSystems::Prepare)
         .before(bevy::camera::visibility::VisibilitySystems::VisibilityPropagate);
-    let theme = simulation.theme().clone();
-    app.insert_resource(ClearColor(theme.clear))
-        .insert_resource(Playback(simulation))
-        .insert_resource(Title(title))
-        .init_resource::<Pools>()
+    app.init_resource::<Pools>()
         .init_resource::<GreyTextures>()
-        .add_systems(Startup, setup)
-        .add_systems(PreUpdate, scale_ui)
-        .add_systems(Update, animate)
+        .add_systems(PreUpdate, scale_ui.run_if(resource_exists::<Playback>))
+        .add_systems(Update, animate.run_if(resource_exists::<Playback>))
         .add_systems(
             PostUpdate,
             (sync_avatar_camera, face_portraits)
                 .chain()
                 .before(bevy::camera::CameraUpdateSystems)
-                .before(bevy::transform::TransformSystems::Propagate),
+                .before(bevy::transform::TransformSystems::Propagate)
+                .run_if(resource_exists::<Playback>),
         )
-        .add_systems(PostUpdate, label_system);
-    app
+        .add_systems(PostUpdate, label_system.run_if(resource_exists::<Playback>));
 }
 
 #[derive(Resource)]
 struct Title(String);
 
-pub(super) fn preview(simulation: Simulation, title: String) {
-    let camera = PreviewCamera::new(simulation.view());
-    let mut app = app(simulation, title);
-    app.insert_resource(camera)
+/// Opens the preview window at once and shows planning progress until `loading`
+/// delivers the simulation; a planning error closes the window and is returned.
+pub(super) fn preview(loading: Loading) -> anyhow::Result<()> {
+    let failure = loading::Failure::default();
+    let mut app = App::new();
+    add_scene_systems(&mut app);
+    app.insert_resource(loading)
+        .insert_resource(failure.clone())
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "Codestrand".to_owned(),
@@ -595,9 +608,33 @@ pub(super) fn preview(simulation: Simulation, title: String) {
             fps: model::PREVIEW_FPS,
         })
         .add_plugins(settings::PreviewSettingsPlugin)
-        .add_systems(Update, preview_clock.before(animate))
-        .add_systems(Update, preview_camera.after(animate));
+        .add_systems(Startup, loading::show)
+        .add_systems(loading::Loaded, setup)
+        .add_systems(
+            Update,
+            loading::poll
+                .run_if(resource_exists::<Loading>)
+                .before(preview_clock),
+        )
+        .add_systems(
+            Update,
+            preview_clock
+                .before(animate)
+                .run_if(resource_exists::<Playback>),
+        )
+        .add_systems(
+            Update,
+            preview_camera
+                .after(animate)
+                .run_if(resource_exists::<Playback>),
+        );
     app.run();
+    let error = failure
+        .0
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    error.map_or(Ok(()), Err)
 }
 
 pub(super) fn headless(

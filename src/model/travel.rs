@@ -4,6 +4,7 @@ use bevy::math::{Rect, Vec2};
 use serde::Serialize;
 
 use super::{Simulation, frames_for, slots, tick_time, ticks_duration};
+use crate::progress::Stage;
 mod occupancy;
 mod planning;
 use planning::trips;
@@ -347,6 +348,9 @@ fn capture(simulation: &mut Simulation) -> Capture {
     let mut seen = 0;
     let mut poses = 0;
     for frame in 0..=frames {
+        simulation
+            .progress
+            .report(Stage::Travel, frame.into(), frames.into());
         simulation.advance_to(frame, 60);
         let state = &simulation.state;
         capture.radii.push(state.avatar_radius());

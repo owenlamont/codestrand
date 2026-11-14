@@ -9,6 +9,7 @@ use bevy::math::{Vec2, Vec3};
 use crate::{
     contributors::{Contributor, Key, Mappings},
     layout::Layout,
+    progress::{Progress, Stage},
     theme::{BeamStyle, Geometry, Theme},
     timeline::{Event, Kind},
 };
@@ -82,6 +83,7 @@ pub(super) struct Options {
     pub avatar_max_speed: f32,
     pub avatar_size: f32,
     pub gutter: f32,
+    pub progress: Progress,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize)]
@@ -141,6 +143,7 @@ impl Default for Options {
             avatar_max_speed: 480.0,
             avatar_size: 2.0,
             gutter: 4.0,
+            progress: Progress::default(),
         }
     }
 }
@@ -380,6 +383,7 @@ pub(super) struct Simulation {
     travel: travel::Plan,
     visual_updates: bool,
     title_plan: Vec<Vec<u8>>,
+    progress: Progress,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -507,6 +511,7 @@ impl Simulation {
         loop {
             pass += 1;
             check_travel_pass(pass)?;
+            options.progress.pass(pass);
             if pass > 1 || padding.iter().any(|&(_, ticks)| ticks > 0) {
                 let schedule = Schedule::with_padding(
                     &events[options.selected_range(events.len())],
@@ -568,7 +573,9 @@ impl Simulation {
         simulation.events = events;
         simulation.caption_plan =
             caption::plan(&simulation.schedule, &simulation.events);
+        options.progress.pass(1);
         simulation.plan_titles();
+        simulation.progress = Progress::default();
         Ok(simulation)
     }
 
@@ -577,14 +584,19 @@ impl Simulation {
         layout_starts: &[Time],
         repositories: &[String],
         layout_cache: &mut Option<(Vec<Time>, Layout)>,
+        progress: &Progress,
     ) -> Layout {
         if let Some((starts, layout)) = layout_cache
             && *starts == layout_starts
         {
             layout.clone()
         } else {
-            let layout =
-                Layout::scheduled_repositories(events, layout_starts, repositories);
+            let layout = Layout::scheduled_repositories(
+                events,
+                layout_starts,
+                repositories,
+                progress,
+            );
             *layout_cache = Some((layout_starts.to_vec(), layout.clone()));
             layout
         }
@@ -623,6 +635,7 @@ impl Simulation {
                 &layout_starts.starts,
                 repositories,
                 layout_cache,
+                &options.progress,
             ),
             avatars: Vec::new(),
             authors: HashMap::new(),
@@ -689,6 +702,7 @@ impl Simulation {
             travel: travel::Plan::default(),
             visual_updates: true,
             title_plan: Vec::new(),
+            progress: options.progress.clone(),
         };
         let snapshots = simulation
             .plan_repositories(prior_active, options.travel_cap == TravelCap::None)?;
@@ -732,7 +746,9 @@ impl Simulation {
         let mut sampled_events = 0;
         let ticks = frames_for(self.duration(), 60)
             .expect("multi-repository playback fits the supported frame range");
-        for _ in 0..ticks {
+        for tick in 0..ticks {
+            self.progress
+                .report(Stage::Layout, tick.into(), ticks.into());
             self.tick_layout();
             for event in &self.events[sampled_events..self.state.next_event] {
                 active[event.repository] = true;

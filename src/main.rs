@@ -23,6 +23,7 @@ mod export;
 mod history;
 mod layout;
 mod model;
+mod progress;
 mod repositories;
 mod resolution;
 mod scene;
@@ -84,6 +85,7 @@ mod terminal_tests {
 use std::path::PathBuf;
 
 use clap::{CommandFactory, Parser, Subcommand};
+use progress::{Progress, Stage};
 
 #[derive(Parser)]
 #[command(version, about = "Git history inspection and playback")]
@@ -238,9 +240,11 @@ impl Source {
         &self,
         cache_root: Option<&std::path::Path>,
         repositories: &[repositories::Repository],
+        progress: &Progress,
     ) -> anyhow::Result<Vec<timeline::Event>> {
         let mut histories = Vec::new();
         for (index, repository) in repositories.iter().enumerate() {
+            progress.report(Stage::History, index as u64, repositories.len() as u64);
             let started = std::time::Instant::now();
             let mut events = cache::load_with_options(
                 &repository.path,
@@ -312,11 +316,12 @@ impl Source {
         }
     }
 
-    fn load(&self) -> anyhow::Result<(model::Simulation, String)> {
+    fn load(&self, progress: &Progress) -> anyhow::Result<(model::Simulation, String)> {
         let repositories =
             repositories::inputs(&self.repository, self.repositories_file.as_deref())?;
         let mappings = contributors::load(self.contributors.as_deref())?;
-        let mut events = self.events(cache::root().as_deref(), &repositories)?;
+        let mut events =
+            self.events(cache::root().as_deref(), &repositories, progress)?;
         let start = self.resolve_start(&events)?;
         mappings.apply(&mut events);
         self.resolve_avatars(&mut events, &repositories, start);
@@ -352,6 +357,7 @@ impl Source {
             avatar_max_speed: self.avatar_max_speed,
             avatar_size: self.avatar_scale,
             gutter: self.gutter,
+            progress: progress.clone(),
         };
         let mut simulation = Self::playback(events, &options, &mappings, &names)?;
         simulation.repository_boundary = self.repository_boundary;
@@ -400,6 +406,25 @@ impl Source {
             mappings,
             &names,
         )
+    }
+
+    /// Loads and plans on a worker thread, handing `report` at most one progress
+    /// update per `interval`.
+    fn load_reporting(
+        &self,
+        interval: std::time::Duration,
+        mut report: impl FnMut(progress::Update),
+    ) -> anyhow::Result<(model::Simulation, String)> {
+        let (progress, updates) = Progress::channel(interval);
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(move || self.load(&progress));
+            for update in updates {
+                report(update);
+            }
+            worker
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+        })
     }
 }
 
@@ -578,6 +603,18 @@ fn main() -> std::process::ExitCode {
     }
 }
 
+/// Opens the preview window while a worker thread loads and plans `source`.
+fn preview(source: Source, theme: theme::ThemeName) -> anyhow::Result<()> {
+    let (progress, updates) = Progress::channel(std::time::Duration::from_millis(50));
+    let theme = theme.build();
+    let worker = std::thread::spawn(move || {
+        let (mut simulation, title) = source.load(&progress)?;
+        simulation.set_theme(theme);
+        Ok((simulation, title))
+    });
+    scene::preview(scene::Loading::new(updates, worker))
+}
+
 fn run() -> anyhow::Result<()> {
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
@@ -594,7 +631,7 @@ fn run() -> anyhow::Result<()> {
             treemap,
         }) => {
             let started = std::time::Instant::now();
-            let (mut simulation, _) = source.load()?;
+            let (mut simulation, _) = source.load(&Progress::default())?;
             eprintln!("load_plan_seconds={:.6}", started.elapsed().as_secs_f64());
             eprintln!(
                 "region_plan_seconds={:.6}",
@@ -631,11 +668,7 @@ fn run() -> anyhow::Result<()> {
             let history = history::import_with_options(&repo, tip, options)?;
             serde_json::to_writer_pretty(std::io::stdout().lock(), &history)?;
         }
-        Some(Command::Preview { source, theme }) => {
-            let (mut simulation, title) = source.load()?;
-            simulation.set_theme(theme.build());
-            scene::preview(simulation, title);
-        }
+        Some(Command::Preview { source, theme }) => preview(source, theme)?,
         Some(Command::Export {
             theme,
             directory,
@@ -647,7 +680,10 @@ fn run() -> anyhow::Result<()> {
             resolution,
             camera_path,
         }) => {
-            let (mut simulation, title) = source.load()?;
+            let (mut simulation, title) =
+                source.load_reporting(std::time::Duration::from_secs(1), |update| {
+                    eprintln!("{update}");
+                })?;
             simulation.set_theme(theme.build());
             let frames = frames
                 .map_or_else(|| model::frames_for(simulation.duration(), fps), Ok)?;
@@ -805,7 +841,8 @@ mod tests {
                 else {
                     panic!("playback command")
                 };
-                let (simulation, _) = source.load().unwrap();
+                let (simulation, _) =
+                    source.load(&crate::progress::Progress::default()).unwrap();
                 assert_eq!(simulation.diff_text_distance, expected);
             }
         }
@@ -825,13 +862,57 @@ mod tests {
         let Some(Command::Preview { source, .. }) = cli.command else {
             panic!("preview")
         };
-        let (simulation, _) = source.load().unwrap();
+        let (simulation, _) =
+            source.load(&crate::progress::Progress::default()).unwrap();
         let starts = |rate, idle| {
             model::schedule::Schedule::new(&timeline::synthetic(), rate, idle).starts
         };
         assert_eq!(simulation.scheduled_starts(), starts(2.0, 5.0));
         assert_ne!(starts(2.0, 5.0), starts(1.0, 5.0));
         assert_ne!(starts(2.0, 5.0), starts(2.0, 1.0));
+    }
+
+    #[test]
+    fn export_planning_reports_every_stage_and_plans_the_same_playback() {
+        let cli = Cli::try_parse_from(["codestrand", "export", "unused"]).unwrap();
+        let Some(Command::Export { source, .. }) = cli.command else {
+            panic!("export")
+        };
+        let mut lines = Vec::new();
+        let (mut reported, title) = source
+            .load_reporting(std::time::Duration::ZERO, |update| {
+                lines.push(update.to_string());
+            })
+            .unwrap();
+        for stage in [
+            "planning directories 0%",
+            "replaying layout 0%",
+            "planning travel 0%",
+            "planning travel 100%",
+            "placing titles 100%",
+        ] {
+            let line = format!("Planning: {stage}");
+            assert!(lines.contains(&line), "missing {line:?}");
+        }
+        assert_eq!(lines.last().unwrap(), "Planning: placing titles 100%");
+
+        let (mut quiet, quiet_title) =
+            source.load(&crate::progress::Progress::default()).unwrap();
+        assert_eq!(title, quiet_title);
+        for frame in [0, 90, 300, 600] {
+            reported.advance_to(frame, 60);
+            quiet.advance_to(frame, 60);
+            assert_eq!(reported.commit(), quiet.commit());
+            assert_eq!(reported.beams().len(), quiet.beams().len());
+            let places = |simulation: &model::Simulation| -> Vec<_> {
+                simulation
+                    .avatars()
+                    .iter()
+                    .map(|avatar| (avatar.position, avatar.presence))
+                    .collect()
+            };
+            assert_eq!(places(&reported), places(&quiet));
+        }
     }
 
     #[test]

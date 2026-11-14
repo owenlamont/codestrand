@@ -399,6 +399,7 @@ mod tests {
             &events,
             &starts,
             &["First".to_owned(), "Second".to_owned()],
+            &crate::progress::Progress::default(),
         );
         let mut identity = None;
         for event in events.iter().filter(|event| event.repository == 0) {

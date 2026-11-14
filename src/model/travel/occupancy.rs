@@ -124,6 +124,11 @@ impl Simulation {
             .expect("bounded schedule")
             + 144;
         for frame in 0..=frames {
+            self.progress.report(
+                crate::progress::Stage::Reservations,
+                frame.into(),
+                frames.into(),
+            );
             self.advance_to(frame, 60);
             conflicts += self.reserve_frame(&mut occupied, &mut conflicted);
         }

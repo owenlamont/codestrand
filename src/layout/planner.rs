@@ -608,6 +608,7 @@ mod tests {
             &events,
             &starts,
             &["First".into(), "Second".into(), "Third".into()],
+            &crate::progress::Progress::default(),
         );
         for mut layout in [Layout::planned(&crate::timeline::synthetic()), combined] {
             for tick in [0, 1, 13, 90, 1000, 10_000, 90, 1] {

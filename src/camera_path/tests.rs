@@ -18,7 +18,13 @@ fn fixture(text: &str) -> (std::path::PathBuf, Simulation) {
     let Some(Command::Export { source, .. }) = cli.command else {
         panic!("export command")
     };
-    (file, source.load().unwrap().0)
+    (
+        file,
+        source
+            .load(&crate::progress::Progress::default())
+            .unwrap()
+            .0,
+    )
 }
 
 const POINT: &str =
