@@ -325,8 +325,14 @@ impl Space<'_> {
         let distance = self.radius + self.margin;
         let rect = labels::tangent_rect(motion.body, motion.size, distance, target);
         let cost = self.cost(index, rect);
-        let clip =
-            forecast_clip(target, 0.0, target, motion.size, distance, motion.future);
+        let clip = labels::forecast_clip(
+            target,
+            0.0,
+            target,
+            motion.size,
+            distance,
+            motion.future,
+        );
         let text = self.text_cost(rect);
         let soft = cost[2] * 2.0
             + clip * 1e8
@@ -413,24 +419,6 @@ impl Space<'_> {
                 ) * 20_000.0,
         ]
     }
-}
-
-fn forecast_clip(
-    mut angle: f32,
-    mut velocity: f32,
-    target: f32,
-    size: Vec2,
-    distance: f32,
-    future: &[Vec2],
-) -> f32 {
-    let mut maximum = 0.0_f32;
-    for &body in future {
-        (angle, velocity) =
-            labels::steer(angle, velocity, target, 4.0 * tick_seconds());
-        let rect = labels::tangent_rect(body, size, distance, angle);
-        maximum = maximum.max(caption::outside(rect, 16.0));
-    }
-    maximum
 }
 
 fn overlap(a: Rect, b: Rect) -> f32 {

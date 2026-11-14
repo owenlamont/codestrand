@@ -991,14 +991,7 @@ impl LabelSpace<'_> {
         let distance = self.radius + self.margin;
         let rect = labels::tangent_rect(motion.body, motion.size, distance, target);
         let cost = self.cost(index, rect);
-        let clip = labels::forecast_clip(
-            target,
-            0.0,
-            target,
-            motion.size,
-            distance,
-            motion.future,
-        );
+        let clip = labels::resting_clip(target, motion.size, distance, motion.future);
         let text = self.text_cost(rect);
         let soft = cost[2] * 2.0
             + clip * 1e8
