@@ -108,6 +108,7 @@ struct Palette {
     descending: Handle<StandardMaterial>,
     rising: Handle<StandardMaterial>,
     membership_mesh: Handle<Mesh>,
+    directory_rings: Vec<Vec<Handle<Mesh>>>,
     activity_mesh: Handle<Mesh>,
     tile: Option<(Handle<StandardMaterial>, Transform)>,
     glyph_mesh: Handle<Mesh>,
@@ -133,16 +134,16 @@ impl Palette {
         let activity_mesh = meshes.add(styling::ring_mesh(theme, theme.activity_radii));
         // Export sorts opaque mesh bins, but instances within a bin retain insertion order.
         let root_cube = meshes.add(Cuboid::default());
-        let directory_cubes = theme
-            .directories
-            .iter()
-            .map(|depths| {
-                depths
-                    .iter()
-                    .map(|_| meshes.add(Cuboid::default()))
-                    .collect()
-            })
-            .collect();
+        let mut per_directory = |mesh: Mesh| -> Vec<Vec<Handle<Mesh>>> {
+            theme
+                .directories
+                .iter()
+                .map(|depths| depths.iter().map(|_| meshes.add(mesh.clone())).collect())
+                .collect()
+        };
+        let directory_cubes = per_directory(Cuboid::default().into());
+        let directory_rings =
+            per_directory(styling::ring_mesh(theme, theme.membership_radii));
         let glyph_textures = Self::preload_glyphs(world, theme);
         let textures = &glyph_textures
             .iter()
@@ -203,6 +204,7 @@ impl Palette {
             descending,
             rising,
             membership_mesh,
+            directory_rings,
             activity_mesh,
             tile,
             glyph_mesh,
@@ -275,10 +277,23 @@ impl Palette {
     }
 
     fn directory_cube(&self, slot: usize, depth: u16) -> &Handle<Mesh> {
+        Self::directory_mesh(&self.root_cube, &self.directory_cubes, slot, depth)
+    }
+
+    fn membership_ring(&self, slot: usize, depth: u16) -> &Handle<Mesh> {
+        Self::directory_mesh(&self.membership_mesh, &self.directory_rings, slot, depth)
+    }
+
+    fn directory_mesh<'a>(
+        root: &'a Handle<Mesh>,
+        slots: &'a [Vec<Handle<Mesh>>],
+        slot: usize,
+        depth: u16,
+    ) -> &'a Handle<Mesh> {
         if depth == 0 {
-            return &self.root_cube;
+            return root;
         }
-        let depths = &self.directory_cubes[slot % self.directory_cubes.len()];
+        let depths = &slots[slot % slots.len()];
         &depths[usize::from(depth - 1).min(depths.len() - 1)]
     }
 }
@@ -1067,10 +1082,14 @@ pub(super) fn switch_theme(world: &mut World, name: crate::theme::ThemeName) {
             .get_mut(&palette.disc)
             .expect("palette portrait mesh remains allocated") =
             Circle::new(theme.avatar_radius).into();
-        *meshes
-            .get_mut(&palette.membership_mesh)
-            .expect("palette membership mesh remains allocated") =
-            styling::ring_mesh(&theme, theme.membership_radii);
+        for ring in std::iter::once(&palette.membership_mesh)
+            .chain(palette.directory_rings.iter().flatten())
+        {
+            *meshes
+                .get_mut(ring)
+                .expect("palette membership mesh remains allocated") =
+                styling::ring_mesh(&theme, theme.membership_radii);
+        }
         *meshes
             .get_mut(&palette.activity_mesh)
             .expect("palette activity mesh remains allocated") =
@@ -1402,12 +1421,9 @@ fn sync_files(
                 .expect("file visual")
                 .heat_material = material.clone();
         }
-        let dir = layout.dir(file.dir);
-        set_material(
-            world,
-            membership,
-            palette.directory(pools.hues.slots[file.dir], dir.depth),
-        );
+        let (slot, depth) = (pools.hues.slots[file.dir], layout.dir(file.dir).depth);
+        set_mesh(world, membership, palette.membership_ring(slot, depth));
+        set_material(world, membership, palette.directory(slot, depth));
         let glowing = if simulation.theme().blackbody {
             file.heat > 0.3
         } else {
@@ -1805,11 +1821,15 @@ fn set_directory_material(
     slot: usize,
     depth: u16,
 ) {
+    set_mesh(world, entity, palette.directory_cube(slot, depth));
+    set_material(world, entity, palette.directory(slot, depth));
+}
+
+fn set_mesh(world: &mut World, entity: Entity, mesh: &Handle<Mesh>) {
     world
         .get_mut::<Mesh3d>(entity)
-        .expect("directory pools have meshes")
-        .set_if_neq(Mesh3d(palette.directory_cube(slot, depth).clone()));
-    set_material(world, entity, palette.directory(slot, depth));
+        .expect("palette-coloured entities have meshes")
+        .set_if_neq(Mesh3d(mesh.clone()));
 }
 
 fn attach_portrait(
@@ -4088,10 +4108,15 @@ mod tests {
         world.init_resource::<Assets<StandardMaterial>>();
         let theme = Theme::neon();
         let palette = Palette::new(&mut world, &theme);
-        let handles: Vec<_> = std::iter::once(&palette.root_cube)
-            .chain(palette.directory_cubes.iter().flatten())
-            .map(Handle::id)
-            .collect();
+        let slot_meshes = |palette: &Palette| -> Vec<_> {
+            [&palette.root_cube, &palette.membership_mesh]
+                .into_iter()
+                .chain(palette.directory_cubes.iter().flatten())
+                .chain(palette.directory_rings.iter().flatten())
+                .map(Handle::id)
+                .collect()
+        };
+        let handles = slot_meshes(&palette);
         let unique: std::collections::HashSet<_> = handles.iter().copied().collect();
         assert_eq!(handles.len(), unique.len());
         assert!(!unique.contains(&palette.cube.id()));
@@ -4142,11 +4167,7 @@ mod tests {
         world.insert_resource(palette);
         switch_theme(&mut world, crate::theme::ThemeName::Phosphor);
         let palette = world.resource::<Palette>();
-        let switched: Vec<_> = std::iter::once(&palette.root_cube)
-            .chain(palette.directory_cubes.iter().flatten())
-            .map(Handle::id)
-            .collect();
-        assert_eq!(handles, switched);
+        assert_eq!(handles, slot_meshes(palette));
         assert_eq!(world.get::<Mesh3d>(entity).unwrap().0, palette.root_cube);
         assert_eq!(
             world
@@ -4442,6 +4463,13 @@ mod tests {
                     .expect("membership ring material")
                     .0,
                 palette.directory(slot, 1),
+            );
+            assert_eq!(
+                &world
+                    .get::<Mesh3d>(visual.membership)
+                    .expect("membership ring mesh")
+                    .0,
+                palette.membership_ring(slot, 1),
             );
             assert_eq!(
                 world
