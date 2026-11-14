@@ -189,7 +189,7 @@ ended = "2026-05-01"
 
 Paths in the TOML file resolve relative to the file. Labels default to the repository
 directory name. Repeated flags and a file can be combined; flag entries come first.
-Paths resolving to the same location share one entry; the first entry wins. Labels for
+Paths resolving to the same location are rejected as duplicate repositories. Labels for
 distinct repositories must be unique. The combined list is limited to 30
 unique repositories before any history is imported or avatars are resolved.
 

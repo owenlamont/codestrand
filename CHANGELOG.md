@@ -92,6 +92,7 @@ Watch the [feature tour video](https://youtu.be/gmueXAHnvAE).
 
 ### Fixed
 
+- Duplicate repository paths now report an error naming both input spellings.
 - Moving translucent surfaces sort at their current positions, fixing stale overlap
   order after movement and material changes.
   ([performance issue 143](https://github.com/owenlamont/codestrand/issues/143))
