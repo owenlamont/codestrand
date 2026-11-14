@@ -486,9 +486,7 @@ fn territories(
                     .expect("territory transform")
                     .translation
                     .y += rise;
-                if grey > 0.0 || alpha < 1.0 {
-                    super::lifecycle_material(world, entity, grey, alpha);
-                }
+                super::fade(world, entity, grey, alpha);
             }
         }
     }
