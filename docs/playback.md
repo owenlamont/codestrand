@@ -378,6 +378,31 @@ playback.
 
 ## Range and pacing
 
+Import refuses truncated history by default, before planning or rendering. The error
+names the exhausted budget. `--allow-truncated-history` accepts completed commits only
+and prints the reason; the incomplete result is never cached. Both options below apply
+to `inspect`, `preview` and `export`.
+
+`--history-budget N` multiplies the cumulative commit, changed-entry, diff-line and
+retained-input budgets by an integer from 1 through 100 (default 1). The base budgets
+are 1,000,000 commits, 2,000,000 changed entries, 20,000,000 diff input lines and
+512 MiB of retained-input accounting per repository. A larger budget uses more memory
+and time. Nondefault budgets bypass the history cache so detail from another budget
+cannot be reused.
+
+Single-object and single-tree limits stay fixed, including 16 MiB objects, 2,000,000
+expanded tree entries, depth 256, 16,384-byte paths and 64 MiB of expanded path bytes.
+The 32 GiB cumulative work ceiling, 8 GiB blob-detail budget and per-diff work limits
+also stay fixed. Oversized or expensive blob diffs keep file changes but omit detail;
+exhausting the cumulative line budget also omits detail. Raising the history budget
+cannot override a fixed security ceiling. Playback range options do not reduce import
+work: the reachable history is checked before selecting the playback range.
+
+```sh
+codestrand inspect /path/to/repository --history-budget 2
+codestrand inspect /path/to/repository --allow-truncated-history
+```
+
 ```sh
 codestrand preview --repository /path/to/repository --start 0 --commits 20 \
   --seconds-per-day 2 --max-idle-seconds 1

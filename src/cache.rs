@@ -212,20 +212,31 @@ pub(super) fn root() -> Option<PathBuf> {
     dirs::cache_dir().map(|path| path.join("codestrand"))
 }
 
+#[cfg(test)]
 pub(super) fn load(
     path: &Path,
     revision: &str,
     cache_root: Option<&Path>,
 ) -> Result<Vec<timeline::Event>, history::Error> {
+    load_with_options(path, revision, cache_root, history::Options::default())
+}
+
+pub(super) fn load_with_options(
+    path: &Path,
+    revision: &str,
+    cache_root: Option<&Path>,
+    options: history::Options,
+) -> Result<Vec<timeline::Event>, history::Error> {
     let (repo, tip) = history::resolve(path, revision)?;
     let entry = cache_root
+        .filter(|_| options.cacheable())
         .filter(|_| repo.objects.store_ref().replacements().next().is_none())
         .and_then(|root| entry_path(root, &repo));
     let tip_text = tip.to_string();
     if let Some(events) = entry.as_deref().and_then(|path| read(path, &tip_text)) {
         return Ok(events);
     }
-    let history = history::import_resolved(&repo, tip)?;
+    let history = history::import_with_options(&repo, tip, options)?;
     let snapshot = Snapshot {
         version: timeline::CACHE_VERSION,
         tip: tip_text,

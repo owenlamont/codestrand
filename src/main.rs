@@ -109,6 +109,8 @@ enum Command {
         repository: PathBuf,
         #[arg(long, default_value = "HEAD")]
         revision: String,
+        #[command(flatten)]
+        history: history::Options,
     },
     /// Play history in a loop; [ halves and ] doubles live speed (0.125x–8x).
     #[command(
@@ -151,6 +153,9 @@ enum Command {
     reason = "each bool is an independent clap switch"
 )]
 struct Source {
+    #[command(flatten)]
+    #[serde(flatten)]
+    history: history::Options,
     /// Assume departure after this many calendar days; default 60 marks two quiet months.
     #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u32).range(1..=36500))]
     contributor_inactivity_days: u32,
@@ -237,10 +242,11 @@ impl Source {
         let mut histories = Vec::new();
         for (index, repository) in repositories.iter().enumerate() {
             let started = std::time::Instant::now();
-            let mut events = cache::load(
+            let mut events = cache::load_with_options(
                 &repository.path,
                 &self.revision,
                 cache_root.filter(|_| !self.no_cache),
+                self.history,
             )?;
             eprintln!(
                 "repository={} import_seconds={:.6} events={}",
@@ -619,8 +625,10 @@ fn run() -> anyhow::Result<()> {
         Some(Command::Inspect {
             repository,
             revision,
+            history: options,
         }) => {
-            let history = history::import(&repository, &revision)?;
+            let (repo, tip) = history::resolve(&repository, &revision)?;
+            let history = history::import_with_options(&repo, tip, options)?;
             serde_json::to_writer_pretty(std::io::stdout().lock(), &history)?;
         }
         Some(Command::Preview { source, theme }) => {
