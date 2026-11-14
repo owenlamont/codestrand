@@ -622,14 +622,14 @@ fn run() -> anyhow::Result<()> {
             }
             let encoder = encoding.start(fps, resolution)?;
             export::prepare(&directory)?;
-            export::run(
+            export::render(
                 &directory,
-                (simulation, camera_path, resolution),
-                title,
+                scene::headless(simulation, title, fps, resolution),
                 frames,
                 fps,
                 frame_delay_ms,
                 encoder,
+                camera_path.as_ref(),
             )?;
         }
         None => Cli::command().print_help()?,
