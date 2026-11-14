@@ -73,8 +73,7 @@ impl Plan {
             if !failed.iter().any(|&value| value) {
                 break samples;
             }
-            let updated = widen_windows(&windows, &failed);
-            windows = updated;
+            windows = widen_windows(&windows, &failed);
         };
         for position in samples.iter_mut().flatten() {
             *position = Vec2::new(position.y, -position.x);

@@ -40,7 +40,7 @@ pub(super) fn steer(angle: f32, velocity: f32, target: f32, dt: f32) -> (f32, f3
     (angle + velocity * dt, velocity)
 }
 
-fn difference(target: f32, angle: f32) -> f32 {
+pub(super) fn difference(target: f32, angle: f32) -> f32 {
     (target - angle + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)
         - std::f32::consts::PI
 }

@@ -200,7 +200,6 @@ struct Trip {
     destination_repository: usize,
     free: u64,
     failure: Option<&'static str>,
-    cutoff: Option<u64>,
     proof: Option<serde_json::Value>,
 }
 
@@ -975,7 +974,6 @@ mod tests {
             destination_repository: 1,
             free: 1,
             failure: Some("endpoint"),
-            cutoff: None,
             proof: None,
         });
         let options = super::super::Options {
@@ -1158,7 +1156,6 @@ mod tests {
             destination_repository: 1,
             free: 10,
             failure: None,
-            cutoff: Some(30),
             proof: None,
         };
         for tick in trip.departure..trip.arrival {
@@ -1185,7 +1182,6 @@ mod tests {
             destination_repository: 1,
             free: 0,
             failure: None,
-            cutoff: None,
             proof: None,
         };
         let second = Trip {

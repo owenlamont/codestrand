@@ -270,7 +270,6 @@ fn search(
         if best.route.is_empty() {
             best = candidate;
             best.fade = true;
-            best.cutoff = Some(begin);
         }
     }
     best
@@ -318,7 +317,6 @@ pub(super) fn trips(
             destination_repository: service.repository,
             free,
             failure: Some("endpoint"),
-            cutoff: None,
             proof: None,
         };
         if !service.bot || bots == crate::model::BotTravel::Walk {

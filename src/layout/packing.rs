@@ -21,15 +21,20 @@ pub(crate) struct Tile {
 
 impl Tile {
     pub(crate) fn viewport() -> Self {
-        let limit = Vec2::ONE - Vec2::splat(2.0 * framing::MARGIN) / framing::VIEWPORT;
+        Self::inset(framing::MARGIN)
+    }
+
+    /// The field between the caption bars, `margin` reference pixels inside each edge.
+    fn inset(margin: f32) -> Self {
+        let limit = Vec2::ONE - Vec2::splat(2.0 * margin) / framing::VIEWPORT;
         Self {
             low: Vec2::new(
                 -limit.x,
-                (caption::BOTTOM + framing::MARGIN) * 2.0 / framing::VIEWPORT.y,
+                (caption::BOTTOM + margin) * 2.0 / framing::VIEWPORT.y,
             ),
             high: Vec2::new(
                 limit.x,
-                (caption::TOP - framing::MARGIN) * 2.0 / framing::VIEWPORT.y,
+                (caption::TOP - margin) * 2.0 / framing::VIEWPORT.y,
             ),
         }
     }
@@ -483,20 +488,7 @@ fn gutter_cells(nodes: &[Node], placement: &[Placement]) -> Vec<Option<Tile>> {
         }
     }
     let mut result = vec![None; placement.len()];
-    let limit = Vec2::ONE - Vec2::splat(32.0) / framing::VIEWPORT;
-    divide(
-        nodes,
-        0,
-        Tile {
-            low: Vec2::new(
-                -limit.x,
-                (caption::BOTTOM + 16.0) * 2.0 / framing::VIEWPORT.y,
-            ),
-            high: Vec2::new(limit.x, (caption::TOP - 16.0) * 2.0 / framing::VIEWPORT.y),
-        },
-        placement,
-        &mut result,
-    );
+    divide(nodes, 0, Tile::inset(16.0), placement, &mut result);
     result
 }
 
