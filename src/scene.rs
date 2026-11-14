@@ -97,6 +97,8 @@ struct FileVisual {
 struct Palette {
     folder: Handle<Mesh>,
     cube: Handle<Mesh>,
+    root_cube: Handle<Mesh>,
+    directory_cubes: Vec<Vec<Handle<Mesh>>>,
     sphere: Handle<Mesh>,
     disc: Handle<Mesh>,
     beam: Handle<Mesh>,
@@ -129,6 +131,18 @@ impl Palette {
         let membership_mesh =
             meshes.add(styling::ring_mesh(theme, theme.membership_radii));
         let activity_mesh = meshes.add(styling::ring_mesh(theme, theme.activity_radii));
+        // Export sorts opaque mesh bins, but instances within a bin retain insertion order.
+        let root_cube = meshes.add(Cuboid::default());
+        let directory_cubes = theme
+            .directories
+            .iter()
+            .map(|depths| {
+                depths
+                    .iter()
+                    .map(|_| meshes.add(Cuboid::default()))
+                    .collect()
+            })
+            .collect();
         let glyph_textures = Self::preload_glyphs(world, theme);
         let textures = &glyph_textures
             .iter()
@@ -178,6 +192,8 @@ impl Palette {
         Self {
             folder,
             cube,
+            root_cube,
+            directory_cubes,
             sphere,
             disc,
             beam,
@@ -256,6 +272,14 @@ impl Palette {
         // Separate coplanar edge tops by palette key rather than allocation order.
         0.01 * model::count_u32(u32::try_from(rank).expect("palette rank fits u32"))
             / model::count_u32(u32::try_from(count).expect("palette size fits u32"))
+    }
+
+    fn directory_cube(&self, slot: usize, depth: u16) -> &Handle<Mesh> {
+        if depth == 0 {
+            return &self.root_cube;
+        }
+        let depths = &self.directory_cubes[slot % self.directory_cubes.len()];
+        &depths[usize::from(depth - 1).min(depths.len() - 1)]
     }
 }
 
@@ -1598,25 +1622,27 @@ fn sync_directory_edges(
             Some((
                 ground(parent.position) + Vec3::Y * (height - 0.05),
                 ground(dir.position) + Vec3::Y * (height - 0.05),
-                palette.directory(pools.hues.slots[index], dir.depth),
+                (pools.hues.slots[index], dir.depth),
                 width * dir.parent.map_or(1.0, |parent| pools.lod.detail[parent]),
                 dir.repository,
             ))
         })
-        .flat_map(|(from, to, material, width, repository)| {
+        .flat_map(|(from, to, key, width, repository)| {
             styling::edge_segments(simulation.theme(), from, to)
                 .into_iter()
-                .map(move |(a, b)| (a, b, material, width, repository))
+                .map(move |(a, b)| (a, b, key, width, repository))
         })
         .collect();
     let pool = grow(
         world,
         &mut pools.edges,
         edges.len(),
-        &palette.cube,
+        &palette.root_cube,
         &palette.edge,
     );
-    for (entity, (from, to, material, width, repository)) in pool.iter().zip(&edges) {
+    for (entity, (from, to, (slot, depth), width, repository)) in
+        pool.iter().zip(&edges)
+    {
         let (grey, alpha, rise) = simulation.repository_effect(*repository);
         if let Some(mut transform) = world.get_mut::<Transform>(*entity) {
             let delta = *to - *from;
@@ -1631,7 +1657,7 @@ fn sync_directory_edges(
             );
         }
         set_visible(world, *entity, true);
-        set_material(world, *entity, material);
+        set_directory_material(world, *entity, palette, *slot, *depth);
         if grey > 0.0 || alpha < 1.0 {
             lifecycle_material(world, *entity, grey, alpha);
         }
@@ -1653,14 +1679,16 @@ fn sync_structure(
         world,
         &mut pools.directories,
         dirs.len(),
-        &palette.cube,
+        &palette.root_cube,
         &palette.edge,
     );
     for (entity, &(index, dir)) in pool.iter().zip(&dirs) {
-        set_material(
+        set_directory_material(
             world,
             *entity,
-            palette.directory(pools.hues.slots[index], dir.depth),
+            palette,
+            pools.hues.slots[index],
+            dir.depth,
         );
         let (grey, alpha, rise) = simulation.repository_effect(dir.repository);
         if let Some(mut transform) = world.get_mut::<Transform>(*entity) {
@@ -1768,6 +1796,20 @@ fn set_material(
             .entity_mut(entity)
             .insert(MeshMaterial3d(material.clone()));
     }
+}
+
+fn set_directory_material(
+    world: &mut World,
+    entity: Entity,
+    palette: &Palette,
+    slot: usize,
+    depth: u16,
+) {
+    world
+        .get_mut::<Mesh3d>(entity)
+        .expect("directory pools have meshes")
+        .set_if_neq(Mesh3d(palette.directory_cube(slot, depth).clone()));
+    set_material(world, entity, palette.directory(slot, depth));
 }
 
 fn attach_portrait(
@@ -3959,7 +4001,7 @@ mod tests {
     }
 
     #[test]
-    fn structure_reuses_materials_across_depth_growth_pool_reuse_and_rewind() {
+    fn structure_reuses_slots_across_depth_growth_pool_reuse_and_rewind() {
         let mut world = World::new();
         world.init_resource::<Assets<Mesh>>();
         world.init_resource::<Assets<Image>>();
@@ -3987,6 +4029,10 @@ mod tests {
                 pools.directories.iter().zip(simulation.layout().dirs())
             {
                 assert_eq!(
+                    &world.get::<Mesh3d>(entity).unwrap().0,
+                    palette.directory_cube(pools.hues.slots[index], dir.depth),
+                );
+                assert_eq!(
                     &world
                         .get::<MeshMaterial3d<StandardMaterial>>(entity)
                         .expect("pooled nodes have materials")
@@ -4002,6 +4048,10 @@ mod tests {
                     .filter(|(_, dir)| dir.parent.is_some()),
             ) {
                 assert_eq!(
+                    &world.get::<Mesh3d>(entity).unwrap().0,
+                    palette.directory_cube(pools.hues.slots[index], dir.depth),
+                );
+                assert_eq!(
                     &world
                         .get::<MeshMaterial3d<StandardMaterial>>(entity)
                         .expect("pooled edges have materials")
@@ -4014,10 +4064,97 @@ mod tests {
             }
         }
         assert_eq!(palette.directory(0, 0), &palette.edge);
+        assert_eq!(palette.directory_cube(0, 0), &palette.root_cube);
+        assert_eq!(
+            palette.directory_cube(0, u16::MAX),
+            palette.directory_cube(0, 4)
+        );
+        assert_eq!(
+            palette.directory_cube(0, 1),
+            palette.directory_cube(theme.directories.len(), 1)
+        );
         assert_eq!(palette.directory(0, u16::MAX), palette.directory(0, 4));
         assert_eq!(
             palette.directory(0, 1),
             palette.directory(theme.directories.len(), 1)
+        );
+    }
+
+    #[test]
+    fn directory_meshes_survive_tinting_and_theme_switches() {
+        let mut world = World::new();
+        world.init_resource::<Assets<Mesh>>();
+        world.init_resource::<Assets<Image>>();
+        world.init_resource::<Assets<StandardMaterial>>();
+        let theme = Theme::neon();
+        let palette = Palette::new(&mut world, &theme);
+        let handles: Vec<_> = std::iter::once(&palette.root_cube)
+            .chain(palette.directory_cubes.iter().flatten())
+            .map(Handle::id)
+            .collect();
+        let unique: std::collections::HashSet<_> = handles.iter().copied().collect();
+        assert_eq!(handles.len(), unique.len());
+        assert!(!unique.contains(&palette.cube.id()));
+        let entity = world
+            .spawn((
+                Mesh3d(palette.root_cube.clone()),
+                MeshMaterial3d(palette.edge.clone()),
+            ))
+            .id();
+        for (slot, depth) in [(0, 0), (1, 1), (1, u16::MAX), (0, 0)] {
+            set_directory_material(&mut world, entity, &palette, slot, depth);
+            let mesh = world.get::<Mesh3d>(entity).unwrap().0.clone();
+            assert_eq!(&mesh, palette.directory_cube(slot, depth));
+            world.clear_trackers();
+            set_directory_material(&mut world, entity, &palette, slot, depth);
+            assert!(
+                !world
+                    .entity(entity)
+                    .get_ref::<Mesh3d>()
+                    .unwrap()
+                    .is_changed()
+            );
+            assert!(
+                !world
+                    .entity(entity)
+                    .get_ref::<MeshMaterial3d<StandardMaterial>>()
+                    .unwrap()
+                    .is_changed()
+            );
+            lifecycle_material(&mut world, entity, 0.25, 0.5);
+            assert_eq!(world.get::<Mesh3d>(entity).unwrap().0, mesh);
+            assert_ne!(
+                &world
+                    .get::<MeshMaterial3d<StandardMaterial>>(entity)
+                    .unwrap()
+                    .0,
+                palette.directory(slot, depth)
+            );
+            assert!(restore_lifecycle_materials(&mut world));
+            assert_eq!(world.get::<Mesh3d>(entity).unwrap().0, mesh);
+        }
+        world.insert_resource(Playback(Simulation::new(
+            crate::timeline::synthetic(),
+            &model::Options::default(),
+            &theme,
+            &crate::contributors::Mappings::default(),
+        )));
+        world.insert_resource(palette);
+        switch_theme(&mut world, crate::theme::ThemeName::Phosphor);
+        let palette = world.resource::<Palette>();
+        let switched: Vec<_> = std::iter::once(&palette.root_cube)
+            .chain(palette.directory_cubes.iter().flatten())
+            .map(Handle::id)
+            .collect();
+        assert_eq!(handles, switched);
+        assert_eq!(world.get::<Mesh3d>(entity).unwrap().0, palette.root_cube);
+        assert_eq!(
+            world
+                .resource::<Assets<StandardMaterial>>()
+                .get(&palette.edge)
+                .unwrap()
+                .base_color,
+            world.resource::<Playback>().0.theme().edge.base_color
         );
     }
 
