@@ -319,15 +319,7 @@ fn tiles(
     presence: &[f32],
     gap: Vec2,
 ) -> Option<Vec<Option<Tile>>> {
-    let mut states: Vec<_> = nodes
-        .iter()
-        .map(|_| Feasible {
-            sizes: Vec::new(),
-            weight: 0.0,
-            presence: 0.0,
-            gap: 0.0,
-        })
-        .collect();
+    let mut states = vec![Feasible::default(); nodes.len()];
     feasibility(nodes, 0, weights, presence, gap, &mut states);
     allocated(nodes, weights.len(), &states)
 }

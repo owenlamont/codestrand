@@ -273,7 +273,8 @@ pub(super) fn import_resolved(
     repo: &gix::Repository,
     tip: gix::ObjectId,
 ) -> Result<History, Error> {
-    load(repo, tip).map_err(|source| Error::History { tip, source })
+    load_with_limits(repo, tip, Limits::default())
+        .map_err(|source| Error::History { tip, source })
 }
 
 const MAX_REFERENCE_HOPS: usize = 64;
@@ -413,10 +414,6 @@ fn bounded_revision(
         }
     }
     Ok(id)
-}
-
-fn load(repo: &gix::Repository, tip: gix::ObjectId) -> anyhow::Result<History> {
-    load_with_limits(repo, tip, Limits::default())
 }
 
 fn load_with_limits(

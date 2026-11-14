@@ -107,6 +107,24 @@ pub(super) struct Dir {
 }
 
 impl Dir {
+    fn new(path: String, parent: Option<usize>, depth: u16, repository: usize) -> Self {
+        Self {
+            local_position: Vec2::ZERO,
+            scale: 1.0,
+            repository,
+            path,
+            parent,
+            depth,
+            position: Vec2::ZERO,
+            slots: Vec::new(),
+            files: 0,
+            children: 0,
+            live: true,
+            touch_age: f32::INFINITY,
+            reserve: 0.4,
+        }
+    }
+
     fn core(&self) -> f32 {
         SPACING * slot_count(self.slots.len()).sqrt()
     }
@@ -141,23 +159,8 @@ impl Layout {
     }
 
     fn empty() -> Self {
-        let root = Dir {
-            local_position: Vec2::ZERO,
-            scale: 1.0,
-            repository: 0,
-            path: String::new(),
-            parent: None,
-            depth: 0,
-            position: Vec2::ZERO,
-            slots: Vec::new(),
-            files: 0,
-            children: 0,
-            live: true,
-            touch_age: f32::INFINITY,
-            reserve: 0.4,
-        };
         Self {
-            dirs: vec![root],
+            dirs: vec![Dir::new(String::new(), None, 0, 0)],
             dir_index: HashMap::from([(String::new(), 0)]),
             files: BTreeMap::new(),
             file_index: HashMap::new(),
@@ -527,21 +530,12 @@ impl Layout {
         let parent = self.ensure_dir(parent_path(path));
         self.dirs[parent].children += 1;
         let index = self.dirs.len();
-        self.dirs.push(Dir {
-            local_position: Vec2::ZERO,
-            scale: 1.0,
-            path: path.to_owned(),
-            parent: Some(parent),
-            depth: self.dirs[parent].depth + 1,
-            position: Vec2::ZERO,
-            slots: Vec::new(),
-            files: 0,
-            children: 0,
-            live: true,
-            touch_age: f32::INFINITY,
-            reserve: 0.4,
-            repository: self.dirs[parent].repository,
-        });
+        self.dirs.push(Dir::new(
+            path.to_owned(),
+            Some(parent),
+            self.dirs[parent].depth + 1,
+            self.dirs[parent].repository,
+        ));
         self.dir_index.insert(path.to_owned(), index);
         index
     }
