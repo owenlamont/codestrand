@@ -578,7 +578,7 @@ pub(super) fn preview(simulation: Simulation, title: String) {
     app.insert_resource(camera)
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
-                title: "Codestrand — layout study".to_owned(),
+                title: "Codestrand".to_owned(),
                 resolution: (WIDTH, HEIGHT).into(),
                 ..default()
             }),

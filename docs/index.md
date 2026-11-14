@@ -10,7 +10,7 @@ all affected files; diff fragments show additions and removals.
 
 Watch the [feature tour on YouTube](https://youtu.be/gmueXAHnvAE).
 
-Codestrand is a **layout study**, with seven steady themes, labels, contributor
+Codestrand has seven steady themes, labels, contributor
 portraits and a mostly planar scene. Preview and export share a repeatable
 simulation, including playback of multiple repositories. Export writes PNG frames or
 streams video to your installed FFmpeg.
