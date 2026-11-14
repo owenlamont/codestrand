@@ -87,6 +87,9 @@ Watch the [feature tour video](https://youtu.be/gmueXAHnvAE).
 
 ### Fixed
 
+- Moving translucent surfaces sort at their current positions, fixing stale overlap
+  order after movement and material changes.
+  ([performance issue 143](https://github.com/owenlamont/codestrand/issues/143))
 - Close the six security audit findings: caches and local avatars reject links and
   path escapes, history import and configuration files have fixed size budgets, and
   terminal diagnostics escape control characters.
