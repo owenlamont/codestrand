@@ -5,7 +5,6 @@ pub(super) struct Geometry {
     pub file_min: Vec3,
     pub file_max: Vec3,
     pub avatar_radius: f32,
-    pub avatar_label_offset: Vec3,
     pub label_height: f32,
 }
 mod candidates;
@@ -130,7 +129,6 @@ pub(super) struct Theme {
     pub(super) label_emphasis: Color,
     pub(super) label_landmark: Color,
     pub(super) avatar_radius: f32,
-    pub(super) avatar_label_offset: Vec3,
     pub(super) label_height: f32,
 }
 
@@ -270,7 +268,6 @@ impl Theme {
             label_emphasis: Color::srgb(0.88, 0.95, 1.0),
             label_landmark: Color::srgb(0.62, 0.86, 0.95),
             avatar_radius: 0.22,
-            avatar_label_offset: Vec3::new(0.3, 0.3, 0.0),
             label_height: 20.0,
         }
     }
@@ -364,7 +361,6 @@ impl Theme {
             file_min,
             file_max,
             avatar_radius: self.avatar_radius,
-            avatar_label_offset: self.avatar_label_offset,
             label_height: self.label_height,
         }
     }

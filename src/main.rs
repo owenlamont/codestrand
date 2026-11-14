@@ -86,7 +86,7 @@ use std::path::PathBuf;
 use clap::{CommandFactory, Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(version, about = "Git history inspection and layout playback study")]
+#[command(version, about = "Git history inspection and playback")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -622,14 +622,14 @@ fn run() -> anyhow::Result<()> {
             }
             let encoder = encoding.start(fps, resolution)?;
             export::prepare(&directory)?;
-            export::run(
+            export::render(
                 &directory,
-                (simulation, camera_path, resolution),
-                title,
+                scene::headless(simulation, title, fps, resolution),
                 frames,
                 fps,
                 frame_delay_ms,
                 encoder,
+                camera_path.as_ref(),
             )?;
         }
         None => Cli::command().print_help()?,
@@ -677,6 +677,29 @@ mod tests {
                 assert_eq!(simulation.diff_text_distance, expected);
             }
         }
+    }
+
+    #[test]
+    fn pacing_flags_reach_the_loaded_schedule() {
+        let cli = Cli::try_parse_from([
+            "codestrand",
+            "preview",
+            "--seconds-per-day",
+            "2",
+            "--max-idle-seconds",
+            "5",
+        ])
+        .unwrap();
+        let Some(Command::Preview { source, .. }) = cli.command else {
+            panic!("preview")
+        };
+        let (simulation, _) = source.load().unwrap();
+        let starts = |rate, idle| {
+            model::schedule::Schedule::new(&timeline::synthetic(), rate, idle).starts
+        };
+        assert_eq!(simulation.scheduled_starts(), starts(2.0, 5.0));
+        assert_ne!(starts(2.0, 5.0), starts(1.0, 5.0));
+        assert_ne!(starts(2.0, 5.0), starts(2.0, 1.0));
     }
 
     #[test]
@@ -803,12 +826,22 @@ mod tests {
 
     #[test]
     fn cli_selects_registered_themes_for_preview_and_export() {
-        for name in ["neon", "phosphor"] {
+        use theme::ThemeName;
+        for (name, expected) in [
+            ("neon", ThemeName::Neon),
+            ("phosphor", ThemeName::Phosphor),
+            ("outrun", ThemeName::Outrun),
+            ("blueprint", ThemeName::Blueprint),
+            ("bevelled-desktop", ThemeName::BevelledDesktop),
+            ("atlas", ThemeName::Atlas),
+            ("forge", ThemeName::Forge),
+        ] {
             let cli = Cli::try_parse_from(["codestrand", "preview", "--theme", name])
                 .unwrap();
             let Some(Command::Preview { theme, .. }) = cli.command else {
                 panic!("preview")
             };
+            assert_eq!(theme, expected);
             assert_eq!(theme.build().name, theme);
             let cli = Cli::try_parse_from([
                 "codestrand",

@@ -12,14 +12,10 @@ impl Capture {
             .map(|i| poses[i])
     }
     fn row(&self, tick: u64) -> &[Option<Tile>] {
-        &self.gutters[usize::try_from(tick)
-            .expect("bounded tick")
-            .min(self.gutters.len() - 1)]
+        super::at_tick(&self.gutters, tick)
     }
     fn radius(&self, tick: u64) -> f32 {
-        self.radii[usize::try_from(tick)
-            .expect("bounded tick")
-            .min(self.radii.len() - 1)]
+        *super::at_tick(&self.radii, tick)
     }
 }
 
@@ -30,12 +26,10 @@ fn hard_clearance(capture: &Capture, tick: u64, point: Vec2) -> bool {
         .all()
         && point.y - capture.radius(tick) >= super::super::caption::BOTTOM
         && point.y + capture.radius(tick) <= super::super::caption::TOP
-        && !capture.tiles[usize::try_from(tick)
-            .expect("bounded tick")
-            .min(capture.tiles.len() - 1)]
-        .iter()
-        .flatten()
-        .any(|t| super::in_guard(*t, capture.radius(tick), point))
+        && !super::at_tick(&capture.tiles, tick)
+            .iter()
+            .flatten()
+            .any(|t| super::in_guard(*t, capture.radius(tick), point))
 }
 
 pub(super) fn progress(trip: &Trip) -> f32 {
@@ -175,11 +169,7 @@ fn moving_route(
             Vec2::new(anchors[leg][0].at(row, 0)?, anchors[leg][1].at(row, 1)?)
                 .lerp(b, u)
         };
-        let cells: Vec<_> = row
-            .iter()
-            .flatten()
-            .map(|t| Rect::from_corners(t.low * HALF, t.high * HALF))
-            .collect();
+        let cells = super::network(row.iter().flatten().copied());
         if !super::on_network(point, &cells) || !hard_clearance(capture, tick, point) {
             return None;
         }
@@ -235,11 +225,7 @@ fn search(
         let target = (target_tile.low
             + (target_tile.high - target_tile.low) * target_fraction)
             * HALF;
-        let cells: Vec<_> = row
-            .iter()
-            .flatten()
-            .map(|t| Rect::from_corners(t.low * HALF, t.high * HALF))
-            .collect();
+        let cells = super::network(row.iter().flatten().copied());
         let points = match router.route(source, target, &cells) {
             Ok(points) => points,
             Err(e) => {

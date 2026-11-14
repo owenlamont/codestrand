@@ -155,12 +155,15 @@ pub(crate) fn background(colour: Color) -> LinearRgba {
 }
 
 impl Simulation {
-    pub(crate) fn caption_fields(&self) -> [String; 6] {
-        let event = self
-            .schedule
+    fn applied_event(&self) -> Option<&Event> {
+        self.schedule
             .applied(self.state.tick)
             .checked_sub(1)
-            .and_then(|i| self.events.get(i));
+            .and_then(|i| self.events.get(i))
+    }
+
+    pub(crate) fn caption_fields(&self) -> [String; 6] {
+        let event = self.applied_event();
         [
             event.map_or_else(String::new, |e| super::date(e.seconds)),
             self.caption_repository()
@@ -183,11 +186,7 @@ impl Simulation {
         ]
     }
     pub(crate) fn caption_repository(&self) -> Option<(usize, &str)> {
-        let event = self
-            .schedule
-            .applied(self.state.tick)
-            .checked_sub(1)
-            .and_then(|i| self.events.get(i))?;
+        let event = self.applied_event()?;
         self.layout()
             .repositories
             .get(event.repository)
@@ -318,6 +317,18 @@ mod tests {
                 );
                 assert_eq!(sim.caption_background(), Color::LinearRgba(expected));
             }
+            sim.caption_style = Style::Chip;
+            sim.advance_to(u32::try_from(tick + 9).unwrap(), 60);
+            let (current, _) = sim.caption_repository().unwrap();
+            assert!(current == from || current == to);
+            assert_eq!(
+                sim.caption_background(),
+                Color::LinearRgba(background(
+                    sim.theme.glass[current % sim.theme.glass.len()].base_color
+                )),
+                "a chip shows one repository colour while a bar is mid-blend"
+            );
+            sim.caption_style = Style::Bar;
         }
     }
 

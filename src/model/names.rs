@@ -41,6 +41,13 @@ pub(super) struct Placement {
     pub motion: Motion,
 }
 
+impl Placement {
+    pub(super) fn bounds(&self, label_height: f32) -> Rect {
+        let size = rect(Vec2::ZERO, &self.text, self.scale, label_height).size();
+        Rect::from_corners(self.point - Vec2::Y * size.y, self.point + Vec2::X * size.x)
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(super) struct Motion {
     pub goal: f32,

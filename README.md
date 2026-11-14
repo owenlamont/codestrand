@@ -10,7 +10,7 @@ video.
 
 Watch the [feature tour on YouTube](https://youtu.be/gmueXAHnvAE).
 
-**Status: layout study.** Video export uses your installed FFmpeg.
+Video export uses your installed FFmpeg.
 Licensed MIT OR Apache-2.0.
 
 Diff samples use Bevy's bundled Fira Mono font (OFL-1.1); see

@@ -97,9 +97,7 @@ impl Title {
         .filter(|(_, opacity)| *opacity > 0.0)
         .map(move |(point, opacity)| {
             (
-                ground(crate::layout::world_coordinates(
-                    super::framing::field_to_world(point / HALF),
-                )) + Vec3::Y * height,
+                ground(super::framing::field_to_world(point / HALF)) + Vec3::Y * height,
                 opacity,
             )
         })

@@ -72,8 +72,7 @@ impl Snapshots {
                 let Some(tile) = regions[frame.repository].tile else {
                     continue;
                 };
-                let origin =
-                    crate::layout::world_coordinates(origins[frame.repository]);
+                let origin = origins[frame.repository];
                 let mut points: Vec<Vec3> = self.points[frame.points.clone()]
                     .iter()
                     .map(|&p| {

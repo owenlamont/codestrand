@@ -65,7 +65,7 @@ impl Layout {
         for (_, dir) in self.dirs() {
             super::outline::include(
                 &mut supports[dir.repository],
-                super::region_coordinates(dir.position),
+                dir.position,
                 dir.radius(),
             );
         }
@@ -83,7 +83,7 @@ impl Layout {
                 for &point in &corners {
                     super::outline::include(
                         &mut supports[dir.repository],
-                        super::region_coordinates(file.position + point * presence),
+                        file.position + point * presence,
                         0.0,
                     );
                 }
@@ -127,12 +127,10 @@ impl Layout {
     pub(crate) fn place_regions(
         &mut self,
         regions: Vec<RepositoryRegion>,
-        offsets: Vec<Vec2>,
+        offsets: &[Vec2],
         scales: &[f32],
     ) {
         self.remove_offsets();
-        let offsets: Vec<_> =
-            offsets.into_iter().map(super::world_coordinates).collect();
         for dir in &mut self.dirs {
             dir.local_position = dir.position;
             dir.scale = scales[dir.repository];
@@ -248,22 +246,18 @@ mod tests {
             {
                 let region = &layout.repositories[layout.dir(file.dir).repository];
                 assert!(
-                    crate::layout::region_coordinates(file.position)
-                        .cmpge(region.low - Vec2::splat(0.0001))
-                        .all(),
+                    file.position.cmpge(region.low - Vec2::splat(0.0001)).all(),
                     "frame {frame}: {} point={:?} low={:?} high={:?}",
                     file.path,
-                    crate::layout::region_coordinates(file.position),
+                    file.position,
                     region.low,
                     region.high
                 );
                 assert!(
-                    crate::layout::region_coordinates(file.position)
-                        .cmple(region.high + Vec2::splat(0.0001))
-                        .all(),
+                    file.position.cmple(region.high + Vec2::splat(0.0001)).all(),
                     "frame {frame}: {} point={:?} low={:?} high={:?}",
                     file.path,
-                    crate::layout::region_coordinates(file.position),
+                    file.position,
                     region.low,
                     region.high
                 );

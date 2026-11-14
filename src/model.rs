@@ -732,10 +732,8 @@ impl Simulation {
         self.state = self.initial.clone();
         self.state.region_depth = framing::depth_bound();
         if let Some((regions, offsets, scales)) = self.packing.sample(0) {
-            self.state.layout.place_regions(regions, offsets, &scales);
+            self.state.layout.place_regions(regions, &offsets, &scales);
         }
-        self.state.focus = Vec3::ZERO;
-        self.state.distance = framing::DISTANCE;
         self.initial = self.state.clone();
         snapshots
     }
@@ -836,7 +834,7 @@ impl Simulation {
         let placement = self.packing.sample(self.state.tick + 1);
         self.tick_local_layout();
         if let Some((regions, offsets, scales)) = placement {
-            self.state.layout.place_regions(regions, offsets, &scales);
+            self.state.layout.place_regions(regions, &offsets, &scales);
         }
     }
 
@@ -924,7 +922,6 @@ impl Simulation {
                 avatar.presence = avatar.presence.min(opacity);
             }
         }
-        state.place_view();
         if self.visual_updates {
             self.place_titles(dt);
             let texts: Vec<_> = self
@@ -1349,8 +1346,8 @@ impl State {
             key: contributor.key.clone(),
             name: contributor.name.clone(),
             portrait: contributor.portrait.clone(),
-            position: self.focus() + Vec3::Y * MIN_AVATAR_HEIGHT,
-            target: self.focus(),
+            position: self.focus + Vec3::Y * MIN_AVATAR_HEIGHT,
+            target: self.focus,
             repository: 0,
             touched: Vec::new(),
             last_active: now,
@@ -1511,17 +1508,8 @@ impl State {
         }
     }
 
-    fn focus(&self) -> Vec3 {
-        self.focus
-    }
-
     fn scale(&self) -> f32 {
         1.0 + self.distance / 60.0
-    }
-
-    fn place_view(&mut self) {
-        self.focus = Vec3::ZERO;
-        self.distance = framing::DISTANCE;
     }
 }
 
@@ -2224,8 +2212,8 @@ mod tests {
         }
     }
     #[test]
-    fn uncapped_default_bot_policy_allows_intentional_fades() {
-        let events = (0..4)
+    fn uncapped_bots_fade_between_repositories_unless_told_to_walk() {
+        let events: Vec<_> = (0..4)
             .map(|index| {
                 let mut row = vec![timeline::synthetic().remove(0)];
                 row[0].seconds = i64::try_from(index).unwrap() * 86_400;
@@ -2235,21 +2223,24 @@ mod tests {
                 row.remove(0)
             })
             .collect();
-        let options = Options {
-            seconds_per_day: 0.3,
-            travel_cap: TravelCap::None,
-            ..Options::default()
-        };
-        let simulation = Simulation::try_with_repositories(
-            events,
-            &options,
-            &Theme::neon(),
-            &Mappings::default(),
-            &["a".into(), "b".into()],
-        )
-        .unwrap();
-        assert_eq!(simulation.travel.stats.bot_fades, 3);
-        assert_eq!(simulation.travel.stats.faded, 3);
+        for (bot_travel, fades) in [(BotTravel::Fade, 3), (BotTravel::Walk, 0)] {
+            let options = Options {
+                seconds_per_day: 0.3,
+                travel_cap: TravelCap::None,
+                bot_travel,
+                ..Options::default()
+            };
+            let simulation = Simulation::try_with_repositories(
+                events.clone(),
+                &options,
+                &Theme::neon(),
+                &Mappings::default(),
+                &["a".into(), "b".into()],
+            )
+            .unwrap();
+            assert_eq!(simulation.travel.stats.bot_fades, fades);
+            assert_eq!(simulation.travel.stats.faded, fades);
+        }
     }
 
     #[test]

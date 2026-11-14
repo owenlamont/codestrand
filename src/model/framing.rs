@@ -47,13 +47,9 @@ pub(super) fn label_position(region: &RepositoryRegion) -> Vec3 {
         let size = label_size(&region.label, 20.0) * 2.0 / VIEWPORT;
         let anchor = Vec2::new(tile.low.x + padding.x, tile.high.y - padding.y)
             .clamp(limit.low + Vec2::Y * size.y, limit.high - Vec2::X * size.x);
-        return ground(crate::layout::world_coordinates(field_to_world(anchor)))
-            + Vec3::Y * LABEL_Y;
+        return ground(field_to_world(anchor)) + Vec3::Y * LABEL_Y;
     }
-    let point = crate::layout::world_coordinates(Vec2::new(
-        region.low.x.midpoint(region.high.x),
-        region.high.y - 1.0,
-    ));
+    let point = Vec2::new(region.low.x.midpoint(region.high.x), region.high.y - 1.0);
     ground(point) + Vec3::Y * LABEL_Y
 }
 
@@ -94,8 +90,7 @@ pub(crate) fn distance(
         if let Some(tile) = region.tile {
             for point in tile.corners() {
                 include(
-                    ground(crate::layout::world_coordinates(field_to_world(point)))
-                        + Vec3::Y * GLASS_BOTTOM,
+                    ground(field_to_world(point)) + Vec3::Y * GLASS_BOTTOM,
                     -limit,
                     limit,
                 );
@@ -169,9 +164,7 @@ mod tests {
         };
         let tile = region.tile.unwrap();
         for corner in tile.corners() {
-            let world =
-                ground(crate::layout::world_coordinates(field_to_world(corner)))
-                    + Vec3::Y * GLASS_BOTTOM;
+            let world = ground(field_to_world(corner)) + Vec3::Y * GLASS_BOTTOM;
             let point = screen(world);
             assert!(
                 inside(point),

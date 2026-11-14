@@ -110,7 +110,7 @@ pub(crate) fn measure(layout: &Layout) -> Metrics {
         let mut current_high = high;
         let mut scale = 0.0_f32;
         for (_, dir) in layout.dirs().filter(|(_, dir)| dir.repository == index) {
-            let centre = crate::layout::region_coordinates(dir.position);
+            let centre = dir.position;
             scale = dir.scale;
             low = low.min(centre - Vec2::splat(dir.radius()));
             high = high.max(centre + Vec2::splat(dir.radius()));
@@ -121,7 +121,7 @@ pub(crate) fn measure(layout: &Layout) -> Metrics {
             .files()
             .filter(|(_, file)| layout.dir(file.dir).repository == index)
         {
-            let point = crate::layout::region_coordinates(file.position);
+            let point = file.position;
             scale = layout.dir(file.dir).scale;
             current_low = current_low.min(point - Vec2::splat(scale));
             current_high = current_high.max(point + Vec2::splat(scale));

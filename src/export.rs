@@ -21,7 +21,7 @@ use bevy::{
     text::{ComputedTextBlock, TextLayoutInfo},
 };
 
-use crate::{encoder::Encoder, model::Simulation, scene};
+use crate::{encoder::Encoder, scene};
 
 const WAIT_LIMIT: Duration = Duration::from_secs(30);
 const MAX_PENDING_CAPTURES: usize = 4;
@@ -33,31 +33,7 @@ pub(super) fn prepare(directory: &Path) -> anyhow::Result<()> {
         .with_context(|| format!("create new export directory {}", directory.display()))
 }
 
-pub(super) fn run(
-    directory: &Path,
-    (simulation, camera_path, resolution): (
-        Simulation,
-        Option<crate::camera_path::CameraPath>,
-        crate::resolution::Resolution,
-    ),
-    title: String,
-    frames: u32,
-    fps: u16,
-    delay_ms: u16,
-    encoder: Option<crate::encoder::Encoder>,
-) -> anyhow::Result<()> {
-    render(
-        directory,
-        scene::headless(simulation, title, fps, resolution),
-        frames,
-        fps,
-        delay_ms,
-        encoder,
-        camera_path.as_ref(),
-    )
-}
-
-fn render(
+pub(super) fn render(
     directory: &Path,
     (mut app, target): (App, Handle<Image>),
     frames: u32,
@@ -77,6 +53,9 @@ fn render(
     let mut previous_camera = None;
     let mut captures = Captures::default();
     let rendered = (|| -> anyhow::Result<()> {
+        let mut write = |index, image| {
+            write_frame(directory, &mut encoder, png.as_mut(), index, image)
+        };
         for index in 0..frames {
             if let Err(error) = place_export_camera(
                 &mut app,
@@ -84,13 +63,7 @@ fn render(
                 &mut previous_camera,
                 (index, fps),
             ) {
-                captures.finish(
-                    index,
-                    || update(&mut app),
-                    |index, image| {
-                        write_frame(directory, &mut encoder, png.as_mut(), index, image)
-                    },
-                )?;
+                captures.finish(index, || update(&mut app), &mut write)?;
                 return Err(error);
             }
             app.world_mut().resource_mut::<scene::Frame>().index = index;
@@ -101,9 +74,7 @@ fn render(
                     let _ = sender.send(event.image.clone());
                 });
             update(&mut app)?;
-            captures.write_ready(|index, image| {
-                write_frame(directory, &mut encoder, png.as_mut(), index, image)
-            })?;
+            captures.write_ready(&mut write)?;
             let (glyphs, missing_glyphs) = glyph_coverage(&mut app);
             let playback = &app.world().resource::<scene::Playback>().0;
             writeln!(
@@ -121,9 +92,7 @@ fn render(
             )?;
             while captures.pending.len() >= MAX_PENDING_CAPTURES {
                 update(&mut app)?;
-                captures.write_ready(|index, image| {
-                    write_frame(directory, &mut encoder, png.as_mut(), index, image)
-                })?;
+                captures.write_ready(&mut write)?;
             }
             thread::sleep(Duration::from_millis(u64::from(delay_ms)));
             if index % u32::from(fps) == 0 && index + 1 < frames {
@@ -135,13 +104,7 @@ fn render(
                 );
             }
         }
-        captures.finish(
-            frames,
-            || update(&mut app),
-            |index, image| {
-                write_frame(directory, &mut encoder, png.as_mut(), index, image)
-            },
-        )?;
+        captures.finish(frames, || update(&mut app), &mut write)?;
         Ok(())
     })();
     let png_result = png.map_or(Ok(()), png::Writer::finish);
@@ -461,7 +424,7 @@ mod tests {
                 contributor.portrait = Some(portrait.clone());
             }
         }
-        let simulation = Simulation::new(
+        let simulation = crate::model::Simulation::new(
             events,
             &model::Options {
                 start: 4,

@@ -154,9 +154,7 @@ impl Placement {
 }
 
 pub(super) fn world(point: Vec2) -> Vec3 {
-    ground(crate::layout::world_coordinates(framing::field_to_world(
-        point / HALF,
-    ))) + Vec3::Y * MIN_AVATAR_HEIGHT
+    ground(framing::field_to_world(point / HALF)) + Vec3::Y * MIN_AVATAR_HEIGHT
 }
 
 pub(super) fn projection_scale(point: Vec3) -> f32 {
@@ -236,7 +234,6 @@ pub(super) fn content_obstacles(state: &State) -> Vec<(usize, Rect)> {
             .outline
             .iter()
             .copied()
-            .map(crate::layout::world_coordinates)
             .flat_map(|p| [ground(p), ground(p) + Vec3::Y * region.height])
             .collect();
         let projected =
@@ -254,15 +251,7 @@ pub(super) fn content_obstacles(state: &State) -> Vec<(usize, Rect)> {
             result.push((index, title.rect().inflate(HALO)));
             continue;
         }
-        let anchor = project(
-            view_direction() * framing::DISTANCE,
-            Vec3::ZERO,
-            &[framing::label_position(region)],
-        )
-        .next()
-        .flatten()
-        .unwrap()
-            * HALF;
+        let anchor = state.screen(framing::label_position(region)).unwrap();
         let size = framing::label_size(&region.label, 20.0);
         result.push((
             index,
@@ -356,8 +345,7 @@ impl Simulation {
                 let Some(tile) = regions[pulse.repository].tile else {
                     continue;
                 };
-                let origin =
-                    crate::layout::world_coordinates(origins[pulse.repository]);
+                let origin = origins[pulse.repository];
                 let transform = |point| {
                     place_point(
                         point,
@@ -447,13 +435,9 @@ impl State {
     ) {
         let gap = Vec2::splat(self.gutter);
         let beams = tile_obstacles(self);
-        let cells: Vec<_> = self
-            .layout
-            .repositories
-            .iter()
-            .filter_map(|r| r.gutter)
-            .map(|t| Rect::from_corners(t.low * HALF, t.high * HALF))
-            .collect();
+        let cells = super::travel::network(
+            self.layout.repositories.iter().filter_map(|r| r.gutter),
+        );
         let radius = self.avatar_radius();
         let name_scale = self.name_scale();
         let mut occupied: Vec<Rect> = Vec::new();
@@ -551,19 +535,32 @@ impl State {
         self.avatar_scale * 0.95
     }
 
+    /// Reference-viewport pixel position of a world point.
+    pub(super) fn screen(&self, point: Vec3) -> Option<Vec2> {
+        project(
+            self.focus + view_direction() * self.distance,
+            self.focus,
+            &[point],
+        )
+        .next()
+        .flatten()
+        .map(|p| p * HALF)
+    }
+
+    fn name_size(&self, text: &str) -> Vec2 {
+        super::names::rect(
+            Vec2::ZERO,
+            text,
+            self.name_scale(),
+            self.geometry.label_height,
+        )
+        .size()
+    }
+
     fn name_bodies(&self) -> Vec<Option<Vec2>> {
         self.avatars
             .iter()
-            .map(|a| {
-                project(
-                    self.focus + view_direction() * self.distance,
-                    self.focus,
-                    &[a.position],
-                )
-                .next()
-                .flatten()
-                .map(|p| p * HALF)
-            })
+            .map(|a| self.screen(a.position))
             .collect()
     }
     fn name_rays(
@@ -581,17 +578,7 @@ impl State {
             .flat_map(|pulse| {
                 pulse.targets.iter().filter_map(|&(target, ..)| {
                     let author = pulse.author;
-                    Some((
-                        bodies[author]?,
-                        project(
-                            self.focus + view_direction() * self.distance,
-                            self.focus,
-                            &[self.point(target)?],
-                        )
-                        .next()
-                        .flatten()?
-                            * HALF,
-                    ))
+                    Some((bodies[author]?, self.screen(self.point(target)?)?))
                 })
             })
             .collect()
@@ -624,13 +611,7 @@ impl State {
             .filter(|(_, a)| a.presence > 0.0)
         {
             let Some(body) = bodies[index] else { continue };
-            let size = super::names::rect(
-                Vec2::ZERO,
-                &displayed[index],
-                self.name_scale(),
-                self.geometry.label_height,
-            )
-            .size();
+            let size = self.name_size(&displayed[index]);
             let previous = avatar.name_visibility.placement.as_ref();
             let velocity = previous
                 .map_or(Vec2::ZERO, |p| (body - p.body) / dt.max(1e-6))
@@ -783,13 +764,7 @@ impl State {
         {
             let selected = candidates[choice];
             let body = bodies[index].expect("projected visible avatar");
-            let size = super::names::rect(
-                Vec2::ZERO,
-                &displayed[index],
-                self.name_scale(),
-                self.geometry.label_height,
-            )
-            .size();
+            let size = self.name_size(&displayed[index]);
             let distance = self.avatar_radius() + 4.0 / 3.0;
             let previous = self.avatars[index].name_visibility.placement.as_ref();
             let (angle, angular_velocity, motion) = previous.map_or_else(
@@ -847,13 +822,7 @@ impl State {
                     avatar.presence > 0.0 && placement.text != avatar.name
                 })
                 .map(|(body, placement)| {
-                    let size = super::names::rect(
-                        Vec2::ZERO,
-                        &avatar.name,
-                        self.name_scale(),
-                        self.geometry.label_height,
-                    )
-                    .size();
+                    let size = self.name_size(&avatar.name);
                     labels::tangent_rect(
                         body,
                         size,
@@ -911,17 +880,7 @@ impl State {
                 covered += overlap(disk(body, self.avatar_radius()));
             }
             if let Some(name) = &avatar.name_visibility.placement {
-                let size = super::names::rect(
-                    Vec2::ZERO,
-                    &name.text,
-                    name.scale,
-                    self.geometry.label_height,
-                )
-                .size();
-                covered += overlap(Rect::from_corners(
-                    name.point - Vec2::Y * size.y,
-                    name.point + Vec2::X * size.x,
-                ));
+                covered += overlap(name.bounds(self.geometry.label_height));
             }
         }
         (covered / area).clamp(0.0, 1.0)

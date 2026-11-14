@@ -343,8 +343,6 @@ Uncapped padding grows until every walking trip completes, subject to the existi
 search is limited to 10,000 graph nodes; thirty repositories need at most 3,844.
 Numeric caps apply to accumulated extra waiting per commit.
 
-The CPU `layout-quality --treemap` report records fallback and least-bad slots,
-live beam crossings, travelling disc intersections, route points and travel padding.
 Header and caption remain in the outer frame. Other preview aspect ratios use conservative
 framing;
 free-camera controls remain independent.

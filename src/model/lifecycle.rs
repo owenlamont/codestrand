@@ -105,7 +105,7 @@ fn ending_time(
     if events.first().is_some_and(|event| date < event.seconds) {
         return -REPOSITORY_EXIT - REFLOW;
     }
-    let time = calendar_time(events, schedule, date);
+    let time = mapped_time(&calendar_dates(events), schedule, date);
     if time.is_finite() || !complete {
         return time;
     }
@@ -119,11 +119,6 @@ fn ending_time(
         + (days * options.seconds_per_day)
             .min(options.max_idle_seconds)
             .max(super::PULSE_SECONDS + super::FRAGMENT_FLIGHT)
-}
-
-pub(super) fn calendar_time(events: &[Event], schedule: &Schedule, date: i64) -> f32 {
-    let dates = calendar_dates(events);
-    mapped_time(&dates, schedule, date)
 }
 
 fn calendar_dates(events: &[Event]) -> Vec<i64> {
@@ -529,6 +524,19 @@ mod tests {
 
     fn at(sim: &mut super::super::Simulation, time: f32) {
         sim.advance_to(super::super::frames_for(time, 60).unwrap(), 60);
+    }
+
+    #[test]
+    fn avatar_scale_option_multiplies_the_drawn_disc() {
+        let disc = |avatar_size| {
+            let options = super::super::Options {
+                avatar_size,
+                ..Default::default()
+            };
+            playback(crate::timeline::synthetic(), &options).avatar_disc_scale()
+        };
+        assert_eq!(disc(2.0).to_bits(), (disc(1.0) * 2.0).to_bits());
+        assert_eq!(disc(0.5).to_bits(), (disc(1.0) * 0.5).to_bits());
     }
 
     #[test]
