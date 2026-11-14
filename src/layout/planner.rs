@@ -628,7 +628,17 @@ mod tests {
         }
     }
 
-    fn event(seconds: i64, changes: &[(&str, Kind)]) -> Event {
+    pub(super) fn change(path: String, kind: Kind) -> FileChange {
+        FileChange {
+            path,
+            kind,
+            insertions: 1,
+            removals: 0,
+            samples: Vec::new(),
+        }
+    }
+
+    pub(super) fn event(seconds: i64, changes: &[(&str, Kind)]) -> Event {
         Event {
             seconds,
             author: Identity {
@@ -640,13 +650,7 @@ mod tests {
             commit: String::new(),
             changes: changes
                 .iter()
-                .map(|(path, kind)| FileChange {
-                    path: (*path).to_owned(),
-                    kind: kind.clone(),
-                    insertions: 1,
-                    removals: 0,
-                    samples: Vec::new(),
-                })
+                .map(|(path, kind)| change((*path).to_owned(), kind.clone()))
                 .collect(),
         }
     }
@@ -979,29 +983,16 @@ mod probes {
         contributors::Mappings,
         model::{Options, Simulation},
         theme::Theme,
-        timeline::{FileChange, Identity, Kind},
+        timeline::Kind,
     };
 
     fn ev(seconds: i64, changes: Vec<(String, Kind)>) -> Event {
         Event {
-            seconds,
-            author: Identity {
-                name: b"Ada".to_vec(),
-                email: Vec::new(),
-            },
-            repository: 0,
-            contributor: None,
-            commit: String::new(),
             changes: changes
                 .into_iter()
-                .map(|(path, kind)| FileChange {
-                    path,
-                    kind,
-                    insertions: 1,
-                    removals: 0,
-                    samples: Vec::new(),
-                })
+                .map(|(path, kind)| super::tests::change(path, kind))
                 .collect(),
+            ..super::tests::event(seconds, &[])
         }
     }
 

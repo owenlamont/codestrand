@@ -76,23 +76,23 @@ fn closing_panel_does_not_capture_the_close_click() {
         panel_was_open: true,
         ..default()
     };
-    state.transition(&Controls {
-        focused: true,
+    assert!(!captured_after(&mut state, click()));
+    assert!(!captured_after(&mut state, Controls::default()));
+    assert!(captured_after(&mut state, click()));
+}
+
+fn click() -> Controls {
+    Controls {
         click_viewport: true,
         ..default()
-    });
-    assert!(!state.captured);
-    state.transition(&Controls {
-        focused: true,
-        ..default()
-    });
-    assert!(!state.captured);
-    state.transition(&Controls {
-        focused: true,
-        click_viewport: true,
-        ..default()
-    });
-    assert!(state.captured);
+    }
+}
+
+/// Steps a focused window once and reports whether the mouse is captured.
+fn captured_after(state: &mut State, mut controls: Controls) -> bool {
+    controls.focused = true;
+    state.transition(&controls);
+    state.captured
 }
 
 #[test]
@@ -299,26 +299,12 @@ fn released_buttons_orbit_without_lift() {
 #[test]
 fn viewport_click_captures_but_idle_and_panel_clicks_do_not() {
     let mut state = State::default();
-    state.transition(&Controls {
-        focused: true,
-        ..default()
-    });
-    assert!(!state.captured);
-    state.transition(&Controls {
-        focused: true,
+    assert!(!captured_after(&mut state, Controls::default()));
+    let panel_click = Controls {
         panel_open: true,
-        click_viewport: true,
-        ..default()
-    });
-    assert!(!state.captured);
-    state.transition(&Controls {
-        focused: true,
-        ..default()
-    });
-    state.transition(&Controls {
-        focused: true,
-        click_viewport: true,
-        ..default()
-    });
-    assert!(state.captured);
+        ..click()
+    };
+    assert!(!captured_after(&mut state, panel_click));
+    captured_after(&mut state, Controls::default());
+    assert!(captured_after(&mut state, click()));
 }
