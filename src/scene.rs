@@ -79,6 +79,9 @@ struct Caption;
 struct PortraitDisc;
 
 #[derive(Component)]
+struct PortraitFace;
+
+#[derive(Component)]
 struct RepositoryGlass(usize);
 
 #[derive(Component)]
@@ -1087,6 +1090,41 @@ fn cache_glyphs(world: &mut World, theme: &Theme) {
     });
 }
 
+fn reshape_meshes(world: &mut World, palette: &Palette, theme: &Theme) {
+    let faces: Vec<_> = world
+        .query_filtered::<&Mesh3d, With<PortraitFace>>()
+        .iter(world)
+        .map(|mesh| mesh.0.clone())
+        .collect();
+    let mut meshes = world.resource_mut::<Assets<Mesh>>();
+    let mut reshape = |handles: &mut dyn Iterator<Item = &Handle<Mesh>>, mesh: Mesh| {
+        for handle in handles {
+            *meshes
+                .get_mut(handle)
+                .expect("palette meshes remain allocated") = mesh.clone();
+        }
+    };
+    reshape(
+        &mut palette.avatar_spheres.iter(),
+        styling::avatar_mesh(theme),
+    );
+    reshape(
+        &mut std::iter::once(&palette.disc)
+            .chain(&palette.avatar_discs)
+            .chain(&faces),
+        Circle::new(theme.avatar_radius).into(),
+    );
+    reshape(
+        &mut std::iter::once(&palette.membership_mesh)
+            .chain(palette.directory_rings.iter().flatten()),
+        styling::ring_mesh(theme, theme.membership_radii),
+    );
+    reshape(
+        &mut std::iter::once(&palette.activity_mesh),
+        styling::ring_mesh(theme, theme.activity_radii),
+    );
+}
+
 pub(super) fn switch_theme(world: &mut World, name: crate::theme::ThemeName) {
     let theme = name.build();
     cache_glyphs(world, &theme);
@@ -1095,31 +1133,7 @@ pub(super) fn switch_theme(world: &mut World, name: crate::theme::ThemeName) {
         visual.glyph_theme = None;
     }
     world.resource_scope(|world, palette: Mut<Palette>| {
-        let mut meshes = world.resource_mut::<Assets<Mesh>>();
-        for sphere in &palette.avatar_spheres {
-            *meshes
-                .get_mut(sphere)
-                .expect("palette avatar mesh remains allocated") =
-                styling::avatar_mesh(&theme);
-        }
-        for disc in std::iter::once(&palette.disc).chain(&palette.avatar_discs) {
-            *meshes
-                .get_mut(disc)
-                .expect("palette portrait mesh remains allocated") =
-                Circle::new(theme.avatar_radius).into();
-        }
-        for ring in std::iter::once(&palette.membership_mesh)
-            .chain(palette.directory_rings.iter().flatten())
-        {
-            *meshes
-                .get_mut(ring)
-                .expect("palette membership mesh remains allocated") =
-                styling::ring_mesh(&theme, theme.membership_radii);
-        }
-        *meshes
-            .get_mut(&palette.activity_mesh)
-            .expect("palette activity mesh remains allocated") =
-            styling::ring_mesh(&theme, theme.activity_radii);
+        reshape_meshes(world, &palette, &theme);
         let replacements = [
             (&palette.edge, &theme.edge),
             (&palette.floor, &theme.floor),
@@ -1898,12 +1912,19 @@ fn attach_portrait(
                     alpha_mode: AlphaMode::Mask(0.5),
                     ..default()
                 });
+        let mut meshes = world.resource_mut::<Assets<Mesh>>();
+        let disc = meshes
+            .get(&palette.disc)
+            .expect("palette portrait mesh remains allocated")
+            .clone();
+        let disc = meshes.add(disc);
         let face = world
             .spawn((
-                Mesh3d(palette.disc.clone()),
+                Mesh3d(disc),
                 MeshMaterial3d(material),
                 Transform::from_xyz(0.0, 0.0, 0.002).with_scale(Vec3::splat(0.9)),
                 RenderLayers::layer(AVATAR_LAYER),
+                PortraitFace,
             ))
             .id();
         world
@@ -3306,6 +3327,20 @@ mod tests {
         assert_switches_preserve_playback_and_portraits(&mut world, scene, face);
     }
 
+    fn assert_face_mesh_follows_theme_privately(world: &World, face: Entity) {
+        let face_mesh = &world.get::<Mesh3d>(face).unwrap().0;
+        let shared = &world.resource::<Palette>().disc;
+        let meshes = world.resource::<Assets<Mesh>>();
+        assert_ne!(face_mesh, shared);
+        let positions = |mesh: &Handle<Mesh>| {
+            let mesh = meshes.get(mesh).unwrap();
+            mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+                .and_then(|values| values.as_float3())
+                .map(<[_]>::to_vec)
+        };
+        assert_eq!(positions(face_mesh), positions(shared));
+    }
+
     fn assert_switches_preserve_playback_and_portraits(
         world: &mut World,
         scene: Entity,
@@ -3393,6 +3428,7 @@ mod tests {
                 portrait_texture
             );
             assert_eq!(world.get::<RenderLayers>(face), Some(&layer));
+            assert_face_mesh_follows_theme_privately(world, face);
             assert_theme_textures(world);
             assert_theme_materials(world);
             assert_labels_stay_below_avatars_without_redundant_updates(world, scene);
