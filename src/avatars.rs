@@ -641,14 +641,25 @@ impl<N: Network> Resolver<N> {
                 stale.is_some(),
             );
         }
-        let portrait = image.as_deref().and_then(Portrait::decode).map(Arc::new);
+        self.settle(key, login, image.as_deref(), complete, stale)
+    }
+
+    fn settle(
+        &self,
+        key: &str,
+        github: Option<String>,
+        image: Option<&[u8]>,
+        complete: bool,
+        stale: Option<Arc<Portrait>>,
+    ) -> Option<Arc<Portrait>> {
+        let portrait = image.and_then(Portrait::decode).map(Arc::new);
         if complete {
             let record = Record {
                 checked: self.now,
-                github: login,
+                github,
                 image: image.is_some(),
             };
-            let _ = self.store(key, &record, image.as_deref());
+            let _ = self.store(key, &record, image);
             portrait
         } else {
             stale.or(portrait)
@@ -663,21 +674,7 @@ impl<N: Network> Resolver<N> {
     ) -> Option<Arc<Portrait>> {
         let mut complete = true;
         let image = self.image(url, &mut complete, stale.is_some());
-        let portrait = image.as_deref().and_then(Portrait::decode).map(Arc::new);
-        if complete {
-            let _ = self.store(
-                key,
-                &Record {
-                    checked: self.now,
-                    github: None,
-                    image: image.is_some(),
-                },
-                image.as_deref(),
-            );
-            portrait
-        } else {
-            stale.or(portrait)
-        }
+        self.settle(key, None, image.as_deref(), complete, stale)
     }
 
     fn explicit_accounts(
