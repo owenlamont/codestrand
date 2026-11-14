@@ -192,35 +192,6 @@ impl std::fmt::Display for Time {
     }
 }
 
-#[cfg(test)]
-impl PartialEq<f32> for Time {
-    fn eq(&self, seconds: &f32) -> bool {
-        self.as_secs_f64() == f64::from(*seconds)
-    }
-}
-
-#[cfg(test)]
-impl PartialEq<f64> for Time {
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "an untyped literal in a test means the f32 nearest to it"
-    )]
-    fn eq(&self, seconds: &f64) -> bool {
-        *self == *seconds as f32
-    }
-}
-
-#[cfg(test)]
-impl Time {
-    pub(crate) fn next_up(self) -> Self {
-        Self::new(self.span, self.seconds.next_up())
-    }
-
-    pub(crate) fn next_down(self) -> Self {
-        Self::new(self.span, self.seconds.next_down())
-    }
-}
-
 impl Add<f32> for Time {
     type Output = Self;
 
@@ -265,6 +236,32 @@ impl Sub for Time {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    impl PartialEq<f32> for Time {
+        fn eq(&self, seconds: &f32) -> bool {
+            self.as_secs_f64() == f64::from(*seconds)
+        }
+    }
+
+    impl PartialEq<f64> for Time {
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "an untyped literal in a test means the f32 nearest to it"
+        )]
+        fn eq(&self, seconds: &f64) -> bool {
+            *self == *seconds as f32
+        }
+    }
+
+    impl Time {
+        pub(crate) fn next_up(self) -> Self {
+            Self::new(self.span, self.seconds.next_up())
+        }
+
+        pub(crate) fn next_down(self) -> Self {
+            Self::new(self.span, self.seconds.next_down())
+        }
+    }
 
     #[test]
     fn first_span_arithmetic_is_plain_f32_arithmetic() {

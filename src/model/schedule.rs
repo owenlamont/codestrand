@@ -171,15 +171,22 @@ mod tests {
     fn commits_days_in_keep_their_order_and_tick_exact_starts() {
         let mut event = crate::timeline::synthetic().remove(0);
         event.seconds = 0;
-        let events = vec![event; 10_000];
-        for days in [2, 8] {
+        let mut events = vec![event; 10_000];
+        let waits = [2, 8].map(|days| {
             let wait = days * 24 * 60 * 60 * TICK_RATE;
-            let schedule =
-                Schedule::with_padding(&events, 0.5, tick_seconds(), |index| {
-                    if index == 0 { wait } else { 0 }
-                });
-            assert!(schedule.starts[0] > tick_time(u64::from(wait)));
-            for pair in schedule.starts.windows(2) {
+            Schedule::with_padding(&events, 0.5, tick_seconds(), |index| {
+                if index == 0 { wait } else { 0 }
+            })
+        });
+        // At a tenth of a second a day, this gap alone puts later commits 8 days in.
+        for event in &mut events[1..] {
+            event.seconds = 7_000_000 * 86_400;
+        }
+        let gap = Schedule::new(&events, 0.1, 86_400.0 * 30.0);
+        let two_days = tick_time(u64::from(2 * 24 * 60 * 60 * TICK_RATE));
+        for schedule in waits.iter().chain([&gap]) {
+            assert!(schedule.starts[1] > two_days);
+            for pair in schedule.starts[1..].windows(2) {
                 assert!(pair[0] < pair[1]);
                 assert!((pair[1] - pair[0] - tick_seconds()).abs() < 0.001);
             }
