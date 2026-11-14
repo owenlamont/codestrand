@@ -432,6 +432,28 @@ impl Simulation {
         Ok(())
     }
 
+    /// The synthetic history twice, a day apart, as repositories `first` and `second`.
+    #[cfg(test)]
+    pub(super) fn two_synthetic_repositories() -> Self {
+        let histories = (0..2_u8)
+            .map(|index| {
+                let mut events = crate::timeline::synthetic();
+                for event in &mut events {
+                    event.seconds += i64::from(index) * 86_400;
+                }
+                crate::repositories::namespace(&mut events, usize::from(index));
+                events
+            })
+            .collect();
+        Self::with_repositories(
+            crate::repositories::merge(histories),
+            &Options::default(),
+            &Theme::neon(),
+            &crate::contributors::Mappings::default(),
+            &["first".into(), "second".into()],
+        )
+    }
+
     #[cfg(test)]
     pub(super) fn scheduled_starts(&self) -> &[f32] {
         &self.schedule.starts

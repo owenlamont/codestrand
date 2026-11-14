@@ -264,14 +264,6 @@ mod tests {
             }
             assert!(simulation.avatars().len() <= 1);
         }
-        simulation.repository_label_plane = crate::repositories::LabelPlane::Raised;
-        assert!(
-            simulation
-                .labels()
-                .iter()
-                .filter(|label| label.kind == crate::model::LabelKind::Repository)
-                .all(|label| (label.position.y - 1.6).abs() < f32::EPSILON)
-        );
         let before = snapshot(&simulation);
         simulation.restart();
         for _ in 0..frames {

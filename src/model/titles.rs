@@ -325,6 +325,29 @@ mod tests {
     }
 
     #[test]
+    fn repository_titles_sit_on_the_chosen_label_plane() {
+        use crate::repositories::LabelPlane;
+        let mut sim = crate::model::Simulation::two_synthetic_repositories();
+        sim.advance_to(90, 30);
+        let mut titles = |plane| -> Vec<Vec3> {
+            sim.repository_label_plane = plane;
+            sim.labels()
+                .iter()
+                .filter(|label| label.kind == crate::model::LabelKind::Repository)
+                .map(|label| label.position)
+                .collect()
+        };
+        let (files, raised) = (titles(LabelPlane::Files), titles(LabelPlane::Raised));
+        assert_eq!(files.len(), 2);
+        assert_eq!(raised.len(), 2);
+        for (low, high) in files.iter().zip(&raised) {
+            assert_eq!(low.y.to_bits(), 0.15_f32.to_bits());
+            assert_eq!(high.y.to_bits(), crate::model::framing::LABEL_Y.to_bits());
+            assert_eq!(low.with_y(0.0), high.with_y(0.0));
+        }
+    }
+
+    #[test]
     fn whole_animation_plan_avoids_a_transient_switch_and_makes_one_necessary_change() {
         let costs = [
             [0.0, 1000.0, 1000.0, 1000.0],
