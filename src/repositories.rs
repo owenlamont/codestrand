@@ -83,11 +83,16 @@ pub(super) fn inputs(
 ) -> anyhow::Result<Vec<Repository>> {
     let mut repositories: Vec<_> = paths
         .iter()
-        .map(|path| Repository {
-            path: path.clone(),
-            label: None,
-            archived: false,
-            ended: None,
+        .map(|path| {
+            (
+                path.clone(),
+                Repository {
+                    path: path.clone(),
+                    label: None,
+                    archived: false,
+                    ended: None,
+                },
+            )
         })
         .collect();
     if let Some(file) = file {
@@ -98,14 +103,15 @@ pub(super) fn inputs(
         }
         let parent = file.parent().unwrap_or(Path::new("."));
         repositories.extend(document.repositories.into_iter().map(|mut repository| {
+            let spelling = repository.path.clone();
             repository.path = parent.join(repository.path);
-            repository
+            (spelling, repository)
         }));
     }
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = std::collections::HashMap::new();
     let mut labels = std::collections::HashSet::new();
     let mut unique = Vec::new();
-    for mut repository in repositories {
+    for (spelling, mut repository) in repositories {
         if let Some(ended) = &repository.ended {
             parse_ended(ended)?;
         }
@@ -116,8 +122,12 @@ pub(super) fn inputs(
         let path = repository.path.canonicalize().with_context(|| {
             format!("resolve repository {}", repository.path.display())
         })?;
-        if !seen.insert(path.clone()) {
-            continue;
+        if let Some(first) = seen.insert(path.clone(), spelling.clone()) {
+            bail!(
+                "repository paths '{}' and '{}' are the same repository",
+                first.display(),
+                spelling.display()
+            );
         }
         if repository
             .label
@@ -207,8 +217,6 @@ pub(super) fn merge(histories: Vec<Vec<Event>>) -> Vec<Event> {
 
 #[cfg(test)]
 mod tests {
-    use std::fmt::Write as _;
-
     use super::*;
 
     #[test]
@@ -233,7 +241,7 @@ mod tests {
     }
 
     #[test]
-    fn repository_limit_counts_unique_resolved_paths() {
+    fn distinct_repository_paths_pass() {
         let temp = tempfile::tempdir().unwrap();
         let paths: Vec<_> = (0..30)
             .map(|i| temp.path().join(format!("repo-{i}")))
@@ -241,22 +249,30 @@ mod tests {
         for path in &paths {
             std::fs::create_dir(path).unwrap();
         }
-        let file = temp.path().join("repos.toml");
-        let mut document = String::new();
-        for i in 0..30 {
-            writeln!(
-                document,
-                "[[repositories]]\npath='repo-{i}'\nlabel='Manifest {i}'"
-            )
-            .unwrap();
-        }
-        std::fs::write(&file, document).unwrap();
-        let mut flags = paths.clone();
-        flags.push(paths[0].join("..").join("repo-0"));
-        let repositories = inputs(&flags, Some(&file)).unwrap();
+        let repositories = inputs(&paths, None).unwrap();
         assert_eq!(repositories.len(), 30);
         assert_eq!(repositories[0].path, paths[0].canonicalize().unwrap());
         assert_eq!(repositories[0].name(), "repo-0");
+    }
+
+    #[test]
+    fn duplicate_paths_report_both_original_spellings() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("repo");
+        std::fs::create_dir(&path).unwrap();
+        for other in [path.clone(), path.join("..").join("repo"), path.join("")] {
+            let error = inputs(&[path.clone(), other.clone()], None)
+                .unwrap_err()
+                .to_string();
+            assert_eq!(
+                error,
+                format!(
+                    "repository paths '{}' and '{}' are the same repository",
+                    path.display(),
+                    other.display()
+                )
+            );
+        }
     }
 
     /// Loads a manifest written beside an empty `repo` directory.
@@ -301,7 +317,7 @@ mod tests {
     }
 
     #[test]
-    fn file_paths_are_relative_to_manifest_and_duplicates_keep_the_first_entry() {
+    fn file_paths_are_relative_to_manifest_and_flag_duplicates_are_errors() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::create_dir(temp.path().join("repo")).unwrap();
         let file = temp.path().join("repos.toml");
@@ -316,11 +332,28 @@ mod tests {
             temp.path().join("repo").canonicalize().unwrap()
         );
         assert_eq!(repositories[0].name(), "Project");
-        let combined = inputs(&[temp.path().join("repo")], Some(&file)).unwrap();
-        assert_eq!(combined.len(), 1);
-        assert_eq!(combined[0].name(), "repo");
+        let error = inputs(&[temp.path().join("repo")], Some(&file))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            format!(
+                "repository paths '{}' and 'repo' are the same repository",
+                temp.path().join("repo").display()
+            )
+        );
         std::fs::write(&file, "repositories = []").unwrap();
         assert!(inputs(&[], Some(&file)).is_err());
+    }
+
+    #[test]
+    fn duplicate_manifest_entries_are_errors() {
+        assert_eq!(
+            manifest_error(
+                "[[repositories]]\npath='repo'\n[[repositories]]\npath='./repo'\n"
+            ),
+            "repository paths 'repo' and './repo' are the same repository"
+        );
     }
 
     #[test]

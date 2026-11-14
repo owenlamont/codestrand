@@ -189,7 +189,7 @@ ended = "2026-05-01"
 
 Paths in the TOML file resolve relative to the file. Labels default to the repository
 directory name. Repeated flags and a file can be combined; flag entries come first.
-Paths resolving to the same location share one entry; the first entry wins. Labels for
+Paths resolving to the same location are rejected as duplicate repositories. Labels for
 distinct repositories must be unique. The combined list is limited to 30
 unique repositories before any history is imported or avatars are resolved.
 
@@ -377,9 +377,16 @@ codestrand preview --repository /path/to/repository --start 0 --commits 20 \
 ```
 
 - `--start`: commits laid out and settled before playback; default `0`.
+- `--start-date YYYY-MM-DD`: begin at the first commit in merged history order authored
+  on or after 00:00 UTC that day, settling preceding commits as with `--start`.
+  Conflicts with `--start`; dates after the history report the last commit date.
 - `--commits`: commits to play after the start; default all remaining commits.
 - `--seconds-per-day`: timeline seconds per calendar day; default `0.5`.
 - `--max-idle-seconds`: maximum timeline gap between commits; default `1`.
+
+```sh
+codestrand preview --repository /path/to/repository --start-date 2026-05-01 --commits 20
+```
 
 Pacing preserves within-day timestamp spacing. Coincident, reversed or very close
 timestamps get a 0.05-second minimum gap, limited by the idle cap, preserving commit
