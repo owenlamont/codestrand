@@ -89,7 +89,6 @@ impl MovingBeams {
         if avatar.presence > 0.0 {
             let wordmark = crate::model::caption::frame_text_rects()[0]
                 .inflate(crate::model::caption::BUFFER);
-            let direction = view_direction();
             let right = Vec3::X;
             let draw_radius = state.geometry.avatar_radius
                 * state.scale()
@@ -98,15 +97,10 @@ impl MovingBeams {
                 * avatar.projection_scale
                 * avatar.lifecycle_scale
                 * avatar.presence;
-            let edge = project(
-                direction * framing::DISTANCE,
-                Vec3::ZERO,
-                &[avatar.position + right * draw_radius],
-            )
-            .next()
-            .flatten()
-            .expect("visible avatar");
-            let avatar_overlap = (edge * HALF - point).length()
+            let edge = state
+                .screen(avatar.position + right * draw_radius)
+                .expect("visible avatar");
+            let avatar_overlap = (edge - point).length()
                 > point.distance(point.clamp(wordmark.min, wordmark.max)) + 0.001;
             self.wordmark_avatar_observations += u64::from(avatar_overlap);
             if avatar_overlap && self.first_wordmark_overlap.is_none() {
@@ -128,17 +122,7 @@ impl MovingBeams {
             }
             if let Some(name) = &avatar.name_visibility.placement {
                 self.visible_name_frames += 1;
-                let bounds = Rect::from_corners(
-                    name.point
-                        - bevy::math::Vec2::Y
-                            * (state.geometry.label_height * name.scale + 4.0),
-                    name.point
-                        + bevy::math::Vec2::X
-                            * (8.0
-                                + 8.6
-                                    * crate::model::count(name.text.chars().count())
-                                    * name.scale),
-                );
+                let bounds = name.bounds(state.geometry.label_height);
                 let depth = content
                     .iter()
                     .map(|(_, r)| bounds.intersect(*r).size().min_element().max(0.0))
@@ -198,15 +182,7 @@ impl MovingBeams {
                     .enumerate()
                     .filter(|(i, a)| *i != other && a.presence > 0.0)
                     .all(|(_, a)| {
-                        let p = project(
-                            state.focus + view_direction() * state.distance,
-                            state.focus,
-                            &[a.position],
-                        )
-                        .next()
-                        .flatten()
-                        .unwrap()
-                            * HALF;
+                        let p = state.screen(a.position).unwrap();
                         p.distance(p.clamp(rect.min, rect.max)) > distance + 0.001
                     })
         });
@@ -231,17 +207,7 @@ impl MovingBeams {
             return;
         }
         let bounds = |name: &crate::model::names::Placement| {
-            let size = crate::model::names::rect(
-                bevy::math::Vec2::ZERO,
-                &name.text,
-                name.scale,
-                state.geometry.label_height,
-            )
-            .size();
-            Rect::from_corners(
-                name.point - bevy::math::Vec2::Y * size.y,
-                name.point + bevy::math::Vec2::X * size.x,
-            )
+            name.bounds(state.geometry.label_height)
         };
         let distance = |rect: Rect| {
             (point.distance(point.clamp(rect.min, rect.max)) - radius).max(0.0)
@@ -298,19 +264,7 @@ impl MovingBeams {
             .iter()
             .filter(|a| a.presence > 0.0)
             .filter_map(|a| a.name_visibility.placement.as_ref())
-            .map(|name| {
-                let size = crate::model::names::rect(
-                    bevy::math::Vec2::ZERO,
-                    &name.text,
-                    name.scale,
-                    state.geometry.label_height,
-                )
-                .size();
-                Rect::from_corners(
-                    name.point - bevy::math::Vec2::Y * size.y,
-                    name.point + bevy::math::Vec2::X * size.x,
-                )
-            })
+            .map(|name| name.bounds(state.geometry.label_height))
             .collect();
         for (i, rect) in labels.iter().enumerate() {
             self.label_label_pairs += u64::try_from(
