@@ -64,8 +64,8 @@ can look different from older builds.
 
 Repeated PNG exports produce byte-identical frames and `frames.csv` manifests on the
 same machine, graphics driver and build, with the same graphics backend, repository
-history, options and portrait assets. Overlapping directory edges and file rings of
-different colours keep a stable draw order.
+history, options and portrait assets. Overlapping solid shapes of different colours
+keep a stable draw order.
 Use cached or local portraits offline: leave `--fetch-avatars` off and keep the avatar
 cache unchanged between exports. Live fetching can change portraits with network
 availability, deadlines and cache expiry. Fetch portraits before making repeatable captures.
