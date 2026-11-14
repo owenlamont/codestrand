@@ -571,26 +571,12 @@ impl Packing {
         self.plan_zoom()
     }
     #[cfg(test)]
-    pub(crate) fn build(regions: &[Vec<RepositoryRegion>]) -> Self {
-        Self::build_births(regions, false, 4.0, None)
-    }
-
-    #[cfg(test)]
     pub(crate) fn before_service(regions: &[Vec<RepositoryRegion>]) -> Self {
-        Self::build_births(regions, true, 4.0, None)
+        Self::with_gutter(regions, 4.0, None)
     }
 
     pub(crate) fn with_gutter(
         regions: &[Vec<RepositoryRegion>],
-        scale: f32,
-        activation: Option<&[u32]>,
-    ) -> Self {
-        Self::build_births(regions, true, scale, activation)
-    }
-
-    fn build_births(
-        regions: &[Vec<RepositoryRegion>],
-        before_service: bool,
         gutter_scale: f32,
         activation: Option<&[u32]>,
     ) -> Self {
@@ -634,14 +620,10 @@ impl Packing {
                             birth
                                 .min(usize::try_from(a[i]).expect("bounded activation"))
                         });
-                        let begin = if before_service {
-                            ready.saturating_sub(
-                                usize::try_from(BIRTH_TICKS)
-                                    .expect("birth ticks fit usize"),
-                            )
-                        } else {
-                            birth
-                        };
+                        let begin = ready.saturating_sub(
+                            usize::try_from(BIRTH_TICKS)
+                                .expect("birth ticks fit usize"),
+                        );
                         if tick < begin || birth == usize::MAX {
                             return 0.0;
                         }
@@ -652,14 +634,10 @@ impl Packing {
                             u64::try_from(tick.saturating_sub(begin))
                                 .expect("bounded timeline"),
                         );
-                        let transition = if before_service {
-                            crate::model::tick_time(
-                                u64::try_from(ready - begin).expect("bounded birth"),
-                            )
-                            .max(crate::model::tick_seconds())
-                        } else {
-                            crate::model::tick_time(u64::from(BIRTH_TICKS))
-                        };
+                        let transition = crate::model::tick_time(
+                            u64::try_from(ready - begin).expect("bounded birth"),
+                        )
+                        .max(crate::model::tick_seconds());
                         let u = (elapsed / transition).min(1.0);
                         u * u * (3.0 - 2.0 * u)
                     })
@@ -1074,7 +1052,7 @@ mod tests {
     #[test]
     fn thirty_tiles_partition_with_gutters_and_remain_readable_and_continuous() {
         let rows = fixture();
-        let packing = Packing::build(&rows);
+        let packing = Packing::before_service(&rows);
         let mut previous = vec![None; 30];
         for (tick, sample) in packing.samples.iter().enumerate() {
             let placement = tiles(
@@ -1124,7 +1102,7 @@ mod tests {
             }
             previous = placement;
         }
-        let replay = Packing::build(&rows);
+        let replay = Packing::before_service(&rows);
         for tick in [0, 60, 700, 1599] {
             let (_, origins, scales) = packing.sample(tick).unwrap();
             let (_, replay_origins, replay_scales) = replay.sample(tick).unwrap();
@@ -1134,7 +1112,7 @@ mod tests {
 
     #[test]
     fn archive_presence_scales_clamps_and_returns_the_whole_view_to_a_singleton() {
-        let packing = Packing::build(&fixture());
+        let packing = Packing::before_service(&fixture());
         for step in 0..=100_u16 {
             let p = f32::from(step) / 100.0;
             let presence: Vec<_> =
@@ -1167,7 +1145,7 @@ mod tests {
             .take(1600)
             .map(|row| row.into_iter().take(2).collect())
             .collect();
-        let original = Packing::build(&rows);
+        let original = Packing::before_service(&rows);
         let ending = original
             .clone()
             .with_endings(&[20.0, f32::INFINITY], 2.5, 4.0);
@@ -1183,7 +1161,7 @@ mod tests {
 
     #[test]
     fn ending_holds_tiles_until_fade_finishes_then_reflows_for_four_seconds() {
-        let original = Packing::build(&fixture());
+        let original = Packing::before_service(&fixture());
         let endings: Vec<_> = (0..30)
             .map(|i| if i == 0 { f32::INFINITY } else { 20.0 })
             .collect();
