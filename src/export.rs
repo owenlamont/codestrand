@@ -94,8 +94,6 @@ fn render(
                 return Err(error);
             }
             app.world_mut().resource_mut::<scene::Frame>().index = index;
-            // Bevy's retained transparent phases need a second update after material changes.
-            update(&mut app)?;
             let sender = captures.request();
             app.world_mut()
                 .spawn(Screenshot::image(target.clone()))

@@ -59,12 +59,16 @@ codestrand export wide-diff --repository /path/to/repository \
   --diff-text-distance 4 --frames 60 --fps 30
 ```
 
-Matching frames require the same build, graphics adapter, backend and driver,
-repository history, options and portrait assets. Even then, a few frames can differ
-by single pixels between runs; `frames.csv` stays identical. Use cached or local
-portraits offline: leave `--fetch-avatars` off and keep the avatar cache unchanged
-between exports. Live fetching can change portraits with network availability, deadlines
-and cache expiry. Fetch portraits before making repeatable captures.
+Moving translucent surfaces overlap using their current positions. Halos and glyphs
+can look different from older builds.
+
+Repeated PNG exports produce byte-identical frames and `frames.csv` manifests on the
+same machine, graphics driver and build, with the same graphics backend, repository
+history, options and portrait assets. Overlapping solid shapes of different colours
+keep a stable draw order.
+Use cached or local portraits offline: leave `--fetch-avatars` off and keep the avatar
+cache unchanged between exports. Live fetching can change portraits with network
+availability, deadlines and cache expiry. Fetch portraits before making repeatable captures.
 
 ## Stream a video to FFmpeg
 
