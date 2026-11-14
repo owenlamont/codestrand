@@ -81,6 +81,8 @@ Watch the [feature tour video](https://youtu.be/gmueXAHnvAE).
   and each frame needs fewer render passes. Preview no longer redoes file and name
   work on frames where playback has not advanced.
   ([#142](https://github.com/owenlamont/codestrand/pull/142))
+- Export renders each frame once instead of twice.
+  ([performance issue 143](https://github.com/owenlamont/codestrand/issues/143))
 - New binary-helix logo.
   ([#61](https://github.com/owenlamont/codestrand/pull/61),
   [#69](https://github.com/owenlamont/codestrand/pull/69))
@@ -96,9 +98,11 @@ Watch the [feature tour video](https://youtu.be/gmueXAHnvAE).
   ([#92](https://github.com/owenlamont/codestrand/pull/92),
   [#95](https://github.com/owenlamont/codestrand/pull/95),
   [#96](https://github.com/owenlamont/codestrand/pull/96))
-- Repeated exports of one input no longer differ across many frames; single-pixel
-  differences in a few frames remain.
-  ([#113](https://github.com/owenlamont/codestrand/pull/113))
+- Repeated PNG exports are byte-identical on the same machine, graphics driver,
+  backend and build with unchanged history, options and portrait assets, including
+  directory intersections that previously varied by single pixels.
+  ([#113](https://github.com/owenlamont/codestrand/pull/113),
+  [performance issue 143](https://github.com/owenlamont/codestrand/issues/143))
 - Diff fragments and arriving files follow each theme's beam curves.
   ([#130](https://github.com/owenlamont/codestrand/pull/130))
 - Contributor names with accented, Cyrillic or other non-ASCII characters render
