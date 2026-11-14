@@ -9,6 +9,8 @@ Watch the [feature tour video](https://youtu.be/gmueXAHnvAE).
 
 ### Added
 
+- `--start-date YYYY-MM-DD` selects playback from a UTC author date, settling earlier
+  commits before playback.
 - Native Wayland preview windows on Linux alongside X11 support.
   ([#144](https://github.com/owenlamont/codestrand/pull/144))
 - Play several local repositories as tiles on one shared timeline, from repeated

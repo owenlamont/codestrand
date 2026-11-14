@@ -196,6 +196,9 @@ struct Source {
     /// Commits laid out and settled before playback begins.
     #[arg(long, default_value_t = 0)]
     start: usize,
+    /// Begin at the first commit authored on or after this UTC date, settling earlier commits.
+    #[arg(long, value_name = "YYYY-MM-DD", value_parser = start_date, conflicts_with = "start")]
+    start_date: Option<i64>,
     /// Commits to play after the start; defaults to the rest of the history.
     #[arg(long)]
     commits: Option<usize>,
@@ -268,6 +271,7 @@ impl Source {
         &self,
         events: &mut [timeline::Event],
         repositories: &[repositories::Repository],
+        start: usize,
     ) {
         let fetch = self.fetch_avatars && !repositories.is_empty();
         let mut resolver = avatars::Resolver::new(
@@ -277,7 +281,7 @@ impl Source {
             avatars::now(),
         );
         resolver.gitlab_email = self.gitlab_email_avatars;
-        let start = self.start.min(events.len());
+        let start = start.min(events.len());
         let end = self.commits.map_or(events.len(), |count| {
             start.saturating_add(count).min(events.len())
         });
@@ -313,8 +317,9 @@ impl Source {
         );
         let mappings = contributors::load(self.contributors.as_deref())?;
         let mut events = self.events(cache::root().as_deref(), &repositories)?;
+        let start = self.resolve_start(&events)?;
         mappings.apply(&mut events);
-        self.resolve_avatars(&mut events, &repositories);
+        self.resolve_avatars(&mut events, &repositories, start);
         let names: Vec<_> = repositories
             .iter()
             .map(repositories::Repository::name)
@@ -340,7 +345,7 @@ impl Source {
             heat_half_life: self.heat_half_life,
             seconds_per_day: self.seconds_per_day,
             max_idle_seconds: self.max_idle_seconds,
-            start: self.start,
+            start,
             commits: self.commits,
             travel_cap: self.travel_cap,
             bot_travel: self.bot_travel,
@@ -355,6 +360,23 @@ impl Source {
         simulation.caption_style = self.caption_style;
         simulation.repository_label_plane = self.repository_label_plane;
         Ok((simulation, title))
+    }
+
+    fn resolve_start(&self, events: &[timeline::Event]) -> anyhow::Result<usize> {
+        let Some(date) = self.start_date else {
+            return Ok(self.start);
+        };
+        if let Some(index) = events.iter().position(|event| event.seconds >= date) {
+            return Ok(index);
+        }
+        let last = events.last().ok_or_else(|| {
+            anyhow::anyhow!("--start-date requires a non-empty history")
+        })?;
+        anyhow::bail!(
+            "--start-date {} is after the history; last commit date is {} UTC",
+            model::date(date),
+            model::date(last.seconds)
+        )
     }
 
     fn playback(
@@ -379,6 +401,24 @@ impl Source {
             &names,
         )
     }
+}
+
+fn start_date(value: &str) -> Result<i64, String> {
+    let invalid = || "expected a valid UTC date in YYYY-MM-DD format".to_owned();
+    if value.len() != 10
+        || !value.bytes().enumerate().all(|(index, byte)| {
+            if index == 4 || index == 7 {
+                byte == b'-'
+            } else {
+                byte.is_ascii_digit()
+            }
+        })
+    {
+        return Err(invalid());
+    }
+    gix::date::parse(value, None)
+        .map(|date| date.seconds)
+        .map_err(|_| invalid())
 }
 
 #[cfg(test)]
@@ -644,6 +684,100 @@ fn gutter_pixels(value: &str) -> Result<f32, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn start_date_cli_rejects_conflicts_and_invalid_dates() {
+        for command in [
+            vec!["preview"],
+            vec!["export", "frames"],
+            vec!["layout-quality", "quality.jsonl"],
+        ] {
+            let args = [vec!["codestrand"], command].concat();
+            for value in ["2026/05/01", "2026-5-01", "2026-02-30", "today"] {
+                let error = Cli::try_parse_from(
+                    [args.clone(), vec!["--start-date", value]].concat(),
+                )
+                .err()
+                .expect("invalid date");
+                assert!(error.to_string().contains("YYYY-MM-DD"));
+            }
+            let error = Cli::try_parse_from(
+                [
+                    args.clone(),
+                    vec!["--start-date", "2026-05-01", "--start", "0"],
+                ]
+                .concat(),
+            )
+            .err()
+            .expect("conflicting start options");
+            assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+            assert!(error.to_string().contains("--start"));
+            assert!(
+                Cli::try_parse_from(
+                    [args, vec!["--start-date", "2026-05-01"]].concat(),
+                )
+                .is_ok()
+            );
+        }
+    }
+
+    #[test]
+    fn start_date_resolves_boundaries_in_single_and_merged_history_order() {
+        let cli = Cli::try_parse_from([
+            "codestrand",
+            "preview",
+            "--start-date",
+            "2026-05-02",
+        ])
+        .unwrap();
+        let Some(Command::Preview { mut source, .. }) = cli.command else {
+            panic!("preview")
+        };
+        let midnight = start_date("2026-05-02").unwrap();
+        let event = |seconds| {
+            let mut event = timeline::synthetic().remove(0);
+            event.seconds = seconds;
+            event
+        };
+        for histories in [
+            vec![vec![
+                event(midnight - 1),
+                event(midnight),
+                event(midnight + 86_400),
+            ]],
+            vec![
+                vec![event(midnight - 1), event(midnight + 86_400)],
+                vec![event(midnight)],
+            ],
+        ] {
+            let events = repositories::merge(histories);
+            for (date, expected) in
+                [("2026-05-01", 0), ("2026-05-02", 1), ("2026-05-03", 2)]
+            {
+                source.start_date = Some(start_date(date).unwrap());
+                assert_eq!(source.resolve_start(&events).unwrap(), expected);
+            }
+            source.start_date = Some(start_date("2026-05-04").unwrap());
+            assert!(
+                source
+                    .resolve_start(&events)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("2026-05-03")
+            );
+        }
+        source.start_date = Some(midnight);
+        assert_eq!(
+            source
+                .resolve_start(&[event(midnight - 1), event(midnight + 1)])
+                .unwrap(),
+            1
+        );
+        let reversed = vec![event(midnight + 1), event(midnight - 1)];
+        assert_eq!(source.resolve_start(&reversed).unwrap(), 0);
+        let merged = repositories::merge(vec![reversed, vec![event(midnight - 2)]]);
+        assert_eq!(source.resolve_start(&merged).unwrap(), 1);
+    }
+
     #[test]
     fn diff_text_distance_is_shared_by_preview_and_export() {
         for command in [vec!["preview"], vec!["export", "frames"]] {
