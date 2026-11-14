@@ -94,7 +94,6 @@ fn render(
                 return Err(error);
             }
             app.world_mut().resource_mut::<scene::Frame>().index = index;
-            update(&mut app)?;
             let sender = captures.request();
             app.world_mut()
                 .spawn(Screenshot::image(target.clone()))
