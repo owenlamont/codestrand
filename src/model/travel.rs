@@ -52,6 +52,7 @@ struct Service {
     dock: slots::Dock,
 }
 
+#[derive(Default)]
 struct Capture {
     services: Vec<Service>,
     poses: Vec<Vec<Pose>>,
@@ -64,6 +65,7 @@ impl Capture {
     fn bytes(&self) -> usize {
         self.gutters
             .iter()
+            .chain(&self.tiles)
             .map(|r| {
                 r.capacity()
                     * std::mem::size_of::<Option<crate::layout::packing::Tile>>()
@@ -73,14 +75,6 @@ impl Capture {
                 .poses
                 .iter()
                 .map(|p| p.capacity() * std::mem::size_of::<Pose>())
-                .sum::<usize>()
-            + self
-                .tiles
-                .iter()
-                .map(|t| {
-                    t.capacity()
-                        * std::mem::size_of::<Option<crate::layout::packing::Tile>>()
-                })
                 .sum::<usize>()
             + self.tiles.capacity()
                 * std::mem::size_of::<Vec<Option<crate::layout::packing::Tile>>>()
@@ -152,11 +146,7 @@ impl Route {
         if self.track.is_empty() {
             self.sample(tick_time(tick))
         } else {
-            Some(
-                self.track[usize::try_from(tick)
-                    .expect("bounded tick")
-                    .min(self.track.len() - 1)],
-            )
+            Some(*at_tick(&self.track, tick))
         }
     }
     fn points(&self) -> Vec<[f32; 2]> {
@@ -345,13 +335,7 @@ fn fade_opacity(remaining: u64, duration: u64) -> f32 {
 fn capture(simulation: &mut Simulation) -> Capture {
     let started = std::time::Instant::now();
     let frames = frames_for(simulation.duration(), 60).expect("validated travel range");
-    let mut capture = Capture {
-        services: Vec::new(),
-        poses: Vec::new(),
-        tiles: Vec::new(),
-        radii: Vec::new(),
-        gutters: Vec::new(),
-    };
+    let mut capture = Capture::default();
     let visual_updates = simulation.visual_updates;
     let docks = if simulation.travel.occupancy.is_empty() {
         std::mem::take(&mut simulation.travel.docks)
@@ -434,9 +418,7 @@ fn capture(simulation: &mut Simulation) -> Capture {
 fn fade_clearance(capture: &Capture, begin: u64, point: Vec2, radius: f32) -> u64 {
     for offset in 0..=9_u64 {
         let tick = begin + offset;
-        let row = &capture.tiles[usize::try_from(tick)
-            .expect("bounded fade tick")
-            .min(capture.tiles.len() - 1)];
+        let row = at_tick(&capture.tiles, tick);
         let tile_collision = row
             .iter()
             .flatten()
@@ -607,38 +589,19 @@ impl Simulation {
                 human_switches += 1;
             }
         }
+        let humans = |keep: fn(&Trip) -> bool| {
+            trips
+                .iter()
+                .filter(|t| {
+                    !t.bot && t.source_repository != t.destination_repository && keep(t)
+                })
+                .count()
+        };
         let stats = Statistics {
-            idle_human_reentries: human_switches
-                - trips
-                    .iter()
-                    .filter(|t| {
-                        !t.bot && t.source_repository != t.destination_repository
-                    })
-                    .count(),
-            human_complete: trips
-                .iter()
-                .filter(|t| {
-                    !t.bot && t.source_repository != t.destination_repository && !t.fade
-                })
-                .count(),
-            human_partial: trips
-                .iter()
-                .filter(|t| {
-                    !t.bot
-                        && t.source_repository != t.destination_repository
-                        && t.fade
-                        && !t.route.is_empty()
-                })
-                .count(),
-            human_no_route: trips
-                .iter()
-                .filter(|t| {
-                    !t.bot
-                        && t.source_repository != t.destination_repository
-                        && t.fade
-                        && t.route.is_empty()
-                })
-                .count(),
+            idle_human_reentries: human_switches - humans(|_| true),
+            human_complete: humans(|t| !t.fade),
+            human_partial: humans(|t| t.fade && !t.route.is_empty()),
+            human_no_route: humans(|t| t.fade && t.route.is_empty()),
             bot_fades: trips.iter().filter(|t| t.bot && t.fade).count(),
             max_speed: options.avatar_max_speed,
             temporary_capture_bytes: capture.bytes(),
@@ -719,6 +682,22 @@ impl RouteFailure {
             Self::Disconnected => "disconnected",
         }
     }
+}
+
+/// The row for `tick`, holding the last row once the capture ends.
+fn at_tick<T>(rows: &[T], tick: u64) -> &T {
+    &rows[usize::try_from(tick)
+        .expect("bounded tick")
+        .min(rows.len() - 1)]
+}
+
+/// Gutter tiles as reference-viewport pixel rectangles.
+pub(super) fn network(
+    gutters: impl Iterator<Item = crate::layout::packing::Tile>,
+) -> Vec<Rect> {
+    gutters
+        .map(|t| Rect::from_corners(t.low * HALF, t.high * HALF))
+        .collect()
 }
 
 pub(super) fn on_network(point: Vec2, cells: &[Rect]) -> bool {

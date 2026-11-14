@@ -154,9 +154,7 @@ impl Placement {
 }
 
 pub(super) fn world(point: Vec2) -> Vec3 {
-    ground(crate::layout::world_coordinates(framing::field_to_world(
-        point / HALF,
-    ))) + Vec3::Y * MIN_AVATAR_HEIGHT
+    ground(framing::field_to_world(point / HALF)) + Vec3::Y * MIN_AVATAR_HEIGHT
 }
 
 pub(super) fn projection_scale(point: Vec3) -> f32 {
@@ -236,7 +234,6 @@ pub(super) fn content_obstacles(state: &State) -> Vec<(usize, Rect)> {
             .outline
             .iter()
             .copied()
-            .map(crate::layout::world_coordinates)
             .flat_map(|p| [ground(p), ground(p) + Vec3::Y * region.height])
             .collect();
         let projected =
@@ -348,8 +345,7 @@ impl Simulation {
                 let Some(tile) = regions[pulse.repository].tile else {
                     continue;
                 };
-                let origin =
-                    crate::layout::world_coordinates(origins[pulse.repository]);
+                let origin = origins[pulse.repository];
                 let transform = |point| {
                     place_point(
                         point,
@@ -439,13 +435,9 @@ impl State {
     ) {
         let gap = Vec2::splat(self.gutter);
         let beams = tile_obstacles(self);
-        let cells: Vec<_> = self
-            .layout
-            .repositories
-            .iter()
-            .filter_map(|r| r.gutter)
-            .map(|t| Rect::from_corners(t.low * HALF, t.high * HALF))
-            .collect();
+        let cells = super::travel::network(
+            self.layout.repositories.iter().filter_map(|r| r.gutter),
+        );
         let radius = self.avatar_radius();
         let name_scale = self.name_scale();
         let mut occupied: Vec<Rect> = Vec::new();

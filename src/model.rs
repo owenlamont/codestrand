@@ -732,10 +732,8 @@ impl Simulation {
         self.state = self.initial.clone();
         self.state.region_depth = framing::depth_bound();
         if let Some((regions, offsets, scales)) = self.packing.sample(0) {
-            self.state.layout.place_regions(regions, offsets, &scales);
+            self.state.layout.place_regions(regions, &offsets, &scales);
         }
-        self.state.focus = Vec3::ZERO;
-        self.state.distance = framing::DISTANCE;
         self.initial = self.state.clone();
         snapshots
     }
@@ -836,7 +834,7 @@ impl Simulation {
         let placement = self.packing.sample(self.state.tick + 1);
         self.tick_local_layout();
         if let Some((regions, offsets, scales)) = placement {
-            self.state.layout.place_regions(regions, offsets, &scales);
+            self.state.layout.place_regions(regions, &offsets, &scales);
         }
     }
 
@@ -924,7 +922,6 @@ impl Simulation {
                 avatar.presence = avatar.presence.min(opacity);
             }
         }
-        state.place_view();
         if self.visual_updates {
             self.place_titles(dt);
             let texts: Vec<_> = self
@@ -1349,8 +1346,8 @@ impl State {
             key: contributor.key.clone(),
             name: contributor.name.clone(),
             portrait: contributor.portrait.clone(),
-            position: self.focus() + Vec3::Y * MIN_AVATAR_HEIGHT,
-            target: self.focus(),
+            position: self.focus + Vec3::Y * MIN_AVATAR_HEIGHT,
+            target: self.focus,
             repository: 0,
             touched: Vec::new(),
             last_active: now,
@@ -1511,17 +1508,8 @@ impl State {
         }
     }
 
-    fn focus(&self) -> Vec3 {
-        self.focus
-    }
-
     fn scale(&self) -> f32 {
         1.0 + self.distance / 60.0
-    }
-
-    fn place_view(&mut self) {
-        self.focus = Vec3::ZERO;
-        self.distance = framing::DISTANCE;
     }
 }
 

@@ -303,15 +303,9 @@ impl MovingBeams {
             let moving = avatar.presence > 0.0
                 && simulation.travel.travelling(author, state.tick);
             if moving && simulation.travel.walking(author, state.tick) {
-                let cells: Vec<_> = state
-                    .layout
-                    .repositories
-                    .iter()
-                    .filter_map(|r| {
-                        r.gutter
-                            .map(|t| Rect::from_corners(t.low * HALF, t.high * HALF))
-                    })
-                    .collect();
+                let cells = super::super::travel::network(
+                    state.layout.repositories.iter().filter_map(|r| r.gutter),
+                );
                 self.travelling_off_network +=
                     u64::from(!super::super::travel::on_network(point, &cells));
             }

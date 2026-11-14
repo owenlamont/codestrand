@@ -22,14 +22,6 @@ pub(super) struct RepositoryRegion {
     pub rotated: bool,
 }
 
-pub(super) fn region_coordinates(point: Vec2) -> Vec2 {
-    point
-}
-
-pub(super) fn world_coordinates(point: Vec2) -> Vec2 {
-    point
-}
-
 impl RepositoryRegion {
     pub(super) fn corners(&self) -> [Vec2; 4] {
         [
@@ -38,7 +30,6 @@ impl RepositoryRegion {
             Vec2::new(self.low.x, self.high.y),
             Vec2::new(self.high.x, self.low.y),
         ]
-        .map(world_coordinates)
     }
 }
 

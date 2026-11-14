@@ -877,9 +877,7 @@ fn glass_positions(region: &crate::layout::RepositoryRegion) -> Vec<[f32; 3]> {
     let corners = region
         .tile
         .map_or([Vec2::ZERO; 4], crate::layout::packing::Tile::corners)
-        .map(|point| {
-            crate::layout::world_coordinates(model::framing::field_to_world(point))
-        });
+        .map(model::framing::field_to_world);
     [0, 1, 2, 0, 2, 3]
         .map(|i| [corners[i].x, model::framing::GLASS_BOTTOM, corners[i].y])
         .to_vec()
