@@ -266,26 +266,7 @@ mod tests {
 
     #[test]
     fn repository_name_tracks_the_applied_commit_and_colour_seeks_exactly() {
-        let histories = (0..2)
-            .map(|i| {
-                let mut events = crate::timeline::synthetic();
-                for e in &mut events {
-                    e.seconds += i * 86_400;
-                }
-                crate::repositories::namespace(
-                    &mut events,
-                    usize::try_from(i).unwrap(),
-                );
-                events
-            })
-            .collect();
-        let mut sim = Simulation::with_repositories(
-            crate::repositories::merge(histories),
-            &super::super::Options::default(),
-            &crate::theme::Theme::neon(),
-            &crate::contributors::Mappings::default(),
-            &["first".into(), "second".into()],
-        );
+        let mut sim = Simulation::two_synthetic_repositories();
         sim.caption_style = Style::Bar;
         sim.advance_to(90, 30);
         let caption = sim.caption();

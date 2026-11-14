@@ -957,10 +957,7 @@ impl LabelSpace<'_> {
             + cost[0]
             + cost[1] * 1e6
             + motion.previous.map_or(0.0, |p| {
-                let distance = (target - p.angle + std::f32::consts::PI)
-                    .rem_euclid(std::f32::consts::TAU)
-                    - std::f32::consts::PI;
-                distance.abs() * 55_000.0
+                labels::difference(target, p.angle).abs() * 55_000.0
             });
         (
             labels::Candidate {
@@ -1270,6 +1267,11 @@ impl Choice<'_> {
     }
 
     fn best(&self, docks: impl Iterator<Item = Dock>) -> Placement {
+        let crowding = |p: &Placement| {
+            self.ray_cost(p.point)
+                + self.spread_cost(p.point, p.dock.edge)
+                + self.spacing_cost(p.point) * 1_000.0
+        };
         docks
             .enumerate()
             .map(|(id, dock)| {
@@ -1289,16 +1291,7 @@ impl Choice<'_> {
                         self.avatar_cost(a.0.point)
                             .total_cmp(&self.avatar_cost(b.0.point)),
                     )
-                    .then(
-                        (self.ray_cost(a.0.point)
-                            + self.spread_cost(a.0.point, a.0.dock.edge)
-                            + self.spacing_cost(a.0.point) * 1_000.0)
-                            .total_cmp(
-                                &(self.ray_cost(b.0.point)
-                                    + self.spread_cost(b.0.point, b.0.dock.edge)
-                                    + self.spacing_cost(b.0.point) * 1_000.0),
-                            ),
-                    )
+                    .then(crowding(&a.0).total_cmp(&crowding(&b.0)))
                     .then(a.1.3.cmp(&b.1.3))
                     .then(a.2.total_cmp(&b.2))
                     .then(a.3.cmp(&b.3))

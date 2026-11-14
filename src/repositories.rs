@@ -259,60 +259,45 @@ mod tests {
         assert_eq!(repositories[0].name(), "repo-0");
     }
 
-    #[test]
-    fn manifest_limits_reject_a_four_mib_comment() {
+    /// Loads a manifest written beside an empty `repo` directory.
+    fn manifest(document: &str) -> anyhow::Result<Vec<Repository>> {
         let temp = tempfile::tempdir().unwrap();
         std::fs::create_dir(temp.path().join("repo")).unwrap();
         let file = temp.path().join("repos.toml");
+        std::fs::write(&file, document).unwrap();
+        inputs(&[], Some(&file))
+    }
+
+    fn manifest_error(document: &str) -> String {
+        format!("{:#}", manifest(document).unwrap_err())
+    }
+
+    #[test]
+    fn manifest_limits_reject_a_four_mib_comment() {
         let document = format!(
             "[[repositories]]\npath='repo'\n#{}\n",
             "x".repeat(4 * 1024 * 1024)
         );
-        std::fs::write(&file, document).unwrap();
-        assert!(
-            format!("{:#}", inputs(&[], Some(&file)).unwrap_err())
-                .contains("exceeds 1 MiB")
-        );
+        assert!(manifest_error(&document).contains("exceeds 1 MiB"));
     }
 
     #[test]
     fn manifest_limits_reject_excess_entries_before_resolving_paths() {
-        let temp = tempfile::tempdir().unwrap();
-        let file = temp.path().join("repos.toml");
-        std::fs::write(&file, "[[repositories]]\npath='missing'\n".repeat(4097))
-            .unwrap();
-        assert!(
-            format!("{:#}", inputs(&[], Some(&file)).unwrap_err())
-                .contains("4096 entries")
-        );
+        let document = "[[repositories]]\npath='missing'\n".repeat(4097);
+        assert!(manifest_error(&document).contains("4096 entries"));
     }
 
     #[test]
     fn manifest_limits_reject_oversized_paths_before_resolving_them() {
-        let temp = tempfile::tempdir().unwrap();
-        let file = temp.path().join("repos.toml");
-        std::fs::write(
-            &file,
-            format!("[[repositories]]\npath='{}'\n", "x".repeat(4097)),
-        )
-        .unwrap();
-        assert!(
-            inputs(&[], Some(&file))
-                .unwrap_err()
-                .to_string()
-                .contains("path exceeds 4096 bytes")
-        );
+        let document = format!("[[repositories]]\npath='{}'\n", "x".repeat(4097));
+        assert!(manifest_error(&document).contains("path exceeds 4096 bytes"));
     }
 
     #[test]
     fn manifest_limits_allow_a_document_at_the_byte_cap() {
-        let temp = tempfile::tempdir().unwrap();
-        std::fs::create_dir(temp.path().join("repo")).unwrap();
-        let file = temp.path().join("repos.toml");
         let mut document = "[[repositories]]\npath='repo'\n#".to_owned();
         document.push_str(&"x".repeat(1024 * 1024 - document.len()));
-        std::fs::write(&file, document).unwrap();
-        assert_eq!(inputs(&[], Some(&file)).unwrap().len(), 1);
+        assert_eq!(manifest(&document).unwrap().len(), 1);
     }
 
     #[test]

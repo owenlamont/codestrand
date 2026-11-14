@@ -159,14 +159,16 @@ impl Palette {
         let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
         let glyphs: Vec<_> = textures
             .iter()
+            .map(|texture| materials.add(glyph_material(theme, texture, 0)))
+            .collect();
+        let heat_glyphs = textures
+            .iter()
             .map(|texture| {
-                materials.add(StandardMaterial {
-                    base_color_texture: Some(texture.clone()),
-                    ..theme.glyph_material.clone()
-                })
+                (1_u16..32)
+                    .map(|bucket| materials.add(glyph_material(theme, texture, bucket)))
+                    .collect()
             })
             .collect();
-        let heat_glyphs = Self::heat_materials(&mut materials, &glyphs, theme);
         let tile = theme
             .file_tile
             .as_ref()
@@ -233,28 +235,6 @@ impl Palette {
         vec![(theme.name, raster_glyphs(theme).install(world))]
     }
 
-    fn heat_materials(
-        materials: &mut Assets<StandardMaterial>,
-        glyphs: &[Handle<StandardMaterial>],
-        theme: &Theme,
-    ) -> Vec<Vec<Handle<StandardMaterial>>> {
-        glyphs
-            .iter()
-            .map(|handle| {
-                let base = materials.get(handle).expect("glyph material").clone();
-                (1_u16..32)
-                    .map(|bucket| {
-                        materials.add(StandardMaterial {
-                            base_color: theme.heat_color(f32::from(bucket) / 31.0),
-                            emissive: theme.heat_emissive(f32::from(bucket) / 31.0),
-                            ..base.clone()
-                        })
-                    })
-                    .collect()
-            })
-            .collect()
-    }
-
     fn heat_glyph(&self, kind: usize, heat: f32) -> &Handle<StandardMaterial> {
         let bucket = (1_u16..32)
             .take_while(|bucket| heat >= (f32::from(*bucket) - 0.5) / 31.0)
@@ -317,6 +297,23 @@ impl Palette {
         let depths = &slots[slot % slots.len()];
         &depths[usize::from(depth - 1).min(depths.len() - 1)]
     }
+}
+
+/// The material of a file glyph in heat bucket 1 to 31, or unheated in bucket 0.
+fn glyph_material(
+    theme: &Theme,
+    texture: &Handle<Image>,
+    bucket: u16,
+) -> StandardMaterial {
+    let mut material = StandardMaterial {
+        base_color_texture: Some(texture.clone()),
+        ..theme.glyph_material.clone()
+    };
+    if bucket > 0 {
+        material.base_color = theme.heat_color(f32::from(bucket) / 31.0);
+        material.emissive = theme.heat_emissive(f32::from(bucket) / 31.0);
+    }
+    material
 }
 
 #[derive(Default)]
@@ -486,6 +483,13 @@ fn restore_lifecycle_materials(world: &mut World) -> bool {
         world.entity_mut(entity).insert(MeshMaterial3d(handle));
     }
     restored
+}
+
+/// Tints an entity that is greyed or partly faded; a fully present one keeps its material.
+fn fade(world: &mut World, entity: Entity, grey: f32, alpha: f32) {
+    if grey > 0.0 || alpha < 1.0 {
+        lifecycle_material(world, entity, grey, alpha);
+    }
 }
 
 fn lifecycle_material(world: &mut World, entity: Entity, grey: f32, alpha: f32) {
@@ -1168,12 +1172,7 @@ pub(super) fn switch_theme(world: &mut World, name: crate::theme::ThemeName) {
                 *world
                     .resource_mut::<Assets<StandardMaterial>>()
                     .get_mut(handle)
-                    .expect("heat bucket") = StandardMaterial {
-                    base_color: theme.heat_color(f32::from(bucket) / 31.0),
-                    emissive: theme.heat_emissive(f32::from(bucket) / 31.0),
-                    base_color_texture: Some(texture.clone()),
-                    ..theme.glyph_material.clone()
-                };
+                    .expect("heat bucket") = glyph_material(&theme, texture, bucket);
             }
         }
         for (handle, texture) in palette.glyphs.iter().zip(textures) {
@@ -1181,10 +1180,7 @@ pub(super) fn switch_theme(world: &mut World, name: crate::theme::ThemeName) {
                 .resource_mut::<Assets<StandardMaterial>>()
                 .get_mut(handle)
                 .expect("palette glyph material remains allocated") =
-                StandardMaterial {
-                    base_color_texture: Some(texture.clone()),
-                    ..theme.glyph_material.clone()
-                };
+                glyph_material(&theme, texture, 0);
         }
     });
     recolor_repository_regions(world, &theme);
@@ -1392,9 +1388,7 @@ fn sync_repository_regions(world: &mut World, simulation: &Simulation) {
         if let Some(mut transform) = world.get_mut::<Transform>(entity) {
             transform.translation.y = rise;
         }
-        if grey > 0.0 || alpha < 1.0 {
-            lifecycle_material(world, entity, grey, alpha);
-        }
+        fade(world, entity, grey, alpha);
     }
 }
 fn sync_files(
@@ -1478,9 +1472,7 @@ fn sync_files(
             transform.scale *= Vec3::new(grow, grow, 1.0);
         }
         set_visible(world, halo, glowing);
-        if grey > 0.0 || alpha < 1.0 {
-            lifecycle_material(world, entity, grey, alpha);
-        }
+        fade(world, entity, grey, alpha);
     }
     if seen != pools.files.len() {
         let mut removed: Vec<_> = pools
@@ -1708,9 +1700,7 @@ fn sync_directory_edges(
         }
         set_visible(world, *entity, true);
         set_directory_material(world, *entity, palette, *slot, *depth);
-        if grey > 0.0 || alpha < 1.0 {
-            lifecycle_material(world, *entity, grey, alpha);
-        }
+        fade(world, *entity, grey, alpha);
     }
     hide_rest(world, pool, edges.len());
 }
@@ -1751,9 +1741,7 @@ fn sync_structure(
             ));
         }
         set_visible(world, *entity, pools.lod.detail[index] > 0.0);
-        if grey > 0.0 || alpha < 1.0 {
-            lifecycle_material(world, *entity, grey, alpha);
-        }
+        fade(world, *entity, grey, alpha);
     }
     hide_rest(world, pool, dirs.len());
     let glyphs = &pools.lod.glyphs;
@@ -1781,9 +1769,7 @@ fn sync_structure(
             transform.set_if_neq(folder);
         }
         set_visible(world, entity, true);
-        if grey > 0.0 || alpha < 1.0 {
-            lifecycle_material(world, entity, grey, alpha);
-        }
+        fade(world, entity, grey, alpha);
     }
     hide_rest(world, pool, glyphs.len());
     sync_grid(world, palette, pools, simulation);
@@ -1971,10 +1957,8 @@ fn sync_activity(
             );
         }
         set_visible(world, entity, presence > 0.0);
-        if let Some(avatar) = avatar
-            && (avatar.grey > 0.0 || presence < 1.0)
-        {
-            lifecycle_material(world, entity, avatar.grey, presence);
+        if let Some(avatar) = avatar {
+            fade(world, entity, avatar.grey, presence);
         }
     }
     styling::beams(world, palette, pools, simulation);
@@ -1990,18 +1974,19 @@ fn sync_fragments(
     let fragments = simulation.fragments_for_detail(|dir| pools.lod.detail[dir]);
     let mut pool = std::mem::take(&mut pools.fragments);
     while pool.len() < fragments.len() {
-        let entity = block(
-            world,
-            &palette.cube,
-            &palette.descending,
-            Vec3::ZERO,
-            Vec3::ONE,
-        );
         let material = world
             .resource_mut::<Assets<StandardMaterial>>()
             .add(simulation.theme().descending.clone());
-        world.entity_mut(entity).insert(MeshMaterial3d(material));
-        pool.push(entity);
+        pool.push(
+            world
+                .spawn((
+                    Mesh3d(palette.cube.clone()),
+                    MeshMaterial3d(material),
+                    Transform::default(),
+                    Visibility::default(),
+                ))
+                .id(),
+        );
     }
     for (entity, fragment) in pool.iter().zip(&fragments) {
         let mut material = if fragment.rising {
@@ -2116,23 +2101,6 @@ fn place_beam(world: &mut World, entity: Entity, from: Vec3, to: Vec3, width: f3
             ));
     }
     set_visible(world, entity, width > 0.0);
-}
-
-fn block(
-    world: &mut World,
-    mesh: &Handle<Mesh>,
-    material: &Handle<StandardMaterial>,
-    position: Vec3,
-    size: Vec3,
-) -> Entity {
-    world
-        .spawn((
-            Mesh3d(mesh.clone()),
-            MeshMaterial3d(material.clone()),
-            Transform::from_translation(position).with_scale(size),
-            Visibility::default(),
-        ))
-        .id()
 }
 
 fn ground(point: Vec2) -> Vec3 {

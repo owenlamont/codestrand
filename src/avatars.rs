@@ -614,7 +614,7 @@ impl<N: Network> Resolver<N> {
             && github.is_none()
             && let Some(login) = &login
         {
-            let url = github_image(login, email, github.is_some(), avatar_url);
+            let url = github_image(login, email, false, avatar_url);
             image = self.image(&url, &mut complete, stale.is_some());
         }
         if image.is_none() && self.gitlab_email && !email.is_empty() {

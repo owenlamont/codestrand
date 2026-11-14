@@ -315,14 +315,14 @@ impl Source {
         let mut events = self.events(cache::root().as_deref(), &repositories)?;
         mappings.apply(&mut events);
         self.resolve_avatars(&mut events, &repositories);
-        let title = if repositories.is_empty() {
+        let names: Vec<_> = repositories
+            .iter()
+            .map(repositories::Repository::name)
+            .collect();
+        let title = if names.is_empty() {
             "Synthetic history".to_owned()
         } else {
-            repositories
-                .iter()
-                .map(repositories::Repository::name)
-                .collect::<Vec<_>>()
-                .join(" | ")
+            names.join(" | ")
         };
         let options = model::Options {
             contributor_inactivity_days: self.contributor_inactivity_days,
@@ -348,10 +348,6 @@ impl Source {
             avatar_size: self.avatar_scale,
             gutter: self.gutter,
         };
-        let names: Vec<_> = repositories
-            .iter()
-            .map(repositories::Repository::name)
-            .collect();
         let mut simulation = Self::playback(events, &options, &mappings, &names)?;
         simulation.repository_boundary = self.repository_boundary;
         simulation.collapse_directories = self.collapse_directories;
@@ -512,19 +508,19 @@ fn avatar_speed(value: &str) -> Result<f32, String> {
 }
 
 fn avatar_size(value: &str) -> Result<f32, String> {
-    value
-        .parse::<f32>()
-        .ok()
-        .filter(|scale| (0.5..=2.0).contains(scale))
-        .ok_or_else(|| "avatar scale must be between 0.5 and 2".to_owned())
+    between(value, 0.5, 2.0, "avatar scale")
 }
 
 fn diff_text_distance(value: &str) -> Result<f32, String> {
+    between(value, 0.1, 100.0, "diff text distance")
+}
+
+fn between(value: &str, low: f32, high: f32, name: &str) -> Result<f32, String> {
     value
         .parse::<f32>()
         .ok()
-        .filter(|distance| (0.1..=100.0).contains(distance))
-        .ok_or_else(|| "diff text distance must be between 0.1 and 100".to_owned())
+        .filter(|parsed| (low..=high).contains(parsed))
+        .ok_or_else(|| format!("{name} must be between {low} and {high}"))
 }
 
 fn main() -> std::process::ExitCode {

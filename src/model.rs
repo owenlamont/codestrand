@@ -432,6 +432,28 @@ impl Simulation {
         Ok(())
     }
 
+    /// The synthetic history twice, a day apart, as repositories `first` and `second`.
+    #[cfg(test)]
+    pub(super) fn two_synthetic_repositories() -> Self {
+        let histories = (0..2_u8)
+            .map(|index| {
+                let mut events = crate::timeline::synthetic();
+                for event in &mut events {
+                    event.seconds += i64::from(index) * 86_400;
+                }
+                crate::repositories::namespace(&mut events, usize::from(index));
+                events
+            })
+            .collect();
+        Self::with_repositories(
+            crate::repositories::merge(histories),
+            &Options::default(),
+            &Theme::neon(),
+            &crate::contributors::Mappings::default(),
+            &["first".into(), "second".into()],
+        )
+    }
+
     #[cfg(test)]
     pub(super) fn scheduled_starts(&self) -> &[f32] {
         &self.schedule.starts
@@ -907,8 +929,7 @@ impl Simulation {
             let service_fade = if service_visible { dt / 0.4 } else { -dt / 1.2 };
             avatar.slot_presence =
                 (avatar.slot_presence + service_fade).clamp(0.0, 1.0);
-            let visible = service_visible;
-            let fade = if visible {
+            let fade = if service_visible {
                 dt / 0.4
             } else {
                 -dt / lifecycle::EXIT
@@ -923,7 +944,7 @@ impl Simulation {
             }
         }
         if self.visual_updates {
-            self.place_titles(dt);
+            self.place_titles();
             let texts: Vec<_> = self
                 .labels_for_detail(|_| true)
                 .iter()
@@ -1552,7 +1573,8 @@ pub(crate) fn box_corners(low: Vec3, high: Vec3) -> [Vec3; 8] {
     ]
 }
 
-/// Projects points to normalised screen coordinates, or `None` for one behind the eye.
+/// Projects points to normalised screen coordinates, or `None` for one within 0.5 of
+/// the eye plane or behind it.
 fn project(
     eye: Vec3,
     focus: Vec3,

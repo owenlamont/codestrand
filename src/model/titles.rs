@@ -270,7 +270,7 @@ impl Simulation {
         self.title_plan = costs.iter().map(|row| plan(row, CHANGE_COST)).collect();
         self.restart();
     }
-    pub(super) fn place_titles(&mut self, _dt: f32) {
+    pub(super) fn place_titles(&mut self) {
         let sample =
             usize::try_from(self.state.tick / u64::from(STEP)).expect("bounded tick");
         self.state.titles.clear();
@@ -322,6 +322,29 @@ mod tests {
         let low = title.positions(1.6).next().unwrap().0;
         let high = title.positions(3.2).next().unwrap().0;
         assert_eq!(low.with_y(0.0), high.with_y(0.0));
+    }
+
+    #[test]
+    fn repository_titles_sit_on_the_chosen_label_plane() {
+        use crate::repositories::LabelPlane;
+        let mut sim = crate::model::Simulation::two_synthetic_repositories();
+        sim.advance_to(90, 30);
+        let mut titles = |plane| -> Vec<Vec3> {
+            sim.repository_label_plane = plane;
+            sim.labels()
+                .iter()
+                .filter(|label| label.kind == crate::model::LabelKind::Repository)
+                .map(|label| label.position)
+                .collect()
+        };
+        let (files, raised) = (titles(LabelPlane::Files), titles(LabelPlane::Raised));
+        assert_eq!(files.len(), 2);
+        assert_eq!(raised.len(), 2);
+        for (low, high) in files.iter().zip(&raised) {
+            assert_eq!(low.y.to_bits(), 0.15_f32.to_bits());
+            assert_eq!(high.y.to_bits(), crate::model::framing::LABEL_Y.to_bits());
+            assert_eq!(low.with_y(0.0), high.with_y(0.0));
+        }
     }
 
     #[test]

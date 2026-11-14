@@ -21,15 +21,20 @@ pub(crate) struct Tile {
 
 impl Tile {
     pub(crate) fn viewport() -> Self {
-        let limit = Vec2::ONE - Vec2::splat(2.0 * framing::MARGIN) / framing::VIEWPORT;
+        Self::inset(framing::MARGIN)
+    }
+
+    /// The field between the caption bars, `margin` reference pixels inside each edge.
+    fn inset(margin: f32) -> Self {
+        let limit = Vec2::ONE - Vec2::splat(2.0 * margin) / framing::VIEWPORT;
         Self {
             low: Vec2::new(
                 -limit.x,
-                (caption::BOTTOM + framing::MARGIN) * 2.0 / framing::VIEWPORT.y,
+                (caption::BOTTOM + margin) * 2.0 / framing::VIEWPORT.y,
             ),
             high: Vec2::new(
                 limit.x,
-                (caption::TOP - framing::MARGIN) * 2.0 / framing::VIEWPORT.y,
+                (caption::TOP - margin) * 2.0 / framing::VIEWPORT.y,
             ),
         }
     }
@@ -40,11 +45,10 @@ impl Tile {
 
     pub(crate) fn usable(self) -> Self {
         let size = self.high - self.low;
-        let low_padding = (Vec2::splat(8.0) * 2.0 / framing::VIEWPORT).min(size * 0.2);
-        let high_padding = low_padding;
+        let padding = (Vec2::splat(8.0) * 2.0 / framing::VIEWPORT).min(size * 0.2);
         Self {
-            low: self.low + low_padding,
-            high: self.high - high_padding,
+            low: self.low + padding,
+            high: self.high - padding,
         }
     }
 
@@ -116,7 +120,8 @@ fn interval(points: &[Vec2], axis: usize, cross: f32) -> Option<(f32, f32)> {
     (low <= high).then_some((low, high))
 }
 
-// Feasible size polygons retain S1's aspect intervals while accounting for fixed pixel gutters and floors.
+// Feasible size polygons keep the children's aspect intervals while accounting for
+// fixed pixel gutters and floors.
 fn combine(a: &[Vec2], b: &[Vec2], axis: usize, gap: f32) -> Vec<Vec2> {
     let mut coordinates: Vec<_> = a.iter().chain(b).map(|p| p[1 - axis]).collect();
     coordinates.sort_by(f32::total_cmp);
@@ -484,20 +489,7 @@ fn gutter_cells(nodes: &[Node], placement: &[Placement]) -> Vec<Option<Tile>> {
         }
     }
     let mut result = vec![None; placement.len()];
-    let limit = Vec2::ONE - Vec2::splat(32.0) / framing::VIEWPORT;
-    divide(
-        nodes,
-        0,
-        Tile {
-            low: Vec2::new(
-                -limit.x,
-                (caption::BOTTOM + 16.0) * 2.0 / framing::VIEWPORT.y,
-            ),
-            high: Vec2::new(limit.x, (caption::TOP - 16.0) * 2.0 / framing::VIEWPORT.y),
-        },
-        placement,
-        &mut result,
-    );
+    divide(nodes, 0, Tile::inset(16.0), placement, &mut result);
     result
 }
 
