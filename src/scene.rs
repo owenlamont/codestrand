@@ -2958,6 +2958,27 @@ mod tests {
     }
 
     #[test]
+    fn glass_is_spawned_only_for_the_glass_boundary() {
+        use crate::repositories::Boundary;
+        let mut world = World::new();
+        world.init_resource::<Assets<Mesh>>();
+        world.init_resource::<Assets<StandardMaterial>>();
+        world.insert_resource(Playback(Simulation::new(
+            crate::timeline::synthetic(),
+            &model::Options::default(),
+            &Theme::neon(),
+            &crate::contributors::Mappings::default(),
+        )));
+        let mut panes = |boundary| {
+            world.resource_mut::<Playback>().0.repository_boundary = boundary;
+            repository_regions(&mut world);
+            world.query::<&RepositoryGlass>().iter(&world).count()
+        };
+        assert_eq!(panes(Boundary::None), 0);
+        assert_eq!(panes(Boundary::Glass), 1);
+    }
+
+    #[test]
     fn repository_glass_follows_every_theme_without_moving_regions() {
         let mut events = crate::timeline::synthetic();
         crate::repositories::namespace(&mut events, 0);

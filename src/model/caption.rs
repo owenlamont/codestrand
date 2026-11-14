@@ -317,6 +317,18 @@ mod tests {
                 );
                 assert_eq!(sim.caption_background(), Color::LinearRgba(expected));
             }
+            sim.caption_style = Style::Chip;
+            sim.advance_to(u32::try_from(tick + 9).unwrap(), 60);
+            let (current, _) = sim.caption_repository().unwrap();
+            assert!(current == from || current == to);
+            assert_eq!(
+                sim.caption_background(),
+                Color::LinearRgba(background(
+                    sim.theme.glass[current % sim.theme.glass.len()].base_color
+                )),
+                "a chip shows one repository colour while a bar is mid-blend"
+            );
+            sim.caption_style = Style::Bar;
         }
     }
 

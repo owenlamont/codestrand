@@ -527,6 +527,19 @@ mod tests {
     }
 
     #[test]
+    fn avatar_scale_option_multiplies_the_drawn_disc() {
+        let disc = |avatar_size| {
+            let options = super::super::Options {
+                avatar_size,
+                ..Default::default()
+            };
+            playback(crate::timeline::synthetic(), &options).avatar_disc_scale()
+        };
+        assert_eq!(disc(2.0).to_bits(), (disc(1.0) * 2.0).to_bits());
+        assert_eq!(disc(0.5).to_bits(), (disc(1.0) * 0.5).to_bits());
+    }
+
+    #[test]
     fn contributor_arrival_departure_and_return_have_fixed_timing() {
         let mut events = crate::timeline::synthetic();
         events.truncate(3);

@@ -358,11 +358,15 @@ mod tests {
     }
 
     #[test]
-    fn oversized_comment_is_rejected() {
+    fn comment_over_one_mib_is_rejected_and_one_at_the_cap_loads() {
         let root = crate::cache::test_directory().unwrap();
         let path = root.path().join("contributors.toml");
-        fs::write(&path, format!("#{}", "x".repeat(2 * 1024 * 1024))).unwrap();
-        assert!(load(Some(&path)).is_err());
+        fs::write(&path, format!("#{}", "x".repeat(1024 * 1024))).unwrap();
+        let error =
+            format!("{:#}", anyhow::Error::from(load(Some(&path)).unwrap_err()));
+        assert!(error.contains("exceeds 1 MiB"), "{error}");
+        fs::write(&path, format!("#{}", "x".repeat(1024 * 1024 - 1))).unwrap();
+        load(Some(&path)).unwrap();
     }
 
     #[test]

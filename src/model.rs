@@ -2212,8 +2212,8 @@ mod tests {
         }
     }
     #[test]
-    fn uncapped_default_bot_policy_allows_intentional_fades() {
-        let events = (0..4)
+    fn uncapped_bots_fade_between_repositories_unless_told_to_walk() {
+        let events: Vec<_> = (0..4)
             .map(|index| {
                 let mut row = vec![timeline::synthetic().remove(0)];
                 row[0].seconds = i64::try_from(index).unwrap() * 86_400;
@@ -2223,21 +2223,24 @@ mod tests {
                 row.remove(0)
             })
             .collect();
-        let options = Options {
-            seconds_per_day: 0.3,
-            travel_cap: TravelCap::None,
-            ..Options::default()
-        };
-        let simulation = Simulation::try_with_repositories(
-            events,
-            &options,
-            &Theme::neon(),
-            &Mappings::default(),
-            &["a".into(), "b".into()],
-        )
-        .unwrap();
-        assert_eq!(simulation.travel.stats.bot_fades, 3);
-        assert_eq!(simulation.travel.stats.faded, 3);
+        for (bot_travel, fades) in [(BotTravel::Fade, 3), (BotTravel::Walk, 0)] {
+            let options = Options {
+                seconds_per_day: 0.3,
+                travel_cap: TravelCap::None,
+                bot_travel,
+                ..Options::default()
+            };
+            let simulation = Simulation::try_with_repositories(
+                events.clone(),
+                &options,
+                &Theme::neon(),
+                &Mappings::default(),
+                &["a".into(), "b".into()],
+            )
+            .unwrap();
+            assert_eq!(simulation.travel.stats.bot_fades, fades);
+            assert_eq!(simulation.travel.stats.faded, fades);
+        }
     }
 
     #[test]

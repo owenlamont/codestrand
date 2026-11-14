@@ -680,6 +680,27 @@ mod tests {
     }
 
     #[test]
+    fn pacing_flags_reach_the_loaded_schedule() {
+        let cli = Cli::try_parse_from([
+            "codestrand",
+            "preview",
+            "--seconds-per-day",
+            "2",
+            "--max-idle-seconds",
+            "1",
+        ])
+        .unwrap();
+        let Some(Command::Preview { source, .. }) = cli.command else {
+            panic!("preview")
+        };
+        let (simulation, _) = source.load().unwrap();
+        assert_eq!(
+            simulation.scheduled_starts(),
+            model::schedule::Schedule::new(&timeline::synthetic(), 2.0, 1.0).starts
+        );
+    }
+
+    #[test]
     fn gutter_accepts_zero_and_rejects_nonfinite_or_out_of_range_values() {
         for value in ["0", "4", "20"] {
             assert!(super::gutter_pixels(value).is_ok());
@@ -803,12 +824,22 @@ mod tests {
 
     #[test]
     fn cli_selects_registered_themes_for_preview_and_export() {
-        for name in ["neon", "phosphor"] {
+        use theme::ThemeName;
+        for (name, expected) in [
+            ("neon", ThemeName::Neon),
+            ("phosphor", ThemeName::Phosphor),
+            ("outrun", ThemeName::Outrun),
+            ("blueprint", ThemeName::Blueprint),
+            ("bevelled-desktop", ThemeName::BevelledDesktop),
+            ("atlas", ThemeName::Atlas),
+            ("forge", ThemeName::Forge),
+        ] {
             let cli = Cli::try_parse_from(["codestrand", "preview", "--theme", name])
                 .unwrap();
             let Some(Command::Preview { theme, .. }) = cli.command else {
                 panic!("preview")
             };
+            assert_eq!(theme, expected);
             assert_eq!(theme.build().name, theme);
             let cli = Cli::try_parse_from([
                 "codestrand",
