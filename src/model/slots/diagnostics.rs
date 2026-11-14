@@ -105,7 +105,7 @@ impl MovingBeams {
             self.wordmark_avatar_observations += u64::from(avatar_overlap);
             if avatar_overlap && self.first_wordmark_overlap.is_none() {
                 self.first_wordmark_overlap = Some(
-                    serde_json::json!({"seconds":crate::model::tick_time(state.tick).as_secs_f32(),"avatar":avatar.name,"kind":"avatar"}),
+                    serde_json::json!({"seconds":crate::model::tick_time(state.tick).lossy_secs_f32(),"avatar":avatar.name,"kind":"avatar"}),
                 );
             }
             self.visible_avatar_frames += 1;
@@ -132,7 +132,7 @@ impl MovingBeams {
                     && !bounds.intersect(wordmark).is_empty()
                 {
                     self.wordmark_label_observations += 1;
-                    self.first_wordmark_overlap.get_or_insert_with(|| serde_json::json!({"seconds":crate::model::tick_time(state.tick).as_secs_f32(),"avatar":avatar.name,"kind":"label"}));
+                    self.first_wordmark_overlap.get_or_insert_with(|| serde_json::json!({"seconds":crate::model::tick_time(state.tick).lossy_secs_f32(),"avatar":avatar.name,"kind":"label"}));
                 }
                 if depth > self.name_content_max_px {
                     self.name_content_max_px = depth;
@@ -417,7 +417,7 @@ impl MovingBeams {
                 self.origin_inside_foreign += u64::from(
                     from.cmpgt(tile.low).all() && from.cmplt(tile.high).all(),
                 );
-                self.first.get_or_insert_with(|| serde_json::json!({"frame":state.tick,"seconds":simulation.seconds().as_secs_f32(),"commit":simulation.commit(),"target_repository":own,"crossed_repository":index,"from":from.to_array(),"to":to.to_array(),"target_tile":state.layout.repositories[own].tile.map(|t| [t.low.to_array(),t.high.to_array()]),"tile_low":tile.low.to_array(),"tile_high":tile.high.to_array()}));
+                self.first.get_or_insert_with(|| serde_json::json!({"frame":state.tick,"seconds":simulation.seconds().lossy_secs_f32(),"commit":simulation.commit(),"target_repository":own,"crossed_repository":index,"from":from.to_array(),"to":to.to_array(),"target_tile":state.layout.repositories[own].tile.map(|t| [t.low.to_array(),t.high.to_array()]),"tile_low":tile.low.to_array(),"tile_high":tile.high.to_array()}));
             }
         }
     }

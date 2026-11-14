@@ -240,7 +240,7 @@ impl Plan {
         }
     }
     pub fn report(&self) -> serde_json::Value {
-        serde_json::json!({"statistics":self.stats,"trips":self.trips.iter().map(|t| serde_json::json!({"author":t.author,"commit":t.commit,"bot":t.bot,"source_repository":t.source_repository,"destination_repository":t.destination_repository,"free":tick_time(t.free).as_secs_f32(),"slack":ticks_duration(t.arrival-t.free),"departure":tick_time(t.departure).as_secs_f32(),"service":tick_time(t.arrival).as_secs_f32(),"fade":t.fade,"failure":t.failure,"proof":t.proof,"source":t.source.to_array(),"target":t.destination.to_array(),"visible_distance":planning::progress(t),"travel_seconds":t.route.duration,"points":t.route.points()})).collect::<Vec<_>>()})
+        serde_json::json!({"statistics":self.stats,"trips":self.trips.iter().map(|t| serde_json::json!({"author":t.author,"commit":t.commit,"bot":t.bot,"source_repository":t.source_repository,"destination_repository":t.destination_repository,"free":tick_time(t.free).lossy_secs_f32(),"slack":ticks_duration(t.arrival-t.free),"departure":tick_time(t.departure).lossy_secs_f32(),"service":tick_time(t.arrival).lossy_secs_f32(),"fade":t.fade,"failure":t.failure,"proof":t.proof,"source":t.source.to_array(),"target":t.destination.to_array(),"visible_distance":planning::progress(t),"travel_seconds":t.route.duration,"points":t.route.points()})).collect::<Vec<_>>()})
     }
     pub fn sample(&self, author: usize, tick: u64) -> Option<(Vec2, f32)> {
         let trip = self.trips.iter().find(|t| t.active(author, tick))?;

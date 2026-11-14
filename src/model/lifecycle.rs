@@ -349,12 +349,12 @@ mod tests {
                 }
             });
             if kind != "commit" {
-                records.push(serde_json::json!({"kind":kind,"time":time.as_secs_f32(),"contributor":contributor.name,"repository":event.repository}));
+                records.push(serde_json::json!({"kind":kind,"time":time.lossy_secs_f32(),"contributor":contributor.name,"repository":event.repository}));
             }
             if let Some(last) = previous
                 && simulation.departures[last] < time
             {
-                records.push(serde_json::json!({"kind":"departure","time":simulation.departures[last].as_secs_f32(),"contributor":contributor.name}));
+                records.push(serde_json::json!({"kind":"departure","time":simulation.departures[last].lossy_secs_f32(),"contributor":contributor.name}));
             }
             for change in &event.changes {
                 let kind = match change.kind {
@@ -362,17 +362,17 @@ mod tests {
                     crate::timeline::Kind::Deleted => "file_deleted",
                     _ => continue,
                 };
-                records.push(serde_json::json!({"kind":kind,"time":time.as_secs_f32(),"path":change.path,"repository":event.repository}));
+                records.push(serde_json::json!({"kind":kind,"time":time.lossy_secs_f32(),"path":change.path,"repository":event.repository}));
             }
         }
         for &last in seen.values() {
             if simulation.departures[last].is_finite() {
-                records.push(serde_json::json!({"kind":"departure","time":simulation.departures[last].as_secs_f32(),"contributor":simulation.events[last].contributor.as_ref().unwrap().name}));
+                records.push(serde_json::json!({"kind":"departure","time":simulation.departures[last].lossy_secs_f32(),"contributor":simulation.events[last].contributor.as_ref().unwrap().name}));
             }
         }
         for (repository, &time) in simulation.repository_ends.iter().enumerate() {
             if time.is_finite() {
-                records.push(serde_json::json!({"kind":"repository_ended","time":time.as_secs_f32(),"repository":repository}));
+                records.push(serde_json::json!({"kind":"repository_ended","time":time.lossy_secs_f32(),"repository":repository}));
             }
         }
         records.sort_by(|a, b| {
@@ -385,7 +385,7 @@ mod tests {
         std::fs::write(
             &output,
             serde_json::to_vec_pretty(
-                &serde_json::json!({"duration":simulation.duration().as_secs_f32(),"events":records,"travel":simulation.travel.report()}),
+                &serde_json::json!({"duration":simulation.duration().lossy_secs_f32(),"events":records,"travel":simulation.travel.report()}),
             )
             .unwrap(),
         )
@@ -582,10 +582,10 @@ mod tests {
         at(&mut sim, 1.7);
         assert_eq!(sim.state.avatars[0].lifecycle_scale, 1.0);
         let deadline = sim.departures[0];
-        at(&mut sim, (deadline + 0.4).as_secs_f32());
+        at(&mut sim, (deadline + 0.4).lossy_secs_f32());
         assert!(sim.state.avatars[0].grey > 0.999);
         assert!(sim.state.avatars[0].presence > 0.0);
-        at(&mut sim, (deadline + EXIT + 0.1).as_secs_f32());
+        at(&mut sim, (deadline + EXIT + 0.1).lossy_secs_f32());
         assert_eq!(sim.state.avatars[0].presence, 0.0);
         at(&mut sim, 41.0);
         assert!(sim.state.avatars[0].presence > 0.9);
@@ -640,9 +640,9 @@ mod tests {
                 + super::super::PULSE_SECONDS
                 + super::super::FRAGMENT_FLIGHT
         );
-        at(&mut sim, (end - 0.1).as_secs_f32());
+        at(&mut sim, (end - 0.1).lossy_secs_f32());
         assert_eq!(sim.repository_effect(0).1, 1.0);
-        at(&mut sim, (end + REPOSITORY_EXIT).as_secs_f32());
+        at(&mut sim, (end + REPOSITORY_EXIT).lossy_secs_f32());
         assert_eq!(sim.repository_effect(0).1, 0.0);
         assert!(sim.duration() >= end + REPOSITORY_EXIT + REFLOW);
     }

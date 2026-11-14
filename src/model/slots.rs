@@ -2022,7 +2022,7 @@ mod tests {
         }
         sim.advance_to(frames, 60);
         assert_eq!(first, report(&sim.state));
-        let summary = serde_json::json!({"avatar_slots":first,"moving_beams":moving,"travel":sim.travel.report(),"duration":sim.duration().as_secs_f32()});
+        let summary = serde_json::json!({"avatar_slots":first,"moving_beams":moving,"travel":sim.travel.report(),"duration":sim.duration().lossy_secs_f32()});
         if let Ok(path) = std::env::var("CODESTRAND_SLOT_DIAGNOSTIC") {
             std::fs::write(path, serde_json::to_vec_pretty(&summary).unwrap()).unwrap();
         }

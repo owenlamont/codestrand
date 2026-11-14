@@ -233,7 +233,7 @@ fn collapsing_off_restores_files_immediately_through_rewind_and_theme_switch() {
         world.insert_resource(PreviewCamera::new((Vec3::ZERO, 20000.0)));
         pools.lod.sample(
             sim.layout(),
-            sim.seconds().as_secs_f32(),
+            sim.seconds().lossy_secs_f32(),
             lod::View {
                 eye: Vec3::Y * 20000.0,
                 focus: Vec3::ZERO,

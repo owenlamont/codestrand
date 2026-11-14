@@ -136,8 +136,8 @@ impl Time {
         f64::from(self.span) * f64::from(SPAN) + f64::from(self.seconds)
     }
 
-    /// Seconds as one `f32`, for display; it loses tick resolution in later spans.
-    pub(crate) fn as_secs_f32(self) -> f32 {
+    /// Seconds as one `f32`, for reports; it loses tick resolution in later spans.
+    pub(crate) fn lossy_secs_f32(self) -> f32 {
         if self.span == 0 {
             return self.seconds;
         }
@@ -267,11 +267,11 @@ mod tests {
     fn first_span_arithmetic_is_plain_f32_arithmetic() {
         for (a, b) in [(0.5_f32, 1.3), (1234.567, 0.016_666_668), (16_000.0, 383.9)] {
             assert_eq!(
-                (Time::seconds(a) + b).as_secs_f32().to_bits(),
+                (Time::seconds(a) + b).lossy_secs_f32().to_bits(),
                 (a + b).to_bits()
             );
             assert_eq!(
-                (Time::seconds(a) - b).as_secs_f32().to_bits(),
+                (Time::seconds(a) - b).lossy_secs_f32().to_bits(),
                 (a - b).to_bits()
             );
             assert_eq!(
@@ -299,9 +299,9 @@ mod tests {
         ] {
             let late = Time::seconds(a) + b;
             assert!(late.span > 0 && late.seconds < SPAN);
-            assert_eq!(late.as_secs_f32().to_bits(), (a + b).to_bits());
+            assert_eq!(late.lossy_secs_f32().to_bits(), (a + b).to_bits());
             assert_eq!((late - Time::seconds(a)).to_bits(), (a + b - a).to_bits());
-            assert_eq!((late - b).as_secs_f32().to_bits(), (a + b - b).to_bits());
+            assert_eq!((late - b).lossy_secs_f32().to_bits(), (a + b - b).to_bits());
             assert!(late > Time::seconds(a) && late < Time::INFINITY);
         }
         assert_eq!(Time::ZERO + f32::INFINITY, Time::INFINITY);
@@ -313,6 +313,79 @@ mod tests {
         assert!(boundary.next_down() <= boundary && boundary - 1.0 < boundary);
         assert_eq!(boundary - (boundary - 1.0), 1.0);
         assert!(!Time::INFINITY.is_finite());
+    }
+
+    /// Ticks within five seconds either side of the start of spans 1, 11 and 40.
+    fn seam_ticks() -> impl Iterator<Item = u64> {
+        [1, 11, 40]
+            .into_iter()
+            .flat_map(|span| span * SPAN_TICKS - 300..span * SPAN_TICKS + 300)
+    }
+
+    fn assert_normal(time: Time) {
+        assert!(
+            (0.0..SPAN).contains(&time.seconds),
+            "{time:?} has a remainder outside its span"
+        );
+    }
+
+    #[test]
+    fn steps_across_a_span_boundary_stay_within_one_f32_step_of_exact() {
+        let step = f64::from(SPAN - SPAN.next_down());
+        for span in [1, 11, 40] {
+            let mut now = Time::from_tick(span * SPAN_TICKS - 300);
+            for _ in 0..600 {
+                let exact = now.as_secs_f64() + f64::from(tick_seconds());
+                now += tick_seconds();
+                assert_normal(now);
+                assert!((now.as_secs_f64() - exact).abs() <= step, "{now:?}");
+            }
+            assert_eq!(now.span, u32::try_from(span).unwrap());
+        }
+    }
+
+    #[test]
+    fn differences_across_a_span_boundary_are_exact_both_ways() {
+        let step = f64::from(SPAN - SPAN.next_down());
+        for span in [1, 11, 40] {
+            let boundary = span * SPAN_TICKS;
+            for (before, after) in [(1, 1), (7, 130), (299, 299)] {
+                let early = Time::from_tick(boundary - before);
+                let late = Time::from_tick(boundary + after);
+                let exact = late.as_secs_f64() - early.as_secs_f64();
+                assert!((f64::from(late - early) - exact).abs() <= step);
+                assert!((f64::from(early - late) + exact).abs() <= step);
+                assert!(
+                    ((early + (late - early)) - late).abs() <= SPAN - SPAN.next_down()
+                );
+                assert!(
+                    ((late - (late - early)) - early).abs() <= SPAN - SPAN.next_down()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ticks_across_a_span_boundary_keep_one_order_and_one_representation() {
+        for tick in seam_ticks() {
+            let (time, next) = (Time::from_tick(tick), Time::from_tick(tick + 1));
+            assert_normal(time);
+            assert!(time < next);
+            assert_ne!(time, next);
+            assert_eq!(time.total_cmp(next), std::cmp::Ordering::Less);
+            assert_eq!(time.min(next), time);
+            assert_eq!(time.max(next), next);
+            assert_normal(time - tick_seconds());
+            assert_normal(time.after(Time::seconds(tick_seconds())));
+        }
+        let boundary = Time::from_tick(SPAN_TICKS);
+        assert_eq!(Time::ZERO + SPAN, boundary);
+        assert_eq!(Time::seconds(SPAN - 1.0) + 1.0, boundary);
+        assert_eq!(
+            Time::seconds(SPAN - 1.0).after(Time::seconds(1.0)),
+            boundary
+        );
+        assert_eq!((boundary + 1.0) - 1.0, boundary);
     }
 
     #[test]

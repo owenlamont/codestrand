@@ -241,5 +241,11 @@ mod tests {
             }
         }
         assert_eq!(first_tick(Time::INFINITY), u64::MAX);
+        let span = 16_384 * u64::from(TICK_RATE);
+        for boundary in [span, 11 * span, 40 * span] {
+            for tick in boundary - 300..boundary + 300 {
+                assert_eq!(first_tick(tick_time(tick)), tick);
+            }
+        }
     }
 }

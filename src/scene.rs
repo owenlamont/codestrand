@@ -4408,7 +4408,7 @@ mod tests {
         let mut fallback = lod::Lod::default();
         fallback.sample(
             simulation.layout(),
-            simulation.seconds().as_secs_f32(),
+            simulation.seconds().lossy_secs_f32(),
             lod::View {
                 eye: focus + model::view_direction() * distance,
                 focus,

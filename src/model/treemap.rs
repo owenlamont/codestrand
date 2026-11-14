@@ -209,7 +209,7 @@ pub(crate) fn run(
         serde_json::to_writer(
             &mut *writer,
             &serde_json::json!({
-                "frame": frame, "seconds": super::tick_time(u64::from(frame)).as_secs_f32(),
+                "frame": frame, "seconds": super::tick_time(u64::from(frame)).lossy_secs_f32(),
                 "commit": simulation.commit(), "metrics": measure(simulation.layout())
             }),
         )?;

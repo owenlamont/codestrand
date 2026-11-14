@@ -3007,7 +3007,7 @@ mod tests {
     fn crowded_commit_aggregates_beams() {
         let mut sim = simulation();
         let crowded = sim.schedule.starts[7] + 0.5;
-        sim.advance_to(frame_at(crowded.as_secs_f32()), 30);
+        sim.advance_to(frame_at(crowded.lossy_secs_f32()), 30);
         let beams = sim.beams();
         assert!(!beams.is_empty());
         assert!(beams.len() <= BEAM_LIMIT * 2, "{} beams", beams.len());
@@ -3087,7 +3087,7 @@ mod tests {
     #[test]
     fn whole_history_plays_out() {
         let mut sim = simulation();
-        let end = frame_at(sim.duration().as_secs_f32());
+        let end = frame_at(sim.duration().lossy_secs_f32());
         sim.advance_to(end, 30);
         assert_eq!(sim.commit(), sim.total());
         assert!(sim.beams().is_empty());
