@@ -73,6 +73,7 @@ Watch the [feature tour video](https://youtu.be/gmueXAHnvAE).
 - On Windows, preview started without a terminal closes the console Windows opened
   for it and logs a later start-up failure to
   `%LOCALAPPDATA%\codestrand\preview-error.log`.
+  ([#148](https://github.com/owenlamont/codestrand/pull/148))
 - Directory layout is planned over the whole history, so directories never overlap
   and file movement speed is capped.
   ([#66](https://github.com/owenlamont/codestrand/pull/66))
