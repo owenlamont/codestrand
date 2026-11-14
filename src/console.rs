@@ -33,14 +33,32 @@ pub(super) fn release_if_alone() {
 #[cfg(windows)]
 #[expect(unsafe_code, reason = "the console is only reachable through Win32")]
 fn release_lone_console<T>(outlet: impl FnOnce() -> Option<T>) -> Option<T> {
-    use windows_sys::Win32::System::Console::{FreeConsole, GetConsoleProcessList};
+    use windows_sys::Win32::System::Console::{
+        FreeConsole, GetConsoleMode, GetConsoleProcessList, GetStdHandle,
+        STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, SetStdHandle,
+    };
 
     let mut process = 0;
     // SAFETY: `process` is a live buffer of the one element the call is told about.
     let attached = unsafe { GetConsoleProcessList(&raw mut process, 1) };
     let outlet = owned_alone(attached).then(outlet).flatten()?;
+    let on_console =
+        [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE].map(|stream| {
+            let mut mode = 0;
+            // SAFETY: both calls accept any handle value and `mode` is a live `u32`.
+            unsafe { GetConsoleMode(GetStdHandle(stream), &raw mut mode) != 0 }
+                .then_some(stream)
+        });
     // SAFETY: `FreeConsole` takes no arguments and only detaches this process.
-    (unsafe { FreeConsole() } != 0).then_some(outlet)
+    if unsafe { FreeConsole() } == 0 {
+        return None;
+    }
+    for stream in on_console.into_iter().flatten() {
+        // SAFETY: a null handle is valid here; `FreeConsole` closed the old one but left
+        // its value behind, where a file opened later could reuse it and receive the output.
+        unsafe { SetStdHandle(stream, std::ptr::null_mut()) };
+    }
+    Some(outlet)
 }
 
 /// Opens `log` for appending without following a link out of its directory.
