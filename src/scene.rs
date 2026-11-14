@@ -267,11 +267,7 @@ impl Palette {
     }
 
     fn directory(&self, slot: usize, depth: u16) -> &Handle<StandardMaterial> {
-        if depth == 0 {
-            return &self.edge;
-        }
-        let depths = &self.directories[slot % self.directories.len()];
-        &depths[usize::from(depth - 1).min(depths.len() - 1)]
+        Self::by_depth(&self.edge, &self.directories, slot, depth)
     }
 
     fn directory_edge_height(&self, slot: usize, depth: u16) -> f32 {
@@ -286,7 +282,7 @@ impl Palette {
     }
 
     fn directory_cube(&self, slot: usize, depth: u16) -> &Handle<Mesh> {
-        Self::directory_mesh(&self.root_cube, &self.directory_cubes, slot, depth)
+        Self::by_depth(&self.root_cube, &self.directory_cubes, slot, depth)
     }
 
     fn colour_meshes(
@@ -302,19 +298,19 @@ impl Palette {
     }
 
     fn directory_folder(&self, slot: usize, depth: u16) -> &Handle<Mesh> {
-        Self::directory_mesh(&self.folder, &self.directory_folders, slot, depth)
+        Self::by_depth(&self.folder, &self.directory_folders, slot, depth)
     }
 
     fn membership_ring(&self, slot: usize, depth: u16) -> &Handle<Mesh> {
-        Self::directory_mesh(&self.membership_mesh, &self.directory_rings, slot, depth)
+        Self::by_depth(&self.membership_mesh, &self.directory_rings, slot, depth)
     }
 
-    fn directory_mesh<'a>(
-        root: &'a Handle<Mesh>,
-        slots: &'a [Vec<Handle<Mesh>>],
+    fn by_depth<'a, T>(
+        root: &'a T,
+        slots: &'a [Vec<T>],
         slot: usize,
         depth: u16,
-    ) -> &'a Handle<Mesh> {
+    ) -> &'a T {
         if depth == 0 {
             return root;
         }

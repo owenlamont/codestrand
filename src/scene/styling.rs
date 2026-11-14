@@ -555,18 +555,13 @@ pub(super) fn beams(
         })
         .collect();
     let mut pool = std::mem::take(&mut pools.beams);
-    while pool.len() < segments.len() {
-        pool.push(
-            world
-                .spawn((
-                    Mesh3d(palette.beam.clone()),
-                    MeshMaterial3d(palette.glass[0].clone()),
-                    Transform::default(),
-                    Visibility::Hidden,
-                ))
-                .id(),
-        );
-    }
+    super::grow(
+        world,
+        &mut pool,
+        segments.len(),
+        &palette.beam,
+        &palette.glass[0],
+    );
     for (entity, (beam, from, to, segment)) in pool.iter().zip(&segments) {
         let (mesh, material) = if matches!(
             simulation.theme().beam_style,
