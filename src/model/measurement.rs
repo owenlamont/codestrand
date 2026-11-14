@@ -52,10 +52,11 @@ fn sampled_history_overlap() {
     let revision = std::env::var("CODESTRAND_MEASURE_REVISION")
         .unwrap_or_else(|_| "HEAD".to_owned());
     let started = Instant::now();
-    let events = crate::cache::load(
+    let events = crate::cache::load_with_options(
         Path::new(&repository),
         &revision,
         crate::cache::root().as_deref(),
+        crate::history::Options::default(),
     )
     .expect("measurement repository imports");
     eprintln!(

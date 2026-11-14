@@ -2159,10 +2159,11 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(i, r)| {
-                let mut events = crate::cache::load(
+                let mut events = crate::cache::load_with_options(
                     &r.path,
                     "HEAD",
                     crate::cache::root().as_deref(),
+                    crate::history::Options::default(),
                 )
                 .unwrap();
                 crate::repositories::namespace(&mut events, i);

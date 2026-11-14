@@ -46,9 +46,6 @@ pub(super) fn check(
         + events.len() as u128 * (3 * size_of::<Event>()) as u128
         + paths * 3
         + layout_bytes(events, options, schedule)?;
-    eprintln!(
-        "planning_memory_estimate_bytes={bytes} region_samples={regions} avatar_pose_change_bound={poses} pose_capacity_bound_bytes={pose_bytes} snapshot_capacity_bytes={snapshot_bytes}"
-    );
     check_bytes(bytes)
 }
 

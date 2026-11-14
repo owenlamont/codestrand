@@ -15,7 +15,7 @@ const ALLOCATION_TOLERANCE_PX: f32 = 0.25;
 
 #[derive(Debug, thiserror::Error)]
 #[error(
-    "repository tile packing cannot insert repository {repository}: minimum tile size {minimum_width} by {minimum_height} reference pixels, aspect ratio 1:{aspect} to {aspect}:1 and gutter {gutter} pixels do not fit the {width} by {height} pixel field"
+    "repository tile packing cannot insert repository {repository}: minimum tile size {minimum_width} by {minimum_height} reference pixels, aspect ratio 1:{aspect} to {aspect}:1 and gutter {gutter} pixels do not fit the {width} by {height} pixel field; use fewer repositories"
 )]
 pub(crate) struct CapacityError {
     repository: usize,
@@ -902,7 +902,11 @@ mod tests {
                 .contains("minimum tile size 144 by 64 reference pixels")
         );
         assert!(error.to_string().contains("gutter 4 pixels"));
-        assert!(error.to_string().contains("pixel field"));
+        assert!(
+            error
+                .to_string()
+                .ends_with("pixel field; use fewer repositories")
+        );
     }
 
     #[test]

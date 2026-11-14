@@ -19,16 +19,19 @@ pub(in crate::model) struct Snapshots {
 }
 
 impl Snapshots {
-    fn capacity(events: &[Event]) -> (usize, usize) {
-        let ticks = usize::try_from(
-            crate::model::frames_for(
-                crate::model::PULSE_SECONDS + crate::model::FRAGMENT_FLIGHT,
-                60,
-            )
-            .expect("bounded pulse"),
+    /// The most ticks one pulse is captured on: one for each started tick of its
+    /// longest lifetime, and a spare.
+    pub(in crate::model) fn pulse_ticks() -> usize {
+        usize::try_from(
+            crate::model::frames_for(crate::model::pulse_end(0.0), 60)
+                .expect("bounded pulse"),
         )
         .expect("pulse ticks fit usize")
-            + 1;
+            + 1
+    }
+
+    fn capacity(events: &[Event]) -> (usize, usize) {
+        let ticks = Self::pulse_ticks();
         let points = events
             .iter()
             .map(|event| event.changes.len() * 2)
@@ -53,10 +56,14 @@ impl Snapshots {
     pub(in crate::model) fn capture(&mut self, state: &State) {
         let now = crate::model::tick_time(state.tick);
         for pulse in state.pulses.iter().filter(|p| now < p.end) {
-            assert!(self.frames.len() < self.frames.capacity());
+            assert!(
+                self.frames.len() < self.frames.capacity(),
+                "each commit's pulse is live for at most `pulse_ticks` ticks"
+            );
             assert!(
                 self.points.len() + pulse.touched.len() + pulse.targets.len()
-                    <= self.points.capacity()
+                    <= self.points.capacity(),
+                "a pulse touches and targets at most one point per changed file"
             );
             let start = self.points.len();
             self.points.extend(
@@ -85,11 +92,6 @@ impl Snapshots {
     }
 
     pub(super) fn project(self, packing: &Packing, events: usize) -> Vec<Envelope> {
-        eprintln!(
-            "envelope_snapshot_frames={} envelope_snapshot_points={}",
-            self.frames.len(),
-            self.points.len()
-        );
         let mut envelopes = vec![Envelope::default(); events];
         for frames in self.frames.chunk_by(|a, b| a.tick == b.tick) {
             let mut needed: Vec<_> = frames.iter().map(|f| f.repository).collect();
@@ -135,24 +137,73 @@ impl Snapshots {
 mod tests {
     use super::*;
 
+    fn commit(seconds: i64, paths: impl IntoIterator<Item = String>) -> Event {
+        Event {
+            repository: 0,
+            author: crate::timeline::Identity {
+                name: b"Ada".to_vec(),
+                email: b"ada@example.invalid".to_vec(),
+            },
+            commit: String::new(),
+            contributor: None,
+            seconds,
+            changes: paths
+                .into_iter()
+                .map(|path| crate::timeline::FileChange {
+                    path,
+                    insertions: 1,
+                    ..Default::default()
+                })
+                .collect(),
+        }
+    }
+
+    /// Commits a tick apart whose pulses overlap: one beam per file, one file listed
+    /// twice, and enough directories to aggregate the beams.
+    fn crowded() -> Vec<Event> {
+        vec![
+            commit(0, (0..24).map(|file| format!("{file}.rs"))),
+            commit(1, ["twice.rs".to_owned(), "twice.rs".to_owned()]),
+            commit(2, (0..60).map(|file| format!("{}/{file}.rs", file % 30))),
+        ]
+    }
+
     #[test]
     fn run_sized_snapshot_cache_does_not_grow_during_capture() {
-        let mut events = crate::timeline::synthetic();
-        crate::repositories::namespace(&mut events, 0);
-        let mut sim = crate::model::Simulation::with_repositories(
-            events,
-            &crate::model::Options::default(),
-            &crate::theme::Theme::neon(),
-            &crate::contributors::Mappings::default(),
-            &["Only".to_owned()],
-        );
-        let mut snapshots = Snapshots::new(&sim.events);
-        let bytes = snapshots.allocated_bytes();
-        for tick in 0..=crate::model::frames_for(sim.duration(), 60).unwrap() {
-            sim.advance_to(tick, 60);
-            snapshots.capture(&sim.state);
+        let theme = crate::theme::Theme::neon();
+        let mappings = crate::contributors::Mappings::default();
+        let waits: [&[(usize, u32)]; 2] = [&[], &[(1, 7), (2, 400)]];
+        for (mut events, start) in [
+            (crate::timeline::synthetic(), 0),
+            (crate::timeline::synthetic(), 3),
+            (crowded(), 0),
+        ] {
+            crate::repositories::namespace(&mut events, 0);
+            let options = crate::model::Options {
+                start,
+                ..Default::default()
+            };
+            for padding in waits {
+                let mut sim = crate::model::Simulation::build(
+                    events.clone(),
+                    &options,
+                    &theme,
+                    &mappings,
+                    padding,
+                    &["Only".to_owned()],
+                    &mut None,
+                )
+                .unwrap();
+                let mut snapshots = Snapshots::new(&sim.events);
+                let bytes = snapshots.allocated_bytes();
+                assert_eq!(Snapshots::estimated_bytes(&events[start..]), bytes as u128);
+                for tick in 0..=crate::model::frames_for(sim.duration(), 60).unwrap() {
+                    sim.advance_to(tick, 60);
+                    snapshots.capture(&sim.state);
+                }
+                assert!(!snapshots.frames.is_empty());
+                assert_eq!(snapshots.allocated_bytes(), bytes);
+            }
         }
-        assert!(!snapshots.frames.is_empty());
-        assert_eq!(snapshots.allocated_bytes(), bytes);
     }
 }

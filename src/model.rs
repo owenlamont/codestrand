@@ -69,6 +69,11 @@ fn check_playback_precision(duration: f32) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// When a pulse starting at `start` ends unless its author's next commit cuts it short.
+fn pulse_end(start: f32) -> f32 {
+    start + PULSE_SECONDS + FRAGMENT_FLIGHT
+}
+
 pub(super) struct Options {
     pub contributor_inactivity_days: u32,
     pub repository_ends: Vec<Option<i64>>,
@@ -583,16 +588,10 @@ impl Simulation {
         if let Some((starts, layout)) = layout_cache
             && *starts == layout_starts
         {
-            eprintln!("phase=build.reuse_scheduled_layout");
             layout.clone()
         } else {
-            let started = std::time::Instant::now();
             let layout =
                 Layout::scheduled_repositories(events, layout_starts, repositories);
-            eprintln!(
-                "phase=build.scheduled_layout seconds={:.6}",
-                started.elapsed().as_secs_f64()
-            );
             *layout_cache = Some((layout_starts.to_vec(), layout.clone()));
             layout
         }
@@ -1486,7 +1485,7 @@ impl State {
             repository: event.repository,
             touched: self.avatars[author].touched.clone(),
             start,
-            end: start + PULSE_SECONDS + FRAGMENT_FLIGHT,
+            end: pulse_end(start),
             author,
             targets,
             aggregated,
@@ -1778,6 +1777,36 @@ mod tests {
                 .layout
                 .shares_repository_plan(&changed.initial.layout)
         );
+    }
+
+    #[test]
+    fn a_pulse_is_live_for_at_most_the_snapshot_tick_capacity() {
+        let capacity = u64::try_from(slots::Snapshots::pulse_ticks()).unwrap();
+        let lifetime = pulse_end(0.0);
+        let assert_bounded = |near: f32, mut first: u64| {
+            for start in [near.next_down(), near, near.next_up()] {
+                while first > 0 && tick_time(first - 1) >= start {
+                    first -= 1;
+                }
+                while tick_time(first) < start {
+                    first += 1;
+                }
+                assert!(
+                    tick_time(first + capacity) >= pulse_end(start),
+                    "a pulse starting at {start} outlives {capacity} ticks"
+                );
+            }
+        };
+        // The live tick count only changes where a start or an end crosses a tick.
+        for tick in 0..=4 * 60 * 60 * u64::from(TICK_RATE) {
+            let aligned = tick_time(tick);
+            let ending = aligned - lifetime;
+            let begun = tick.saturating_sub(capacity);
+            assert_bounded(aligned, tick);
+            assert_bounded(ending.next_down().next_down(), begun);
+            assert_bounded(ending, begun);
+            assert_bounded(ending.next_up().next_up(), begun);
+        }
     }
 
     #[test]

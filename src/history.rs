@@ -112,7 +112,7 @@ impl Default for Limits {
             blob_bytes: 8 * 1024 * 1024 * 1024,
             lines: 20_000_000,
             work: 32 * 1024 * 1024 * 1024,
-            object_bytes: 16 * 1024 * 1024,
+            object_bytes: OBJECT_ALLOCATION_BYTES,
             line_pairs: 1_000_000_000,
         }
     }
@@ -326,20 +326,15 @@ pub(super) struct Hunk {
     after_end: u32,
 }
 
-#[cfg(test)]
-pub(super) fn import(path: &Path, revision: &str) -> Result<History, Error> {
-    let (repo, tip) = resolve(path, revision)?;
-    import_resolved(&repo, tip)
-}
-
 pub(super) fn resolve(
     path: &Path,
     revision: &str,
 ) -> Result<(gix::Repository, gix::ObjectId), Error> {
     let mut repo = gix::open_opts(
         path,
-        gix::open::Options::default()
-            .config_overrides(["gitoxide.objects.allocLimit=16777216"]),
+        gix::open::Options::default().config_overrides([format!(
+            "gitoxide.objects.allocLimit={OBJECT_ALLOCATION_BYTES}"
+        )]),
     )
     .map_err(|source| Error::Open {
         path: path.to_owned(),
@@ -353,14 +348,6 @@ pub(super) fn resolve(
     Ok((repo, tip))
 }
 
-#[cfg(test)]
-pub(super) fn import_resolved(
-    repo: &gix::Repository,
-    tip: gix::ObjectId,
-) -> Result<History, Error> {
-    import_with_options(repo, tip, Options::default())
-}
-
 pub(super) fn import_with_options(
     repo: &gix::Repository,
     tip: gix::ObjectId,
@@ -372,6 +359,7 @@ pub(super) fn import_with_options(
 }
 
 const MAX_REFERENCE_HOPS: usize = 64;
+const OBJECT_ALLOCATION_BYTES: u64 = 16 * 1024 * 1024;
 
 fn reference_id(
     repo: &gix::Repository,
@@ -537,7 +525,7 @@ fn load_with_limits(
         {
             history.truncated = true;
             history.truncation_reason = Some(error.downcast_ref::<Exhausted>().map_or_else(
-                || format!("object allocation budget reached (16777216 bytes); fixed security ceiling: {error:#}"),
+                || format!("object allocation budget reached ({OBJECT_ALLOCATION_BYTES} bytes); fixed security ceiling: {error:#}"),
                 ToString::to_string,
             ));
             if let Some(tip) = &budget.playback_tip {
@@ -984,6 +972,11 @@ mod security_tests {
     use super::*;
     use clap::Parser;
 
+    fn import(path: &Path, revision: &str) -> Result<History, Error> {
+        let (repo, tip) = resolve(path, revision)?;
+        import_with_options(&repo, tip, Options::default())
+    }
+
     #[test]
     fn history_options_are_shared_and_finite() {
         for command in ["inspect", "preview", "export"] {
@@ -1185,7 +1178,9 @@ mod security_tests {
             (16, vec![b'x'; 1024], "single-tree path bytes"),
         ] {
             let (_root, repo, tip) = hostile_path(levels, b"ok\n", &filename);
-            let error = import_resolved(&repo, tip).err().unwrap();
+            let error = import_with_options(&repo, tip, Options::default())
+                .err()
+                .unwrap();
             let message = format!("{:#}", anyhow::Error::from(error));
             assert!(message.contains(reason), "{message}");
         }
@@ -1404,7 +1399,11 @@ mod security_tests {
         ] {
             assert!(load_with_limits(&repo, tip, limits).unwrap().truncated);
         }
-        assert!(!import_resolved(&repo, tip).unwrap().truncated);
+        assert!(
+            !import_with_options(&repo, tip, Options::default())
+                .unwrap()
+                .truncated
+        );
     }
 
     #[test]
@@ -1455,7 +1454,7 @@ mod security_tests {
     #[test]
     fn skipped_detail_remains_bounded_by_global_work() {
         let (_root, repo, tip) = hostile_history(0, b"first\nsecond\n");
-        let history = import_resolved(&repo, tip).unwrap();
+        let history = import_with_options(&repo, tip, Options::default()).unwrap();
         let change = &history.commits[0].changes[0];
         for limits in [
             Limits {
@@ -1514,7 +1513,9 @@ mod security_tests {
     #[test]
     fn deep_shared_tree_stops_before_gix_expansion() {
         let (_root, repo, tip) = hostile_history(512, b"ok\n");
-        let error = import_resolved(&repo, tip).err().unwrap();
+        let error = import_with_options(&repo, tip, Options::default())
+            .err()
+            .unwrap();
         assert!(format!("{:#}", anyhow::Error::from(error)).contains("tree depth"));
     }
 

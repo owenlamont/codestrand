@@ -192,7 +192,8 @@ directory name. Repeated flags and a file can be combined; flag entries come fir
 Paths resolving to the same location are rejected as duplicate repositories. Labels for
 distinct repositories must be unique. There is no fixed repository-count limit.
 Packing refuses an insertion when the minimum tile size, aspect range and selected
-gutter cannot fit the field; the error names those geometric limits.
+gutter cannot fit the field; the error names those geometric limits and asks for
+fewer repositories.
 
 `archived = true` ends a repository after the final commit in the selected revision,
 once the commit's activity finishes. `ended = "YYYY-MM-DD"` supplies an explicit UTC

@@ -144,9 +144,13 @@ fn local_framing_trace() {
         .iter()
         .enumerate()
         .map(|(i, r)| {
-            let mut events =
-                crate::cache::load(&r.path, "HEAD", crate::cache::root().as_deref())
-                    .unwrap();
+            let mut events = crate::cache::load_with_options(
+                &r.path,
+                "HEAD",
+                crate::cache::root().as_deref(),
+                crate::history::Options::default(),
+            )
+            .unwrap();
             crate::repositories::namespace(&mut events, i);
             events
         })

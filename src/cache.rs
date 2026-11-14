@@ -212,15 +212,6 @@ pub(super) fn root() -> Option<PathBuf> {
     dirs::cache_dir().map(|path| path.join("codestrand"))
 }
 
-#[cfg(test)]
-pub(super) fn load(
-    path: &Path,
-    revision: &str,
-    cache_root: Option<&Path>,
-) -> Result<Vec<timeline::Event>, history::Error> {
-    load_with_options(path, revision, cache_root, history::Options::default())
-}
-
 pub(super) fn load_with_options(
     path: &Path,
     revision: &str,
@@ -295,6 +286,14 @@ mod tests {
     use clap::Parser;
 
     use super::*;
+
+    fn load(
+        path: &Path,
+        revision: &str,
+        cache_root: Option<&Path>,
+    ) -> Result<Vec<timeline::Event>, history::Error> {
+        load_with_options(path, revision, cache_root, history::Options::default())
+    }
 
     pub(crate) fn directory_link(target: &Path, link: &Path) {
         #[cfg(windows)]
@@ -674,7 +673,11 @@ emails = ["author@example.invalid"]
     fn measure_sample_cache_growth() {
         let repository = std::env::var("CODESTRAND_MEASURE_REPOSITORY").unwrap();
         let output = PathBuf::from(std::env::var("CODESTRAND_MEASURE_OUTPUT").unwrap());
-        let history = history::import(Path::new(&repository), "origin/main").unwrap();
+        let (repo, tip) =
+            history::resolve(Path::new(&repository), "origin/main").unwrap();
+        let history =
+            history::import_with_options(&repo, tip, history::Options::default())
+                .unwrap();
         let snapshot = Snapshot {
             version: timeline::CACHE_VERSION,
             tip: history.tip.clone(),
