@@ -65,6 +65,8 @@ pub(super) fn edge_segments(theme: &Theme, from: Vec3, to: Vec3) -> Vec<(Vec3, V
 #[derive(Component)]
 pub(super) struct Ground;
 
+pub(super) const BEAM_SEGMENTS: usize = 16;
+
 #[derive(Resource)]
 pub(super) struct Styles {
     backdrops: Vec<(crate::theme::ThemeName, Handle<Image>)>,
@@ -154,7 +156,9 @@ pub(super) fn setup(world: &mut World, theme: &Theme) {
     })
     .collect();
     let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
-    let beams = (0..16).map(|_| materials.add(theme.edge.clone())).collect();
+    let beams = (0..BEAM_SEGMENTS)
+        .map(|_| materials.add(theme.edge.clone()))
+        .collect();
     let territories = (0..36).map(|_| materials.add(theme.edge.clone())).collect();
     world.insert_resource(Styles {
         territory_mesh,
@@ -564,14 +568,21 @@ pub(super) fn beams(
         );
     }
     for (entity, (beam, from, to, segment)) in pool.iter().zip(&segments) {
-        let material = if matches!(
+        let (mesh, material) = if matches!(
             simulation.theme().beam_style,
             crate::theme::BeamStyle::Straight
         ) {
-            palette.glass[beam.author % palette.glass.len()].clone()
+            (
+                &palette.beam,
+                palette.glass[beam.author % palette.glass.len()].clone(),
+            )
         } else {
-            world.resource::<Styles>().beams[*segment].clone()
+            (
+                &palette.segment_beams[*segment],
+                world.resource::<Styles>().beams[*segment].clone(),
+            )
         };
+        super::set_mesh(world, *entity, mesh);
         world.entity_mut(*entity).insert(MeshMaterial3d(material));
         place_beam(
             world,
