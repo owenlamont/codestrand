@@ -341,8 +341,7 @@ Gaps between that contributor's commits absorb travel before padding is needed.
 Padding is revalidated as scene geometry changes. Numeric caps use at most five
 padded rebuilds, including one cleanup of unused service padding.
 Uncapped padding grows until every walking trip completes, subject to the planning
-memory estimate and playback time precision limit. Each Dijkstra search is limited
-to 10,000 graph nodes.
+memory estimate. Each Dijkstra search is limited to 10,000 graph nodes.
 Numeric caps apply to accumulated extra waiting per commit.
 
 Header and caption remain in the outer frame. Other preview aspect ratios use conservative
@@ -356,8 +355,7 @@ sizes are estimates, so the figure is not a process-memory ceiling. Each padded 
 is checked before rebuilding; numeric travel caps do not reserve hypothetical waits.
 The same check applies to single repositories and synthetic playback.
 
-Playback longer than four hours is refused because of timeline time precision.
-Shorten the selected history or reduce playback times to stay within the limits.
+Shorten the selected history or reduce playback times to stay within the limit.
 Packing reserves tiles before applying repository endings, so sequential repositories
 can reach the same geometric limit as repositories visible together.
 Route searches stop at 10,000 nodes; capped playback can fade across when a search

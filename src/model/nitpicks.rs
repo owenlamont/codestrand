@@ -19,7 +19,7 @@ fn beam_finishes_the_last_emitted_flight_before_fading() {
         sim.advance_to(frame, 60);
         assert_labels_and_beams(&sim);
         let flying = sim.fragments().iter().any(|f| !f.rising);
-        if flying && sim.seconds() > LEAD_IN + PULSE_SECONDS {
+        if flying && sim.seconds() > Time::seconds(LEAD_IN + PULSE_SECONDS) {
             late_flight = true;
             assert!(sim.beams().iter().all(|b| b.width >= 0.999));
         }

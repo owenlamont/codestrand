@@ -12,14 +12,14 @@ pub(super) struct Names {
     sampled: Option<Sample>,
     #[cfg(test)]
     samples: usize,
-    seconds: Option<f32>,
+    seconds: Option<crate::model::Time>,
     pub targets: BTreeSet<Target>,
     pub labels: Vec<Label>,
 }
 
 #[derive(PartialEq)]
 struct Sample {
-    seconds: u32,
+    seconds: crate::model::Time,
     theme: crate::theme::ThemeName,
     rate: u32,
     clip_from_world: Mat4,
@@ -177,7 +177,7 @@ impl Names {
 
     pub(super) fn sample(&mut self, simulation: &Simulation, view: &View) {
         let sampled = Sample {
-            seconds: simulation.seconds().to_bits(),
+            seconds: simulation.seconds(),
             theme: simulation.theme().name,
             rate: simulation.playback_multiplier().to_bits(),
             clip_from_world: view.clip_from_world,

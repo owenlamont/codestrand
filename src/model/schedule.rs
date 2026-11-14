@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use super::{LEAD_IN, TAIL, TICK_RATE, tick_seconds, tick_time};
+use super::{LEAD_IN, TAIL, TICK_RATE, Time, tick_seconds, tick_time};
 use crate::timeline::Event;
 
 pub(super) fn padding_at(padding: &[(usize, u32)], index: usize) -> u32 {
@@ -12,7 +12,7 @@ pub(super) fn padding_at(padding: &[(usize, u32)], index: usize) -> u32 {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Schedule {
-    pub(crate) starts: Vec<f32>,
+    pub(crate) starts: Vec<Time>,
     services: Vec<Service>,
 }
 
@@ -38,7 +38,7 @@ impl Schedule {
         padding: impl Fn(usize) -> u32,
     ) -> Self {
         let mut previous = events.first().map_or(0, |event| event.seconds);
-        let mut now = LEAD_IN;
+        let mut now = Time::seconds(LEAD_IN);
         let mut extra = 0_u64;
         let mut services = Vec::with_capacity(events.len());
         let starts = events
@@ -54,10 +54,7 @@ impl Schedule {
                 previous = event.seconds;
                 let padding = padding(index);
                 extra += u64::from(padding);
-                let seconds = Duration::from_secs(extra / u64::from(TICK_RATE))
-                    .as_secs_f32()
-                    + tick_time(extra % u64::from(TICK_RATE));
-                let start = now + seconds;
+                let start = now.after(tick_time(extra));
                 services.push(Service {
                     tick: first_tick(start),
                     padding,
@@ -68,7 +65,7 @@ impl Schedule {
         Self { starts, services }
     }
 
-    pub(crate) fn start(&self, index: usize, tick: u64) -> Option<f32> {
+    pub(crate) fn start(&self, index: usize, tick: u64) -> Option<Time> {
         self.services
             .get(index)
             .filter(|service| service.tick <= tick)
@@ -80,15 +77,19 @@ impl Schedule {
             .partition_point(|service| service.tick <= tick)
     }
 
-    pub(crate) fn duration(&self) -> f32 {
-        self.starts.last().copied().unwrap_or(LEAD_IN) + TAIL
+    pub(crate) fn duration(&self) -> Time {
+        self.starts
+            .last()
+            .copied()
+            .unwrap_or(Time::seconds(LEAD_IN))
+            + TAIL
     }
 
     pub(crate) fn frame_tick(frame: u32, fps: u16) -> u64 {
         u64::from(frame) * u64::from(TICK_RATE) / u64::from(fps)
     }
 
-    pub(crate) fn layout_time(&self, time: f32) -> f32 {
+    pub(crate) fn layout_time(&self, time: Time) -> Time {
         let next = self.starts.partition_point(|&start| start <= time);
         if next == 0 {
             return time;
@@ -96,14 +97,14 @@ impl Schedule {
         let previous = self.starts[next - 1];
         // Preserve launch-timeline rounding so existing exports and quality reports stay identical.
         if next == self.starts.len() {
-            return previous + time - previous;
+            return time.rounded_through(previous);
         }
         let gap = self.starts[next] - previous;
         previous + (time - previous) / gap * gap
     }
 }
 
-fn first_tick(start: f32) -> u64 {
+fn first_tick(start: Time) -> u64 {
     let mut low = 0;
     let mut high = u64::from(u32::MAX) * u64::from(TICK_RATE);
     if start > tick_time(high) {
@@ -131,10 +132,10 @@ mod tests {
         let events = vec![event; 120];
         let padded = Schedule::with_padding(&events, 0.5, 1.0, |_| u32::MAX);
         let expected = 120.0 * f64::from(u32::MAX) / f64::from(TICK_RATE);
-        assert!(f64::from(padded.starts[119]) >= expected);
+        assert!(padded.starts[119].as_secs_f64() >= expected);
         assert_eq!(padded.services[119].tick, u64::MAX);
         let clock_limit = u64::from(u32::MAX) * u64::from(TICK_RATE);
-        assert_eq!(padded.applied(clock_limit), 60);
+        assert_eq!(padded.applied(clock_limit), 59);
         assert!(padded.starts.windows(2).all(|pair| pair[0] < pair[1]));
     }
 
@@ -157,12 +158,41 @@ mod tests {
                     now += (days.max(0.1) * rate).min(idle).max(tick_seconds());
                 }
                 previous = event.seconds;
-                assert_eq!(schedule.starts[index].to_bits(), now.to_bits());
+                assert_eq!(schedule.starts[index], now);
                 let tick = schedule.services[index].tick;
-                assert!(tick_time(tick) >= now);
-                assert!(tick_time(tick - 1) < now);
+                assert!(tick_time(tick) >= Time::ZERO + now);
+                assert!(tick_time(tick - 1) < Time::ZERO + now);
                 assert_eq!(schedule.services[index].padding, 0);
             }
+        }
+    }
+
+    #[test]
+    fn commits_days_in_keep_their_order_and_tick_exact_starts() {
+        let mut event = crate::timeline::synthetic().remove(0);
+        event.seconds = 0;
+        let events = vec![event; 10_000];
+        for days in [2, 8] {
+            let wait = days * 24 * 60 * 60 * TICK_RATE;
+            let schedule =
+                Schedule::with_padding(&events, 0.5, tick_seconds(), |index| {
+                    if index == 0 { wait } else { 0 }
+                });
+            assert!(schedule.starts[0] > tick_time(u64::from(wait)));
+            for pair in schedule.starts.windows(2) {
+                assert!(pair[0] < pair[1]);
+                assert!((pair[1] - pair[0] - tick_seconds()).abs() < 0.001);
+            }
+            for (&start, service) in schedule.starts.iter().zip(&schedule.services) {
+                assert!(tick_time(service.tick) >= start);
+                assert!(tick_time(service.tick - 1) < start);
+            }
+            assert!(
+                schedule
+                    .services
+                    .windows(2)
+                    .all(|pair| pair[0].tick <= pair[1].tick)
+            );
         }
     }
 
@@ -203,6 +233,6 @@ mod tests {
                 assert!(tick_time(applied - 1) < start);
             }
         }
-        assert_eq!(first_tick(f32::MAX), u64::MAX);
+        assert_eq!(first_tick(Time::INFINITY), u64::MAX);
     }
 }

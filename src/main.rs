@@ -607,7 +607,7 @@ fn run() -> anyhow::Result<()> {
                 &serde_json::json!({
                     "schema": 1, "source": source,
                     "history_events": simulation.total(),
-                    "duration_seconds": simulation.duration(), "tick_rate": model::TICK_RATE,
+                    "duration_seconds": simulation.duration().as_secs_f32(), "tick_rate": model::TICK_RATE,
                 }),
             )?;
             std::io::Write::write_all(&mut writer, b"\n")?;

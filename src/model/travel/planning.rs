@@ -1,5 +1,6 @@
 use super::{
-    Capture, HALF, Pose, Rect, Route, Router, Trip, Vec2, fade_clearance, tick_time,
+    Capture, HALF, Pose, Rect, Route, Router, Trip, Vec2, fade_clearance,
+    ticks_duration,
 };
 use crate::layout::packing::Tile;
 
@@ -144,12 +145,12 @@ fn moving_route(
 ) -> Option<Route> {
     let anchors = route_anchors(capture.row(epoch), trip, points)?;
     let shape = Route::new(points, speed * 0.8);
-    let duration = shape.duration + tick_time(animation_delay);
+    let duration = shape.duration + ticks_duration(animation_delay);
     let mut track = Vec::new();
     for offset in 0..=trip.arrival - trip.departure {
         let tick = trip.departure + offset;
         let row = capture.row(tick);
-        let elapsed = tick_time(offset.saturating_sub(animation_delay));
+        let elapsed = ticks_duration(offset.saturating_sub(animation_delay));
         let leg = shape
             .legs
             .iter()
@@ -256,9 +257,9 @@ fn search(
         candidate.source = source;
         let animation_delay = release.saturating_sub(begin);
         candidate.route = Route::new(&points, speed * 0.8);
-        candidate.route.duration += tick_time(animation_delay);
+        candidate.route.duration += ticks_duration(animation_delay);
         candidate.fade =
-            candidate.route.duration > tick_time(candidate.arrival - begin);
+            candidate.route.duration > ticks_duration(candidate.arrival - begin);
         candidate.failure = Some("moving_network");
         if let Some(route) =
             moving_route(capture, &candidate, &points, begin, speed, animation_delay)
@@ -293,7 +294,7 @@ pub(super) fn trips(
         };
         if (prior.repository == service.repository && prior.dock == service.dock)
             || ((!keep_idle || (service.bot && bots == crate::model::BotTravel::Fade))
-                && tick_time(service.tick - prior.tick)
+                && ticks_duration(service.tick - prior.tick)
                     >= crate::model::AVATAR_IDLE + 1.2)
         {
             continue;
@@ -375,7 +376,7 @@ mod tests {
             &crate::theme::Theme::neon(),
             &crate::contributors::Mappings::default(),
         );
-        sim.departures[0] = 1.2;
+        sim.departures[0] = crate::model::Time::seconds(1.2);
         let (trips, _) = trips(&fixture(), 480.0, crate::model::BotTravel::Walk, true);
         sim.travel = Plan {
             trips,
@@ -449,7 +450,7 @@ mod tests {
         assert_eq!(trips.len(), 1);
         assert_eq!(trips[0].departure, 70);
         assert!(!trips[0].fade);
-        assert!(trips[0].route.duration + tick_time(70) > tick_time(90));
+        assert!(trips[0].route.duration + ticks_duration(70) > ticks_duration(90));
         let plan = Plan {
             trips,
             docks: Vec::new(),

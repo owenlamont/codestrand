@@ -1,15 +1,15 @@
-use super::{Schedule, tick_seconds};
+use super::{Schedule, Time, tick_seconds};
 use crate::timeline::Event;
 
 pub(super) const EXIT: f32 = 1.2;
 pub(super) const REPOSITORY_EXIT: f32 = 2.5;
 pub(super) const REFLOW: f32 = 4.0;
 
-pub(super) fn duration(schedule: &Schedule, endings: &[f32]) -> f32 {
+pub(super) fn duration(schedule: &Schedule, endings: &[Time]) -> Time {
     endings
         .iter()
         .filter(|end| end.is_finite())
-        .fold(schedule.duration(), |duration, end| {
+        .fold(schedule.duration(), |duration, &end| {
             duration.max(end + REPOSITORY_EXIT + REFLOW)
         })
 }
@@ -41,7 +41,7 @@ pub(super) fn plan(
     schedule: &Schedule,
     options: &super::Options,
     selected: std::ops::Range<usize>,
-) -> (Vec<f32>, Vec<f32>) {
+) -> (Vec<Time>, Vec<Time>) {
     let archived: Vec<_> = options
         .repository_archived
         .iter()
@@ -68,7 +68,7 @@ pub(super) fn repository_ends(
     options: &super::Options,
     archived: &[bool],
     complete: bool,
-) -> Vec<f32> {
+) -> Vec<Time> {
     options
         .repository_ends
         .iter()
@@ -77,7 +77,7 @@ pub(super) fn repository_ends(
             date.map_or_else(
                 || {
                     if archived.get(repository) != Some(&true) {
-                        return f32::INFINITY;
+                        return Time::INFINITY;
                     }
                     events
                         .iter()
@@ -87,7 +87,7 @@ pub(super) fn repository_ends(
                             start + super::PULSE_SECONDS + super::FRAGMENT_FLIGHT
                         })
                         .next_back()
-                        .unwrap_or(-REPOSITORY_EXIT - REFLOW)
+                        .unwrap_or(Time::seconds(-REPOSITORY_EXIT - REFLOW))
                 },
                 |date| ending_time(events, schedule, date, options, complete),
             )
@@ -101,21 +101,25 @@ fn ending_time(
     date: i64,
     options: &super::Options,
     complete: bool,
-) -> f32 {
+) -> Time {
     if events.first().is_some_and(|event| date < event.seconds) {
-        return -REPOSITORY_EXIT - REFLOW;
+        return Time::seconds(-REPOSITORY_EXIT - REFLOW);
     }
     let time = mapped_time(&calendar_dates(events), schedule, date);
     if time.is_finite() || !complete {
         return time;
     }
     let Some(last) = events.iter().map(|event| event.seconds).max() else {
-        return f32::INFINITY;
+        return Time::INFINITY;
     };
     let days = std::time::Duration::from_secs(date.saturating_sub(last).unsigned_abs())
         .as_secs_f32()
         / 86_400.0;
-    schedule.starts.last().copied().unwrap_or(super::LEAD_IN)
+    schedule
+        .starts
+        .last()
+        .copied()
+        .unwrap_or(Time::seconds(super::LEAD_IN))
         + (days * options.seconds_per_day)
             .min(options.max_idle_seconds)
             .max(super::PULSE_SECONDS + super::FRAGMENT_FLIGHT)
@@ -132,10 +136,10 @@ fn calendar_dates(events: &[Event]) -> Vec<i64> {
         .collect()
 }
 
-fn mapped_time(dates: &[i64], schedule: &Schedule, date: i64) -> f32 {
+fn mapped_time(dates: &[i64], schedule: &Schedule, date: i64) -> Time {
     let next = dates.partition_point(|&seconds| seconds < date);
     let Some(&start) = schedule.starts.get(next) else {
-        return f32::INFINITY;
+        return Time::INFINITY;
     };
     next.checked_sub(1).map_or(start, |previous| {
         let seconds = dates[previous];
@@ -159,7 +163,11 @@ fn fraction32(value: f64) -> f32 {
     value as f32
 }
 
-pub(super) fn departures(events: &[Event], schedule: &Schedule, days: u32) -> Vec<f32> {
+pub(super) fn departures(
+    events: &[Event],
+    schedule: &Schedule,
+    days: u32,
+) -> Vec<Time> {
     let dates = calendar_dates(events);
     dates
         .iter()
@@ -175,7 +183,7 @@ pub(super) fn departures(events: &[Event], schedule: &Schedule, days: u32) -> Ve
         .collect()
 }
 
-pub(super) fn progress(now: f32, start: f32, duration: f32) -> f32 {
+pub(super) fn progress(now: Time, start: Time, duration: f32) -> f32 {
     ((now - start) / duration).clamp(0.0, 1.0)
 }
 
@@ -190,7 +198,7 @@ mod tests {
         events[0].seconds = 100 * 86_400;
         events[1].seconds = 0;
         let schedule = Schedule::new(&events, 0.5, 1.0);
-        assert_eq!(departures(&events, &schedule, 60), [f32::INFINITY; 2]);
+        assert_eq!(departures(&events, &schedule, 60), [Time::INFINITY; 2]);
         let mut later = events[1].clone();
         later.seconds = 200 * 86_400;
         events.push(later);
@@ -199,7 +207,7 @@ mod tests {
             schedule.starts[1] + (schedule.starts[2] - schedule.starts[1]) * 0.6;
         assert_eq!(
             departures(&events, &schedule, 60),
-            [expected, expected, f32::INFINITY]
+            [expected, expected, Time::INFINITY]
         );
     }
 
@@ -218,7 +226,7 @@ mod tests {
         let schedule =
             Schedule::new(selected, options.seconds_per_day, options.max_idle_seconds);
         let (_, endings) = plan(&events, &schedule, &options, 1..2);
-        assert!(endings[0] + REPOSITORY_EXIT < 0.0);
+        assert!(endings[0] + REPOSITORY_EXIT < Time::ZERO);
         let boundary = super::super::Options {
             repository_ends: vec![Some(100 * 86_400)],
             ..options
@@ -276,7 +284,10 @@ mod tests {
             ..Default::default()
         };
         let (_, ends) = plan(&events, &schedule, &options, 0..2);
-        assert_eq!(ends[0], schedule.starts[0].midpoint(schedule.starts[1]));
+        assert_eq!(
+            ends[0],
+            schedule.starts[0] + (schedule.starts[1] - schedule.starts[0]) * 0.5
+        );
         assert_eq!(arrivals(&events, 0..2), [true, false]);
         assert_eq!(arrivals(&events, 1..2), [false]);
         let archived = super::super::Options {
@@ -285,7 +296,10 @@ mod tests {
             ..Default::default()
         };
         let selected = Schedule::new(&events[..1], 0.5, 1.0);
-        assert_eq!(plan(&events, &selected, &archived, 0..1).1, [f32::INFINITY]);
+        assert_eq!(
+            plan(&events, &selected, &archived, 0..1).1,
+            [Time::INFINITY]
+        );
     }
 
     #[test]
@@ -334,12 +348,12 @@ mod tests {
                 }
             });
             if kind != "commit" {
-                records.push(serde_json::json!({"kind":kind,"time":time,"contributor":contributor.name,"repository":event.repository}));
+                records.push(serde_json::json!({"kind":kind,"time":time.as_secs_f32(),"contributor":contributor.name,"repository":event.repository}));
             }
             if let Some(last) = previous
                 && simulation.departures[last] < time
             {
-                records.push(serde_json::json!({"kind":"departure","time":simulation.departures[last],"contributor":contributor.name}));
+                records.push(serde_json::json!({"kind":"departure","time":simulation.departures[last].as_secs_f32(),"contributor":contributor.name}));
             }
             for change in &event.changes {
                 let kind = match change.kind {
@@ -347,17 +361,17 @@ mod tests {
                     crate::timeline::Kind::Deleted => "file_deleted",
                     _ => continue,
                 };
-                records.push(serde_json::json!({"kind":kind,"time":time,"path":change.path,"repository":event.repository}));
+                records.push(serde_json::json!({"kind":kind,"time":time.as_secs_f32(),"path":change.path,"repository":event.repository}));
             }
         }
         for &last in seen.values() {
             if simulation.departures[last].is_finite() {
-                records.push(serde_json::json!({"kind":"departure","time":simulation.departures[last],"contributor":simulation.events[last].contributor.as_ref().unwrap().name}));
+                records.push(serde_json::json!({"kind":"departure","time":simulation.departures[last].as_secs_f32(),"contributor":simulation.events[last].contributor.as_ref().unwrap().name}));
             }
         }
         for (repository, &time) in simulation.repository_ends.iter().enumerate() {
             if time.is_finite() {
-                records.push(serde_json::json!({"kind":"repository_ended","time":time,"repository":repository}));
+                records.push(serde_json::json!({"kind":"repository_ended","time":time.as_secs_f32(),"repository":repository}));
             }
         }
         records.sort_by(|a, b| {
@@ -370,7 +384,7 @@ mod tests {
         std::fs::write(
             &output,
             serde_json::to_vec_pretty(
-                &serde_json::json!({"duration":simulation.duration(),"events":records,"travel":simulation.travel.report()}),
+                &serde_json::json!({"duration":simulation.duration().as_secs_f32(),"events":records,"travel":simulation.travel.report()}),
             )
             .unwrap(),
         )
@@ -507,9 +521,9 @@ mod tests {
         let deadlines = departures(&events, &schedule, 50);
         assert_eq!(
             deadlines[0],
-            schedule.starts[0].midpoint(schedule.starts[1])
+            schedule.starts[0] + (schedule.starts[1] - schedule.starts[0]) * 0.5
         );
-        assert_eq!(deadlines[1], f32::INFINITY);
+        assert_eq!(deadlines[1], Time::INFINITY);
         assert_eq!(progress(deadlines[0], deadlines[0], EXIT), 0.0);
         assert_eq!(progress(deadlines[0] + EXIT, deadlines[0], EXIT), 1.0);
     }
@@ -527,7 +541,8 @@ mod tests {
     }
 
     fn at(sim: &mut super::super::Simulation, time: f32) {
-        sim.advance_to(super::super::frames_for(time, 60).unwrap(), 60);
+        let frames = super::super::frames_for(Time::seconds(time), 60).unwrap();
+        sim.advance_to(frames, 60);
     }
 
     #[test]
@@ -566,10 +581,10 @@ mod tests {
         at(&mut sim, 1.7);
         assert_eq!(sim.state.avatars[0].lifecycle_scale, 1.0);
         let deadline = sim.departures[0];
-        at(&mut sim, deadline + 0.4);
+        at(&mut sim, (deadline + 0.4).as_secs_f32());
         assert!(sim.state.avatars[0].grey > 0.999);
         assert!(sim.state.avatars[0].presence > 0.0);
-        at(&mut sim, deadline + EXIT + 0.1);
+        at(&mut sim, (deadline + EXIT + 0.1).as_secs_f32());
         assert_eq!(sim.state.avatars[0].presence, 0.0);
         at(&mut sim, 41.0);
         assert!(sim.state.avatars[0].presence > 0.9);
@@ -624,9 +639,9 @@ mod tests {
                 + super::super::PULSE_SECONDS
                 + super::super::FRAGMENT_FLIGHT
         );
-        at(&mut sim, end - 0.1);
+        at(&mut sim, (end - 0.1).as_secs_f32());
         assert_eq!(sim.repository_effect(0).1, 1.0);
-        at(&mut sim, end + REPOSITORY_EXIT);
+        at(&mut sim, (end + REPOSITORY_EXIT).as_secs_f32());
         assert_eq!(sim.repository_effect(0).1, 0.0);
         assert!(sim.duration() >= end + REPOSITORY_EXIT + REFLOW);
     }

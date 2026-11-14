@@ -379,7 +379,7 @@ impl Simulation {
 
 impl State {
     #[cfg(test)]
-    pub(super) fn place_slots(&mut self, envelopes: &[Envelope], now: f32) {
+    pub(super) fn place_slots(&mut self, envelopes: &[Envelope], now: super::Time) {
         self.place_slots_planned(envelopes, now, &super::travel::Plan::default());
     }
     fn slot_peers(
@@ -414,7 +414,7 @@ impl State {
             })
             .collect()
     }
-    fn retained_slots(&self, now: f32, radius: f32) -> Vec<Option<Rect>> {
+    fn retained_slots(&self, now: super::Time, radius: f32) -> Vec<Option<Rect>> {
         self.avatars
             .iter()
             .map(|avatar| {
@@ -430,7 +430,7 @@ impl State {
     pub(super) fn place_slots_planned(
         &mut self,
         envelopes: &[Envelope],
-        now: f32,
+        now: super::Time,
         plan: &super::travel::Plan,
     ) {
         let gap = Vec2::splat(self.gutter);
@@ -461,7 +461,7 @@ impl State {
         order.sort_by(|&a, &b| {
             self.avatars[b]
                 .last_active
-                .total_cmp(&self.avatars[a].last_active)
+                .total_cmp(self.avatars[a].last_active)
                 .then(a.cmp(&b))
         });
         for index in order {
@@ -1948,15 +1948,15 @@ mod tests {
         );
         sim.advance_to(120, 60);
         let mut state = sim.state.clone();
-        state.avatars[0].last_active = 0.0;
+        state.avatars[0].last_active = crate::model::Time::ZERO;
         state.avatars[0].presence = 0.0;
         state.avatars[0].slot_presence = 0.0;
-        state.avatars[1].last_active = 12.0;
-        state.place_slots(&sim.envelopes, 12.0);
+        state.avatars[1].last_active = crate::model::Time::seconds(12.0);
+        state.place_slots(&sim.envelopes, crate::model::Time::seconds(12.0));
         let expected = state.avatars[1].slot.as_ref().unwrap().point;
         state.avatars[0].slot.as_mut().unwrap().point = expected;
         state.avatars[0].presence = 1.0;
-        state.place_slots(&sim.envelopes, 12.0);
+        state.place_slots(&sim.envelopes, crate::model::Time::seconds(12.0));
         assert_eq!(state.avatars[1].slot.as_ref().unwrap().point, expected);
         assert!(state.avatars[1].slot.as_ref().unwrap().valid());
     }
@@ -2022,7 +2022,7 @@ mod tests {
         }
         sim.advance_to(frames, 60);
         assert_eq!(first, report(&sim.state));
-        let summary = serde_json::json!({"avatar_slots":first,"moving_beams":moving,"travel":sim.travel.report(),"duration":sim.duration()});
+        let summary = serde_json::json!({"avatar_slots":first,"moving_beams":moving,"travel":sim.travel.report(),"duration":sim.duration().as_secs_f32()});
         if let Ok(path) = std::env::var("CODESTRAND_SLOT_DIAGNOSTIC") {
             std::fs::write(path, serde_json::to_vec_pretty(&summary).unwrap()).unwrap();
         }

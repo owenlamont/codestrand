@@ -391,7 +391,7 @@ struct Pools {
 
 #[derive(PartialEq)]
 struct SyncStamp {
-    seconds: u32,
+    seconds: model::Time,
     theme: crate::theme::ThemeName,
     collapse: bool,
     rate: u32,
@@ -403,7 +403,7 @@ struct SyncStamp {
 
 impl SyncStamp {
     fn matches(&self, simulation: &Simulation, lod: &lod::Lod) -> bool {
-        self.seconds == simulation.seconds().to_bits()
+        self.seconds == simulation.seconds()
             && self.theme == simulation.theme().name
             && self.collapse == simulation.collapse_directories
             && self.rate == simulation.playback_multiplier().to_bits()
@@ -415,7 +415,7 @@ impl SyncStamp {
 
     fn new(simulation: &Simulation, lod: &lod::Lod) -> Self {
         Self {
-            seconds: simulation.seconds().to_bits(),
+            seconds: simulation.seconds(),
             theme: simulation.theme().name,
             collapse: simulation.collapse_directories,
             rate: simulation.playback_multiplier().to_bits(),
@@ -1322,9 +1322,10 @@ fn sync_lod(world: &mut World, pools: &mut Pools, simulation: &Simulation) {
         })
         .unwrap_or(std::f32::consts::FRAC_PI_4);
     let seconds = if world.contains_resource::<PreviewCamera>() {
-        world
-            .get_resource::<Time<Real>>()
-            .map_or(0.0, Time::elapsed_secs)
+        model::Time::ZERO
+            + world
+                .get_resource::<Time<Real>>()
+                .map_or(0.0, Time::elapsed_secs)
     } else {
         simulation.seconds()
     };
@@ -4370,7 +4371,7 @@ mod tests {
         let mut fallback = lod::Lod::default();
         fallback.sample(
             simulation.layout(),
-            simulation.seconds(),
+            simulation.seconds().as_secs_f32(),
             lod::View {
                 eye: focus + model::view_direction() * distance,
                 focus,

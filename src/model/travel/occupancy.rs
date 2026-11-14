@@ -19,7 +19,7 @@ fn merge(row: &mut Vec<(u8, Rect)>, edge: u8, mut rect: Rect) {
 }
 fn anticipate_service_reservations(
     events: &[crate::timeline::Event],
-    starts: &[f32],
+    starts: &[crate::model::Time],
     occupied: &mut [Vec<(u8, Rect)>],
     conflicted: &mut [bool],
 ) {
@@ -231,7 +231,7 @@ mod tests {
         let mut flags = vec![false, false, false, true];
         super::anticipate_service_reservations(
             &events,
-            &[0.0, 2.0, 4.0, 6.0],
+            &[0.0, 2.0, 4.0, 6.0].map(crate::model::Time::seconds),
             &mut rows,
             &mut flags,
         );
@@ -242,7 +242,7 @@ mod tests {
         let mut flags = vec![false, false, false, true];
         super::anticipate_service_reservations(
             &events,
-            &[0.0, 2.0, 4.0, 20.0],
+            &[0.0, 2.0, 4.0, 20.0].map(crate::model::Time::seconds),
             &mut rows,
             &mut flags,
         );

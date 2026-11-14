@@ -28,10 +28,12 @@ mod planning_memory;
 pub(crate) mod quality;
 pub(crate) mod schedule;
 mod slots;
+mod time;
 mod titles;
 mod travel;
 pub(super) use names::rect as label_rect;
 use schedule::Schedule;
+pub(crate) use time::Time;
 pub(crate) mod treemap;
 
 pub(super) const TICK_RATE: u32 = 60;
@@ -61,16 +63,8 @@ fn check_travel_pass(pass: u32) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn check_playback_precision(duration: f32) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        duration <= 4.0 * 60.0 * 60.0,
-        "playback duration {duration:.2} seconds exceeds the 4-hour time precision limit; shorten the selected history or reduce playback times"
-    );
-    Ok(())
-}
-
 /// When a pulse starting at `start` ends unless its author's next commit cuts it short.
-fn pulse_end(start: f32) -> f32 {
+fn pulse_end(start: Time) -> Time {
     start + PULSE_SECONDS + FRAGMENT_FLIGHT
 }
 
@@ -162,8 +156,8 @@ struct Pulse {
     commit: usize,
     repository: usize,
     touched: Vec<u64>,
-    start: f32,
-    end: f32,
+    start: Time,
+    end: Time,
     author: usize,
     targets: Vec<(Target, f32, u32, u32)>,
     aggregated: bool,
@@ -248,8 +242,8 @@ pub(super) struct DiffLine {
 
 #[derive(Clone, Debug)]
 pub(super) struct Avatar {
-    expires: f32,
-    arrived: f32,
+    expires: Time,
+    arrived: Time,
     pub lifecycle_scale: f32,
     pub grey: f32,
     pub key: Key,
@@ -259,7 +253,7 @@ pub(super) struct Avatar {
     target: Vec3,
     repository: usize,
     touched: Vec<u64>,
-    last_active: f32,
+    last_active: Time,
     pub presence: f32,
     // Travel fades do not release a reserved parking slot.
     slot_presence: f32,
@@ -364,8 +358,8 @@ struct State {
 pub(super) struct Simulation {
     file_ids: HashMap<String, FileIdentity>,
     first_arrivals: Vec<bool>,
-    departures: Vec<f32>,
-    repository_ends: Vec<f32>,
+    departures: Vec<Time>,
+    repository_ends: Vec<Time>,
     pub caption_style: caption::Style,
     caption_plan: Vec<caption::Transition>,
     packing: crate::layout::packing::Packing,
@@ -422,7 +416,6 @@ impl Simulation {
             options.selected_range(events.len()),
         );
         let duration = lifecycle::duration(schedule, &endings);
-        check_playback_precision(duration)?;
         planning_memory::check(events, options, repositories, schedule, duration)?;
         Ok(())
     }
@@ -450,7 +443,7 @@ impl Simulation {
     }
 
     #[cfg(test)]
-    pub(super) fn scheduled_starts(&self) -> &[f32] {
+    pub(super) fn scheduled_starts(&self) -> &[Time] {
         &self.schedule.starts
     }
 
@@ -581,9 +574,9 @@ impl Simulation {
 
     fn scheduled_layout(
         events: &[Event],
-        layout_starts: &[f32],
+        layout_starts: &[Time],
         repositories: &[String],
-        layout_cache: &mut Option<(Vec<f32>, Layout)>,
+        layout_cache: &mut Option<(Vec<Time>, Layout)>,
     ) -> Layout {
         if let Some((starts, layout)) = layout_cache
             && *starts == layout_starts
@@ -604,7 +597,7 @@ impl Simulation {
         mappings: &Mappings,
         padding: &[(usize, u32)],
         repositories: &[String],
-        layout_cache: &mut Option<(Vec<f32>, Layout)>,
+        layout_cache: &mut Option<(Vec<Time>, Layout)>,
     ) -> anyhow::Result<Self> {
         if events.iter().any(|event| event.contributor.is_none()) {
             mappings.apply(&mut events);
@@ -650,7 +643,11 @@ impl Simulation {
         if start > 0 {
             state.layout.plan_time(
                 layout_starts.starts[start.min(layout_starts.starts.len() - 1)]
-                    - schedule.starts.first().copied().unwrap_or(LEAD_IN),
+                    - schedule
+                        .starts
+                        .first()
+                        .copied()
+                        .unwrap_or(Time::seconds(LEAD_IN)),
             );
             state.layout.settle(SETTLE_TICKS, tick_seconds());
             state.avatars.clear();
@@ -711,7 +708,8 @@ impl Simulation {
             }
         }
         for (index, event) in self.events.iter().enumerate() {
-            let arrival = travel::seconds_ticks(self.schedule.starts[index], false);
+            let arrival = u32::try_from(self.schedule.starts[index].ticks(false))
+                .expect("bounded service tick");
             let padding = self.schedule.padding(index);
             activation[event.repository] = activation[event.repository].min(
                 arrival
@@ -778,7 +776,7 @@ impl Simulation {
         self.initial = self.state.clone();
         Ok(Some(snapshots))
     }
-    pub(super) fn duration(&self) -> f32 {
+    pub(super) fn duration(&self) -> Time {
         lifecycle::duration(&self.schedule, &self.repository_ends)
     }
 
@@ -787,7 +785,7 @@ impl Simulation {
             .repository_ends
             .get(repository)
             .copied()
-            .unwrap_or(f32::INFINITY);
+            .unwrap_or(Time::INFINITY);
         let u = lifecycle::progress(self.seconds(), end, lifecycle::REPOSITORY_EXIT);
         (u.min(0.2) * 5.0, 1.0 - u, u * self.scale() * 1.5)
     }
@@ -857,7 +855,7 @@ impl Simulation {
         self.playback_multiplier
     }
 
-    pub(super) fn seconds(&self) -> f32 {
+    pub(super) fn seconds(&self) -> Time {
         tick_time(self.state.tick)
     }
 
@@ -901,7 +899,7 @@ impl Simulation {
                 if !self.first_arrivals[state.next_event]
                     && state.avatars[author].arrived >= start
                 {
-                    state.avatars[author].arrived = f32::NEG_INFINITY;
+                    state.avatars[author].arrived = Time::NEG_INFINITY;
                     state.avatars[author].lifecycle_scale = 1.0;
                 }
             }
@@ -1361,7 +1359,7 @@ impl State {
                     .contributor
                     .as_ref()
                     .expect("contributors are resolved"),
-                0.0,
+                Time::ZERO,
             );
             for change in &event.changes {
                 apply(&mut self.layout, change, author);
@@ -1373,7 +1371,7 @@ impl State {
         6.5 * self.avatar_scale * self.avatar_size * ARRIVAL_SCALE + 1.0
     }
 
-    fn author(&mut self, contributor: &Contributor, now: f32) -> usize {
+    fn author(&mut self, contributor: &Contributor, now: Time) -> usize {
         if let Some(&index) = self.authors.get(&contributor.key) {
             return index;
         }
@@ -1407,7 +1405,7 @@ impl State {
     fn begin(
         &mut self,
         event: &Event,
-        start: f32,
+        start: Time,
         file_ids: &mut HashMap<String, FileIdentity>,
     ) {
         let author = self.author(
@@ -1661,11 +1659,16 @@ pub(super) fn tick_seconds() -> f32 {
     1.0 / count_u32(TICK_RATE)
 }
 
-pub(crate) fn tick_time(tick: u64) -> f32 {
-    let whole = u32::try_from(tick / u64::from(TICK_RATE)).unwrap_or(u32::MAX);
+/// The length of `ticks` simulation ticks in seconds.
+pub(crate) fn ticks_duration(ticks: u64) -> f32 {
+    let whole = u32::try_from(ticks / u64::from(TICK_RATE)).unwrap_or(u32::MAX);
     let part =
-        u32::try_from(tick % u64::from(TICK_RATE)).expect("remainder fits in u32");
+        u32::try_from(ticks % u64::from(TICK_RATE)).expect("remainder fits in u32");
     count_u32(whole) + count_u32(part) * tick_seconds()
+}
+
+pub(crate) fn tick_time(tick: u64) -> Time {
+    Time::from_tick(tick)
 }
 
 #[expect(
@@ -1711,8 +1714,8 @@ pub(super) fn date(seconds: i64) -> String {
     clippy::cast_sign_loss,
     reason = "frame count is validated before conversion"
 )]
-pub(super) fn frames_for(duration: f32, fps: u16) -> anyhow::Result<u32> {
-    let frames = (f64::from(duration) * f64::from(fps)).ceil();
+pub(super) fn frames_for(duration: Time, fps: u16) -> anyhow::Result<u32> {
+    let frames = (duration.as_secs_f64() * f64::from(fps)).ceil();
     anyhow::ensure!(
         frames.is_finite() && frames >= 0.0 && frames <= f64::from(u32::MAX),
         "whole playback exceeds the supported export range of {} frames; use --frames or reduce duration or fps",
@@ -1749,7 +1752,7 @@ mod tests {
         let mappings = Mappings::default();
         let names = ["One".to_owned()];
         let build = |padding: &[(usize, u32)],
-                     cache: &mut Option<(Vec<f32>, Layout)>| {
+                     cache: &mut Option<(Vec<Time>, Layout)>| {
             Simulation::build(
                 events.clone(),
                 &options,
@@ -1782,8 +1785,8 @@ mod tests {
     #[test]
     fn a_pulse_is_live_for_at_most_the_snapshot_tick_capacity() {
         let capacity = u64::try_from(slots::Snapshots::pulse_ticks()).unwrap();
-        let lifetime = pulse_end(0.0);
-        let assert_bounded = |near: f32, mut first: u64| {
+        let lifetime = pulse_end(Time::ZERO) - Time::ZERO;
+        let assert_bounded = |near: Time, mut first: u64| {
             for start in [near.next_down(), near, near.next_up()] {
                 while first > 0 && tick_time(first - 1) >= start {
                     first -= 1;
@@ -1798,7 +1801,8 @@ mod tests {
             }
         };
         // The live tick count only changes where a start or an end crosses a tick.
-        for tick in 0..=4 * 60 * 60 * u64::from(TICK_RATE) {
+        let span = 16_384 * u64::from(TICK_RATE);
+        for tick in (0..span + 200).chain(11 * span - 200..11 * span + 20_000) {
             let aligned = tick_time(tick);
             let ending = aligned - lifetime;
             let begun = tick.saturating_sub(capacity);
@@ -2195,15 +2199,6 @@ mod tests {
                 &vec![String::new(); 5]
             )
             .is_err()
-        );
-    }
-
-    #[test]
-    fn playback_precision_refuses_more_than_four_hours() {
-        assert!(check_playback_precision(14_400.0).is_ok());
-        assert_eq!(
-            check_playback_precision(14_401.0).unwrap_err().to_string(),
-            "playback duration 14401.00 seconds exceeds the 4-hour time precision limit; shorten the selected history or reduce playback times"
         );
     }
 
@@ -2728,7 +2723,7 @@ mod tests {
                 .contains("supported export range")
         );
         assert!(frames_for(schedule.duration(), 30).is_ok());
-        assert_eq!(frames_for(1.0, 30).unwrap(), 30);
+        assert_eq!(frames_for(Time::seconds(1.0), 30).unwrap(), 30);
     }
 
     #[test]
@@ -2747,7 +2742,7 @@ mod tests {
         assert_eq!(sim.schedule.starts[1], 1.0);
         assert!(sim.schedule.starts.windows(2).all(|pair| pair[1] > pair[0]));
         sim.change_rate(2.0);
-        assert!((sim.schedule.starts[1] - 1.0).abs() < 0.0001);
+        assert!((sim.schedule.starts[1] - Time::seconds(1.0)).abs() < 0.0001);
         assert!(sim.caption().contains("1x"));
         sim.restart();
         assert_eq!(
@@ -2996,7 +2991,7 @@ mod tests {
     fn crowded_commit_aggregates_beams() {
         let mut sim = simulation();
         let crowded = sim.schedule.starts[7] + 0.5;
-        sim.advance_to(frame_at(crowded), 30);
+        sim.advance_to(frame_at(crowded.as_secs_f32()), 30);
         let beams = sim.beams();
         assert!(!beams.is_empty());
         assert!(beams.len() <= BEAM_LIMIT * 2, "{} beams", beams.len());
@@ -3076,7 +3071,7 @@ mod tests {
     #[test]
     fn whole_history_plays_out() {
         let mut sim = simulation();
-        let end = frame_at(sim.duration());
+        let end = frame_at(sim.duration().as_secs_f32());
         sim.advance_to(end, 30);
         assert_eq!(sim.commit(), sim.total());
         assert!(sim.beams().is_empty());

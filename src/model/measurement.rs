@@ -80,7 +80,11 @@ fn sampled_history_overlap() {
         "tick,commit,dirs,overlapping_pairs_per_dir,spread,edge_mean,edge_p95"
     )
     .unwrap();
-    let total = frames_for(LEAD_IN + count(events.len()) * 0.02 + TAIL, 60).unwrap();
+    let total = frames_for(
+        Time::seconds(LEAD_IN + count(events.len()) * 0.02 + TAIL),
+        60,
+    )
+    .unwrap();
     let intervals = total.min(300);
     let mut next_event = 0;
     let mut sum = 0.0;
@@ -93,7 +97,7 @@ fn sampled_history_overlap() {
         if tick > 0 {
             let now = tick_time(u64::from(tick));
             while let Some(event) = events.get(next_event) {
-                if LEAD_IN + 0.02 * count(next_event) > now {
+                if Time::seconds(LEAD_IN + 0.02 * count(next_event)) > now {
                     break;
                 }
                 for change in &event.changes {

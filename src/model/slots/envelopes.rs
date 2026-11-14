@@ -23,8 +23,11 @@ impl Snapshots {
     /// longest lifetime, and a spare.
     pub(in crate::model) fn pulse_ticks() -> usize {
         usize::try_from(
-            crate::model::frames_for(crate::model::pulse_end(0.0), 60)
-                .expect("bounded pulse"),
+            crate::model::frames_for(
+                crate::model::pulse_end(crate::model::Time::ZERO),
+                60,
+            )
+            .expect("bounded pulse"),
         )
         .expect("pulse ticks fit usize")
             + 1

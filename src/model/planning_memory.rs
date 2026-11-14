@@ -13,7 +13,7 @@ pub(super) fn check(
     options: &Options,
     repositories: &[String],
     schedule: &Schedule,
-    duration: f32,
+    duration: super::Time,
 ) -> anyhow::Result<()> {
     let frames = u128::from(frames_for(duration, 60)?) + 1;
     let selected = &events[options.selected_range(events.len())];

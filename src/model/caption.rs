@@ -210,8 +210,8 @@ impl Simulation {
         else {
             return Color::BLACK;
         };
-        let alpha = (super::tick_time(self.state.tick - change.tick)
-            / super::tick_time(FADE))
+        let alpha = (super::ticks_duration(self.state.tick - change.tick)
+            / super::ticks_duration(FADE))
         .min(1.0);
         colour(change.from).mix(&colour(change.to), alpha).into()
     }

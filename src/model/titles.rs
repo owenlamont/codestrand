@@ -305,7 +305,7 @@ impl Simulation {
                         at(change - 1),
                     )
                     .map(|t| t.point);
-                    current.opacity = super::tick_time(age) / 0.3;
+                    current.opacity = super::ticks_duration(age) / 0.3;
                 }
             }
             self.state.titles.insert(index, current);

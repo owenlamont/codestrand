@@ -6,7 +6,7 @@ use crate::timeline::Event;
 impl Layout {
     pub(crate) fn scheduled_repositories(
         events: &[Event],
-        starts: &[f32],
+        starts: &[crate::model::Time],
         names: &[String],
     ) -> Self {
         let mut combined = Self::empty();
@@ -25,7 +25,7 @@ impl Layout {
 
     fn scheduled_batch(
         events: &[Event],
-        starts: &[f32],
+        starts: &[crate::model::Time],
         repositories: std::ops::Range<usize>,
     ) -> Vec<Self> {
         std::thread::scope(|scope| {
@@ -79,7 +79,7 @@ impl Layout {
 
     fn scheduled_repository(
         events: &[Event],
-        starts: &[f32],
+        starts: &[crate::model::Time],
         repository: usize,
     ) -> Self {
         let prefix = crate::repositories::prefix(repository);

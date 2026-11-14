@@ -3,7 +3,7 @@ use std::{cmp::Reverse, collections::BinaryHeap};
 use bevy::math::{Rect, Vec2};
 use serde::Serialize;
 
-use super::{Simulation, frames_for, slots, tick_time};
+use super::{Simulation, frames_for, slots, tick_time, ticks_duration};
 mod occupancy;
 mod planning;
 use planning::trips;
@@ -143,7 +143,7 @@ impl Route {
     }
     fn point_at(&self, tick: u64) -> Option<Vec2> {
         if self.track.is_empty() {
-            self.sample(tick_time(tick))
+            self.sample(ticks_duration(tick))
         } else {
             Some(*at_tick(&self.track, tick))
         }
@@ -239,7 +239,7 @@ impl Plan {
         }
     }
     pub fn report(&self) -> serde_json::Value {
-        serde_json::json!({"statistics":self.stats,"trips":self.trips.iter().map(|t| serde_json::json!({"author":t.author,"commit":t.commit,"bot":t.bot,"source_repository":t.source_repository,"destination_repository":t.destination_repository,"free":tick_time(t.free),"slack":tick_time(t.arrival-t.free),"departure":tick_time(t.departure),"service":tick_time(t.arrival),"fade":t.fade,"failure":t.failure,"proof":t.proof,"source":t.source.to_array(),"target":t.destination.to_array(),"visible_distance":planning::progress(t),"travel_seconds":t.route.duration,"points":t.route.points()})).collect::<Vec<_>>()})
+        serde_json::json!({"statistics":self.stats,"trips":self.trips.iter().map(|t| serde_json::json!({"author":t.author,"commit":t.commit,"bot":t.bot,"source_repository":t.source_repository,"destination_repository":t.destination_repository,"free":tick_time(t.free).as_secs_f32(),"slack":ticks_duration(t.arrival-t.free),"departure":tick_time(t.departure).as_secs_f32(),"service":tick_time(t.arrival).as_secs_f32(),"fade":t.fade,"failure":t.failure,"proof":t.proof,"source":t.source.to_array(),"target":t.destination.to_array(),"visible_distance":planning::progress(t),"travel_seconds":t.route.duration,"points":t.route.points()})).collect::<Vec<_>>()})
     }
     pub fn sample(&self, author: usize, tick: u64) -> Option<(Vec2, f32)> {
         let trip = self.trips.iter().find(|t| t.active(author, tick))?;
@@ -328,7 +328,8 @@ pub(super) fn committing_overlap(
         && a.distance(b) < diameter
 }
 fn fade_opacity(remaining: u64, duration: u64) -> f32 {
-    (tick_time(remaining.saturating_sub(1)) / tick_time(duration.max(1))).min(1.0)
+    (ticks_duration(remaining.saturating_sub(1)) / ticks_duration(duration.max(1)))
+        .min(1.0)
 }
 
 fn capture(simulation: &mut Simulation) -> Capture {
@@ -469,8 +470,9 @@ impl Simulation {
                 options.travel_cap.blocked_ticks()
             } else {
                 seconds_ticks(
-                    (trip.route.duration - tick_time(trip.arrival - trip.departure))
-                        .max(0.0),
+                    (trip.route.duration
+                        - ticks_duration(trip.arrival - trip.departure))
+                    .max(0.0),
                     true,
                 )
             };
@@ -547,10 +549,10 @@ impl Simulation {
                 } else {
                     seconds_ticks(
                         (tick_time(trip.departure)
-                            + tick_time(shifts[departure_event])
+                            + ticks_duration(shifts[departure_event])
                             + trip.route.duration
                             - tick_time(trip.arrival)
-                            - tick_time(extra))
+                            - ticks_duration(extra))
                         .max(0.0),
                         true,
                     )
@@ -628,7 +630,7 @@ impl Simulation {
                 .count(),
             padding_seconds: padding
                 .iter()
-                .map(|&(_, t)| tick_time(u64::from(t)))
+                .map(|&(_, t)| ticks_duration(u64::from(t)))
                 .sum(),
         };
         let docks = capture.services.iter().map(|s| Some(s.dock)).collect();
@@ -1088,7 +1090,7 @@ mod tests {
     #[test]
     fn cap_quantization_never_rounds_above_the_requested_wait() {
         for cap in [0.0, 0.001, 0.1, 0.4, 0.999, 3600.0] {
-            assert!(tick_time(u64::from(seconds_ticks(cap, false))) <= cap + 1e-5);
+            assert!(ticks_duration(u64::from(seconds_ticks(cap, false))) <= cap + 1e-5);
         }
     }
 
@@ -1193,8 +1195,13 @@ mod tests {
             );
             let mut prior = route.sample(0.0).unwrap();
             let mut prior_velocity = Vec2::ZERO;
-            for frame in 1..=super::frames_for(route.duration + 0.1, 60).unwrap() {
-                let point = route.sample(tick_time(u64::from(frame))).unwrap();
+            for frame in 1..=super::frames_for(
+                crate::model::Time::seconds(route.duration + 0.1),
+                60,
+            )
+            .unwrap()
+            {
+                let point = route.sample(ticks_duration(u64::from(frame))).unwrap();
                 assert!(point.distance(prior) * 60.0 <= 240.01);
                 let velocity = (point - prior) * 60.0;
                 let acceleration = (velocity - prior_velocity).length() * 60.0;

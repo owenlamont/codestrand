@@ -525,7 +525,7 @@ pub(crate) struct Packing {
     rotated: Vec<bool>,
     placements: Arc<[OnceLock<Vec<Placement>>]>,
     zoom: Arc<[Vec<f32>]>,
-    visible_until: Arc<[f32]>,
+    visible_until: Arc<[crate::model::Time]>,
 }
 
 fn rotations(
@@ -561,19 +561,19 @@ fn rotations(
 impl Packing {
     pub(crate) fn with_endings(
         mut self,
-        endings: &[f32],
+        endings: &[crate::model::Time],
         exit: f32,
         reflow: f32,
     ) -> Self {
         if !endings.iter().any(|end| end.is_finite()) {
             return self;
         }
-        self.visible_until = endings.iter().map(|end| end + exit).collect();
+        self.visible_until = endings.iter().map(|&end| end + exit).collect();
         for (tick, sample) in Arc::make_mut(&mut self.samples).iter_mut().enumerate() {
             let now = crate::model::tick_time(
                 u64::try_from(tick).expect("bounded packing tick"),
             );
-            for (presence, end) in sample.presence.iter_mut().zip(endings) {
+            for (presence, &end) in sample.presence.iter_mut().zip(endings) {
                 let u = ((now - end - exit) / reflow).clamp(0.0, 1.0);
                 *presence *= 1.0 - u * u * (3.0 - 2.0 * u);
                 // Subpixel regions fall below the feasible-polygon clipping tolerance.
@@ -645,11 +645,11 @@ impl Packing {
                         if births[i] == earliest {
                             return 1.0;
                         }
-                        let elapsed = crate::model::tick_time(
+                        let elapsed = crate::model::ticks_duration(
                             u64::try_from(tick.saturating_sub(begin))
                                 .expect("bounded timeline"),
                         );
-                        let transition = crate::model::tick_time(
+                        let transition = crate::model::ticks_duration(
                             u64::try_from(ready - begin).expect("bounded birth"),
                         )
                         .max(crate::model::tick_seconds());
@@ -702,7 +702,7 @@ impl Packing {
                                 .visible_until
                                 .get(i)
                                 .copied()
-                                .unwrap_or(f32::INFINITY)
+                                .unwrap_or(crate::model::Time::INFINITY)
                         {
                             p.scale
                         } else {
@@ -1220,9 +1220,14 @@ mod tests {
             .map(|row| row.into_iter().take(2).collect())
             .collect();
         let original = Packing::before_service(&rows);
-        let ending = original
-            .clone()
-            .with_endings(&[20.0, f32::INFINITY], 2.5, 4.0);
+        let ending = original.clone().with_endings(
+            &[
+                crate::model::Time::seconds(20.0),
+                crate::model::Time::INFINITY,
+            ],
+            2.5,
+            4.0,
+        );
         for tick in 600..1200 {
             let before = original.sample(tick).unwrap().2[0];
             let after = ending.sample(tick).unwrap().2[0];
@@ -1237,7 +1242,13 @@ mod tests {
     fn ending_holds_tiles_until_fade_finishes_then_reflows_for_four_seconds() {
         let original = Packing::before_service(&fixture());
         let endings: Vec<_> = (0..30)
-            .map(|i| if i == 0 { f32::INFINITY } else { 20.0 })
+            .map(|i| {
+                if i == 0 {
+                    crate::model::Time::INFINITY
+                } else {
+                    crate::model::Time::seconds(20.0)
+                }
+            })
             .collect();
         let ending = original.clone().with_endings(&endings, 2.5, 4.0);
         assert_eq!(
