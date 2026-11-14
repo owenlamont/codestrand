@@ -24,6 +24,7 @@ mod nitpicks;
 pub(crate) mod occlusion;
 #[cfg(test)]
 mod pacing_tests;
+mod planning_memory;
 pub(crate) mod quality;
 pub(crate) mod schedule;
 mod slots;
@@ -56,6 +57,14 @@ fn check_travel_pass(pass: u32) -> anyhow::Result<()> {
     anyhow::ensure!(
         pass <= 32,
         "avatar travel planning did not converge within 32 passes; shorten the history or reduce the playback times"
+    );
+    Ok(())
+}
+
+fn check_playback_precision(duration: f32) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        duration <= 4.0 * 60.0 * 60.0,
+        "playback duration {duration:.2} seconds exceeds the 4-hour time precision limit; shorten the selected history or reduce playback times"
     );
     Ok(())
 }
@@ -384,16 +393,13 @@ impl Simulation {
     pub(super) fn check_repository_plan(
         events: &[Event],
         options: &Options,
-        repositories: usize,
+        repositories: &[String],
     ) -> anyhow::Result<()> {
         let schedule = Schedule::with_padding(
             &events[options.selected_range(events.len())],
             options.seconds_per_day,
             options.max_idle_seconds,
-            |_| match options.travel_cap {
-                TravelCap::Seconds(_) => options.travel_cap.ticks(),
-                TravelCap::None => 0,
-            },
+            |_| 0,
         );
         Self::check_schedule(events, options, repositories, &schedule)
     }
@@ -401,7 +407,7 @@ impl Simulation {
     fn check_schedule(
         events: &[Event],
         options: &Options,
-        repositories: usize,
+        repositories: &[String],
         schedule: &Schedule,
     ) -> anyhow::Result<()> {
         let (_, endings) = lifecycle::plan(
@@ -410,25 +416,9 @@ impl Simulation {
             options,
             options.selected_range(events.len()),
         );
-        let ticks = frames_for(lifecycle::duration(schedule, &endings), 60)?;
-        let authors = events[options.selected_range(events.len())]
-            .iter()
-            .map(|e| (e.author.name.as_slice(), e.author.email.as_slice()))
-            .collect::<std::collections::HashSet<_>>()
-            .len();
-        anyhow::ensure!(
-            repositories <= crate::repositories::MAX_REPOSITORIES
-                && ticks <= 216_000
-                && usize::try_from(ticks)
-                    .ok()
-                    .and_then(|ticks| ticks.checked_mul(repositories))
-                    .is_some_and(|samples| samples <= 2_000_000)
-                && usize::try_from(ticks)
-                    .ok()
-                    .and_then(|t| (t + 1).checked_mul(authors))
-                    .is_some_and(|n| n <= 4_000_000),
-            "multi-repository planning exceeds 30 repositories, 216000 ticks, 2000000 region samples or 4000000 avatar poses including worst-case travel padding; use fewer repositories, shorten the history or reduce the playback times"
-        );
+        let duration = lifecycle::duration(schedule, &endings);
+        check_playback_precision(duration)?;
+        planning_memory::check(events, options, repositories, schedule, duration)?;
         Ok(())
     }
 
@@ -502,7 +492,7 @@ impl Simulation {
         if events.iter().any(|event| event.contributor.is_none()) {
             mappings.apply(&mut events);
         }
-        Self::check_repository_plan(&events, options, repositories.len())?;
+        Self::check_repository_plan(&events, options, repositories)?;
         let mut layout_cache = None;
         let mut simulation = Self::build(
             events.clone(),
@@ -512,7 +502,7 @@ impl Simulation {
             &[],
             repositories,
             &mut layout_cache,
-        );
+        )?;
         let mut padding = simulation.travel_padding(options);
         let mut pass = 0;
         let mut compactions = 0;
@@ -531,7 +521,7 @@ impl Simulation {
                             .map_or(0, |&(_, ticks)| ticks)
                     },
                 );
-                Self::check_schedule(&events, options, repositories.len(), &schedule)?;
+                Self::check_schedule(&events, options, repositories, &schedule)?;
                 let preferences = std::mem::take(&mut simulation.travel).preferences();
                 simulation = Self::build(
                     events.clone(),
@@ -541,7 +531,7 @@ impl Simulation {
                     &padding,
                     repositories,
                     &mut layout_cache,
-                );
+                )?;
                 simulation.travel = preferences;
             }
             simulation.plan_travel(options, &padding);
@@ -616,7 +606,7 @@ impl Simulation {
         padding: &[(usize, u32)],
         repositories: &[String],
         layout_cache: &mut Option<(Vec<f32>, Layout)>,
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
         if events.iter().any(|event| event.contributor.is_none()) {
             mappings.apply(&mut events);
         }
@@ -705,16 +695,16 @@ impl Simulation {
             title_plan: Vec::new(),
         };
         let snapshots = simulation
-            .plan_repositories(prior_active, options.travel_cap == TravelCap::None);
+            .plan_repositories(prior_active, options.travel_cap == TravelCap::None)?;
         simulation.plan_avatar_envelopes(snapshots);
-        simulation
+        Ok(simulation)
     }
 
     fn plan_repositories(
         &mut self,
         mut active: Vec<bool>,
         uncapped: bool,
-    ) -> Option<slots::Snapshots> {
+    ) -> anyhow::Result<Option<slots::Snapshots>> {
         let mut activation = vec![u32::MAX; active.len()];
         for (repository, live) in active.iter().enumerate() {
             if *live {
@@ -780,7 +770,7 @@ impl Simulation {
             &samples,
             self.state.gutter,
             uncapped.then_some(activation.as_slice()),
-        )
+        )?
         .with_endings(
             &self.repository_ends,
             lifecycle::REPOSITORY_EXIT,
@@ -792,7 +782,7 @@ impl Simulation {
             self.state.layout.place_regions(regions, &offsets, &scales);
         }
         self.initial = self.state.clone();
-        snapshots
+        Ok(snapshots)
     }
     pub(super) fn duration(&self) -> f32 {
         lifecycle::duration(&self.schedule, &self.repository_ends)
@@ -1775,6 +1765,7 @@ mod tests {
                 &names,
                 cache,
             )
+            .unwrap()
         };
         let mut cache = None;
         let first = build(&[], &mut cache);
@@ -2146,18 +2137,28 @@ mod tests {
     fn repository_plan_limits_reject_slow_or_oversized_inputs() {
         let events = crate::timeline::synthetic();
         assert!(
-            Simulation::check_repository_plan(&events, &Options::default(), 5).is_ok()
+            Simulation::check_repository_plan(
+                &events,
+                &Options::default(),
+                &vec![String::new(); 5]
+            )
+            .is_ok()
         );
         assert!(
-            Simulation::check_repository_plan(&events, &Options::default(), 30).is_ok()
+            Simulation::check_repository_plan(
+                &events,
+                &Options::default(),
+                &vec![String::new(); 30]
+            )
+            .is_ok()
         );
         assert!(
-            Simulation::check_repository_plan(&events, &Options::default(), 31)
-                .is_err()
-        );
-        assert!(
-            Simulation::check_repository_plan(&events, &Options::default(), usize::MAX)
-                .is_err()
+            Simulation::check_repository_plan(
+                &events,
+                &Options::default(),
+                &vec![String::new(); 31]
+            )
+            .is_ok()
         );
         assert!(
             Simulation::check_repository_plan(
@@ -2167,10 +2168,71 @@ mod tests {
                     max_idle_seconds: 86_400.0,
                     ..Options::default()
                 },
-                5
+                &vec![String::new(); 5]
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn playback_precision_refuses_more_than_four_hours() {
+        assert!(check_playback_precision(14_400.0).is_ok());
+        assert_eq!(
+            check_playback_precision(14_401.0).unwrap_err().to_string(),
+            "playback duration 14401.00 seconds exceeds the 4-hour time precision limit; shorten the selected history or reduce playback times"
+        );
+    }
+
+    #[test]
+    fn ended_sequential_repositories_report_the_packing_limit() {
+        let count = 128;
+        let mut events = Vec::new();
+        let mut endings = Vec::new();
+        for repository in 0..count {
+            let mut event = crate::timeline::synthetic().remove(0);
+            event.seconds = i64::try_from(repository).unwrap() * 2 * 86_400;
+            endings.push(Some(event.seconds + 86_400));
+            crate::repositories::namespace(
+                std::slice::from_mut(&mut event),
+                repository,
+            );
+            events.push(event);
+        }
+        for (ending, next) in endings.iter().zip(events.iter().skip(1)) {
+            assert!(ending.unwrap() < next.seconds);
+        }
+        let options = Options {
+            start: events.len(),
+            repository_ends: endings,
+            ..Options::default()
+        };
+        let labels: Vec<_> = (0..count).map(|i| format!("Repository {i}")).collect();
+        let Err(error) = Simulation::try_with_repositories(
+            events,
+            &options,
+            &Theme::neon(),
+            &Mappings::default(),
+            &labels,
+        ) else {
+            panic!("ended repositories still reserve their packing tree")
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("minimum tile size 144 by 64 reference pixels")
+        );
+        assert!(error.to_string().contains("gutter 4 pixels"));
+    }
+
+    #[test]
+    fn numeric_travel_cap_does_not_reserve_worst_case_waits() {
+        let events = crate::timeline::synthetic();
+        let options = Options {
+            travel_cap: TravelCap::Seconds(3600.0),
+            ..Options::default()
+        };
+        Simulation::check_repository_plan(&events, &options, &vec![String::new(); 48])
+            .unwrap();
     }
 
     #[test]
@@ -2180,14 +2242,29 @@ mod tests {
             travel_cap: TravelCap::None,
             ..Options::default()
         };
-        assert!(Simulation::check_repository_plan(&events, &options, 5).is_ok());
+        assert!(
+            Simulation::check_repository_plan(
+                &events,
+                &options,
+                &vec![String::new(); 5]
+            )
+            .is_ok()
+        );
         let schedule = Schedule::with_padding(
             &events,
             options.seconds_per_day,
             options.max_idle_seconds,
             |_| 216_000,
         );
-        assert!(Simulation::check_schedule(&events, &options, 5, &schedule).is_err());
+        assert!(
+            Simulation::check_schedule(
+                &events,
+                &options,
+                &vec![String::new(); 5],
+                &schedule
+            )
+            .is_err()
+        );
     }
 
     fn short_repository_history(count: usize) -> (Vec<Event>, Vec<String>) {
@@ -2224,7 +2301,8 @@ mod tests {
                 &[],
                 &labels,
                 &mut None,
-            );
+            )
+            .unwrap();
             for tick in 0..=frames_for(simulation.duration(), 60).unwrap() {
                 let (regions, _, _) =
                     simulation.packing.sample(u64::from(tick)).unwrap();
@@ -2360,7 +2438,12 @@ mod tests {
                 max_idle_seconds: 86_400.0,
                 ..Options::default()
             };
-            Simulation::check_repository_plan(&events, &options, 2).unwrap();
+            Simulation::check_repository_plan(
+                &events,
+                &options,
+                &vec![String::new(); 2],
+            )
+            .unwrap();
             let simulation = Simulation::with_repositories(
                 events.clone(),
                 &options,
@@ -2372,7 +2455,12 @@ mod tests {
         }
         events[1].seconds = events[0].seconds;
         assert!(
-            Simulation::check_repository_plan(&events, &Options::default(), 2).is_ok()
+            Simulation::check_repository_plan(
+                &events,
+                &Options::default(),
+                &vec![String::new(); 2]
+            )
+            .is_ok()
         );
     }
     use crate::timeline;

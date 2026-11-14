@@ -241,8 +241,12 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            super::super::Simulation::check_repository_plan(&events, &options, 2)
-                .is_err()
+            super::super::Simulation::check_repository_plan(
+                &events,
+                &options,
+                &[String::new(), String::new()]
+            )
+            .is_err()
         );
     }
 

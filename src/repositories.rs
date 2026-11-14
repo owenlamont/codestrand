@@ -9,9 +9,7 @@ use serde::Deserialize;
 use crate::timeline::{Event, Kind};
 
 const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
-const MAX_MANIFEST_ENTRIES: usize = 4096;
 const MAX_PATH_BYTES: usize = 4096;
-pub(super) const MAX_REPOSITORIES: usize = 30;
 
 #[derive(Clone, Copy, Debug, Default, clap::ValueEnum, serde::Serialize)]
 pub(super) enum Boundary {
@@ -70,10 +68,6 @@ fn read_document(path: &Path) -> anyhow::Result<Document> {
     );
     let document: Document =
         toml::from_str(&text).context("parse repositories file")?;
-    anyhow::ensure!(
-        document.repositories.len() <= MAX_MANIFEST_ENTRIES,
-        "repositories file exceeds 4096 entries"
-    );
     Ok(document)
 }
 
@@ -295,12 +289,6 @@ mod tests {
             "x".repeat(4 * 1024 * 1024)
         );
         assert!(manifest_error(&document).contains("exceeds 1 MiB"));
-    }
-
-    #[test]
-    fn manifest_limits_reject_excess_entries_before_resolving_paths() {
-        let document = "[[repositories]]\npath='missing'\n".repeat(4097);
-        assert!(manifest_error(&document).contains("4096 entries"));
     }
 
     #[test]

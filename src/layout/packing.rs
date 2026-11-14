@@ -13,6 +13,20 @@ pub(crate) const MINIMUM: Vec2 = Vec2::new(144.0, 64.0);
 pub(crate) const BIRTH_TICKS: u32 = 45;
 const ALLOCATION_TOLERANCE_PX: f32 = 0.25;
 
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "repository tile packing cannot insert repository {repository}: minimum tile size {minimum_width} by {minimum_height} reference pixels, aspect ratio 1:{aspect} to {aspect}:1 and gutter {gutter} pixels do not fit the {width} by {height} pixel field"
+)]
+pub(crate) struct CapacityError {
+    repository: usize,
+    minimum_width: f32,
+    minimum_height: f32,
+    aspect: f32,
+    gutter: f32,
+    width: f32,
+    height: f32,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Tile {
     pub low: Vec2,
@@ -351,10 +365,10 @@ fn insert(
     weights: &[f32],
     aspects: &[f32],
     gutter_scale: f32,
-) {
+) -> Result<(), CapacityError> {
     if nodes.is_empty() {
         nodes.push(Node::Repository(repository));
-        return;
+        return Ok(());
     }
     let mut best = None;
     let presence: Vec<_> = weights.iter().map(|&w| f32::from(w > 0.0)).collect();
@@ -420,8 +434,17 @@ fn insert(
         }
     }
     *nodes = best
-        .expect("readable insertion fits the supported repository count")
+        .ok_or_else(|| CapacityError {
+            repository,
+            minimum_width: MINIMUM.x,
+            minimum_height: MINIMUM.y,
+            aspect: BOUND,
+            gutter: gutter_scale,
+            width: Tile::viewport().pixels().x,
+            height: Tile::viewport().pixels().y,
+        })?
         .1;
+    Ok(())
 }
 
 #[derive(Clone, Debug)]
@@ -564,17 +587,17 @@ impl Packing {
     }
     #[cfg(test)]
     pub(crate) fn before_service(regions: &[Vec<RepositoryRegion>]) -> Self {
-        Self::with_gutter(regions, 4.0, None)
+        Self::with_gutter(regions, 4.0, None).unwrap()
     }
 
     pub(crate) fn with_gutter(
         regions: &[Vec<RepositoryRegion>],
         gutter_scale: f32,
         activation: Option<&[u32]>,
-    ) -> Self {
+    ) -> Result<Self, CapacityError> {
         let started = std::time::Instant::now();
         let Some(first) = regions.first().filter(|r| !r.is_empty()) else {
-            return Self::default();
+            return Ok(Self::default());
         };
         let births: Vec<_> = (0..first.len())
             .map(|i| regions.iter().position(|r| r[i].live).unwrap_or(usize::MAX))
@@ -591,7 +614,7 @@ impl Packing {
                 .map_or(regions.len(), |&j| births[j].min(regions.len()))
                 .max(begin + 1);
             let (weights, aspects) = birth_weights(regions, &born, begin, end);
-            insert(&mut nodes, i, &weights, &aspects, gutter_scale);
+            insert(&mut nodes, i, &weights, &aspects, gutter_scale)?;
         }
         let alpha = 1.0 - (-crate::model::tick_seconds() / 0.25).exp();
         let mut weights = vec![1.0; first.len()];
@@ -650,7 +673,7 @@ impl Packing {
             regions.len(),
             first.len()
         );
-        Self {
+        Ok(Self {
             gutter_scale,
             nodes,
             regions: regions.to_vec().into(),
@@ -660,7 +683,7 @@ impl Packing {
             zoom: Arc::default(),
             visible_until: Arc::default(),
         }
-        .plan_zoom()
+        .plan_zoom())
     }
 
     fn plan_zoom(mut self) -> Self {
@@ -852,6 +875,61 @@ fn birth_weights(
 mod tests {
     use super::*;
 
+    fn capacity_fixture() -> Vec<RepositoryRegion> {
+        (0..128)
+            .map(|i| RepositoryRegion {
+                label: format!("Repository {i}"),
+                low: -Vec2::ONE,
+                high: Vec2::ONE,
+                live: true,
+                files: 1.0,
+                tile: None,
+                gutter: None,
+                outline: outline::rectangle(-Vec2::ONE, Vec2::ONE),
+                height: 0.105,
+                rotated: false,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn simultaneous_repositories_report_the_geometric_limit() {
+        let error = Packing::with_gutter(&[capacity_fixture()], 4.0, None).unwrap_err();
+        assert!(error.repository > 30);
+        assert!(
+            error
+                .to_string()
+                .contains("minimum tile size 144 by 64 reference pixels")
+        );
+        assert!(error.to_string().contains("gutter 4 pixels"));
+        assert!(error.to_string().contains("pixel field"));
+    }
+
+    #[test]
+    fn sequential_repositories_reserve_tiles_before_endings_are_applied() {
+        let row = capacity_fixture();
+        let rows: Vec<_> = (0..row.len())
+            .map(|tick| {
+                let mut row = row.clone();
+                for (index, region) in row.iter_mut().enumerate() {
+                    region.live = index == tick;
+                }
+                row
+            })
+            .collect();
+        assert!(
+            rows.iter()
+                .all(|row| row.iter().filter(|r| r.live).count() == 1)
+        );
+        let error = Packing::with_gutter(&rows, 4.0, None).unwrap_err();
+        assert!(error.repository > 30);
+        assert!(
+            error
+                .to_string()
+                .contains("minimum tile size 144 by 64 reference pixels")
+        );
+    }
+
     #[test]
     fn empty_birth_tiles_do_not_constrain_later_content_zoom() {
         let rows = fixture();
@@ -873,8 +951,8 @@ mod tests {
         let rows = fixture();
         let mut activation = vec![u32::MAX; 30];
         activation[3] = 30;
-        let normal = Packing::with_gutter(&rows, 2.0, None);
-        let waiting = Packing::with_gutter(&rows, 2.0, Some(&activation));
+        let normal = Packing::with_gutter(&rows, 2.0, None).unwrap();
+        let waiting = Packing::with_gutter(&rows, 2.0, Some(&activation)).unwrap();
         assert!(normal.sample(35).unwrap().0[3].tile.is_none());
         assert!(waiting.sample(35).unwrap().0[3].tile.is_some());
     }
@@ -1004,7 +1082,7 @@ mod tests {
             let shares: Vec<_> = [0.0, 4.0, 20.0]
                 .into_iter()
                 .map(|scale| {
-                    let packing = Packing::with_gutter(&rows, scale, None);
+                    let packing = Packing::with_gutter(&rows, scale, None).unwrap();
                     let row = packing
                         .sample(u64::try_from(rows.len() - 1).unwrap())
                         .unwrap()

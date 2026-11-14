@@ -9,7 +9,6 @@ mod planning;
 use planning::trips;
 
 const HALF: Vec2 = Vec2::new(640.0, 360.0);
-const MAX_POSES: usize = 4_000_000;
 const NETWORK_EPSILON: f32 = 0.01;
 const JUNCTION_EPSILON: f32 = 0.001;
 
@@ -35,7 +34,7 @@ pub(super) fn in_guard(
 }
 
 #[derive(Clone, Copy, Debug)]
-struct Pose {
+pub(super) struct Pose {
     tick: u64,
     point: Vec2,
     dock: slots::Dock,
@@ -359,7 +358,6 @@ fn capture(simulation: &mut Simulation) -> Capture {
         capture.poses.resize_with(state.avatars.len(), Vec::new);
         for (index, avatar) in state.avatars.iter().enumerate() {
             if let Some(slot) = &avatar.slot {
-                assert!(poses < MAX_POSES, "validated travel pose bound");
                 capture.poses[index].push(Pose {
                     tick: state.tick,
                     point: slot.point,

@@ -2134,7 +2134,8 @@ mod tests {
             &[],
             &labels,
             &mut None,
-        );
+        )
+        .unwrap();
         let build = start.elapsed();
         let start = std::time::Instant::now();
         let padding = base.travel_padding(&options);

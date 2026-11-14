@@ -190,8 +190,9 @@ ended = "2026-05-01"
 Paths in the TOML file resolve relative to the file. Labels default to the repository
 directory name. Repeated flags and a file can be combined; flag entries come first.
 Paths resolving to the same location are rejected as duplicate repositories. Labels for
-distinct repositories must be unique. The combined list is limited to 30
-unique repositories before any history is imported or avatars are resolved.
+distinct repositories must be unique. There is no fixed repository-count limit.
+Packing refuses an insertion when the minimum tile size, aspect range and selected
+gutter cannot fit the field; the error names those geometric limits.
 
 `archived = true` ends a repository after the final commit in the selected revision,
 once the commit's activity finishes. `ended = "YYYY-MM-DD"` supplies an explicit UTC
@@ -222,8 +223,8 @@ codestrand preview --repositories-file repositories.toml \
   --contributor-inactivity-days 60
 ```
 
-Repository manifests must be regular files no larger than 1 MiB, with at most 4,096
-entries. Repository paths are limited to 4,096 bytes before filesystem resolution.
+Repository manifests must be regular files no larger than 1 MiB.
+Repository paths are limited to 4,096 bytes before filesystem resolution.
 
 Events merge by comparing the next commit from each repository by author timestamp,
 breaking ties by repository input order. Each repository retains its first-parent
@@ -338,29 +339,35 @@ Planning tests departure ticks from the contributor's fragment completion onward
 Gaps between that contributor's commits absorb travel before padding is needed.
 Padding is revalidated as scene geometry changes. Numeric caps use at most five
 padded rebuilds, including one cleanup of unused service padding.
-Uncapped padding grows until every walking trip completes, subject to the existing
-216,000-tick, 2,000,000-region-sample and 4,000,000-pose capture budgets. Each Dijkstra
-search is limited to 10,000 graph nodes; thirty repositories need at most 3,844.
+Uncapped padding grows until every walking trip completes, subject to the planning
+memory estimate and playback time precision limit. Each Dijkstra search is limited
+to 10,000 graph nodes.
 Numeric caps apply to accumulated extra waiting per commit.
 
 Header and caption remain in the outer frame. Other preview aspect ratios use conservative
 framing;
 free-camera controls remain independent.
 
-Repository planning supports up to 30 repositories, 216,000 simulation ticks,
-2,000,000 region samples and 4,000,000 temporary avatar poses. The preflight includes
-worst-case travel padding for numeric caps. With `none`, each actual padded schedule is
-checked before rebuilding; exceeding a budget reports an error rather than allocating
-an unbounded plan. Route searches stop at 10,000 nodes; capped playback can fade across
-when a search exceeds that bound, while uncapped walking reports an error. Use fewer
-repositories, shorten the imported history or reduce playback times if an input limit
-is exceeded. The same planning limits apply to single repositories and synthetic playback.
+Planning refuses an estimated allocation above 2 GiB and reports the estimated bytes
+and MiB. The estimate uses the actual selected schedule, repository samples, contributor
+first arrivals, imported changes, path bytes and directory samples. Variable allocation
+sizes are estimates, so the figure is not a process-memory ceiling. Each padded schedule
+is checked before rebuilding; numeric travel caps do not reserve hypothetical waits.
+The same check applies to single repositories and synthetic playback.
+
+Playback longer than four hours is refused because of timeline time precision.
+Shorten the selected history or reduce playback times to stay within the limits.
+Packing reserves tiles before applying repository endings, so sequential repositories
+can reach the same geometric limit as repositories visible together.
+Route searches stop at 10,000 nodes; capped playback can fade across when a search
+exceeds that bound, while uncapped walking reports an error.
 
 Planning happens before the first frame. Large multi-repository histories can take
 several seconds to plan. To inspect a smaller interval, select the playback with
 `--start` and `--commits`.
 
-Tick and region-sample budgets apply to the playback selected by `--start` and `--commits`.
+Playback memory and duration checks use the range selected by `--start` and `--commits`;
+the layout estimate also includes the imported history needed to settle that range.
 
 To choose visual treatments, use
 `--repository-boundary none|glass` and `--repository-label-plane files|raised`.

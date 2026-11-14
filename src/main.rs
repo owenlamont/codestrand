@@ -309,12 +309,6 @@ impl Source {
     fn load(&self) -> anyhow::Result<(model::Simulation, String)> {
         let repositories =
             repositories::inputs(&self.repository, self.repositories_file.as_deref())?;
-        anyhow::ensure!(
-            repositories.len() <= repositories::MAX_REPOSITORIES,
-            "multi-repository playback supports at most {} repositories (received {})",
-            repositories::MAX_REPOSITORIES,
-            repositories.len()
-        );
         let mappings = contributors::load(self.contributors.as_deref())?;
         let mut events = self.events(cache::root().as_deref(), &repositories)?;
         let start = self.resolve_start(&events)?;

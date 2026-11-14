@@ -201,6 +201,7 @@ fn padded(
         &["Synthetic history".into()],
         &mut None,
     )
+    .unwrap()
 }
 
 #[test]

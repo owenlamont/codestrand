@@ -35,7 +35,7 @@ fn camera_targets_fail_before_output_or_encoder_starts() {
 }
 
 #[test]
-fn repository_limit_is_checked_before_import_or_contributor_loading() {
+fn more_than_thirty_repositories_reach_contributor_loading() {
     let scratch = tempfile::tempdir().unwrap();
     for index in 0..60 {
         std::fs::create_dir(scratch.path().join(format!("repo-{index}"))).unwrap();
@@ -65,7 +65,7 @@ fn repository_limit_is_checked_before_import_or_contributor_loading() {
         let output = command.output().unwrap();
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(!output.status.success());
-        assert!(stderr.contains("at most 30 repositories"), "{stderr}");
+        assert!(stderr.contains("read contributors file"), "{stderr}");
         assert!(!stderr.contains("repository="), "{stderr}");
         assert!(!destination.exists());
     }
