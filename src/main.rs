@@ -86,7 +86,7 @@ use std::path::PathBuf;
 use clap::{CommandFactory, Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(version, about = "Git history inspection and layout playback study")]
+#[command(version, about = "Git history inspection and playback")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
