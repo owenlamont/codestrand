@@ -155,6 +155,16 @@ fn interacting(a: Candidate, b: Candidate) -> bool {
     overlap(a.rect, b.rect) > 0.0
 }
 
+/// The rectangle enclosing every candidate, so names whose reaches are disjoint
+/// have no overlapping pair of candidates.
+fn reach(domain: &[Candidate]) -> Rect {
+    domain
+        .iter()
+        .map(|candidate| candidate.rect)
+        .reduce(|a, b| a.union(b))
+        .unwrap_or_default()
+}
+
 pub(super) fn solve(domains: &[Vec<Candidate>]) -> Assignment {
     let mut result = Assignment {
         choices: vec![0; domains.len()],
@@ -162,6 +172,7 @@ pub(super) fn solve(domains: &[Vec<Candidate>]) -> Assignment {
         clear: true,
     };
     let mut seen = vec![false; domains.len()];
+    let reaches: Vec<_> = domains.iter().map(|domain| reach(domain)).collect();
     for root in 0..domains.len() {
         if seen[root] {
             continue;
@@ -173,6 +184,7 @@ pub(super) fn solve(domains: &[Vec<Candidate>]) -> Assignment {
             let node = component[cursor];
             for other in 0..domains.len() {
                 if !seen[other]
+                    && overlap(reaches[node], reaches[other]) > 0.0
                     && domains[node]
                         .iter()
                         .any(|a| domains[other].iter().any(|b| interacting(*a, *b)))
@@ -184,9 +196,21 @@ pub(super) fn solve(domains: &[Vec<Candidate>]) -> Assignment {
             cursor += 1;
         }
         component.sort_by_key(|&node| (domains[node].len(), node));
+        let neighbours: Vec<Vec<_>> = component
+            .iter()
+            .enumerate()
+            .map(|(depth, &node)| {
+                (0..depth)
+                    .filter(|&earlier| {
+                        overlap(reaches[node], reaches[component[earlier]]) > 0.0
+                    })
+                    .collect()
+            })
+            .collect();
         let mut search = Search {
             domains,
             component: &component,
+            neighbours: &neighbours,
             selected: Vec::new(),
             best: vec![0; component.len()],
             score: (usize::MAX, f32::INFINITY, f32::INFINITY),
@@ -206,6 +230,8 @@ pub(super) fn solve(domains: &[Vec<Candidate>]) -> Assignment {
 struct Search<'a> {
     domains: &'a [Vec<Candidate>],
     component: &'a [usize],
+    /// For each depth, the earlier depths whose names can overlap this one.
+    neighbours: &'a [Vec<usize>],
     selected: Vec<usize>,
     best: Vec<usize>,
     score: (usize, f32, f32),
@@ -246,10 +272,11 @@ impl Search<'_> {
                 score.1 + candidate.text_area,
                 score.2 + candidate.soft,
             );
-            for (previous, &selected) in self.selected.iter().enumerate() {
+            for &previous in &self.neighbours[depth] {
                 let area = overlap(
                     candidate.rect,
-                    self.domains[self.component[previous]][selected].rect,
+                    self.domains[self.component[previous]][self.selected[previous]]
+                        .rect,
                 );
                 next.0 += usize::from(area > 0.0);
                 next.1 += area;
