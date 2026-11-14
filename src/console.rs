@@ -1,8 +1,7 @@
 //! Windows gives a console program started without a terminal a console of its own;
 //! `preview` releases that console so only the render window shows.
 
-use std::io::Write as _;
-use std::path::Path;
+use std::{fs::File, io::Write as _, path::Path};
 
 /// Name of the file, in the cache directory, that receives start-up failures once
 /// the console is gone.
@@ -19,9 +18,8 @@ const fn owned_alone(attached: u32) -> bool {
 /// [`FAILURE_LOG`] because standard error no longer reaches the user.
 #[cfg(windows)]
 pub(super) fn release_if_alone() {
-    if release_lone_console()
-        && let Some(log) = crate::cache::root().map(|root| root.join(FAILURE_LOG))
-    {
+    let log = || open(&crate::cache::root()?.join(FAILURE_LOG));
+    if let Some(log) = release_lone_console(log) {
         let previous = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |panic| {
             record(&log, &panic.to_string());
@@ -30,35 +28,36 @@ pub(super) fn release_if_alone() {
     }
 }
 
+/// Detaches from a console nothing else shares, but only once `outlet` has produced
+/// somewhere else for failures to go, and returns that outlet.
 #[cfg(windows)]
 #[expect(unsafe_code, reason = "the console is only reachable through Win32")]
-fn release_lone_console() -> bool {
+fn release_lone_console<T>(outlet: impl FnOnce() -> Option<T>) -> Option<T> {
     use windows_sys::Win32::System::Console::{FreeConsole, GetConsoleProcessList};
 
     let mut process = 0;
     // SAFETY: `process` is a live buffer of the one element the call is told about.
     let attached = unsafe { GetConsoleProcessList(&raw mut process, 1) };
+    let outlet = owned_alone(attached).then(outlet).flatten()?;
     // SAFETY: `FreeConsole` takes no arguments and only detaches this process.
-    owned_alone(attached) && unsafe { FreeConsole() } != 0
+    (unsafe { FreeConsole() } != 0).then_some(outlet)
 }
 
-/// Appends `failure` to `log`; an unwritable log has no remaining outlet to report to.
-fn record(log: &Path, failure: &str) {
-    if let Some(directory) = log.parent() {
-        let _ = std::fs::create_dir_all(directory);
-    }
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log)
-    {
-        let _ = writeln!(file, "{failure}");
-    }
+/// Opens `log` for appending without following a link out of its directory.
+fn open(log: &Path) -> Option<File> {
+    crate::cache::ConfinedFile::at(log, true)
+        .ok()?
+        .append()
+        .ok()
+}
+
+fn record(mut log: &File, failure: &str) {
+    let _ = log.write_all(format!("{failure}\n").as_bytes());
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{owned_alone, record};
+    use super::{open, owned_alone, record};
 
     #[test]
     fn only_a_console_with_no_other_process_is_released() {
@@ -70,10 +69,16 @@ mod tests {
 
     #[test]
     fn failures_accumulate_in_a_log_whose_directory_is_created() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::cache::test_directory().unwrap();
         let log = directory.path().join("nested/preview-error.log");
-        record(&log, "first");
-        record(&log, "second");
+        record(&open(&log).unwrap(), "first");
+        record(&open(&log).unwrap(), "second");
         assert_eq!(std::fs::read_to_string(log).unwrap(), "first\nsecond\n");
+    }
+
+    #[test]
+    fn a_directory_at_the_log_path_gives_no_outlet() {
+        let directory = crate::cache::test_directory().unwrap();
+        assert!(open(directory.path()).is_none());
     }
 }

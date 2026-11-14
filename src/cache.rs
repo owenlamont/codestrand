@@ -81,6 +81,21 @@ impl ConfinedFile {
         Ok(file.into_std())
     }
 
+    #[cfg(any(windows, test))]
+    pub(super) fn append(&self) -> io::Result<fs::File> {
+        let file = self.directory.open_with(
+            &self.name,
+            OpenOptions::new()
+                .append(true)
+                .create(true)
+                .follow(FollowSymlinks::No),
+        )?;
+        if !file.metadata()?.is_file() {
+            return Err(io::Error::other("expected a regular file"));
+        }
+        Ok(file.into_std())
+    }
+
     pub(super) fn write(
         &self,
         write: impl FnOnce(&mut cap_std::fs::File) -> io::Result<()>,
