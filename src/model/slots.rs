@@ -4,6 +4,8 @@ mod envelopes;
 pub(super) mod labels;
 #[cfg(test)]
 mod motion_tests;
+#[cfg(test)]
+pub(super) mod name_oracle;
 pub(super) use envelopes::Snapshots;
 
 use bevy::math::{Rect, Vec2, Vec3};
@@ -766,12 +768,16 @@ impl State {
             avatar.name_visibility.full_clear_since = None;
         }
         let bodies = self.name_bodies();
+        #[cfg(test)]
+        let assigned = name_oracle::assign(self, dt, travel, texts);
+        #[cfg(not(test))]
+        let assigned = self.assign_names(dt, travel, texts);
         let NameAssignment {
             authors,
             domains,
             assignment,
             displayed,
-        } = self.assign_names(dt, travel, texts);
+        } = assigned;
         for ((index, candidates), choice) in
             authors.into_iter().zip(domains).zip(assignment.choices)
         {

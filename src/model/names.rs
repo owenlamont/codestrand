@@ -56,6 +56,10 @@ impl super::State {
         travel: &super::travel::Plan,
         texts: &[Rect],
     ) {
+        #[cfg(test)]
+        if super::slots::name_oracle::place_checked(self, dt, travel, texts) {
+            return;
+        }
         self.place_slot_names(dt, travel, texts);
     }
 }
