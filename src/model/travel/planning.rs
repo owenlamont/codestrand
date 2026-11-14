@@ -4,7 +4,7 @@ use super::{
 use crate::layout::packing::Tile;
 
 impl Capture {
-    fn pose(&self, author: usize, tick: u64) -> Option<Pose> {
+    pub(super) fn pose(&self, author: usize, tick: u64) -> Option<Pose> {
         let poses = self.poses.get(author)?;
         poses
             .partition_point(|p| p.tick <= tick)

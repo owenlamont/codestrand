@@ -721,7 +721,7 @@ impl Simulation {
                     .min(arrival),
             );
         }
-        let mut snapshots = Some(slots::Snapshots::default());
+        let mut snapshots = slots::Snapshots::new(&self.events);
         for (_, file) in self.layout().files() {
             active[self.layout().dir(file.dir).repository] = true;
         }
@@ -742,12 +742,7 @@ impl Simulation {
             }
             sampled_events = self.state.next_event;
             samples.push(self.layout().local_regions(&active, geometry));
-            if snapshots
-                .as_mut()
-                .is_some_and(|cache| !cache.capture(&self.state))
-            {
-                snapshots = None;
-            }
+            snapshots.capture(&self.state);
         }
         if uncapped {
             for (index, event) in self.events.iter().enumerate() {
@@ -782,7 +777,7 @@ impl Simulation {
             self.state.layout.place_regions(regions, &offsets, &scales);
         }
         self.initial = self.state.clone();
-        Ok(snapshots)
+        Ok(Some(snapshots))
     }
     pub(super) fn duration(&self) -> f32 {
         lifecycle::duration(&self.schedule, &self.repository_ends)

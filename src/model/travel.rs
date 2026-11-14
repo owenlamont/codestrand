@@ -357,7 +357,11 @@ fn capture(simulation: &mut Simulation) -> Capture {
             .push(state.layout.repositories.iter().map(|r| r.tile).collect());
         capture.poses.resize_with(state.avatars.len(), Vec::new);
         for (index, avatar) in state.avatars.iter().enumerate() {
-            if let Some(slot) = &avatar.slot {
+            if let Some(slot) = &avatar.slot
+                && capture.poses[index].last().is_none_or(|last| {
+                    last.point != slot.point || last.dock != slot.dock
+                })
+            {
                 capture.poses[index].push(Pose {
                     tick: state.tick,
                     point: slot.point,
@@ -888,6 +892,71 @@ fn simplify_path(path: &[Vec2]) -> Vec<Vec2> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn faded_contributor_returns_from_the_moved_gutter() {
+        let mut events = Vec::new();
+        for (index, repository) in [0, 1, 1].into_iter().enumerate() {
+            let mut event = crate::timeline::synthetic().remove(0);
+            event.seconds = i64::try_from(index).unwrap() * 20 * 86_400;
+            if index == 1 {
+                event.author.email = b"other@example.invalid".to_vec();
+                let change = event.changes[0].clone();
+                event.changes = (0..40)
+                    .map(|file| crate::timeline::FileChange {
+                        path: format!("large/file{file}.rs"),
+                        ..change.clone()
+                    })
+                    .collect();
+            }
+            let mut history = vec![event];
+            crate::repositories::namespace(&mut history, repository);
+            events.extend(history);
+        }
+        let options = super::super::Options {
+            seconds_per_day: 1.0,
+            max_idle_seconds: 30.0,
+            contributor_inactivity_days: 5,
+            travel_cap: super::super::TravelCap::None,
+            ..Default::default()
+        };
+        let mut simulation = Simulation::build(
+            events,
+            &options,
+            &crate::theme::Theme::neon(),
+            &crate::contributors::Mappings::default(),
+            &[],
+            &["first".into(), "second".into()],
+            &mut None,
+        )
+        .unwrap();
+        let captured = capture(&mut simulation);
+        let mut faded_move = false;
+        let mut previous = None;
+        for frame in 0..=frames_for(simulation.duration(), 60).unwrap() {
+            simulation.advance_to(frame, 60);
+            if let Some(avatar) = simulation.state.avatars.first()
+                && let Some(slot) = &avatar.slot
+            {
+                let pose = captured.pose(0, u64::from(frame)).unwrap();
+                assert_eq!(pose.point, slot.point);
+                assert_eq!(pose.dock, slot.dock);
+                faded_move |= avatar.presence == 0.0
+                    && previous.is_some_and(|point| point != slot.point);
+                previous = Some(slot.point);
+            }
+        }
+        assert!(faded_move);
+        let (routes, _) = trips(&captured, 480.0, options.bot_travel, true);
+        let route = routes.iter().find(|route| route.author == 0).unwrap();
+        assert!(!route.fade);
+        assert_ne!(route.source, captured.poses[0][0].point);
+        assert_eq!(
+            route.source,
+            captured.pose(0, route.departure).unwrap().point
+        );
+        assert!(captured.poses[0].len() < captured.radii.len() / 2);
+    }
 
     #[test]
     fn nearby_gutter_boundaries_do_not_create_unanchorable_micro_legs() {

@@ -18,6 +18,8 @@ pub(super) fn check(
     let frames = u128::from(frames_for(duration, 60)?) + 1;
     let selected = &events[options.selected_range(events.len())];
     let poses = pose_count(selected, schedule, frames)?;
+    let pose_bytes = poses * size_of::<travel::Pose>() as u128 * 2;
+    let snapshot_bytes = super::slots::Snapshots::estimated_bytes(selected);
     let regions = frames * repositories.len() as u128;
     let labels = repositories
         .iter()
@@ -38,14 +40,14 @@ pub(super) fn check(
         .sum::<u128>();
     let bytes = regions * region_bytes as u128
         + frames * labels * 2
-        + poses * size_of::<travel::Pose>() as u128 * 2
+        + pose_bytes.max(snapshot_bytes)
         + frames * (8 * size_of::<Vec<()>>()) as u128
         + changes * (3 * size_of::<FileChange>()) as u128
         + events.len() as u128 * (3 * size_of::<Event>()) as u128
         + paths * 3
         + layout_bytes(events, options, schedule)?;
     eprintln!(
-        "planning_memory_estimate_bytes={bytes} region_samples={regions} avatar_poses={poses}"
+        "planning_memory_estimate_bytes={bytes} region_samples={regions} avatar_pose_change_bound={poses} pose_capacity_bound_bytes={pose_bytes} snapshot_capacity_bytes={snapshot_bytes}"
     );
     check_bytes(bytes)
 }
@@ -65,6 +67,7 @@ fn pose_count(
     schedule: &Schedule,
     frames: u128,
 ) -> anyhow::Result<u128> {
+    // Faded-out docks can follow a moving gutter every tick, so change capture retains this upper bound.
     let mut seen = HashSet::new();
     let mut poses = 0;
     for (event, &start) in events.iter().zip(&schedule.starts) {
