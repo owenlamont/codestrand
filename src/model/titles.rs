@@ -270,7 +270,7 @@ impl Simulation {
         self.title_plan = costs.iter().map(|row| plan(row, CHANGE_COST)).collect();
         self.restart();
     }
-    pub(super) fn place_titles(&mut self, _dt: f32) {
+    pub(super) fn place_titles(&mut self) {
         let sample =
             usize::try_from(self.state.tick / u64::from(STEP)).expect("bounded tick");
         self.state.titles.clear();

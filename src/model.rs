@@ -929,8 +929,7 @@ impl Simulation {
             let service_fade = if service_visible { dt / 0.4 } else { -dt / 1.2 };
             avatar.slot_presence =
                 (avatar.slot_presence + service_fade).clamp(0.0, 1.0);
-            let visible = service_visible;
-            let fade = if visible {
+            let fade = if service_visible {
                 dt / 0.4
             } else {
                 -dt / lifecycle::EXIT
@@ -945,7 +944,7 @@ impl Simulation {
             }
         }
         if self.visual_updates {
-            self.place_titles(dt);
+            self.place_titles();
             let texts: Vec<_> = self
                 .labels_for_detail(|_| true)
                 .iter()

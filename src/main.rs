@@ -508,19 +508,19 @@ fn avatar_speed(value: &str) -> Result<f32, String> {
 }
 
 fn avatar_size(value: &str) -> Result<f32, String> {
-    value
-        .parse::<f32>()
-        .ok()
-        .filter(|scale| (0.5..=2.0).contains(scale))
-        .ok_or_else(|| "avatar scale must be between 0.5 and 2".to_owned())
+    between(value, 0.5, 2.0, "avatar scale")
 }
 
 fn diff_text_distance(value: &str) -> Result<f32, String> {
+    between(value, 0.1, 100.0, "diff text distance")
+}
+
+fn between(value: &str, low: f32, high: f32, name: &str) -> Result<f32, String> {
     value
         .parse::<f32>()
         .ok()
-        .filter(|distance| (0.1..=100.0).contains(distance))
-        .ok_or_else(|| "diff text distance must be between 0.1 and 100".to_owned())
+        .filter(|parsed| (low..=high).contains(parsed))
+        .ok_or_else(|| format!("{name} must be between {low} and {high}"))
 }
 
 fn main() -> std::process::ExitCode {
