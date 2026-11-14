@@ -17,7 +17,7 @@ pub(super) struct Plan {
     pub(super) parts: Vec<(usize, Plan)>,
     samples: Arc<[Vec<Vec2>]>,
     pub(super) time: Time,
-    origin: f32,
+    origin: Time,
     step: f32,
     seconds: f64,
 }
@@ -82,7 +82,7 @@ impl Plan {
             parts: Vec::new(),
             samples: samples.into(),
             time: Time::ZERO,
-            origin: 0.0,
+            origin: Time::ZERO,
             step,
             seconds: 0.0,
         }
@@ -559,13 +559,13 @@ impl Layout {
         self.plan.seconds
     }
 
-    pub(crate) fn plan_time(&mut self, origin: f32) {
-        self.plan.time = Time::ZERO + origin;
+    pub(crate) fn plan_time(&mut self, origin: Time) {
+        self.plan.time = origin;
         self.plan.origin = origin;
     }
 
     pub(crate) fn sample_plan(&mut self, time: Time, dt: f32) {
-        self.plan.time = time + self.plan.origin - dt;
+        self.plan.time = time.after(self.plan.origin) - dt;
     }
 
     pub(super) fn relax(&mut self, dt: f32) {

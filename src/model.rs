@@ -655,12 +655,13 @@ impl Simulation {
         state.apply_history(&events[..start]);
         if start > 0 {
             state.layout.plan_time(
-                layout_starts.starts[start.min(layout_starts.starts.len() - 1)]
-                    - schedule
+                layout_starts.starts[start.min(layout_starts.starts.len() - 1)].since(
+                    schedule
                         .starts
                         .first()
                         .copied()
                         .unwrap_or(Time::seconds(LEAD_IN)),
+                ),
             );
             state.layout.settle(SETTLE_TICKS, tick_seconds());
             state.avatars.clear();

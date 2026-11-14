@@ -167,6 +167,14 @@ impl Time {
         Self::ZERO + (origin.after(self) - origin)
     }
 
+    /// The length of time from `earlier` to `self`, at full resolution.
+    pub(crate) fn since(self, earlier: Self) -> Self {
+        if self.span < earlier.span {
+            return Self::seconds(self - earlier);
+        }
+        Self::new(self.span - earlier.span, self.seconds - earlier.seconds)
+    }
+
     pub(crate) fn min(self, other: Self) -> Self {
         if other < self { other } else { self }
     }
@@ -386,6 +394,18 @@ mod tests {
             boundary
         );
         assert_eq!((boundary + 1.0) - 1.0, boundary);
+    }
+
+    #[test]
+    fn a_length_of_time_keeps_tick_resolution_ten_days_long() {
+        let ten_days = 10 * 24 * 60 * 60 * u64::from(TICK_RATE);
+        let origin = Time::from_tick(ten_days + 7).since(Time::seconds(0.5));
+        assert_eq!(Time::seconds(2.5).since(Time::seconds(0.5)), 2.0);
+        for tick in 0..600 {
+            let (now, next) = (Time::from_tick(tick), Time::from_tick(tick + 1));
+            let step = next.after(origin) - now.after(origin);
+            assert!((step - tick_seconds()).abs() < 0.001, "{step}");
+        }
     }
 
     #[test]

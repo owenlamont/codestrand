@@ -981,7 +981,11 @@ fn heading(
         .id()
 }
 
-fn preview_clock(world: &mut World, mut elapsed: Local<std::time::Duration>) {
+fn preview_clock(
+    world: &mut World,
+    mut started: Local<bool>,
+    mut elapsed: Local<std::time::Duration>,
+) {
     preview_theme(world);
     let keys = world.resource::<ButtonInput<KeyCode>>();
     let factor = if keys.just_pressed(KeyCode::BracketRight) {
@@ -995,7 +999,10 @@ fn preview_clock(world: &mut World, mut elapsed: Local<std::time::Duration>) {
         world.resource_mut::<Playback>().0.change_rate(factor);
     }
     let multiplier = world.resource::<Playback>().0.playback_multiplier();
-    *elapsed += world.resource::<Time<Real>>().delta().mul_f32(multiplier);
+    // The update that first has a simulation also carries the time spent planning it.
+    if std::mem::replace(&mut *started, true) {
+        *elapsed += world.resource::<Time<Real>>().delta().mul_f32(multiplier);
+    }
     let duration = world.resource::<Playback>().0.duration();
     let fps = world.resource::<Frame>().fps;
     let frames = model::frames_for(duration, fps).unwrap_or(u32::MAX);
@@ -3198,6 +3205,43 @@ mod tests {
     }
 
     #[test]
+    fn playback_starts_at_frame_zero_however_long_planning_took() {
+        let simulation = Simulation::new(
+            crate::timeline::synthetic(),
+            &model::Options::default(),
+            &Theme::neon(),
+            &crate::contributors::Mappings::default(),
+        );
+        let (_progress, updates) =
+            crate::progress::Progress::channel(std::time::Duration::ZERO);
+        let worker = std::thread::spawn(move || Ok((simulation, "Fixture".to_owned())));
+        let mut world = World::new();
+        world.insert_resource(Loading::new(updates, worker));
+        world.insert_resource(Frame { index: 0, fps: 30 });
+        world.init_resource::<ButtonInput<KeyCode>>();
+        world.init_resource::<Time<Real>>();
+        world
+            .resource_mut::<Time<Real>>()
+            .update_with_duration(std::time::Duration::ZERO);
+        world.add_schedule(Schedule::new(loading::Loaded));
+        for _ in 0..2_000 {
+            loading::poll(&mut world);
+            if world.contains_resource::<Playback>() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let clock = world.register_system(preview_clock);
+        for (millis, frame) in [(1_000, 0), (100, 3)] {
+            world
+                .resource_mut::<Time<Real>>()
+                .update_with_duration(std::time::Duration::from_millis(millis));
+            world.run_system(clock).unwrap();
+            assert_eq!(world.resource::<Frame>().index, frame);
+        }
+    }
+
+    #[test]
     fn preview_loop_preserves_overshoot_across_multiple_cycles() {
         let mut simulation = Simulation::new(
             crate::timeline::synthetic().into_iter().take(1).collect(),
@@ -3226,6 +3270,7 @@ mod tests {
         ]
         .into_iter()
         .chain(std::iter::repeat_n(33_333_333, 200));
+        app.update();
         for nanos in deltas {
             let delta = std::time::Duration::from_nanos(nanos);
             total += delta.mul_f32(8.0);
@@ -3707,11 +3752,12 @@ mod tests {
             .init_resource::<ButtonInput<KeyCode>>()
             .init_resource::<Time<Real>>()
             .add_systems(Update, preview_clock);
-        let world = app.world_mut();
-        let mut time = world.resource_mut::<Time<Real>>();
-        time.update_with_duration(std::time::Duration::ZERO);
-        time.update_with_duration(std::time::Duration::from_millis(750));
-        app.update();
+        for millis in [0, 750] {
+            app.world_mut()
+                .resource_mut::<Time<Real>>()
+                .update_with_duration(std::time::Duration::from_millis(millis));
+            app.update();
+        }
         assert_eq!(app.world().resource::<Frame>().index, 45);
         app.world_mut()
             .resource_mut::<Playback>()
