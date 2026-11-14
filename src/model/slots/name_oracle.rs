@@ -647,3 +647,26 @@ fn name_assignment_matches_the_reference_on_every_tick() {
         "{seen:?}"
     );
 }
+
+#[test]
+fn an_overlap_that_is_not_a_number_still_reaches_the_score() {
+    let tall = |x: f32| Rect::new(x, f32::MIN, x + 1.0, f32::MAX);
+    let wide = |height: f32| Rect::new(0.0, 0.0, 3.0, height);
+    let domains: Vec<Vec<_>> =
+        [vec![tall(0.0)], vec![tall(2.0)], vec![wide(1.0), wide(0.5)]]
+            .into_iter()
+            .map(|rects| {
+                rects
+                    .into_iter()
+                    .map(|rect| Candidate {
+                        angle: 0.0,
+                        rect,
+                        text_pairs: 1,
+                        text_area: 0.0,
+                        soft: 0.0,
+                    })
+                    .collect()
+            })
+            .collect();
+    assert_eq!(labels::solve(&domains).choices, solve(&domains).choices);
+}

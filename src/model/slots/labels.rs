@@ -183,14 +183,19 @@ fn interacting(a: Candidate, b: Candidate) -> bool {
     overlap(a.rect, b.rect) > 0.0
 }
 
-/// The rectangle enclosing every candidate, so names whose reaches are disjoint
-/// have no overlapping pair of candidates.
+/// The rectangle enclosing every candidate of one name.
 fn reach(domain: &[Candidate]) -> Rect {
     domain
         .iter()
         .map(|candidate| candidate.rect)
         .reduce(|a, b| a.union(b))
         .unwrap_or_default()
+}
+
+/// Whether two names' candidates can overlap, or overlap by an area that is not a
+/// number, given the [`reach`] of each.
+fn touching(a: Rect, b: Rect) -> bool {
+    overlap(a, b) != 0.0
 }
 
 pub(super) fn solve(domains: &[Vec<Candidate>]) -> Assignment {
@@ -212,7 +217,7 @@ pub(super) fn solve(domains: &[Vec<Candidate>]) -> Assignment {
             let node = component[cursor];
             for other in 0..domains.len() {
                 if !seen[other]
-                    && overlap(reaches[node], reaches[other]) > 0.0
+                    && touching(reaches[node], reaches[other])
                     && domains[node]
                         .iter()
                         .any(|a| domains[other].iter().any(|b| interacting(*a, *b)))
@@ -230,7 +235,7 @@ pub(super) fn solve(domains: &[Vec<Candidate>]) -> Assignment {
             .map(|(depth, &node)| {
                 (0..depth)
                     .filter(|&earlier| {
-                        overlap(reaches[node], reaches[component[earlier]]) > 0.0
+                        touching(reaches[node], reaches[component[earlier]])
                     })
                     .collect()
             })
