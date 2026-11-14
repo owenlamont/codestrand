@@ -539,6 +539,17 @@ fn pack_with_residual(
 
 impl Layout {
     #[cfg(test)]
+    pub(crate) fn shares_repository_plan(&self, other: &Self) -> bool {
+        self.plan.parts.len() == other.plan.parts.len()
+            && self.plan.parts.iter().zip(&other.plan.parts).all(
+                |((base, plan), (other_base, other_plan))| {
+                    base == other_base
+                        && Arc::ptr_eq(&plan.samples, &other_plan.samples)
+                },
+            )
+    }
+
+    #[cfg(test)]
     pub(crate) fn planned(events: &[Event]) -> Self {
         let starts = model::schedule::Schedule::new(events, 0.5, 1.0).starts;
         Self::scheduled(events, &starts)

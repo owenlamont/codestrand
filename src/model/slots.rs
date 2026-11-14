@@ -2133,6 +2133,7 @@ mod tests {
             &Mappings::default(),
             &[],
             &labels,
+            &mut None,
         );
         let build = start.elapsed();
         let start = std::time::Instant::now();

@@ -199,6 +199,7 @@ fn padded(
         &Mappings::default(),
         padding,
         &["Synthetic history".into()],
+        &mut None,
     )
 }
 

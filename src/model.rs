@@ -503,8 +503,16 @@ impl Simulation {
             mappings.apply(&mut events);
         }
         Self::check_repository_plan(&events, options, repositories.len())?;
-        let mut simulation =
-            Self::build(events.clone(), options, theme, mappings, &[], repositories);
+        let mut layout_cache = None;
+        let mut simulation = Self::build(
+            events.clone(),
+            options,
+            theme,
+            mappings,
+            &[],
+            repositories,
+            &mut layout_cache,
+        );
         let mut padding = simulation.travel_padding(options);
         let mut pass = 0;
         let mut compactions = 0;
@@ -532,6 +540,7 @@ impl Simulation {
                     mappings,
                     &padding,
                     repositories,
+                    &mut layout_cache,
                 );
                 simulation.travel = preferences;
             }
@@ -575,6 +584,30 @@ impl Simulation {
         Ok(simulation)
     }
 
+    fn scheduled_layout(
+        events: &[Event],
+        layout_starts: &[f32],
+        repositories: &[String],
+        layout_cache: &mut Option<(Vec<f32>, Layout)>,
+    ) -> Layout {
+        if let Some((starts, layout)) = layout_cache
+            && *starts == layout_starts
+        {
+            eprintln!("phase=build.reuse_scheduled_layout");
+            layout.clone()
+        } else {
+            let started = std::time::Instant::now();
+            let layout =
+                Layout::scheduled_repositories(events, layout_starts, repositories);
+            eprintln!(
+                "phase=build.scheduled_layout seconds={:.6}",
+                started.elapsed().as_secs_f64()
+            );
+            *layout_cache = Some((layout_starts.to_vec(), layout.clone()));
+            layout
+        }
+    }
+
     fn build(
         mut events: Vec<Event>,
         options: &Options,
@@ -582,6 +615,7 @@ impl Simulation {
         mappings: &Mappings,
         padding: &[(usize, u32)],
         repositories: &[String],
+        layout_cache: &mut Option<(Vec<f32>, Layout)>,
     ) -> Self {
         if events.iter().any(|event| event.contributor.is_none()) {
             mappings.apply(&mut events);
@@ -602,10 +636,11 @@ impl Simulation {
         let mut state = State {
             region_depth: 0.0,
             tick: 0,
-            layout: Layout::scheduled_repositories(
+            layout: Self::scheduled_layout(
                 &events,
                 &layout_starts.starts,
                 repositories,
+                layout_cache,
             ),
             avatars: Vec::new(),
             authors: HashMap::new(),
@@ -1721,6 +1756,45 @@ fn prior_activity(events: &[Event], count: usize) -> Vec<bool> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn unchanged_rebuild_reuses_layout_but_changed_times_replan() {
+        let mut events = crate::timeline::synthetic();
+        events.truncate(2);
+        crate::repositories::namespace(&mut events, 0);
+        let options = Options::default();
+        let theme = Theme::neon();
+        let mappings = Mappings::default();
+        let names = ["One".to_owned()];
+        let build = |padding: &[(usize, u32)],
+                     cache: &mut Option<(Vec<f32>, Layout)>| {
+            Simulation::build(
+                events.clone(),
+                &options,
+                &theme,
+                &mappings,
+                padding,
+                &names,
+                cache,
+            )
+        };
+        let mut cache = None;
+        let first = build(&[], &mut cache);
+        let repeated = build(&[], &mut cache);
+        assert!(
+            first
+                .initial
+                .layout
+                .shares_repository_plan(&repeated.initial.layout)
+        );
+        let changed = build(&[(1, 60)], &mut cache);
+        assert!(
+            !first
+                .initial
+                .layout
+                .shares_repository_plan(&changed.initial.layout)
+        );
+    }
+
+    #[test]
     fn convergence_limit_does_not_recommend_an_already_capped_policy() {
         assert!(super::check_travel_pass(32).is_ok());
         let error = super::check_travel_pass(33).unwrap_err().to_string();
@@ -2149,6 +2223,7 @@ mod tests {
                 &Mappings::default(),
                 &[],
                 &labels,
+                &mut None,
             );
             for tick in 0..=frames_for(simulation.duration(), 60).unwrap() {
                 let (regions, _, _) =
