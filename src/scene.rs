@@ -1340,11 +1340,16 @@ fn preview_camera(world: &mut World, mut navigation: Local<navigation::State>) {
 }
 
 pub(super) fn animate(world: &mut World) {
+    let waiting = world
+        .get_resource::<PlanningWait>()
+        .is_some_and(|wait| wait.0);
     let restored = restore_lifecycle_materials(world);
     let frame = world.resource::<Frame>();
     let (index, fps) = (frame.index, frame.fps);
     world.resource_scope(|world, mut playback: Mut<Playback>| {
-        playback.0.advance_to(index, fps);
+        if !waiting {
+            playback.0.advance_to(index, fps);
+        }
         world.resource_scope(|world, palette: Mut<Palette>| {
             world.resource_scope(|world, mut pools: Mut<Pools>| {
                 let simulation = &playback.0;
@@ -3476,6 +3481,134 @@ mod tests {
             );
             assert!(!world.resource::<Messages<AppExit>>().is_empty());
         }
+    }
+
+    fn rewind_preview_world(simulation: Simulation) -> World {
+        let mut world = World::new();
+        world.insert_resource(Playback(simulation));
+        world.insert_resource(Frame { index: 0, fps: 60 });
+        world.init_resource::<ButtonInput<KeyCode>>();
+        world.init_resource::<ButtonInput<MouseButton>>();
+        world.init_resource::<bevy::input::mouse::AccumulatedMouseScroll>();
+        world.insert_resource(SceneTarget(Handle::<Image>::default().into()));
+        world.insert_resource(Title("Loop fixture".to_owned()));
+        world.init_resource::<Pools>();
+        world.init_resource::<GreyTextures>();
+        world.init_resource::<Assets<Mesh>>();
+        world.init_resource::<Assets<Image>>();
+        world.init_resource::<Assets<StandardMaterial>>();
+        setup(&mut world);
+        let view = world.resource::<Playback>().0.view();
+        world.insert_resource(PreviewCamera::new(view));
+        world.spawn((Window::default(), bevy::window::PrimaryWindow));
+        world.init_resource::<Time<Real>>();
+        world
+            .resource_mut::<Time<Real>>()
+            .update_with_duration(std::time::Duration::ZERO);
+        world
+    }
+
+    #[test]
+    fn streamed_preview_rewind_keeps_animation_nonblocking() {
+        use std::sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+            mpsc,
+        };
+        use std::time::{Duration, Instant};
+
+        let generations = Arc::new(AtomicUsize::new(0));
+        let blocked = Arc::new(AtomicBool::new(false));
+        let (release, gate) = mpsc::channel();
+        let gate = Mutex::new(gate);
+        let worker_generations = generations.clone();
+        let worker_blocked = blocked.clone();
+        let hook: model::streaming::WindowHook = Arc::new(move |index, _| {
+            if index == 0 && worker_generations.fetch_add(1, Ordering::Relaxed) > 0 {
+                worker_blocked.store(
+                    gate.lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(5))
+                        .is_err(),
+                    Ordering::Relaxed,
+                );
+            }
+        });
+        let simulation = model::streaming::tests::fixture_with(
+            false,
+            Some(hook),
+            model::TravelCap::Seconds(0.4),
+        );
+        let first_duration = simulation.duration();
+        let mut world = rewind_preview_world(simulation);
+        let mut schedule = Schedule::default();
+        schedule.add_systems((preview_clock, animate, preview_camera).chain());
+        schedule.run(&mut world);
+        let initial = model::streaming::tests::visible(&world.resource::<Playback>().0);
+        world
+            .resource_mut::<Playback>()
+            .0
+            .prepare_frame(u32::MAX, 60, true)
+            .unwrap();
+        let duration = world.resource::<Playback>().0.duration();
+        assert!(duration > first_duration);
+        let last = model::frames_for(duration, 60).unwrap() - 1;
+        world
+            .resource_mut::<Time<Real>>()
+            .update_with_duration(Duration::from_nanos(
+                (u64::from(last) * 1_000_000_000).div_ceil(60),
+            ));
+        schedule.run(&mut world);
+        assert_eq!(world.resource::<Frame>().index, last);
+        let finished =
+            model::streaming::tests::visible(&world.resource::<Playback>().0);
+        let camera = world.resource::<PreviewCamera>().pose();
+        world
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyD);
+        world
+            .resource_mut::<Time<Real>>()
+            .update_with_duration(Duration::from_nanos(16_666_667));
+        schedule.run(&mut world);
+        assert!(
+            !blocked.load(Ordering::Relaxed),
+            "animation blocked on the pending rewind"
+        );
+        assert!(world.resource::<PlanningWait>().0);
+        assert_eq!(world.resource::<Frame>().index, last);
+        assert_eq!(
+            model::streaming::tests::visible(&world.resource::<Playback>().0),
+            finished
+        );
+        assert_ne!(world.resource::<PreviewCamera>().pose(), camera);
+        world
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .release(KeyCode::KeyD);
+        release.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while world.resource::<PlanningWait>().0 && Instant::now() < deadline {
+            world
+                .resource_mut::<Time<Real>>()
+                .update_with_duration(Duration::ZERO);
+            schedule.run(&mut world);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(
+            !world.resource::<PlanningWait>().0,
+            "rewind did not complete"
+        );
+        assert_eq!(world.resource::<Frame>().index, 0);
+        assert_eq!(
+            model::streaming::tests::visible(&world.resource::<Playback>().0),
+            initial
+        );
+        assert_eq!(generations.load(Ordering::Relaxed), 2);
+        world
+            .resource_mut::<Time<Real>>()
+            .update_with_duration(Duration::from_nanos(16_666_667));
+        schedule.run(&mut world);
+        assert_eq!(world.resource::<Frame>().index, 1);
+        assert_eq!(generations.load(Ordering::Relaxed), 2);
     }
 
     #[test]
