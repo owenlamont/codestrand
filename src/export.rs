@@ -112,12 +112,7 @@ pub(super) fn render(
             if index % u32::from(fps) == 0
                 && frames.is_none_or(|frames| index + 1 < frames)
             {
-                eprintln!(
-                    "Exported {}/{} frames ({:.1}s elapsed)",
-                    index + 1,
-                    frames.unwrap_or(planned),
-                    started.elapsed().as_secs_f32()
-                );
+                report_progress(&app, index + 1, frames, planned, started.elapsed());
             }
             index += 1;
         }
@@ -142,6 +137,43 @@ pub(super) fn render(
         crate::terminal_escape(&directory.to_string_lossy())
     );
     Ok(())
+}
+
+fn report_progress(
+    app: &App,
+    written: u32,
+    frames: Option<u32>,
+    planned: u32,
+    elapsed: Duration,
+) {
+    let playback = &app.world().resource::<scene::Playback>().0;
+    let total = frames.or_else(|| playback.planning_complete().then_some(planned));
+    eprintln!(
+        "{}",
+        progress_line(written, total, playback.history_progress(), elapsed)
+    );
+}
+
+fn progress_line(
+    written: u32,
+    frames: Option<u32>,
+    (history, total): (crate::model::Time, crate::model::Time),
+    elapsed: Duration,
+) -> String {
+    let progress = frames.map_or_else(
+        || {
+            format!(
+                "{written} frames; history {:.1}/{:.1}s",
+                history.lossy_secs_f32(),
+                total.lossy_secs_f32(),
+            )
+        },
+        |frames| format!("{written}/{frames} frames"),
+    );
+    format!(
+        "Exported {progress} ({:.1}s elapsed)",
+        elapsed.as_secs_f32()
+    )
 }
 
 fn record_frame(
@@ -382,6 +414,19 @@ mod tests {
     use bevy::{color::ColorToPacked, prelude::IntoScheduleConfigs};
 
     #[test]
+    fn progress_does_not_present_a_window_as_the_final_frame_count() {
+        let history = (model::Time::seconds(2.0), model::Time::seconds(100.0));
+        assert_eq!(
+            progress_line(61, None, history, Duration::from_secs(3)),
+            "Exported 61 frames; history 2.0/100.0s (3.0s elapsed)"
+        );
+        assert_eq!(
+            progress_line(61, Some(3000), history, Duration::from_secs(3)),
+            "Exported 61/3000 frames (3.0s elapsed)"
+        );
+    }
+
+    #[test]
     fn captures_write_in_request_order_once() {
         let mut captures = Captures::default();
         let first = captures.request();
@@ -492,16 +537,23 @@ mod tests {
             "--repositories-file".into(),
             manifest_path,
         ];
-        if let Ok(seconds) = std::env::var("CODESTRAND_SAMPLE_WINDOW") {
-            args.extend(["--travel-window-seconds".into(), seconds]);
-        }
         if let Ok(commits) = std::env::var("CODESTRAND_SAMPLE_COMMITS") {
             args.extend(["--commits".into(), commits]);
         }
+        if let Ok(extra) = std::env::var("CODESTRAND_SAMPLE_EXTRA_ARGS") {
+            args.extend(serde_json::from_str::<Vec<String>>(&extra).unwrap());
+        }
         let cli = crate::Cli::try_parse_from(args).unwrap();
-        let Some(crate::Command::LayoutQuality { source, .. }) = cli.command else {
+        let Some(crate::Command::LayoutQuality { mut source, .. }) = cli.command else {
             panic!("fixture source");
         };
+        if let Ok(seconds) = std::env::var("CODESTRAND_SAMPLE_WINDOW") {
+            source.window_override = Some(if seconds == "whole" {
+                crate::WindowOverride::Whole
+            } else {
+                crate::WindowOverride::Seconds(seconds.parse().unwrap())
+            });
+        }
         (source, output)
     }
 
@@ -605,6 +657,78 @@ mod tests {
             );
         eprintln!("sample_available_memory_bytes={available_memory}");
         available_memory
+    }
+
+    #[test]
+    #[ignore = "requires an explicit video command, graphics adapter and run bound"]
+    fn diagnosed_video_export() {
+        use bevy::prelude::{PostUpdate, Res};
+        use clap::Parser;
+        use std::sync::{Arc, Mutex};
+
+        let args: Vec<String> =
+            serde_json::from_str(&std::env::var("CODESTRAND_PROOF_ARGS").unwrap())
+                .unwrap();
+        let Some(crate::Command::Export {
+            source,
+            directory,
+            theme,
+            fps,
+            resolution,
+            encoding,
+            frames,
+            frame_delay_ms,
+            camera_path,
+        }) = crate::Cli::try_parse_from(args).unwrap().command
+        else {
+            panic!("explicit export command required");
+        };
+        assert!(camera_path.is_none());
+        let available = sample_memory();
+        let (mut simulation, title) = crate::Source::report_loading(
+            Duration::from_secs(1),
+            |update| eprintln!("{update}"),
+            |progress| source.load_with_memory(progress, available),
+        )
+        .unwrap();
+        simulation.set_theme(theme.build());
+        eprintln!(
+            "diagnostic_capture_hz={fps} history_seconds={}",
+            simulation.history_progress().1
+        );
+        prepare(&directory).unwrap();
+        let encoder = encoding.start(fps, resolution).unwrap();
+        assert!(encoder.is_some());
+        let (mut app, target) = scene::headless(simulation, title, fps, resolution);
+        let audit = Arc::new(Mutex::new((None, model::MovingBeams::default())));
+        let observed = Arc::clone(&audit);
+        app.add_systems(
+            PostUpdate,
+            move |frame: Res<scene::Frame>, playback: Res<scene::Playback>| {
+                let mut audit = observed.lock().unwrap();
+                if audit.0 != Some(frame.index) {
+                    audit.0 = Some(frame.index);
+                    audit.1.observe(&playback.0);
+                }
+            },
+        );
+        let result = render(
+            &directory,
+            (app, target),
+            frames,
+            fps,
+            frame_delay_ms,
+            encoder,
+            None,
+        );
+        let audit = audit.lock().unwrap();
+        fs::write(
+            directory.join("diagnostics.json"),
+            serde_json::to_vec_pretty(&audit.1).unwrap(),
+        )
+        .unwrap();
+        result.unwrap();
+        audit.1.assert_clear(source.avatar_max_speed);
     }
 
     #[test]

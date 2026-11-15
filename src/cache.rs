@@ -220,7 +220,6 @@ pub(super) fn load_with_options(
 ) -> Result<Vec<timeline::Event>, history::Error> {
     let (repo, tip) = history::resolve(path, revision)?;
     let entry = cache_root
-        .filter(|_| options.cacheable())
         .filter(|_| repo.objects.store_ref().replacements().next().is_none())
         .and_then(|root| entry_path(root, &repo));
     let tip_text = tip.to_string();

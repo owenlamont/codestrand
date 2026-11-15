@@ -114,7 +114,7 @@ enum Command {
         #[command(flatten)]
         history: history::Options,
     },
-    /// Play history in a loop; [ halves and ] doubles live speed (0.125x–8x).
+    /// Play history as planning progresses; [ halves and ] doubles live speed (0.125x–8x).
     #[command(
         after_help = "Camera: overhead by default; pitch clamps to ±90° and the eye stays above the file plane. Right drag orbits. With settings closed, C or a left viewport click captures the mouse to aim; while captured, hold left / right buttons to move up / down. C or Escape releases capture; Escape otherwise closes preview. WASD pans, scroll zooms, Tab cycles visible contributors, Space restores overhead. Orbit, captured aim and zoom retain follow; pan or button elevation releases it. F10 toggles display settings; F11 toggles borderless fullscreen."
     )]
@@ -124,7 +124,7 @@ enum Command {
         #[command(flatten)]
         source: Source,
     },
-    /// Write PNG frames or stream video, with a manifest in a new directory.
+    /// Write PNG frames or video as planning progresses, with a manifest in a new directory.
     Export {
         #[arg(long, value_enum, default_value = "neon")]
         theme: theme::ThemeName,
@@ -138,7 +138,7 @@ enum Command {
         #[command(flatten)]
         source: Source,
         /// Frames to write; defaults to the whole playback.
-        #[arg(long, value_parser = clap::value_parser!(u32).range(2..=1_000_000))]
+        #[arg(long, value_parser = clap::value_parser!(u32).range(2..))]
         frames: Option<u32>,
         #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u16).range(1..=240))]
         fps: u16,
@@ -147,6 +147,13 @@ enum Command {
         #[command(flatten)]
         encoding: encoder::Options,
     },
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+enum WindowOverride {
+    Whole,
+    Seconds(f32),
 }
 
 #[derive(clap::Args, serde::Serialize)]
@@ -218,9 +225,10 @@ struct Source {
     /// Maximum extra seconds per walking trip; none waits for the route, zero never waits.
     #[arg(long, default_value = "0.4", value_parser = travel_seconds)]
     travel_cap: model::TravelCap,
-    /// Experimental travel window length in unpadded history seconds.
-    #[arg(long, hide = true, value_parser = positive_seconds)]
-    travel_window_seconds: Option<f32>,
+    #[cfg(test)]
+    #[arg(skip)]
+    #[serde(skip)]
+    window_override: Option<WindowOverride>,
     /// Bot travel policy: fade across or walk the shortest gutter route.
     #[arg(long, value_enum, default_value = "fade")]
     bot_travel: model::BotTravel,
@@ -349,7 +357,7 @@ impl Source {
         } else {
             names.join(" | ")
         };
-        let options = model::Options {
+        let mut options = model::Options {
             available_memory,
             contributor_inactivity_days: self.contributor_inactivity_days,
             repository_ends: repositories
@@ -369,7 +377,7 @@ impl Source {
             start,
             commits: self.commits,
             travel_cap: self.travel_cap,
-            travel_window_seconds: self.travel_window_seconds,
+            travel_window_seconds: None,
             #[cfg(test)]
             eager_windows: false,
             #[cfg(test)]
@@ -380,6 +388,21 @@ impl Source {
             gutter: self.gutter,
             progress: progress.clone(),
         };
+        let history_duration = options.choose_window(&events);
+        #[cfg(test)]
+        if let Some(window) = self.window_override {
+            options.travel_window_seconds = match window {
+                WindowOverride::Whole => None,
+                WindowOverride::Seconds(seconds) => Some(seconds),
+            };
+        }
+        eprintln!(
+            "planning_history_seconds={} travel_window_seconds={}",
+            history_duration.lossy_secs_f32(),
+            options
+                .travel_window_seconds
+                .map_or_else(|| "single".to_owned(), |seconds| seconds.to_string())
+        );
         let mut simulation = Self::playback(events, &options, &mappings, &names)?;
         simulation.repository_boundary = self.repository_boundary;
         simulation.collapse_directories = self.collapse_directories;
@@ -429,17 +452,34 @@ impl Source {
         )
     }
 
-    /// Loads and plans on a worker thread, handing `report` at most one progress
-    /// update per `interval`.
+    /// Reports initial planning through `report`, then later planning to stderr,
+    /// at most once per `interval`.
     fn load_reporting(
         &self,
         interval: std::time::Duration,
+        report: impl FnMut(progress::Update),
+    ) -> anyhow::Result<(model::Simulation, String)> {
+        Self::report_loading(interval, report, |progress| self.load(progress))
+    }
+
+    fn report_loading(
+        interval: std::time::Duration,
         mut report: impl FnMut(progress::Update),
+        load: impl FnOnce(&Progress) -> anyhow::Result<(model::Simulation, String)> + Send,
     ) -> anyhow::Result<(model::Simulation, String)> {
         let (progress, updates) = Progress::channel(interval);
         std::thread::scope(|scope| {
-            let worker = scope.spawn(move || self.load(&progress));
-            for update in updates {
+            let worker_progress = progress.clone();
+            let worker = scope.spawn(move || load(&worker_progress));
+            while !worker.is_finished() {
+                match updates.recv_timeout(std::time::Duration::from_millis(50)) {
+                    Ok(update) => report(update),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => (),
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+            }
+            progress.continue_on_stderr();
+            for update in updates.try_iter() {
                 report(update);
             }
             worker
@@ -898,45 +938,69 @@ mod tests {
 
     #[test]
     fn export_planning_reports_every_stage_and_plans_the_same_playback() {
-        let cli = Cli::try_parse_from(["codestrand", "export", "unused"]).unwrap();
-        let Some(Command::Export { source, .. }) = cli.command else {
-            panic!("export")
+        let places = |simulation: &model::Simulation| -> Vec<_> {
+            simulation
+                .avatars()
+                .iter()
+                .map(|avatar| (avatar.position, avatar.presence))
+                .collect()
         };
-        let mut lines = Vec::new();
-        let (mut reported, title) = source
-            .load_reporting(std::time::Duration::ZERO, |update| {
-                lines.push(update.to_string());
-            })
-            .unwrap();
-        for stage in [
-            "planning directories 0%",
-            "replaying layout 0%",
-            "planning travel 0%",
-            "planning travel 100%",
-            "placing titles 100%",
-        ] {
-            let line = format!("Planning: {stage}");
-            assert!(lines.contains(&line), "missing {line:?}");
-        }
-        assert_eq!(lines.last().unwrap(), "Planning: placing titles 100%");
+        let (finished, completion) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            for window in [None, Some(2.0)] {
+                let cli =
+                    Cli::try_parse_from(["codestrand", "export", "unused"]).unwrap();
+                let Some(Command::Export { mut source, .. }) = cli.command else {
+                    panic!("export")
+                };
+                source.window_override = window.map(WindowOverride::Seconds);
+                let mut lines = Vec::new();
+                let (mut reported, title) = source
+                    .load_reporting(std::time::Duration::ZERO, |update| {
+                        lines.push(update.to_string());
+                    })
+                    .unwrap();
+                for stage in [
+                    "planning directories 0%",
+                    "replaying layout 0%",
+                    "planning travel 0%",
+                    "planning travel 100%",
+                ] {
+                    let line = format!("Planning: {stage}");
+                    assert!(lines.contains(&line), "missing {line:?}");
+                }
+                if window.is_none() {
+                    assert_eq!(lines.last().unwrap(), "Planning: placing titles 100%");
+                } else {
+                    assert!(!reported.planning_complete());
+                    assert!(
+                        lines
+                            .iter()
+                            .any(|line| line.starts_with("Planning: placing titles "))
+                    );
+                }
 
-        let (mut quiet, quiet_title) =
-            source.load(&crate::progress::Progress::default()).unwrap();
-        assert_eq!(title, quiet_title);
-        for frame in [0, 90, 300, 600] {
-            reported.advance_to(frame, 60);
-            quiet.advance_to(frame, 60);
-            assert_eq!(reported.commit(), quiet.commit());
-            assert_eq!(reported.beams().len(), quiet.beams().len());
-            let places = |simulation: &model::Simulation| -> Vec<_> {
-                simulation
-                    .avatars()
-                    .iter()
-                    .map(|avatar| (avatar.position, avatar.presence))
-                    .collect()
-            };
-            assert_eq!(places(&reported), places(&quiet));
-        }
+                let (mut quiet, quiet_title) =
+                    source.load(&crate::progress::Progress::default()).unwrap();
+                assert_eq!(title, quiet_title);
+                for frame in [0, 90, 300, 600] {
+                    reported.prepare_frame(frame, 60, true).unwrap();
+                    quiet.prepare_frame(frame, 60, true).unwrap();
+                    reported.advance_to(frame, 60);
+                    quiet.advance_to(frame, 60);
+                    assert_eq!(reported.commit(), quiet.commit());
+                    assert_eq!(reported.beams().len(), quiet.beams().len());
+                    assert_eq!(places(&reported), places(&quiet));
+                }
+            }
+            finished.send(()).unwrap();
+        });
+        completion
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect(
+                "export progress must return while later windows are still planned",
+            );
+        worker.join().unwrap();
     }
 
     #[test]
@@ -1119,6 +1183,47 @@ mod tests {
             Cli::try_parse_from(["codestrand", "preview", "--max-idle-seconds", &cap])
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn window_length_is_not_a_cli_option() {
+        assert!(
+            Cli::try_parse_from([
+                "codestrand",
+                "preview",
+                "--travel-window-seconds",
+                "15"
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn frame_count_uses_the_supported_frame_index_range() {
+        for value in ["2", "1000001", "4294967295"] {
+            assert!(
+                Cli::try_parse_from([
+                    "codestrand",
+                    "export",
+                    "unused",
+                    "--frames",
+                    value
+                ])
+                .is_ok()
+            );
+        }
+        for value in ["0", "1", "4294967296"] {
+            assert!(
+                Cli::try_parse_from([
+                    "codestrand",
+                    "export",
+                    "unused",
+                    "--frames",
+                    value
+                ])
+                .is_err()
+            );
+        }
     }
 
     #[test]

@@ -359,7 +359,7 @@ mod tests {
             ..Options::default()
         };
         let mut sim = Simulation::with_repositories(
-            events,
+            events.clone(),
             &options,
             &crate::theme::Theme::neon(),
             &crate::contributors::Mappings::default(),
@@ -370,6 +370,7 @@ mod tests {
             && super::super::tick_time(s.tick) - s.avatars[0].last_active > MARGIN
             && s.avatars[0].presence > 0.0));
         verify_boundaries(&mut sim);
+        verify_streamed(&mut sim, events, &options, &labels);
     }
 
     #[test]
@@ -428,6 +429,37 @@ mod tests {
             }
         }
         diagnostic.assert_clear(480.0);
+    }
+
+    fn verify_streamed(
+        eager: &mut Simulation,
+        events: Vec<crate::timeline::Event>,
+        options: &Options,
+        labels: &[String],
+    ) {
+        let mut streamed = Simulation::with_repositories(
+            events,
+            &Options {
+                eager_windows: false,
+                ..options.clone()
+            },
+            &crate::theme::Theme::neon(),
+            &crate::contributors::Mappings::default(),
+            labels,
+        );
+        eager.restart();
+        for frame in 0..=super::super::frames_for(eager.duration(), 60).unwrap() {
+            streamed.prepare_frame(frame, 60, true).unwrap();
+            eager.advance_to(frame, 60);
+            streamed.advance_to(frame, 60);
+            assert_eq!(
+                super::super::streaming::tests::visible(eager),
+                super::super::streaming::tests::visible(&streamed),
+                "streamed frame {frame}"
+            );
+            assert!(streamed.boundaries.is_empty());
+        }
+        assert!(streamed.planning_complete());
     }
 
     #[test]
@@ -522,7 +554,7 @@ mod tests {
             ..Options::default()
         };
         let mut sim = Simulation::with_repositories(
-            events,
+            events.clone(),
             &options,
             &crate::theme::Theme::neon(),
             &crate::contributors::Mappings::default(),
@@ -540,6 +572,7 @@ mod tests {
             sim.advance_to(u32::try_from(saved.tick).unwrap(), 60);
             assert_eq!(format!("{:?}", sim.state), format!("{saved:?}"));
         }
+        verify_streamed(&mut sim, events, &options, &labels);
     }
 
     #[test]

@@ -30,6 +30,8 @@ mod planning_memory;
 pub(crate) mod quality;
 pub(crate) mod schedule;
 mod slots;
+#[cfg(test)]
+pub(crate) use slots::diagnostics::MovingBeams;
 pub(crate) mod streaming;
 mod time;
 mod titles;
@@ -46,6 +48,9 @@ pub(super) const TICK_RATE: u32 = 60;
 pub(super) const PREVIEW_FPS: u16 = 30;
 const LEAD_IN: f32 = 0.5;
 const TAIL: f32 = 2.5;
+// Sixty-second windows beat fifteen on whole mid30 (459 vs 514 s) and the matched
+// all48 prefix (971 vs 1026 s), with first frames at 24/136 s rather than 19/112 s.
+const WINDOW_SECONDS: f32 = 60.0;
 const PULSE_SECONDS: f32 = 1.3;
 const FRAGMENT_SPEED: f32 = 1.1;
 const FRAGMENT_FLIGHT: f32 = 1.0 / FRAGMENT_SPEED;
@@ -130,6 +135,22 @@ pub(super) enum BotTravel {
 }
 
 impl Options {
+    pub(super) fn choose_window(&mut self, events: &[Event]) -> Time {
+        let history = Schedule::with_padding(
+            &events[self.selected_range(events.len())],
+            self.seconds_per_day,
+            self.max_idle_seconds,
+            |_| 0,
+        );
+        let (_, endings) =
+            lifecycle::plan(events, &history, self, self.selected_range(events.len()));
+        let duration = lifecycle::duration(&history, &endings);
+        self.travel_window_seconds = (duration
+            > Time::seconds(WINDOW_SECONDS + windows::MARGIN))
+        .then_some(WINDOW_SECONDS);
+        duration
+    }
+
     fn selected_range(&self, events: usize) -> Range<usize> {
         let start = self.start.min(events);
         let end = self
@@ -2408,6 +2429,28 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn automatic_windows_keep_short_selected_histories_in_one_plan() {
+        let mut event = crate::timeline::synthetic().remove(0);
+        event.seconds = 0;
+        let mut later = event.clone();
+        later.seconds = 86_400;
+        let events = vec![event, later];
+        let mut options = Options {
+            seconds_per_day: WINDOW_SECONDS + windows::MARGIN - LEAD_IN - TAIL,
+            max_idle_seconds: WINDOW_SECONDS * 2.0,
+            ..Options::default()
+        };
+        options.choose_window(&events);
+        assert_eq!(options.travel_window_seconds, None);
+        options.seconds_per_day += tick_seconds();
+        options.choose_window(&events);
+        assert_eq!(options.travel_window_seconds, Some(WINDOW_SECONDS));
+        options.start = 1;
+        options.choose_window(&events);
+        assert_eq!(options.travel_window_seconds, None);
+    }
 
     #[test]
     fn repository_plan_limits_reject_slow_or_oversized_inputs() {

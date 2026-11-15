@@ -7,13 +7,17 @@ Preview renders at the window's physical resolution, including on HiDPI displays
 Resizing or maximising keeps a 720-logical-pixel-high UI: text scales with height,
 and wider windows show more scene. See [Export](export.md) for native output sizes.
 
-Planning a long history takes time before the first frame. Preview opens its window
-at once and shows the planning stage and a progress bar until playback is ready.
+Preview opens its window at once and shows planning progress until playback is ready.
+For long histories, the first frame appears while later history is still being
+planned. Playback pauses if planning falls behind, then resumes without skipping
+history. Rewinding or looping may need another planning pause.
 Export prints the stage and its percentage to standard error at most once a second.
 
-Commit application times are precomputed for the selected history and pacing.
+Commit application times are planned ahead for the selected history and pacing.
 The caption shows the last applied commit's date; cooling and fades advance in
 playback seconds. Seeking or restarting replays the same fixed simulation ticks.
+The caption's percentage follows history time, excluding extra walking waits, so it
+holds while contributors finish a walk.
 
 Repository captions also name the applying commit's repository, including single-tile
 playback. The default
@@ -367,14 +371,16 @@ The same check applies to single repositories and synthetic playback.
 
 Use fewer repositories or a later `--start` or `--start-date` to reduce the estimate.
 The snapshot is not a memory reservation; other processes can consume RAM afterward.
+It is the host's available RAM, without container or job-specific memory limits.
+Rendering and video encoding need additional memory beyond the planning estimate.
 Packing reserves tiles before applying repository endings, so sequential repositories
 can reach the same geometric limit as repositories visible together.
 Route searches stop at 10,000 nodes; capped playback can fade across when a search
 exceeds that bound, while uncapped walking reports an error.
 
-Planning happens before the first frame. Large multi-repository histories can take
-several seconds to plan. To inspect a smaller interval, select the playback with
-`--start` and `--commits`.
+Large multi-repository histories can take time to begin playback. Consumed travel plans
+are discarded to keep memory bounded; the shared layout remains available throughout
+playback. To inspect a smaller interval, use `--start`, `--start-date` and `--commits`.
 
 Playback memory and duration checks use the range selected by `--start` and `--commits`;
 the layout estimate also includes the imported history needed to settle that range.
@@ -390,26 +396,23 @@ playback.
 
 Import refuses truncated history by default, before planning or rendering. The error
 names the exhausted budget. `--allow-truncated-history` accepts completed commits only
-and prints the reason; the incomplete result is never cached. Both options below apply
-to `inspect`, `preview` and `export`.
+and prints the reason; the incomplete result is never cached. The option applies
+to `inspect`, `preview` and `export`. When a playback prefix was read, both messages
+name its last complete first-parent commit, position and UTC author date, inclusive.
+Commits with no file changes are not shown. If import stopped before completing a
+playback commit, the message says so.
 
-`--history-budget N` multiplies the cumulative commit, changed-entry, diff-line and
-retained-input budgets by an integer from 1 through 100 (default 1). The base budgets
-are 1,000,000 commits, 2,000,000 changed entries, 20,000,000 diff input lines and
-512 MiB of retained-input accounting per repository. A larger budget uses more memory
-and time. Nondefault budgets bypass the history cache so detail from another budget
-cannot be reused.
+Import budgets are 1,000,000 commits, 2,000,000 changed entries, 20,000,000 diff input
+lines and 512 MiB of retained-input accounting per repository.
 
 Single-object and single-tree limits stay fixed, including 16 MiB objects, 2,000,000
 expanded tree entries, depth 256, 16,384-byte paths and 64 MiB of expanded path bytes.
 The 32 GiB cumulative work ceiling, 8 GiB blob-detail budget and per-diff work limits
 also stay fixed. Oversized or expensive blob diffs keep file changes but omit detail;
-exhausting the cumulative line budget also omits detail. Raising the history budget
-cannot override a fixed security ceiling. Playback range options do not reduce import
-work: the reachable history is checked before selecting the playback range.
+exhausting the cumulative line budget also omits detail. Playback range options do not
+reduce import work: the reachable history is checked before selecting the playback range.
 
 ```sh
-codestrand inspect /path/to/repository --history-budget 2
 codestrand inspect /path/to/repository --allow-truncated-history
 ```
 

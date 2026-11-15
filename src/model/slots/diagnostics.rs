@@ -56,7 +56,7 @@ impl MovingBeams {
         }
     }
     #[cfg(test)]
-    pub(in crate::model) fn assert_clear(&self, speed: f32) {
+    pub(crate) fn assert_clear(&self, speed: f32) {
         assert_eq!(self.wordmark_avatar_observations, 0, "avatar over wordmark");
         assert_eq!(self.wordmark_label_observations, 0, "label over wordmark");
         assert_eq!(self.pair_frames, 0, "beam/foreign tile intersections");

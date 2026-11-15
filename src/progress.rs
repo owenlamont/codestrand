@@ -1,7 +1,7 @@
 use std::{
     sync::{
         Arc,
-        atomic::{AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
         mpsc,
     },
     time::{Duration, Instant},
@@ -59,6 +59,7 @@ struct Channel {
     created: Instant,
     sent_nanos: AtomicU64,
     pass: AtomicU32,
+    stderr: AtomicBool,
 }
 
 /// The sending end of planning progress; a disabled one costs a branch per report.
@@ -75,6 +76,7 @@ impl Progress {
             created: Instant::now(),
             sent_nanos: AtomicU64::new(0),
             pass: AtomicU32::new(1),
+            stderr: AtomicBool::new(false),
         };
         (Self(Some(Arc::new(channel))), receiver)
     }
@@ -82,6 +84,13 @@ impl Progress {
     pub(crate) fn pass(&self, pass: u32) {
         if let Some(channel) = &self.0 {
             channel.pass.store(pass, Ordering::Relaxed);
+        }
+    }
+
+    /// Keep export progress visible after the initial loader returns its first plan.
+    pub(crate) fn continue_on_stderr(&self) {
+        if let Some(channel) = &self.0 {
+            channel.stderr.store(true, Ordering::Relaxed);
         }
     }
 
@@ -108,12 +117,17 @@ impl Progress {
             reason = "a displayed fraction needs no more than f32 precision"
         )]
         let fraction = (done as f32 / total.max(1) as f32).min(1.0);
-        // A closed receiver means nobody is watching; planning carries on.
-        let _ = channel.sender.send(Update {
+        let update = Update {
             stage,
             pass: channel.pass.load(Ordering::Relaxed),
             fraction,
-        });
+        };
+        if channel.stderr.load(Ordering::Relaxed) {
+            eprintln!("{update}");
+        } else {
+            // A closed receiver means nobody is watching; planning carries on.
+            let _ = channel.sender.send(update);
+        }
     }
 }
 

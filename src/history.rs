@@ -36,43 +36,15 @@ pub(super) struct History {
     truncation_reason: Option<String>,
 }
 
-#[derive(Clone, Copy, clap::Args, Serialize)]
+#[derive(Clone, Copy, Default, clap::Args, Serialize)]
 #[group(id = "HistoryOptions")]
 pub(super) struct Options {
     /// Accept completed commits when a history budget is exhausted.
     #[arg(long)]
     allow_truncated_history: bool,
-    /// Multiply cumulative commits, changes, lines and retained bytes (1–100); fixed security limits stay unchanged.
-    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=100))]
-    history_budget: u32,
-}
-
-impl Default for Options {
-    fn default() -> Self {
-        Self {
-            allow_truncated_history: false,
-            history_budget: 1,
-        }
-    }
 }
 
 impl Options {
-    pub(super) fn cacheable(self) -> bool {
-        self.history_budget == 1
-    }
-
-    fn limits(self) -> Limits {
-        let base = Limits::default();
-        let multiplier = u64::from(self.history_budget);
-        Limits {
-            commits: base.commits * self.history_budget as usize,
-            entries: base.entries * multiplier,
-            lines: base.lines * multiplier,
-            retained_bytes: base.retained_bytes * multiplier,
-            ..base
-        }
-    }
-
     fn accept(self, history: History) -> anyhow::Result<History> {
         if let Some(reason) = &history.truncation_reason {
             if !self.allow_truncated_history {
@@ -126,12 +98,12 @@ struct Exhausted {
     remedy: &'static str,
 }
 
-fn exhausted(name: &'static str, limit: u64, adjustable: bool) -> anyhow::Error {
+fn exhausted(name: &'static str, limit: u64, cumulative: bool) -> anyhow::Error {
     Exhausted {
         name,
         limit,
-        remedy: if adjustable {
-            "raise --history-budget"
+        remedy: if cumulative {
+            "use --allow-truncated-history to play completed commits"
         } else {
             "fixed security ceiling"
         },
@@ -147,6 +119,8 @@ struct Budget {
     changes: u64,
     retained_bytes: u64,
     playback_tip: Option<String>,
+    playback_total: usize,
+    playback_completed: usize,
     trees: BTreeMap<gix::ObjectId, (u64, usize, usize, u64)>,
 }
 
@@ -160,6 +134,8 @@ impl Budget {
             changes: 0,
             retained_bytes: 0,
             playback_tip: None,
+            playback_total: 0,
+            playback_completed: 0,
             trees: BTreeMap::new(),
         }
     }
@@ -353,7 +329,7 @@ pub(super) fn import_with_options(
     tip: gix::ObjectId,
     options: Options,
 ) -> Result<History, Error> {
-    load_with_limits(repo, tip, options.limits())
+    load_with_limits(repo, tip, Limits::default())
         .and_then(|history| options.accept(history))
         .map_err(|source| Error::History { tip, source })
 }
@@ -531,6 +507,26 @@ fn load_with_limits(
             if let Some(tip) = &budget.playback_tip {
                 history.tip.clone_from(tip);
             }
+            let boundary = history
+                .commits
+                .iter()
+                .find(|commit| Some(&commit.id) == budget.playback_tip.as_ref())
+                .map_or_else(
+                    || "no complete first-parent playback commit was read".to_owned(),
+                    |commit| {
+                        format!(
+                            "first-parent history was read through commit {} of {}, {} dated {} UTC, inclusive; commits with no file changes are not shown",
+                            budget.playback_completed,
+                            budget.playback_total,
+                            commit.id,
+                            crate::model::date(commit.author.seconds),
+                        )
+                    },
+                );
+            if let Some(reason) = &mut history.truncation_reason {
+                reason.push_str("; ");
+                reason.push_str(&boundary);
+            }
         }
         Err(error) => return Err(error),
     }
@@ -580,13 +576,11 @@ fn reachable(
     Ok(commits)
 }
 
-fn bounded_load(
-    repo: &gix::Repository,
+fn first_parent_chain(
+    commits: &BTreeMap<gix::ObjectId, Vec<gix::ObjectId>>,
     tip: gix::ObjectId,
     budget: &mut Budget,
-    ordered: &mut Vec<Commit>,
-) -> anyhow::Result<()> {
-    let commits = reachable(repo, tip, budget)?;
+) -> anyhow::Result<BTreeSet<gix::ObjectId>> {
     let mut first_parents = BTreeSet::new();
     let mut current = Some(tip);
     while let Some(id) = current {
@@ -596,6 +590,18 @@ fn bounded_load(
         }
         current = commits[&id].first().copied();
     }
+    Ok(first_parents)
+}
+
+fn bounded_load(
+    repo: &gix::Repository,
+    tip: gix::ObjectId,
+    budget: &mut Budget,
+    ordered: &mut Vec<Commit>,
+) -> anyhow::Result<()> {
+    let commits = reachable(repo, tip, budget)?;
+    let first_parents = first_parent_chain(&commits, tip, budget)?;
+    budget.playback_total = first_parents.len();
     let mut children: BTreeMap<_, Vec<_>> = BTreeMap::new();
     let mut remaining = BTreeMap::new();
     let mut ready = BTreeSet::new();
@@ -671,6 +677,7 @@ fn bounded_load(
         });
         if first_parents.contains(&id) {
             budget.playback_tip = Some(id.to_string());
+            budget.playback_completed += 1;
         }
         for child in children.get(&id).into_iter().flatten() {
             let count = remaining
@@ -978,22 +985,25 @@ mod security_tests {
     }
 
     #[test]
-    fn history_options_are_shared_and_finite() {
+    fn truncation_opt_in_is_shared_and_budget_option_is_removed() {
         for command in ["inspect", "preview", "export"] {
             let mut args = vec!["codestrand", command];
             if command != "preview" {
                 args.push("unused");
             }
-            for value in ["1", "2", "10", "100"] {
-                let mut configured = args.clone();
-                configured.extend([
-                    "--history-budget",
-                    value,
-                    "--allow-truncated-history",
-                ]);
-                assert!(crate::Cli::try_parse_from(configured).is_ok());
-            }
-            for value in ["0", "101", "none", "18446744073709551615"] {
+            let mut allowed = args.clone();
+            allowed.push("--allow-truncated-history");
+            assert!(crate::Cli::try_parse_from(allowed).is_ok());
+            for value in [
+                "1",
+                "2",
+                "10",
+                "100",
+                "0",
+                "101",
+                "none",
+                "18446744073709551615",
+            ] {
                 let mut configured = args.clone();
                 configured.extend(["--history-budget", value]);
                 assert!(crate::Cli::try_parse_from(configured).is_err());
@@ -1085,7 +1095,7 @@ mod security_tests {
                     ..Limits::default()
                 },
                 "reachable commits",
-                "raise --history-budget",
+                "--allow-truncated-history",
             ),
             (
                 Limits {
@@ -1093,7 +1103,7 @@ mod security_tests {
                     ..Limits::default()
                 },
                 "changed entries",
-                "raise --history-budget",
+                "--allow-truncated-history",
             ),
             (
                 Limits {
@@ -1101,7 +1111,7 @@ mod security_tests {
                     ..Limits::default()
                 },
                 "retained input bytes",
-                "raise --history-budget",
+                "--allow-truncated-history",
             ),
             (
                 Limits {
@@ -1140,7 +1150,6 @@ mod security_tests {
             let history = load_with_limits(&repo, tip, limits).unwrap();
             let accepted = Options {
                 allow_truncated_history: true,
-                ..Options::default()
             }
             .accept(history)
             .unwrap();
@@ -1149,26 +1158,17 @@ mod security_tests {
     }
 
     #[test]
-    fn history_multiplier_does_not_raise_single_tree_ceiling() {
+    fn single_tree_ceiling_is_fixed() {
         let (_root, repo, tip) = hostile_history(20, b"ok\n");
-        for history_budget in [1, 2, 10, 100] {
-            let error = import_with_options(
-                &repo,
-                tip,
-                Options {
-                    history_budget,
-                    ..Options::default()
-                },
-            )
+        let error = import_with_options(&repo, tip, Options::default())
             .err()
             .unwrap();
-            let message = format!("{:#}", anyhow::Error::from(error));
-            assert!(
-                message.contains("single-tree entries budget reached (2000000)"),
-                "{message}"
-            );
-            assert!(message.contains("fixed security ceiling"));
-        }
+        let message = format!("{:#}", anyhow::Error::from(error));
+        assert!(
+            message.contains("single-tree entries budget reached (2000000)"),
+            "{message}"
+        );
+        assert!(message.contains("fixed security ceiling"));
     }
 
     #[test]
@@ -1208,26 +1208,17 @@ mod security_tests {
             .unwrap()
             .to_string();
         assert!(error.contains("pending parents budget reached (1)"));
-        assert!(error.contains("raise --history-budget"));
+        assert!(error.contains("--allow-truncated-history"));
     }
 
     #[test]
-    fn raised_budget_imports_whole_history_without_raising_fixed_limits() {
+    fn default_budget_imports_complete_small_history() {
         let (_root, repo, tip) = hostile_history(0, b"ok\n");
-        let options = Options {
-            history_budget: 10,
-            ..Options::default()
-        };
-        let limits = options.limits();
-        assert_eq!(limits.entries, 20_000_000);
-        assert_eq!(limits.commits, 10_000_000);
-        assert_eq!(limits.lines, 200_000_000);
-        assert_eq!(limits.retained_bytes, 10 * Limits::default().retained_bytes);
-        assert_eq!(limits.work, Limits::default().work);
-        assert_eq!(limits.blob_bytes, Limits::default().blob_bytes);
-        assert_eq!(limits.line_pairs, Limits::default().line_pairs);
-        assert_eq!(limits.object_bytes, Limits::default().object_bytes);
-        assert!(!import_with_options(&repo, tip, options).unwrap().truncated);
+        assert!(
+            !import_with_options(&repo, tip, Options::default())
+                .unwrap()
+                .truncated
+        );
     }
 
     #[test]
@@ -1374,6 +1365,68 @@ mod security_tests {
                 ));
             }
         }
+    }
+
+    #[test]
+    fn truncation_names_the_completed_playback_boundary() {
+        let (_root, repo, first) = hostile_history(0, b"first\n");
+        let object = repo.find_commit(first).unwrap();
+        let mut next = object.decode().unwrap().to_owned().unwrap();
+        next.parents = [first].into_iter().collect();
+        let blob = repo.write_blob(vec![b'x'; 20_000]).unwrap().detach();
+        let mut tree = repo
+            .find_tree(next.tree)
+            .unwrap()
+            .decode()
+            .unwrap()
+            .to_owned();
+        tree.entries[0].oid = blob;
+        next.tree = repo.write_object(&tree).unwrap().detach();
+        let tip = repo.write_object(&next).unwrap().detach();
+        let limits = Limits {
+            work: 10_000,
+            ..Limits::default()
+        };
+        let history = load_with_limits(&repo, tip, limits).unwrap();
+        assert_eq!(history.tip, first.to_string());
+        assert_eq!(history.commits.len(), 1);
+        let boundary = format!(
+            "first-parent history was read through commit 1 of 2, {first} dated 2023-11-14 UTC, inclusive"
+        );
+        assert!(
+            history
+                .truncation_reason
+                .as_ref()
+                .unwrap()
+                .contains(&boundary)
+        );
+        let refusal = Options::default()
+            .accept(history)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(refusal.contains(&boundary), "{refusal}");
+        let accepted = Options {
+            allow_truncated_history: true,
+        }
+        .accept(load_with_limits(&repo, tip, limits).unwrap())
+        .unwrap();
+        assert!(accepted.truncation_reason.unwrap().contains(&boundary));
+        let empty = load_with_limits(
+            &repo,
+            tip,
+            Limits {
+                commits: 0,
+                ..limits
+            },
+        )
+        .unwrap();
+        assert!(
+            empty
+                .truncation_reason
+                .unwrap()
+                .contains("no complete first-parent playback commit")
+        );
     }
 
     #[test]

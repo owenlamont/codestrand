@@ -2,7 +2,6 @@ use std::{
     ops::Deref,
     sync::{Arc, Mutex, mpsc},
     thread,
-    time::Duration,
 };
 
 use super::{Options, Simulation, Time};
@@ -63,8 +62,6 @@ pub(crate) enum Error {
     Panic(String),
     #[error("window planning worker disconnected")]
     Disconnected,
-    #[error("window planning exceeded thirty minutes")]
-    Timeout,
 }
 struct Packet {
     generation: u64,
@@ -186,12 +183,7 @@ impl Stream {
     fn receive(&mut self, wait: bool) -> Result<Option<Simulation>, Error> {
         loop {
             let packet = if wait {
-                self.receiver
-                    .recv_timeout(Duration::from_mins(30))
-                    .map_err(|error| match error {
-                        mpsc::RecvTimeoutError::Timeout => Error::Timeout,
-                        mpsc::RecvTimeoutError::Disconnected => Error::Disconnected,
-                    })?
+                self.receiver.recv().map_err(|_| Error::Disconnected)?
             } else {
                 match self.receiver.try_recv() {
                     Ok(packet) => packet,
@@ -271,6 +263,7 @@ impl std::ops::DerefMut for Events {
 pub(crate) mod tests {
     use super::*;
     use crate::{contributors::Mappings, theme::Theme};
+    use std::time::Duration;
 
     fn diagnostic_fixture() -> Simulation {
         use clap::Parser;
@@ -278,6 +271,7 @@ pub(crate) mod tests {
             std::env::var("CODESTRAND_AUDIT_CAP").unwrap_or_default() != "none";
         let window = std::env::var("CODESTRAND_AUDIT_WINDOW")
             .ok()
+            .filter(|s| s != "whole")
             .map(|s| s.parse().unwrap());
         if std::env::var("CODESTRAND_AUDIT_FIXTURE").unwrap() == "full30" {
             let histories = (0..30)
@@ -291,20 +285,25 @@ pub(crate) mod tests {
                     events
                 })
                 .collect();
-            return Simulation::with_repositories(
-                crate::repositories::merge(histories),
-                &Options {
-                    travel_window_seconds: window,
-                    seconds_per_day: 0.02,
-                    max_idle_seconds: 0.05,
-                    travel_cap: if capped {
-                        super::super::TravelCap::Seconds(0.4)
-                    } else {
-                        super::super::TravelCap::None
-                    },
-                    bot_travel: super::super::BotTravel::Walk,
-                    ..Options::default()
+            let events = crate::repositories::merge(histories);
+            let mut options = Options {
+                travel_window_seconds: window,
+                seconds_per_day: 0.02,
+                max_idle_seconds: 0.05,
+                travel_cap: if capped {
+                    super::super::TravelCap::Seconds(0.4)
+                } else {
+                    super::super::TravelCap::None
                 },
+                bot_travel: super::super::BotTravel::Walk,
+                ..Options::default()
+            };
+            if std::env::var("CODESTRAND_AUDIT_WINDOW").is_err() {
+                options.choose_window(&events);
+            }
+            return Simulation::with_repositories(
+                events,
+                &options,
                 &Theme::neon(),
                 &Mappings::default(),
                 &(0..30)
@@ -314,20 +313,24 @@ pub(crate) mod tests {
         }
         if std::env::var("CODESTRAND_AUDIT_FIXTURE").unwrap() == "short" {
             let (events, labels) = super::super::tests::short_repository_history(30);
+            let mut options = Options {
+                travel_window_seconds: window,
+                seconds_per_day: 0.2,
+                max_idle_seconds: 0.2,
+                travel_cap: if capped {
+                    super::super::TravelCap::Seconds(0.4)
+                } else {
+                    super::super::TravelCap::None
+                },
+                bot_travel: super::super::BotTravel::Walk,
+                ..Options::default()
+            };
+            if std::env::var("CODESTRAND_AUDIT_WINDOW").is_err() {
+                options.choose_window(&events);
+            }
             return Simulation::with_repositories(
                 events,
-                &Options {
-                    travel_window_seconds: window,
-                    seconds_per_day: 0.2,
-                    max_idle_seconds: 0.2,
-                    travel_cap: if capped {
-                        super::super::TravelCap::Seconds(0.4)
-                    } else {
-                        super::super::TravelCap::None
-                    },
-                    bot_travel: super::super::BotTravel::Walk,
-                    ..Options::default()
-                },
+                &options,
                 &Theme::neon(),
                 &Mappings::default(),
                 &labels,
@@ -337,13 +340,28 @@ pub(crate) mod tests {
             serde_json::from_str(&std::env::var("CODESTRAND_AUDIT_ARGS").unwrap())
                 .unwrap();
         let cli = crate::Cli::try_parse_from(args).unwrap();
-        let Some(crate::Command::LayoutQuality { source, .. }) = cli.command else {
-            panic!("diagnostic source");
+        let (mut source, theme) = match cli.command {
+            Some(crate::Command::LayoutQuality { source, .. }) => {
+                (source, Theme::neon())
+            }
+            Some(crate::Command::Export { source, theme, .. }) => {
+                (source, theme.build())
+            }
+            _ => panic!("diagnostic source"),
         };
-        source
+        if std::env::var("CODESTRAND_AUDIT_WINDOW").is_ok() {
+            source.window_override =
+                Some(window.map_or(
+                    crate::WindowOverride::Whole,
+                    crate::WindowOverride::Seconds,
+                ));
+        }
+        let mut simulation = source
             .load(&crate::progress::Progress::default())
             .unwrap()
-            .0
+            .0;
+        simulation.set_theme(theme);
+        simulation
     }
 
     #[test]
@@ -356,8 +374,14 @@ pub(crate) mod tests {
         let mut boundaries = std::collections::BTreeSet::new();
         let mut step = BoundarySteps::default();
         let mut frame = 0;
+        let mut maximum_faded = 0;
+        let uncapped = std::env::var("CODESTRAND_AUDIT_CAP").as_deref() == Ok("none");
         loop {
             sim.prepare_frame(frame, 60, true).unwrap();
+            maximum_faded = maximum_faded.max(sim.travel.stats.faded);
+            if uncapped {
+                assert_eq!(sim.travel.stats.faded, 0, "uncapped travel must not fade");
+            }
             if let Some((end, _)) = sim.ready_end {
                 boundaries.insert(end);
             }
@@ -376,7 +400,7 @@ pub(crate) mod tests {
             }
             frame += 1;
         }
-        let report = serde_json::json!({"frames":frame+1, "trajectory_hash":hash.finish(), "moving_beams":diagnostic, "steps":step, "boundaries":boundaries.len(), "slots":super::super::slots::report(&sim.state)});
+        let report = serde_json::json!({"frames":frame+1, "trajectory_hash":hash.finish(), "moving_beams":diagnostic, "steps":step, "boundaries":boundaries.len(), "maximum_faded":maximum_faded, "slots":super::super::slots::report(&sim.state)});
         std::fs::write(
             std::env::var_os("CODESTRAND_AUDIT_OUTPUT").unwrap(),
             report.to_string(),

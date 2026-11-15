@@ -38,7 +38,8 @@ By default the whole playback is exported at 30 fps. To make a short capture:
 codestrand export short-frames --frames 60 --fps 30
 ```
 
-`--frames` accepts 2 through 1,000,000; `--fps` accepts 1 through 240. An explicit
+`--frames` accepts 2 through 4,294,967,295, inclusive, matching the supported frame
+index range; `--fps` accepts 1 through 240, inclusive. An explicit
 frame count stops capture after that many frames rather than changing the timeline
 speed. `--frame-delay-ms` adds a wall-clock delay between captures (default `0`);
 the delay does not change simulated frame times.
