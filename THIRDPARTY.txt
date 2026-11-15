@@ -3081,8 +3081,8 @@ DEALINGS IN THE SOFTWARE.
 ================================================================================
 MIT License (MIT)
 Used by:
-  cc 1.11.1
-  Source: https://crates.io/api/v1/crates/cc/1.11.1/download
+  cc 1.11.2
+  Source: https://crates.io/api/v1/crates/cc/1.11.2/download
   cfg-if 1.0.5
   Source: https://crates.io/api/v1/crates/cfg-if/1.0.5/download
   filetime 0.2.29
@@ -3385,20 +3385,20 @@ DEALINGS IN THE SOFTWARE.
 ================================================================================
 MIT License (MIT)
 Used by:
-  wayland-backend 0.3.15
-  Source: https://crates.io/api/v1/crates/wayland-backend/0.3.15/download
-  wayland-client 0.31.14
-  Source: https://crates.io/api/v1/crates/wayland-client/0.31.14/download
+  wayland-backend 0.3.17
+  Source: https://crates.io/api/v1/crates/wayland-backend/0.3.17/download
+  wayland-client 0.31.15
+  Source: https://crates.io/api/v1/crates/wayland-client/0.31.15/download
   wayland-cursor 0.31.14
   Source: https://crates.io/api/v1/crates/wayland-cursor/0.31.14/download
   wayland-protocols-plasma 0.3.12
   Source: https://crates.io/api/v1/crates/wayland-protocols-plasma/0.3.12/download
   wayland-protocols-wlr 0.3.12
   Source: https://crates.io/api/v1/crates/wayland-protocols-wlr/0.3.12/download
-  wayland-protocols 0.32.12
-  Source: https://crates.io/api/v1/crates/wayland-protocols/0.32.12/download
-  wayland-scanner 0.31.10
-  Source: https://crates.io/api/v1/crates/wayland-scanner/0.31.10/download
+  wayland-protocols 0.32.13
+  Source: https://crates.io/api/v1/crates/wayland-protocols/0.32.13/download
+  wayland-scanner 0.31.11
+  Source: https://crates.io/api/v1/crates/wayland-scanner/0.31.11/download
   wayland-sys 0.31.11
   Source: https://crates.io/api/v1/crates/wayland-sys/0.31.11/download
 
@@ -5372,8 +5372,8 @@ DEALINGS IN THE SOFTWARE.
 ================================================================================
 MIT License (MIT)
 Used by:
-  bumpalo 3.20.3
-  Source: https://crates.io/api/v1/crates/bumpalo/3.20.3/download
+  bumpalo 3.20.4
+  Source: https://crates.io/api/v1/crates/bumpalo/3.20.4/download
 
 Copyright (c) 2019 Nick Fitzgerald
 
@@ -6429,8 +6429,8 @@ DEALINGS IN THE SOFTWARE.
 ================================================================================
 MIT License (MIT)
 Used by:
-  rand 0.10.3
-  Source: https://crates.io/api/v1/crates/rand/0.10.3/download
+  rand 0.10.4
+  Source: https://crates.io/api/v1/crates/rand/0.10.4/download
 
 Copyright 2018 Developers of the Rand project
 Copyright (c) 2014 The Rust Project Developers
@@ -6724,8 +6724,8 @@ DEALINGS IN THE SOFTWARE.
 ================================================================================
 MIT License (MIT)
 Used by:
-  wayland-protocols 0.32.12
-  Source: https://crates.io/api/v1/crates/wayland-protocols/0.32.12/download
+  wayland-protocols 0.32.13
+  Source: https://crates.io/api/v1/crates/wayland-protocols/0.32.13/download
 
 Copyright © 2008-2013 Kristian Høgsberg
 Copyright © 2010-2013 Intel Corporation
@@ -7092,8 +7092,8 @@ SOFTWARE.
 ================================================================================
 MIT License (MIT)
 Used by:
-  xcursor 0.3.10
-  Source: https://crates.io/api/v1/crates/xcursor/0.3.10/download
+  xcursor 0.3.11
+  Source: https://crates.io/api/v1/crates/xcursor/0.3.11/download
 
 MIT License
 
@@ -8673,14 +8673,14 @@ Used by:
   Source: https://crates.io/api/v1/crates/byteorder-lite/0.1.0/download
   byteorder 1.5.0
   Source: https://crates.io/api/v1/crates/byteorder/1.5.0/download
-  jiff-core 0.1.5
-  Source: https://crates.io/api/v1/crates/jiff-core/0.1.5/download
+  jiff-core 0.1.8
+  Source: https://crates.io/api/v1/crates/jiff-core/0.1.8/download
   jiff-tzdb-platform 0.1.3
   Source: https://crates.io/api/v1/crates/jiff-tzdb-platform/0.1.3/download
-  jiff-tzdb 0.1.9
-  Source: https://crates.io/api/v1/crates/jiff-tzdb/0.1.9/download
-  jiff 0.2.43
-  Source: https://crates.io/api/v1/crates/jiff/0.2.43/download
+  jiff-tzdb 0.1.10
+  Source: https://crates.io/api/v1/crates/jiff-tzdb/0.1.10/download
+  jiff 0.2.46
+  Source: https://crates.io/api/v1/crates/jiff/0.2.46/download
   memchr 2.8.3
   Source: https://crates.io/api/v1/crates/memchr/2.8.3/download
   walkdir 2.5.0
@@ -9543,8 +9543,8 @@ SOFTWARE.
 ================================================================================
 MIT License (MIT)
 Used by:
-  quick-xml 0.39.4
-  Source: https://crates.io/api/v1/crates/quick-xml/0.39.4/download
+  quick-xml 0.41.0
+  Source: https://crates.io/api/v1/crates/quick-xml/0.41.0/download
 
 The MIT License (MIT)
 
