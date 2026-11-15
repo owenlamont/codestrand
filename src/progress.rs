@@ -15,6 +15,7 @@ pub(crate) enum Stage {
     Travel,
     Reservations,
     Titles,
+    Checkpoint,
 }
 
 impl Stage {
@@ -26,6 +27,7 @@ impl Stage {
             Self::Travel => "planning travel",
             Self::Reservations => "reserving parking",
             Self::Titles => "placing titles",
+            Self::Checkpoint => "preparing playback",
         }
     }
 }
@@ -100,6 +102,11 @@ impl Progress {
         }
     }
 
+    /// Reports work within this pass, excluding the already planned prefix.
+    pub(crate) fn report_range(&self, stage: Stage, done: u64, begin: u64, end: u64) {
+        self.report(stage, done.saturating_sub(begin), end.saturating_sub(begin));
+    }
+
     fn report_at(&self, elapsed: Duration, stage: Stage, done: u64, total: u64) {
         let Some(channel) = &self.0 else { return };
         let now = u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX);
@@ -161,5 +168,20 @@ mod tests {
         let (progress, updates) = Progress::channel(Duration::ZERO);
         drop(updates);
         progress.report(Stage::History, 1, 2);
+    }
+
+    #[test]
+    fn later_window_progress_starts_at_zero() {
+        let (progress, updates) = Progress::channel(Duration::ZERO);
+        for tick in [9_000, 9_050, 9_100] {
+            progress.report_range(Stage::Titles, tick, 9_000, 9_100);
+        }
+        assert_eq!(
+            updates
+                .try_iter()
+                .map(|update| update.fraction)
+                .collect::<Vec<_>>(),
+            [0.0, 0.5, 1.0]
+        );
     }
 }

@@ -123,10 +123,12 @@ impl Simulation {
         let frames = crate::model::frames_for(self.duration(), 60)
             .expect("bounded schedule")
             + 144;
-        for frame in u32::try_from(self.state.tick).expect("bounded window")..=frames {
-            self.progress.report(
+        let begin = u32::try_from(self.state.tick).expect("bounded window");
+        for frame in begin..=frames {
+            self.progress.report_range(
                 crate::progress::Stage::Reservations,
                 frame.into(),
+                begin.into(),
                 frames.into(),
             );
             self.advance_to(frame, 60);

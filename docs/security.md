@@ -41,6 +41,12 @@ Video export starts FFmpeg and sends it rendered frames through standard input.
 Codestrand's production import and renderer do not launch Git, repository hooks,
 external diff drivers or other subprocesses.
 
+Before planning, Codestrand compares a planning-memory estimate with available physical
+memory. The estimate excludes the renderer and video encoder; it can be conservative
+on some inputs and too low on others. It is not a process-memory limit or reservation.
+Windowed planning bounds retained travel windows and checkpoints, not total process
+memory. The available-memory snapshot excludes swap and container or job-specific limits.
+
 This describes Codestrand's own behavior. It cannot promise what a user-selected
 encoder executable does, or keep an operating system from accessing a network-mounted
 repository, cache, avatar file or output path. HTTPS avatar requests use environment

@@ -390,9 +390,12 @@ fn capture(simulation: &mut Simulation) -> Capture {
     let mut seen = simulation.state.next_event;
     let mut poses = 0;
     for frame in u32::try_from(capture.begin).expect("bounded window")..=frames {
-        simulation
-            .progress
-            .report(Stage::Travel, frame.into(), frames.into());
+        simulation.progress.report_range(
+            Stage::Travel,
+            frame.into(),
+            capture.begin,
+            frames.into(),
+        );
         simulation.advance_to(frame, 60);
         let state = &simulation.state;
         capture.radii.push(state.avatar_radius());

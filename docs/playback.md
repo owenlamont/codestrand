@@ -376,14 +376,17 @@ Use fewer repositories or a later inclusive `--start-date` to reduce the estimat
 The snapshot is not a memory reservation; other processes can consume RAM afterward.
 It is the host's available RAM, without container or job-specific memory limits.
 Rendering and video encoding need additional memory beyond the planning estimate.
+The check is an estimate made before planning, not a guarantee that the process will
+fit in memory. It can be conservative on some inputs and too low on others.
 Packing reserves tiles before applying repository endings, so sequential repositories
 can reach the same geometric limit as repositories visible together.
 Route searches stop at 10,000 nodes; capped playback can fade across when a search
 exceeds that bound, while uncapped walking reports an error.
 
 Large multi-repository histories can take time to begin playback. Consumed travel plans
-are discarded to keep memory bounded; the shared layout remains available throughout
-playback. To inspect a smaller interval, use inclusive `--start-date` and `--end-date`.
+are discarded to bound retained travel windows and checkpoints; the shared layout
+remains available throughout playback. This does not bound total process memory.
+To inspect a smaller interval, use inclusive `--start-date` and `--end-date`.
 
 Playback memory and duration checks use the range selected by `--start-date` and `--end-date`;
 the layout estimate also includes the imported history needed to settle that range.

@@ -52,7 +52,15 @@ impl Simulation {
         self.plan_titles();
         let boundary = self.clock.present(end).ticks(true);
         self.restart();
-        self.advance_to(u32::try_from(boundary)?, 60);
+        for frame in u32::try_from(begin)?..=u32::try_from(boundary)? {
+            self.progress.report_range(
+                crate::progress::Stage::Checkpoint,
+                frame.into(),
+                begin,
+                boundary,
+            );
+            self.advance_to(frame, 60);
+        }
         self.boundaries.push(self.state.0.clone());
         eprintln!(
             "travel_window end={} commits={} boundary_tick={boundary}",
@@ -338,6 +346,51 @@ impl Simulation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_window_reports_local_passes_and_checkpoint_progress() {
+        use crate::progress::{Progress, Stage};
+        let (progress, updates) = Progress::channel(std::time::Duration::ZERO);
+        let (events, labels) = super::super::tests::short_repository_history(2);
+        let mut sim = Simulation::with_repositories(
+            events,
+            &Options {
+                eager_windows: true,
+                travel_window_seconds: Some(0.5),
+                progress,
+                ..Options::default()
+            },
+            &crate::theme::Theme::neon(),
+            &crate::contributors::Mappings::default(),
+            &labels,
+        );
+        let mut previous: Option<crate::progress::Update> = None;
+        let mut checkpoints = 0;
+        for update in updates.try_iter().filter(|update| {
+            matches!(
+                update.stage,
+                Stage::Travel | Stage::Reservations | Stage::Titles | Stage::Checkpoint
+            )
+        }) {
+            let beginning = previous.is_none_or(|old| {
+                old.stage != update.stage
+                    || old.pass != update.pass
+                    || update.fraction < old.fraction
+            });
+            if beginning {
+                assert_eq!(update.fraction, 0.0, "{update:?}");
+                if let Some(old) = previous {
+                    assert_eq!(old.fraction, 1.0, "{old:?}");
+                }
+                checkpoints += usize::from(update.stage == Stage::Checkpoint);
+            }
+            previous = Some(update);
+        }
+        assert_eq!(previous.unwrap().fraction, 1.0);
+        assert_eq!(checkpoints, sim.boundaries.len());
+        assert!(checkpoints > 1);
+        verify_boundaries(&mut sim);
+    }
 
     #[test]
     fn parked_author_and_occupied_dock_cross_uncapped_boundaries() {

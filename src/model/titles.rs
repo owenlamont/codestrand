@@ -238,11 +238,14 @@ impl Simulation {
         } else {
             u32::try_from(self.state.tick).expect("bounded window") / STEP + 1
         };
-        for frame in (first * STEP..=frames + STEP).step_by(STEP as usize) {
-            self.progress.report(
+        let begin = first * STEP;
+        let last = (frames + STEP) / STEP * STEP;
+        for frame in (begin..=frames + STEP).step_by(STEP as usize) {
+            self.progress.report_range(
                 crate::progress::Stage::Titles,
                 frame.into(),
-                frames.into(),
+                begin.into(),
+                last.into(),
             );
             self.advance_to(frame, 60);
             let blocked = obstacles(self);
