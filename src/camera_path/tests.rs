@@ -1,5 +1,3 @@
-use clap::Parser;
-
 use super::*;
 use crate::{Cli, Command};
 
@@ -7,7 +5,7 @@ fn fixture(text: &str) -> (std::path::PathBuf, Simulation) {
     let directory = tempfile::tempdir().unwrap().keep();
     let file = directory.join("camera.toml");
     fs::write(&file, text).unwrap();
-    let cli = Cli::try_parse_from([
+    let cli = Cli::try_fixture_from([
         "codestrand",
         "export",
         "unused-output",
@@ -197,7 +195,7 @@ fn frame_keys_ease_and_clamp_with_file_fps() {
 
 #[test]
 fn example_tracks_live_targets_and_replays_identically() {
-    let text = fs::read_to_string("docs/examples/demo-camera.toml").unwrap();
+    let text = fs::read_to_string("tests/fixtures/camera-targets.toml").unwrap();
     let (file, mut sim) = fixture(&text);
     let path = CameraPath::load(&file, &sim).unwrap();
     let mut poses = Vec::new();

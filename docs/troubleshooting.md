@@ -52,8 +52,8 @@ See the [configuration example](contributors.md).
 
 Portraits stay offline unless `--fetch-avatars` is supplied. Network errors and
 rate limits leave coloured spheres or previously cached images available.
-`--no-cache` disables portrait reuse as well as history caching. Synthetic history
-never fetches portraits. Private GitHub repositories need an API token with access.
+`--no-cache` disables portrait reuse as well as history caching. Private GitHub
+repositories need an API token with access.
 
 ## Report a problem
 

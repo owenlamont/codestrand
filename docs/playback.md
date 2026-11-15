@@ -34,8 +34,7 @@ Widths use the longest scheduled date, repository and resolved contributor name,
 the total commit counter's digits. Speed and theme columns reserve their longest
 available values so preview controls cannot move separators. Captions always use the
 embedded monospace Fira Mono font, even when another theme uses proportional labels.
-CLI playback uses the same six fixed columns for single repositories and synthetic
-history. The synthetic repository column is named `Synthetic history`.
+CLI playback uses the same six fixed columns for single and multiple repositories.
 
 Text falls back from the selected theme font to bundled IBM Plex Mono for accented
 and Cyrillic names, then to installed system fonts for other scripts, including Greek.
@@ -249,8 +248,8 @@ order. Contributor mappings apply across all repositories, so a matched contribu
 uses one avatar that moves between regions.
 
 Live repositories share the inset viewport inside a 24-pixel frame margin. The
-same frame-scaled avatar sizing and gutter placement apply to single repositories and
-synthetic playback. The top wordmark has a separate 26-pixel reserved strip, including
+same frame-scaled avatar sizing and gutter placement apply to single repositories.
+The top wordmark has a separate 26-pixel reserved strip, including
 a four-pixel buffer;
 avatars, gutter routes and name labels stay below the strip, matching caption clearance.
 The default 16:9 export camera stays fixed. Spacing and size floors use a fixed world scale
@@ -326,8 +325,7 @@ and fades in at the destination. Blocked capped routes fade across. Zero disable
 waiting. `--bot-travel fade` is the default; `--bot-travel walk` gives bots the same
 routing and waiting policy as humans. Bot classification uses an explicit `bot` override
 in `contributors.toml`, then a GitHub noreply login ending in `[bot]`, then the displayed
-name's `[bot]` suffix. Travel policies also apply to single repositories and synthetic
-playback.
+name's `[bot]` suffix. Travel policies also apply to single repositories.
 Walking avatars remain visible during travel until an inferred calendar departure.
 With `--travel-cap none`, walking trips
 also remain routed across long idle gaps instead of disappearing and re-entering at a
@@ -372,7 +370,7 @@ The estimate uses the actual selected schedule, repository samples, contributor
 first arrivals, imported changes, path bytes and directory samples. Variable allocation
 sizes are estimates, so the figure is not a process-memory ceiling. Each padded schedule
 is checked before rebuilding; numeric travel caps do not reserve hypothetical waits.
-The same check applies to single repositories and synthetic playback.
+The same check applies to single repositories.
 
 Use fewer repositories or a later `--start` or `--start-date` to reduce the estimate.
 The snapshot is not a memory reservation; other processes can consume RAM afterward.
@@ -394,8 +392,7 @@ To choose visual treatments, use
 `--repository-boundary none|glass` and `--repository-label-plane files|raised`.
 Defaults are `glass` and `raised`. Glass is a faint, coloured ground-plane tile for
 each live repository; raised labels stay at a constant height of 1.6 scene units.
-Both options apply to preview and export, including single repositories and synthetic
-playback.
+Both options apply to preview and export, including single repositories.
 
 ## Range and pacing
 

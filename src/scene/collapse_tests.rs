@@ -1,6 +1,5 @@
 use super::*;
 use bevy::mesh::VertexAttributeValues;
-use clap::Parser;
 
 #[test]
 fn export_lod_crosses_threshold_using_the_rendered_camera_pose() {
@@ -72,7 +71,7 @@ fn collapsing_option_defaults_on_and_accepts_only_on_or_off() {
             let mut args = vec!["codestrand"];
             args.extend(command.clone());
             args.extend(flags);
-            let cli = crate::Cli::try_parse_from(args).unwrap();
+            let cli = crate::Cli::try_fixture_from(args).unwrap();
             let (crate::Command::Preview { source, .. }
             | crate::Command::Export { source, .. }) = cli.command.unwrap()
             else {
@@ -86,7 +85,7 @@ fn collapsing_option_defaults_on_and_accepts_only_on_or_off() {
         let mut args = vec!["codestrand"];
         args.extend(command);
         args.extend(["--collapse-directories", "sometimes"]);
-        assert!(crate::Cli::try_parse_from(args).is_err());
+        assert!(crate::Cli::try_fixture_from(args).is_err());
     }
 }
 
@@ -216,7 +215,7 @@ fn collapsing_off_restores_files_immediately_through_rewind_and_theme_switch() {
         let mut args = vec!["codestrand"];
         args.extend(command);
         args.extend(["--collapse-directories", "off", "--start", "1000"]);
-        let cli = crate::Cli::try_parse_from(args).unwrap();
+        let cli = crate::Cli::try_fixture_from(args).unwrap();
         let (crate::Command::Preview { source, .. }
         | crate::Command::Export { source, .. }) = cli.command.unwrap()
         else {

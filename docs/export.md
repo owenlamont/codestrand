@@ -6,8 +6,9 @@
 codestrand export frames --repository /path/to/repository --commits 20
 ```
 
-The output directory (`frames` here) must not already exist. Without `--repository`,
-export uses the synthetic demo. Export writes `frame-00000.png` onwards and a
+The output directory (`frames` here) must not already exist. Without a repository
+argument or manifest, export discovers the repository from the current directory,
+searching upward. Export writes `frame-00000.png` onwards and a
 `frames.csv` logical-state manifest. Frames default to 1280×720.
 The final `glyphs` and `missing_glyphs` columns count visible text-layout glyphs
 used for each captured frame. A nonzero missing count indicates unavailable glyphs;
@@ -127,12 +128,13 @@ them manually after checking the video.
 
 ## Scripted camera
 
-`--camera-path` replaces the fitted export camera with TOML keys. Download the
-[demo path](examples/demo-camera.toml), then export the synthetic history:
+`--camera-path` replaces the fitted export camera with TOML keys. Save the
+[example path](examples/camera-path.toml) as `camera-path.toml` in a Git working
+tree, then run there:
 
 ```sh
-codestrand export demo-state --camera-path docs/examples/demo-camera.toml \
-  --frames 241 --fps 30 --video demo.mkv --ffmpeg-arg=-c:v --ffmpeg-arg=ffv1
+codestrand export camera-frames --camera-path camera-path.toml \
+  --frames 241 --fps 30 --video camera.mkv --ffmpeg-arg=-c:v --ffmpeg-arg=ffv1
 ```
 
 The file requires `fps` (1–240) and one or more `[[key]]` tables. Each key requires

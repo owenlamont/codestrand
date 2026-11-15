@@ -24,7 +24,16 @@ fn native_4k_and_ultrawide_exports_repeat_byte_identically() {
             let child = Command::new(env!("CARGO_BIN_EXE_codestrand"))
                 .arg("export")
                 .arg(&directory)
-                .args(["--resolution", resolution, "--frames", "2", "--fps", "2"])
+                .args([
+                    "--test-input",
+                    "synthetic",
+                    "--resolution",
+                    resolution,
+                    "--frames",
+                    "2",
+                    "--fps",
+                    "2",
+                ])
                 .stdout(Stdio::from(log.try_clone().unwrap()))
                 .stderr(Stdio::from(log))
                 .spawn()
@@ -379,7 +388,7 @@ focus={point=[0.0,12.0,2.0]}
         .arg(&directory)
         .arg("--camera-path")
         .arg(&path)
-        .args(["--frames", "2", "--fps", "30"])
+        .args(["--test-input", "synthetic", "--frames", "2", "--fps", "30"])
         .stdout(Stdio::from(log.try_clone().unwrap()))
         .stderr(Stdio::from(log))
         .spawn()
@@ -402,9 +411,18 @@ fn export(directory: &Path, delay: &str) {
         .arg("--camera-path")
         .arg(
             Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("docs/examples/demo-camera.toml"),
+                .join("tests/fixtures/camera-targets.toml"),
         )
-        .args(["--frames", "8", "--fps", "2", "--frame-delay-ms", delay])
+        .args([
+            "--test-input",
+            "synthetic",
+            "--frames",
+            "8",
+            "--fps",
+            "2",
+            "--frame-delay-ms",
+            delay,
+        ])
         .stdout(Stdio::from(
             log.try_clone().expect("log handle can be cloned"),
         ))

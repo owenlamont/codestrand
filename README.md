@@ -36,5 +36,7 @@ codestrand preview
 codestrand preview --repository /path/to/repository
 ```
 
-The first command plays the built-in demo. Escape closes the window.
+Run the first command inside a Git working tree, including a subdirectory, to play
+that repository. The second command selects another local repository. Escape closes
+the window.
 See [Contributing](https://github.com/owenlamont/codestrand/blob/main/CONTRIBUTING.md) for development setup and checks.

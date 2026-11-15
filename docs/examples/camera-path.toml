@@ -1,0 +1,16 @@
+fps = 30
+
+[[key]]
+frame = 0
+eye = { point = [0.0, 24.0, 16.0] }
+focus = { point = [0.0, 0.0, 0.0] }
+
+[[key]]
+frame = 120
+eye = { point = [16.0, 24.0, 0.0] }
+focus = { point = [0.0, 0.0, 0.0] }
+
+[[key]]
+frame = 240
+eye = { point = [0.0, 24.0, -16.0] }
+focus = { point = [0.0, 0.0, 0.0] }

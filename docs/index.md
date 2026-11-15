@@ -18,7 +18,7 @@ streams video to your installed FFmpeg.
 ## Start here
 
 1. [Install Codestrand](getting-started/installation.md).
-2. [Play the demo or your repository](getting-started/quickstart.md).
+2. [Play your repository](getting-started/quickstart.md).
 3. Adjust [playback and camera controls](playback.md).
 4. [Export frames](export.md) or set up [contributors and avatars](contributors.md).
 

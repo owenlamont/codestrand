@@ -11,6 +11,19 @@ use crate::timeline::{Event, Kind};
 const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 const MAX_PATH_BYTES: usize = 4096;
 
+pub(super) fn discover(directory: &Path) -> anyhow::Result<PathBuf> {
+    let repository = gix::discover(directory).with_context(|| {
+        format!(
+            "no repository found from {}; pass --repository PATH",
+            directory.display()
+        )
+    })?;
+    Ok(repository
+        .workdir()
+        .unwrap_or(repository.git_dir())
+        .to_path_buf())
+}
+
 #[derive(Clone, Copy, Debug, Default, clap::ValueEnum, serde::Serialize)]
 pub(super) enum Boundary {
     #[default]
@@ -212,6 +225,29 @@ pub(super) fn merge(histories: Vec<Vec<Event>>) -> Vec<Event> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discovers_worktrees_upward_and_bare_repositories() {
+        let scratch = tempfile::tempdir().unwrap();
+        let worktree = scratch.path().join("worktree");
+        gix::init(&worktree).unwrap();
+        let nested = worktree.join("one/two");
+        std::fs::create_dir_all(&nested).unwrap();
+        for directory in [&worktree, &nested] {
+            assert_eq!(
+                discover(directory).unwrap().canonicalize().unwrap(),
+                worktree.canonicalize().unwrap()
+            );
+        }
+        let bare = scratch.path().join("bare");
+        gix::init_bare(&bare).unwrap();
+        assert_eq!(
+            discover(&bare).unwrap().canonicalize().unwrap(),
+            bare.canonicalize().unwrap()
+        );
+        let error = discover(scratch.path()).unwrap_err();
+        assert!(error.to_string().contains("pass --repository PATH"));
+    }
 
     #[test]
     fn ended_dates_reject_invalid_calendar_values_and_archival_is_opt_in() {
