@@ -201,6 +201,7 @@ jobs:
 
   smoke-wheels:
     needs: [wheels, version-check]
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -229,7 +230,10 @@ jobs:
           save-cache: false
       - name: Install Linux runtime dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libasound2t64 libudev1 libxkbcommon0 libwayland-client0 libegl1
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2t64 libudev1 libxkbcommon0 libwayland-client0 libegl1 \
+            mesa-vulkan-drivers libvulkan1
       - name: Install wheel and run CLI
         env:
           VERSION: ${{ needs.version-check.outputs.version }}
@@ -248,6 +252,32 @@ jobs:
             if [ "${attempt}" -lt 3 ]; then sleep 10; fi
           done
           exit 1
+      - name: Render installed wheel
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euxo pipefail
+          case "$RUNNER_OS" in
+            Linux)
+              icds=(/usr/share/vulkan/icd.d/lvp_icd*.json)
+              test "${#icds[@]}" -eq 1
+              test -f "${icds[0]}"
+              export VK_DRIVER_FILES="${icds[0]}"
+              export WGPU_BACKEND=vulkan WGPU_ADAPTER_NAME=llvmpipe
+              export XDG_RUNTIME_DIR="$RUNNER_TEMP/xdg-runtime"
+              mkdir -m 700 "$XDG_RUNTIME_DIR"
+              ;;
+            Windows)
+              export WGPU_BACKEND=dx12 WGPU_ADAPTER_NAME='Microsoft Basic Render Driver'
+              ;;
+            macOS)
+              export WGPU_BACKEND=metal
+              ;;
+          esac
+          uv run --no-project -p .venv codestrand export smoke-render \
+            --test-input synthetic --frames 2 --resolution 320x180
+          test -s smoke-render/frame-00000.png
+          test -s smoke-render/frame-00001.png
 
   release-assets:
     needs: [wheels, sdist, smoke-wheels]
