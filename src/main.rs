@@ -320,6 +320,18 @@ impl Source {
     }
 
     fn load(&self, progress: &Progress) -> anyhow::Result<(model::Simulation, String)> {
+        #[cfg(not(test))]
+        let available_memory = model::available_memory()?;
+        #[cfg(test)]
+        let available_memory = model::Options::default().available_memory;
+        self.load_with_memory(progress, available_memory)
+    }
+
+    fn load_with_memory(
+        &self,
+        progress: &Progress,
+        available_memory: u64,
+    ) -> anyhow::Result<(model::Simulation, String)> {
         let repositories =
             repositories::inputs(&self.repository, self.repositories_file.as_deref())?;
         let mappings = contributors::load(self.contributors.as_deref())?;
@@ -338,6 +350,7 @@ impl Source {
             names.join(" | ")
         };
         let options = model::Options {
+            available_memory,
             contributor_inactivity_days: self.contributor_inactivity_days,
             repository_ends: repositories
                 .iter()

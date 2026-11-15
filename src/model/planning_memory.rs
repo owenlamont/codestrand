@@ -6,7 +6,28 @@ use crate::{
     timeline::{Event, FileChange, Kind},
 };
 
-const LIMIT: u128 = 2 * 1024 * 1024 * 1024;
+/// Available physical RAM in bytes at run startup, including memory the OS can
+/// reclaim without swapping. Swap is excluded. The snapshot is reused for every
+/// padded schedule and window; it is not a reservation against other processes.
+#[cfg(not(test))]
+pub(crate) fn available() -> anyhow::Result<u64> {
+    use anyhow::Context;
+    let mut system = sysinfo::System::new()
+        .context("cannot read available physical memory; planning stopped")?;
+    system.refresh_memory_specifics(sysinfo::MemoryRefreshKind::nothing().with_ram());
+    let available =
+        validate_available(system.total_memory(), system.available_memory())?;
+    eprintln!("planning_available_memory_bytes={available}");
+    Ok(available)
+}
+
+fn validate_available(total: u64, available: u64) -> anyhow::Result<u64> {
+    anyhow::ensure!(
+        total > 0 && available <= total,
+        "cannot read available physical memory; planning stopped; check operating-system memory reporting and retry"
+    );
+    Ok(available)
+}
 
 pub(super) fn check(
     events: &[Event],
@@ -83,7 +104,7 @@ pub(super) fn check(
         + events.len() as u128 * (3 * size_of::<Event>()) as u128
         + paths * 3
         + layout_bytes(events, options, &history)?;
-    check_bytes(bytes)
+    check_bytes(bytes, options.available_memory)
 }
 
 fn checkpoint_bytes(events: &[Event], repositories: usize) -> u128 {
@@ -135,12 +156,12 @@ fn checkpoint_bytes(events: &[Event], repositories: usize) -> u128 {
         + std::mem::size_of::<super::State>() as u128
 }
 
-fn check_bytes(bytes: u128) -> anyhow::Result<()> {
+fn check_bytes(bytes: u128, available: u64) -> anyhow::Result<()> {
     anyhow::ensure!(
-        bytes <= LIMIT,
-        "estimated planning memory {bytes} bytes ({} MiB) exceeds the {} MiB planning memory limit; shorten the selected history or reduce playback times",
+        bytes <= u128::from(available),
+        "estimated planning memory {bytes} bytes ({} MiB) exceeds available physical memory {available} bytes ({} MiB) at startup; use fewer repositories or a later --start or --start-date",
         bytes.div_ceil(1024 * 1024),
-        LIMIT / (1024 * 1024)
+        available / (1024 * 1024)
     );
     Ok(())
 }
@@ -253,7 +274,7 @@ fn check_streaming(
     eprintln!(
         "streaming_memory global_peak={global} global_retained={retained} window={window} checkpoint={checkpoint} global_states={global_states} window_states={states} total={bytes}"
     );
-    check_bytes(bytes).map_err(|error| error.context(format!("streaming memory: global peak {global} plus state copies {global_states}, global retained {retained}, three windows {windows}, ten window state copies {states}")))
+    check_bytes(bytes, options.available_memory).map_err(|error| error.context(format!("streaming memory: global peak {global} plus state copies {global_states}, global retained {retained}, three windows {windows}, ten window state copies {states}")))
 }
 
 #[cfg(test)]
@@ -262,11 +283,23 @@ mod tests {
 
     #[test]
     fn refusal_reports_estimated_memory_and_limit() {
-        assert!(check_bytes(LIMIT).is_ok());
+        let available = 1024 * 1024;
+        assert!(check_bytes(u128::from(available), available).is_ok());
         assert_eq!(
-            check_bytes(LIMIT + 1).unwrap_err().to_string(),
-            "estimated planning memory 2147483649 bytes (2049 MiB) exceeds the 2048 MiB planning memory limit; shorten the selected history or reduce playback times"
+            check_bytes(u128::from(available) + 1, available)
+                .unwrap_err()
+                .to_string(),
+            "estimated planning memory 1048577 bytes (2 MiB) exceeds available physical memory 1048576 bytes (1 MiB) at startup; use fewer repositories or a later --start or --start-date"
         );
+    }
+
+    #[test]
+    fn unavailable_reading_stops_planning_but_zero_available_is_valid() {
+        assert!(validate_available(0, 0).is_err());
+        assert!(validate_available(10, 11).is_err());
+        assert_eq!(validate_available(10, 0).unwrap(), 0);
+        assert!(check_bytes(1, 0).is_err());
+        assert_eq!(validate_available(10, 4).unwrap(), 4);
     }
 
     #[test]
@@ -281,11 +314,9 @@ mod tests {
         let error =
             check(&events, &options, &labels, &padded, padded.duration()).unwrap_err();
         assert!(error.to_string().contains("estimated planning memory"));
-        assert!(
-            error
-                .to_string()
-                .contains("exceeds the 2048 MiB planning memory limit")
-        );
+        assert!(error.to_string().contains(
+            "exceeds available physical memory 2147483648 bytes (2048 MiB) at startup"
+        ));
     }
 
     #[test]

@@ -356,14 +356,17 @@ Header and caption remain in the outer frame. Other preview aspect ratios use co
 framing;
 free-camera controls remain independent.
 
-Planning refuses an estimated allocation above 2 GiB and reports the estimated bytes
-and MiB. The estimate uses the actual selected schedule, repository samples, contributor
+Planning snapshots the machine's available physical memory before importing history.
+Swap does not count. An estimate above that snapshot is refused, with both values
+reported in bytes and MiB. If memory information cannot be read, planning stops.
+The estimate uses the actual selected schedule, repository samples, contributor
 first arrivals, imported changes, path bytes and directory samples. Variable allocation
 sizes are estimates, so the figure is not a process-memory ceiling. Each padded schedule
 is checked before rebuilding; numeric travel caps do not reserve hypothetical waits.
 The same check applies to single repositories and synthetic playback.
 
-Shorten the selected history or reduce playback times to stay within the limit.
+Use fewer repositories or a later `--start` or `--start-date` to reduce the estimate.
+The snapshot is not a memory reservation; other processes can consume RAM afterward.
 Packing reserves tiles before applying repository endings, so sequential repositories
 can reach the same geometric limit as repositories visible together.
 Route searches stop at 10,000 nodes; capped playback can fade across when a search

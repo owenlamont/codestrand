@@ -26,6 +26,7 @@ pub(crate) mod occlusion;
 #[cfg(test)]
 mod pacing_tests;
 mod planning_memory;
+
 pub(crate) mod quality;
 pub(crate) mod schedule;
 mod slots;
@@ -35,6 +36,8 @@ mod titles;
 mod travel;
 mod windows;
 pub(super) use names::rect as label_rect;
+#[cfg(not(test))]
+pub(super) use planning_memory::available as available_memory;
 use schedule::Schedule;
 pub(crate) use time::Time;
 pub(crate) mod treemap;
@@ -73,6 +76,7 @@ fn pulse_end(start: Time) -> Time {
 
 #[derive(Clone)]
 pub(super) struct Options {
+    pub available_memory: u64,
     pub contributor_inactivity_days: u32,
     pub repository_ends: Vec<Option<i64>>,
     pub repository_archived: Vec<bool>,
@@ -135,9 +139,11 @@ impl Options {
     }
 }
 
+#[cfg(test)]
 impl Default for Options {
     fn default() -> Self {
         Self {
+            available_memory: 2 * 1024 * 1024 * 1024,
             contributor_inactivity_days: 60,
             repository_ends: Vec::new(),
             repository_archived: Vec::new(),
