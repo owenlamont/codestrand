@@ -1,1 +1,29 @@
 excessive-nesting-threshold = 5
+
+disallowed-types = [
+    "std::net::TcpStream",
+    "std::net::TcpListener",
+    "std::net::UdpSocket",
+    "ureq::Agent",
+]
+disallowed-methods = [
+    "std::net::TcpStream::connect",
+    "std::net::TcpStream::connect_timeout",
+    "std::net::TcpListener::bind",
+    "std::net::UdpSocket::bind",
+    "std::net::ToSocketAddrs::to_socket_addrs",
+    "ureq::Agent::config_builder",
+    "ureq::Agent::new_with_defaults",
+    "ureq::Agent::new_with_config",
+    "ureq::agent",
+    "ureq::run",
+    "ureq::get",
+    "ureq::post",
+    "ureq::put",
+    "ureq::delete",
+    "ureq::head",
+    "ureq::options",
+    "ureq::connect",
+    "ureq::patch",
+    "ureq::trace",
+]

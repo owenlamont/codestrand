@@ -4,6 +4,8 @@
     clippy::pedantic,
     clippy::cargo,
     clippy::cognitive_complexity,
+    clippy::disallowed_types,
+    clippy::disallowed_methods,
     clippy::allow_attributes,
     clippy::allow_attributes_without_reason
 )]

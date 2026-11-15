@@ -1,3 +1,9 @@
+#![expect(
+    clippy::disallowed_types,
+    clippy::disallowed_methods,
+    reason = "opt-in avatar fetching is the application's only network client"
+)]
+
 use std::{
     collections::{HashMap, HashSet},
     io::{Cursor, Read, Write},
