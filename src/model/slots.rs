@@ -338,8 +338,7 @@ impl Simulation {
             needed.sort_unstable();
             needed.dedup();
             let (regions, origins, scales) = self
-                .packing
-                .sample_repositories(self.state.tick, &needed)
+                .packing_sample(self.state.tick, Some(&needed))
                 .expect("planned repository samples");
             for pulse in &self.state.pulses {
                 let Some(tile) = regions[pulse.repository].tile else {

@@ -20,15 +20,30 @@ pub(super) fn check(
     let poses = pose_count(selected, schedule, frames)?;
     let pose_bytes = poses * size_of::<travel::Pose>() as u128 * 2;
     let snapshot_bytes = super::slots::Snapshots::estimated_bytes(selected);
-    let regions = frames * repositories.len() as u128;
+    let history = Schedule::with_padding(
+        selected,
+        options.seconds_per_day,
+        options.max_idle_seconds,
+        |_| 0,
+    );
+    let (_, endings) = super::lifecycle::plan(
+        events,
+        &history,
+        options,
+        options.selected_range(events.len()),
+    );
+    let history_frames = u128::from(frames_for(
+        super::lifecycle::duration(&history, &endings),
+        60,
+    )?) + 1;
+    let regions = history_frames * repositories.len() as u128;
     let labels = repositories
         .iter()
         .map(|label| label.len() as u128)
         .sum::<u128>();
-    let region_bytes = 2 * size_of::<RepositoryRegion>()
-        + 2 * crate::layout::outline::NORMALS.len() * size_of::<bevy::math::Vec2>()
-        + 2 * size_of::<Option<crate::layout::packing::Tile>>()
-        + 3 * size_of::<f32>();
+    let region_bytes = size_of::<RepositoryRegion>()
+        + crate::layout::outline::NORMALS.len() * size_of::<bevy::math::Vec2>()
+        + crate::layout::packing::Packing::input_bytes();
     let changes = events
         .iter()
         .map(|event| event.changes.len() as u128)
@@ -39,13 +54,13 @@ pub(super) fn check(
         .map(|change| change.path.len() as u128)
         .sum::<u128>();
     let bytes = regions * region_bytes as u128
-        + frames * labels * 2
+        + (history_frames + 1) * labels
         + pose_bytes.max(snapshot_bytes)
         + frames * (8 * size_of::<Vec<()>>()) as u128
         + changes * (3 * size_of::<FileChange>()) as u128
         + events.len() as u128 * (3 * size_of::<Event>()) as u128
         + paths * 3
-        + layout_bytes(events, options, schedule)?;
+        + layout_bytes(events, options, &history)?;
     check_bytes(bytes)
 }
 
@@ -132,14 +147,14 @@ mod tests {
     }
 
     #[test]
-    fn actual_padding_and_label_bytes_contribute_to_the_estimate() {
+    fn actual_padding_contributes_to_the_pose_estimate() {
         let mut events = crate::timeline::synthetic();
         events.truncate(1);
         let options = Options::default();
         let labels = ["r".repeat(4096)];
         let short = Schedule::with_padding(&events, 1.0, 1.0, |_| 0);
         check(&events, &options, &labels, &short, short.duration()).unwrap();
-        let padded = Schedule::with_padding(&events, 1.0, 1.0, |_| 360_000);
+        let padded = Schedule::with_padding(&events, 1.0, 1.0, |_| 60_000_000);
         let error =
             check(&events, &options, &labels, &padded, padded.duration()).unwrap_err();
         assert!(error.to_string().contains("estimated planning memory"));

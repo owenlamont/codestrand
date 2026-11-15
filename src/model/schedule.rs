@@ -22,6 +22,71 @@ struct Service {
     padding: u32,
 }
 
+#[derive(Clone, Debug)]
+pub(super) struct Clock {
+    pub(super) history: Schedule,
+    presentation: Schedule,
+}
+
+impl Clock {
+    pub(super) fn new(history: Schedule, presentation: Schedule) -> Self {
+        Self {
+            history,
+            presentation,
+        }
+    }
+
+    pub(super) fn rows(&self, tick: u64) -> (u64, u64) {
+        let next = self.presentation.applied(tick);
+        let (floor, running) = next.checked_sub(1).map_or((0, tick), |last| {
+            let floor = self.history.services[last].tick;
+            (floor, floor + tick - self.presentation.services[last].tick)
+        });
+        self.history
+            .services
+            .get(next)
+            .map_or((running, running), |service| {
+                (
+                    running.min(service.tick),
+                    running.min(service.tick.saturating_sub(1).max(floor)),
+                )
+            })
+    }
+
+    pub(super) fn present(&self, history: Time) -> Time {
+        let next = self
+            .history
+            .starts
+            .partition_point(|&start| start <= history);
+        next.checked_sub(1).map_or(history, |last| {
+            history
+                .after(self.presentation.starts[last].since(self.history.starts[last]))
+        })
+    }
+
+    pub(super) fn tile_transition(&self, tick: u64) -> Option<(u64, f32)> {
+        let next = self.presentation.applied(tick);
+        let service = self.presentation.services.get(next)?;
+        let span = service.padding.checked_sub(1)?.min(45);
+        let begin = service.tick.saturating_sub(u64::from(service.padding));
+        if span == 0 || tick < begin || tick >= begin + u64::from(span) {
+            return None;
+        }
+        Some((
+            self.history.services[next].tick.saturating_sub(1),
+            super::ticks_duration(tick - begin)
+                / super::ticks_duration(u64::from(span)),
+        ))
+    }
+
+    pub(super) fn service_ticks(&self, index: usize) -> (u64, u64) {
+        (
+            self.presentation.services[index].tick,
+            self.history.services[index].tick,
+        )
+    }
+}
+
 impl Schedule {
     pub(super) fn padding(&self, index: usize) -> u32 {
         self.services[index].padding
@@ -124,6 +189,29 @@ fn first_tick(start: Time) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_later_wait_leaves_an_idle_gap_departure_unchanged() {
+        let mut events = crate::timeline::synthetic();
+        events.truncate(2);
+        events[0].seconds = 0;
+        events[1].seconds = 100 * 86_400;
+        let history = Schedule::new(&events, 1.0, 100.0);
+        let departure = crate::model::lifecycle::departures(&events, &history, 30)[0];
+        let padded =
+            Schedule::with_padding(
+                &events,
+                1.0,
+                100.0,
+                |i| if i == 1 { 600 } else { 0 },
+            );
+        let clock = Clock::new(history.clone(), padded);
+        assert!((departure - Time::seconds(30.5)).abs() < 0.00001);
+        assert_eq!(clock.present(departure), departure);
+        let tick = first_tick(departure);
+        assert_eq!(clock.rows(tick), (tick, tick));
+        assert_eq!(clock.history, history);
+    }
 
     #[test]
     fn accumulated_padding_remains_beyond_the_clock_range() {

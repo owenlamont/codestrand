@@ -325,8 +325,12 @@ also remain routed across long idle gaps instead of disappearing and re-entering
 different repository. After the last service, the normal inactivity fade still applies.
 Uncapped walking services trips in commit order and adds another second of waiting
 when tile motion or insufficient travel time blocks a route. New repository tiles get
-a full 0.75-second birth window inside their added wait. Packing weights start
-approaching the upcoming service footprint during that wait. An uncapped plan
+a full 0.75-second birth window inside their added wait. At the start of a wait,
+tile sizes transition toward the upcoming commit for at most 0.75 seconds,
+finishing before arrival. Tiles then hold their size, using the upcoming commit's
+zoom ceiling while fitting the content from before the commit. The content outline
+switches on arrival without moving the tile. Layout and calendar departures follow
+history time, which holds during travel waits. An uncapped plan
 that cannot find safe routes within the planning budgets reports an error instead of
 silently accepting a travel fade.
 A plan that cannot converge within 32 replans stops with an error.

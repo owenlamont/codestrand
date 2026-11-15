@@ -393,31 +393,44 @@ impl MovingBeams {
             };
             self.missing_tile_beams +=
                 u64::from(state.layout.repositories[own].tile.is_none());
-            let points = [state.avatars[pulse.author].position, to + Vec3::Y * 0.12];
-            let mut projected =
-                project(view_direction() * framing::DISTANCE, Vec3::ZERO, &points)
-                    .flatten();
-            let (Some(from), Some(to)) = (projected.next(), projected.next()) else {
-                continue;
+            let position = state.avatars[pulse.author].position;
+            let from = bevy::math::Vec2::new(position.x, position.z);
+            let to = bevy::math::Vec2::new(to.x, to.z);
+            let footprint = match target {
+                Target::File(id) => {
+                    let file = state.layout.file(id).expect("existing beam file");
+                    let scale = file.visible_presence(state.layout.dir(file.dir));
+                    let low = state.geometry.file_min;
+                    let high = state.geometry.file_max;
+                    Rect::from_corners(
+                        to + bevy::math::Vec2::new(low.x, low.z) * scale,
+                        to + bevy::math::Vec2::new(high.x, high.z) * scale,
+                    )
+                }
+                Target::Dir(_) => Rect::from_corners(to, to),
             };
             for (index, region) in state.layout.repositories.iter().enumerate() {
                 let Some(tile) = region.tile.filter(|_| index != own) else {
                     continue;
                 };
-                if !segment(
-                    from * HALF,
-                    to * HALF,
-                    Rect::from_corners(tile.low * HALF, tile.high * HALF),
-                ) {
+                let ground = tile.ground();
+                let bounds = Rect::from_corners(ground[0], ground[2]);
+                let endpoint_inside = to.cmpgt(bounds.min).all()
+                    && to.cmplt(bounds.max).all()
+                    || footprint
+                        .intersect(bounds)
+                        .size()
+                        .cmpgt(bevy::math::Vec2::ZERO)
+                        .all();
+                if !segment(from, to, bounds) && !endpoint_inside {
                     continue;
                 }
                 self.pair_frames += 1;
-                self.endpoint_inside_foreign +=
-                    u64::from(to.cmpgt(tile.low).all() && to.cmplt(tile.high).all());
+                self.endpoint_inside_foreign += u64::from(endpoint_inside);
                 self.origin_inside_foreign += u64::from(
-                    from.cmpgt(tile.low).all() && from.cmplt(tile.high).all(),
+                    from.cmpgt(bounds.min).all() && from.cmplt(bounds.max).all(),
                 );
-                self.first.get_or_insert_with(|| serde_json::json!({"frame":state.tick,"seconds":simulation.seconds().lossy_secs_f32(),"commit":simulation.commit(),"target_repository":own,"crossed_repository":index,"from":from.to_array(),"to":to.to_array(),"target_tile":state.layout.repositories[own].tile.map(|t| [t.low.to_array(),t.high.to_array()]),"tile_low":tile.low.to_array(),"tile_high":tile.high.to_array()}));
+                self.first.get_or_insert_with(|| serde_json::json!({"frame":state.tick,"seconds":simulation.seconds().lossy_secs_f32(),"commit":simulation.commit(),"target_repository":own,"crossed_repository":index,"from":from.to_array(),"to":to.to_array(),"coordinate_space":"world_ground","target_tile":state.layout.repositories[own].tile.map(|t| t.ground().map(|p| p.to_array())),"tile_low":bounds.min.to_array(),"tile_high":bounds.max.to_array()}));
             }
         }
     }

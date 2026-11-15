@@ -1,4 +1,4 @@
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use bevy::math::{FloatExt, Vec2};
 
@@ -520,12 +520,49 @@ fn gutter_cells(nodes: &[Node], placement: &[Placement]) -> Vec<Option<Tile>> {
 pub(crate) struct Packing {
     gutter_scale: f32,
     nodes: Vec<Node>,
-    regions: Arc<[Vec<RepositoryRegion>]>,
+    labels: Arc<[String]>,
+    inputs: Arc<[Vec<Input>]>,
     samples: Arc<[Sample]>,
     rotated: Vec<bool>,
-    placements: Arc<[OnceLock<Vec<Placement>>]>,
     zoom: Arc<[Vec<f32>]>,
     visible_until: Arc<[crate::model::Time]>,
+}
+
+#[derive(Clone, Debug)]
+struct Input {
+    low: Vec2,
+    high: Vec2,
+    outline: Vec<Vec2>,
+    height: f32,
+    live: bool,
+}
+
+impl From<&RepositoryRegion> for Input {
+    fn from(region: &RepositoryRegion) -> Self {
+        Self {
+            low: region.low,
+            high: region.high,
+            outline: region.outline.clone(),
+            height: region.height,
+            live: region.live,
+        }
+    }
+}
+impl Input {
+    fn region(&self, label: &str) -> RepositoryRegion {
+        RepositoryRegion {
+            label: label.to_owned(),
+            low: self.low,
+            high: self.high,
+            outline: self.outline.clone(),
+            height: self.height,
+            live: self.live,
+            files: 0.0,
+            tile: None,
+            gutter: None,
+            rotated: false,
+        }
+    }
 }
 
 fn rotations(
@@ -559,6 +596,12 @@ fn rotations(
 }
 
 impl Packing {
+    pub(crate) fn input_bytes() -> usize {
+        std::mem::size_of::<Input>()
+            + outline::NORMALS.len() * std::mem::size_of::<Vec2>()
+            + 3 * std::mem::size_of::<f32>()
+    }
+
     pub(crate) fn with_endings(
         mut self,
         endings: &[crate::model::Time],
@@ -582,7 +625,6 @@ impl Packing {
                 }
             }
         }
-        self.placements = (0..self.samples.len()).map(|_| OnceLock::new()).collect();
         self.plan_zoom()
     }
     #[cfg(test)]
@@ -676,10 +718,13 @@ impl Packing {
         Ok(Self {
             gutter_scale,
             nodes,
-            regions: regions.to_vec().into(),
+            labels: first.iter().map(|r| r.label.clone()).collect(),
+            inputs: regions
+                .iter()
+                .map(|row| row.iter().map(Input::from).collect())
+                .collect(),
             samples: samples.into(),
             rotated,
-            placements: (0..regions.len()).map(|_| OnceLock::new()).collect(),
             zoom: Arc::default(),
             visible_until: Arc::default(),
         }
@@ -688,11 +733,11 @@ impl Packing {
 
     fn plan_zoom(mut self) -> Self {
         self.zoom = Arc::default();
-        let mut scales: Vec<Vec<_>> = (0..self.regions.len())
+        let mut scales: Vec<Vec<_>> = (0..self.inputs.len())
             .map(|tick| {
                 self.fit(tick, None)
                     .iter()
-                    .zip(&self.regions[tick])
+                    .zip(&self.inputs[tick])
                     .enumerate()
                     .map(|(i, (p, r))| {
                         if r.live
@@ -746,19 +791,44 @@ impl Packing {
         presence: Option<&[f32]>,
         selected: impl Fn(usize) -> bool,
     ) -> Option<(Vec<RepositoryRegion>, Vec<Vec2>, Vec<f32>)> {
+        self.sample_rows(tick, tick, None, presence, selected)
+    }
+
+    pub(crate) fn sample_split(
+        &self,
+        tiles: u64,
+        content: u64,
+        transition: Option<(u64, f32)>,
+        presence: Option<&[f32]>,
+        repositories: Option<&[usize]>,
+    ) -> Option<(Vec<RepositoryRegion>, Vec<Vec2>, Vec<f32>)> {
+        self.sample_rows(tiles, content, transition, presence, |index| {
+            repositories.is_none_or(|selected| selected.contains(&index))
+        })
+    }
+
+    fn sample_rows(
+        &self,
+        tiles: u64,
+        tick: u64,
+        transition: Option<(u64, f32)>,
+        presence: Option<&[f32]>,
+        selected: impl Fn(usize) -> bool,
+    ) -> Option<(Vec<RepositoryRegion>, Vec<Vec2>, Vec<f32>)> {
         let tick = usize::try_from(tick)
             .unwrap_or(usize::MAX)
             .min(self.samples.len().checked_sub(1)?);
-        let sample = &self.samples[tick];
-        let computed;
-        let placement = if presence.is_none() {
-            self.placements[tick].get_or_init(|| self.fit(tick, None))
-        } else {
-            computed = self.fit(tick, presence);
-            &computed
-        };
-        let mut regions = self.regions[tick].clone();
-        let gutters = gutter_cells(&self.nodes, placement);
+        let tiles = usize::try_from(tiles)
+            .unwrap_or(usize::MAX)
+            .min(self.samples.len() - 1);
+        let sample = &self.samples[tiles];
+        let placement = self.fit_rows(tiles, tick, transition, presence);
+        let mut regions: Vec<_> = self.inputs[tick]
+            .iter()
+            .zip(self.labels.iter())
+            .map(|(input, label)| input.region(label))
+            .collect();
+        let gutters = gutter_cells(&self.nodes, &placement);
         let mut origins = Vec::with_capacity(regions.len());
         let mut scales = Vec::with_capacity(regions.len());
         for (i, r) in regions.iter_mut().enumerate() {
@@ -799,9 +869,34 @@ impl Packing {
     }
 
     fn fit(&self, tick: usize, presence: Option<&[f32]>) -> Vec<Placement> {
-        let sample = &self.samples[tick];
-        let presence: Vec<_> = sample
-            .presence
+        self.fit_rows(tick, tick, None, presence)
+    }
+
+    fn fit_rows(
+        &self,
+        tile_tick: usize,
+        tick: usize,
+        transition: Option<(u64, f32)>,
+        presence: Option<&[f32]>,
+    ) -> Vec<Placement> {
+        let sample = &self.samples[tile_tick];
+        let mut weights = sample.weights.clone();
+        let mut visibility = sample.presence.clone();
+        if let Some((from, fraction)) = transition {
+            let from = usize::try_from(from)
+                .unwrap_or(usize::MAX)
+                .min(self.samples.len() - 1);
+            for (weight, &before) in weights.iter_mut().zip(&self.samples[from].weights)
+            {
+                *weight = before.lerp(*weight, fraction);
+            }
+            for (visible, &before) in
+                visibility.iter_mut().zip(&self.samples[from].presence)
+            {
+                *visible = before.lerp(*visible, fraction);
+            }
+        }
+        let presence: Vec<_> = visibility
             .iter()
             .enumerate()
             .map(|(i, &p)| {
@@ -814,12 +909,12 @@ impl Packing {
             .collect();
         let placement = tiles(
             &self.nodes,
-            &sample.weights,
+            &weights,
             &presence,
             Vec2::splat(self.gutter_scale),
         )
         .expect("presence-scaled tiles remain feasible");
-        self.regions[tick]
+        self.inputs[tick]
             .iter()
             .enumerate()
             .map(|(i, r)| {
@@ -833,7 +928,7 @@ impl Packing {
                 let raw_scale = fitted.map_or(0.0, |f| f.scale);
                 let scale = self
                     .zoom
-                    .get(tick)
+                    .get(tile_tick)
                     .map_or(raw_scale, |row| row[i].min(raw_scale));
                 let (low, high) = outline::bounds(&shape);
                 let origin = fitted.map_or(Vec2::ZERO, |f| {

@@ -820,7 +820,7 @@ impl Router {
         if distance[end] == u64::MAX {
             return Err(RouteFailure::Disconnected);
         }
-        let mut path = vec![target];
+        let mut path = vec![point(end)];
         let mut node = end;
         while node != start {
             node = previous[node];
@@ -899,6 +899,24 @@ fn simplify_path(path: &[Vec2]) -> Vec<Vec2> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn near_coincident_gutters_keep_route_segments_axis_aligned() {
+        let cells = [
+            Rect::from_corners(Vec2::new(-20.0, -10.0), Vec2::ZERO),
+            Rect::from_corners(Vec2::new(0.0, -10.0), Vec2::new(20.0, 0.0004)),
+        ];
+        let points = Router::default()
+            .route(Vec2::new(-10.0, 0.0), Vec2::new(10.0, 0.0004), &cells)
+            .unwrap();
+        assert!(points.windows(2).all(|pair| {
+            pair[0].x.to_bits() == pair[1].x.to_bits()
+                || pair[0].y.to_bits() == pair[1].y.to_bits()
+        }));
+        assert!(points.iter().all(|&point| on_network(point, &cells)));
+        assert!(
+            points.last().unwrap().distance(Vec2::new(10.0, 0.0004)) < JUNCTION_EPSILON
+        );
+    }
     #[test]
     fn faded_contributor_returns_from_the_moved_gutter() {
         let mut events = Vec::new();
