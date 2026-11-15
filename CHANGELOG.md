@@ -5,7 +5,7 @@ All notable changes to Codestrand are documented here, following
 
 ## Unreleased
 
-## 0.2.0 - 2026-11-16
+## v0.2.0 - 2026-11-16
 
 Watch the [feature tour video](https://youtu.be/gmueXAHnvAE).
 

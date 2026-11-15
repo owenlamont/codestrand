@@ -36,7 +36,7 @@ def release_notes(changelog: str, version: str) -> str:
     matches = [
         (index, bounds)
         for index, (heading, bounds) in enumerate(sections)
-        if heading.removeprefix("v").split(" - ", 1)[0] == version.removeprefix("v")
+        if heading == version or heading.startswith(f"{version} - ")
     ]
     if len(matches) != 1:
         raise ValueError(
