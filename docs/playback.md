@@ -166,9 +166,9 @@ and Bevelled Desktop keep constant ink brightness; touched files still receive
 activity outlines.
 
 `--heat-half-life 3` sets the cooling half-life in canonical playback seconds for
-preview and export (default `3`, accepted range `0.01` through `86400`). Live speed
-keys speed up cooling along with the rest of playback. Export cooling uses explicit
-frame times. Files settled before the inclusive start date begin cold.
+preview and export (default `3`, accepted range `0.01` through `86400`, inclusive).
+Live speed keys speed up cooling along with the rest of playback. Export cooling uses
+explicit frame times. Files settled before the inclusive start date begin cold.
 
 ```sh
 codestrand export frames --heat-half-life 3 --frames 90 --fps 30
@@ -268,13 +268,13 @@ The usable content area leaves an eight-pixel edge inset; corner titles retain t
 existing placement rules. Invisible archived content cannot constrain earlier zoom.
 
 A newcomer splits one existing tile or subtree. Other repositories retain their
-relative order. Splits clamp to a ground-aspect range of 1:2.5 to 2.5:1 and a
-144-by-64 reference-pixel floor. Births ease for up to 0.75 playback seconds
+relative order. Splits clamp to a ground-aspect range of 1:2.5 to 2.5:1, inclusive,
+and a 144-by-64 reference-pixel floor. Births ease for up to 0.75 playback seconds
 before their first commit; births near the lead-in use the available lead-in time.
 Aspect and size clamps scale with presence during the transition. Tiles and shared
 gutters partition the whole inset field. `--gutter` sets the visible spacing in
-1280×720 reference pixels: default `4`, range `0`–`20`, including touching tiles at
-`0`. Avatars remain doubled through five repositories, then taper with a smoothstep
+1280×720 reference pixels: default `4`, range `0`–`20`, inclusive, including touching
+tiles at `0`. Avatars remain doubled through five repositories, then taper with a smoothstep
 curve to the original diameter at thirty. Crowd scaling also remains active.
 Names prefer clear content rectangles, including repository labels
 and a small margin, but may overlap content near tile edges when space is tight.
@@ -444,8 +444,8 @@ codestrand preview --repository /path/to/repository --start-date 2026-05-01 --en
 
 Pacing preserves within-day timestamp spacing. Coincident, reversed or very close
 timestamps get a 0.05-second minimum gap, limited by the idle cap, preserving commit
-order. Seconds per day accepts `0.01` through `86400`; the idle cap must also be at
-least one simulation tick (1/60 second).
+order. Seconds per day accepts `0.01` through `86400`, inclusive; the idle cap must
+also be at least one simulation tick (1/60 second).
 
 Live speed keys move through the canonical timeline faster or slower without
 changing commit times, layout, pulses, beams, avatar motion, settling or fades in
@@ -489,17 +489,19 @@ serif labels.
 Theme switching restyles active snippets without restarting their motion or fade.
 
 Snippet text keeps the font's natural proportions with equal X and Y scaling.
-Lines are cut at 88 characters. Samples smoothly appear between 6 and 14 projected
-beam-diameter pixels. Visible text stays between 14 and 20 logical pixels high, making
-close oblique shots readable while the overview keeps plain fragments.
+Lines are cut at 88 characters. Samples are hidden at 6 projected beam-diameter
+pixels or less and fully visible at 14 or more, with a smooth transition between.
+Visible text stays between 14 and 20 logical pixels high, inclusive, making close
+oblique shots readable while the overview keeps plain fragments.
 Text holds full contrast through the first three quarters of the fragment's alpha
 fade, then fades out with the backing.
 Overlapping snippets may overlap freely without collision or viewport-edge hiding.
 Files inside collapsed subtrees show no sample text; LOD keeps its fragment behaviour.
 
 Samples come from actual changed lines: up to three per file and twelve per commit,
-preferring lines of 16–60 bytes. Lines over 72 bytes before trimming, non-ASCII text,
-controls and trivial lines are omitted. Binary files and submodules have no samples.
+preferring lines of 16–60 bytes, inclusive. Lines over 72 bytes before trimming,
+non-ASCII text, controls and trivial lines are omitted. Binary files and submodules
+have no samples.
 Selection is deterministic; crowded commits use path order to spend the budget.
 At most twelve samples appear at once.
 

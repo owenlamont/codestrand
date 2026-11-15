@@ -19,7 +19,7 @@ CHANGELOG: Final = """# Changelog
 
 New work.
 
-## v0.2.0 - 2025-09-10
+## 0.2.0 - 2025-09-10
 
 No user-facing changes.
 
@@ -42,6 +42,11 @@ def test_release_notes_extract_only_the_exact_version() -> None:
     ("source", "version"),
     [
         pytest.param(CHANGELOG, "v0.3.0", id="missing version"),
+        pytest.param(
+            "## v0.2.0\n\nOld.\n\n## 0.2.0 - 2025-09-10\n\nNew.\n",
+            "v0.2.0",
+            id="duplicate with mixed version prefixes",
+        ),
         pytest.param(
             "## v0.1.0\n\n## v0.1.0\n\nDuplicate.\n", "v0.1.0", id="duplicate version"
         ),

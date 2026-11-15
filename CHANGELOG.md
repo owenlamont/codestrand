@@ -5,27 +5,36 @@ All notable changes to Codestrand are documented here, following
 
 ## Unreleased
 
+## 0.2.0 - 2026-11-16
+
 Watch the [feature tour video](https://youtu.be/gmueXAHnvAE).
 
 ### Added
 
-- `--start-date YYYY-MM-DD` selects playback from a UTC author date, settling earlier
-  commits before playback.
-  ([#152](https://github.com/owenlamont/codestrand/pull/152))
+- Play full histories across many repositories with windowed planning streamed to
+  the renderer and planning progress in preview and export.
+  ([#153](https://github.com/owenlamont/codestrand/pull/153))
+- Select an inclusive UTC date range with `--start-date` and `--end-date`, including
+  the whole end day; earlier commits settle before playback.
+  ([#152](https://github.com/owenlamont/codestrand/pull/152),
+  [#153](https://github.com/owenlamont/codestrand/pull/153))
+- Security documentation covering local inputs, network opt-ins and resource limits.
+  ([#153](https://github.com/owenlamont/codestrand/pull/153))
 - Native Wayland preview windows on Linux alongside X11 support.
   ([#144](https://github.com/owenlamont/codestrand/pull/144))
 - Play several local repositories as tiles on one shared timeline, from repeated
   `--repository` flags or `--repositories-file`, with contributors travelling along
-  gutters between tiles. Adds `--travel-cap`, `--bot-travel`, `--avatar-scale`,
+  gutters between tiles. Adds `--contributor-travel`, `--bot-travel`, `--avatar-scale`,
   `--gutter`, `--caption-style`, `--repository-boundary` and
   `--repository-label-plane`.
-  ([#94](https://github.com/owenlamont/codestrand/pull/94))
+  ([#94](https://github.com/owenlamont/codestrand/pull/94),
+  [#153](https://github.com/owenlamont/codestrand/pull/153))
 - Contributors and repositories appear, depart and fade; `--contributor-inactivity-days`
   sets when a quiet contributor is assumed to have left, and repository lists can mark
   repositories `archived` or `ended`.
   ([#98](https://github.com/owenlamont/codestrand/pull/98))
 - Pace playback by calendar days with `--seconds-per-day` and `--max-idle-seconds`;
-  `[` and `]` change live preview speed from 0.125x to 8x.
+  `[` and `]` change live preview speed from 0.125x to 8x, inclusive.
   ([#63](https://github.com/owenlamont/codestrand/pull/63),
   [#66](https://github.com/owenlamont/codestrand/pull/66))
 - Six more themes, `phosphor`, `outrun`, `blueprint`, `bevelled-desktop`, `atlas` and
@@ -34,11 +43,11 @@ Watch the [feature tour video](https://youtu.be/gmueXAHnvAE).
   [#83](https://github.com/owenlamont/codestrand/pull/83))
 - Files heat up on each touch and cool with `--heat-half-life`.
   ([#77](https://github.com/owenlamont/codestrand/pull/77))
-- Sampled added and removed source lines travel beside changed files;
-  `--no-diff-samples` hides them and `--diff-text-distance` reveals them from farther
-  away.
+- Sampled added and removed source lines appear beside changed files at close zoom;
+  `--no-diff-samples` hides them.
   ([#78](https://github.com/owenlamont/codestrand/pull/78),
-  [#135](https://github.com/owenlamont/codestrand/pull/135))
+  [#135](https://github.com/owenlamont/codestrand/pull/135),
+  [#153](https://github.com/owenlamont/codestrand/pull/153))
 - Small directory subtrees collapse into folder glyphs at overview zoom;
   `--collapse-directories off` keeps every file visible.
   ([#79](https://github.com/owenlamont/codestrand/pull/79),
@@ -73,6 +82,20 @@ Watch the [feature tour video](https://youtu.be/gmueXAHnvAE).
 
 ### Changed
 
+- Preview and export play the current repository by default.
+  ([#153](https://github.com/owenlamont/codestrand/pull/153))
+- Exact timeline time preserves frame timing throughout long histories.
+  ([#153](https://github.com/owenlamont/codestrand/pull/153))
+- Truncated imports are refused unless `--allow-truncated-history` is set; planning
+  is refused when its memory estimate exceeds available memory.
+  ([#153](https://github.com/owenlamont/codestrand/pull/153))
+- `--contributor-travel auto` walks short trips and fades longer ones;
+  `--contributor-travel walk` always walks, alongside the `--bot-travel` choice.
+  ([#153](https://github.com/owenlamont/codestrand/pull/153))
+- Repository `ended` dates include the whole named UTC day.
+  ([#153](https://github.com/owenlamont/codestrand/pull/153))
+- Installed release wheels must render two frames before publication.
+  ([#153](https://github.com/owenlamont/codestrand/pull/153))
 - Directory layout is planned over the whole history, so directories never overlap
   and file movement speed is capped.
   ([#66](https://github.com/owenlamont/codestrand/pull/66))
@@ -116,6 +139,12 @@ Watch the [feature tour video](https://youtu.be/gmueXAHnvAE).
 - Contributor names with accented, Cyrillic or other non-ASCII characters render
   through bundled IBM Plex Mono and installed system fonts.
   ([#122](https://github.com/owenlamont/codestrand/pull/122))
+
+### Removed
+
+- The built-in demo user mode and positional commit-range controls; use a local
+  repository and inclusive date bounds instead.
+  ([#153](https://github.com/owenlamont/codestrand/pull/153))
 
 ## v0.1.1
 

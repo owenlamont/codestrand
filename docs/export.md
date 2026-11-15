@@ -21,7 +21,7 @@ codestrand export hd-frames --resolution 1920x1080 --frames 2
 codestrand export uhd-frames --resolution 3840x2160 --frames 2
 ```
 
-Each side accepts 64–8192 pixels, with at most 33,554,432 pixels per frame
+Each side accepts 64–8192 pixels, inclusive, with at most 33,554,432 pixels per frame
 (including 7680×4320). The graphics adapter must support the selected texture size
 and have enough memory. Both PNG and video exports render at the selected size
 from the start. No upscaling is used. The default H.264 encoder needs even dimensions;
@@ -129,8 +129,8 @@ codestrand export camera-frames --camera-path camera-path.toml \
   --frames 241 --fps 30 --video camera.mkv --ffmpeg-arg=-c:v --ffmpeg-arg=ffv1
 ```
 
-The file requires `fps` (1–240) and one or more `[[key]]` tables. Each key requires
-an unsigned `frame`, `eye` and `focus`. Frames must increase strictly. Key seconds
+The file requires `fps` (1–240, inclusive) and one or more `[[key]]` tables. Each key
+requires an unsigned `frame`, `eye` and `focus`. Frames must increase strictly. Key seconds
 are `frame / file fps`; export `--fps` samples the same path at its own rate.
 A path never changes playback speed or export duration. Frame zero follows the
 selected inclusive start date; before the first key and after the last, the endpoint key
