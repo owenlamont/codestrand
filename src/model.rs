@@ -857,10 +857,13 @@ impl Simulation {
             active[event.repository] = true;
         }
         let geometry = self.state.geometry;
-        let mut samples = vec![self.layout().local_regions(&active, geometry)];
         let mut sampled_events = 0;
         let ticks = frames_for(self.duration(), 60)
             .expect("multi-repository playback fits the supported frame range");
+        let mut samples = crate::layout::packing::Inputs::new(
+            usize::try_from(ticks).expect("bounded packing ticks") + 1,
+        );
+        samples.push(self.layout().local_regions(&active, geometry));
         for tick in 0..ticks {
             self.progress
                 .report(Stage::Layout, tick.into(), ticks.into());
@@ -885,14 +888,11 @@ impl Simulation {
                     usize::try_from(self.schedule.padding(index))
                         .expect("bounded padding"),
                 );
-                let files = samples[arrival][event.repository].files;
-                for row in &mut samples[begin..arrival] {
-                    row[event.repository].files = files;
-                }
+                samples.anticipate_files(event.repository, begin, arrival);
             }
         }
-        self.packing = crate::layout::packing::Packing::with_gutter(
-            &samples,
+        self.packing = crate::layout::packing::Packing::from_inputs(
+            samples,
             self.state.gutter,
             uncapped.then_some(activation.as_slice()),
         )?

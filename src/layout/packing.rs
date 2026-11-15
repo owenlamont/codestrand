@@ -532,19 +532,62 @@ pub(crate) struct Packing {
 struct Input {
     low: Vec2,
     high: Vec2,
-    outline: Vec<Vec2>,
+    outline: Box<[Vec2]>,
     height: f32,
     live: bool,
 }
 
-impl From<&RepositoryRegion> for Input {
-    fn from(region: &RepositoryRegion) -> Self {
+impl From<RepositoryRegion> for Input {
+    fn from(region: RepositoryRegion) -> Self {
         Self {
             low: region.low,
             high: region.high,
-            outline: region.outline.clone(),
+            outline: region.outline.into_boxed_slice(),
             height: region.height,
             live: region.live,
+        }
+    }
+}
+
+pub(crate) struct Inputs {
+    labels: Vec<String>,
+    rows: Vec<Vec<Input>>,
+    files: Vec<Vec<f32>>,
+}
+
+impl Inputs {
+    pub(crate) fn new(ticks: usize) -> Self {
+        Self {
+            labels: Vec::new(),
+            rows: Vec::with_capacity(ticks),
+            files: Vec::with_capacity(ticks),
+        }
+    }
+
+    pub(crate) fn push(&mut self, regions: Vec<RepositoryRegion>) {
+        if self.rows.is_empty() {
+            self.labels = regions.iter().map(|region| region.label.clone()).collect();
+        }
+        let (rows, files) = regions
+            .into_iter()
+            .map(|region| {
+                let files = region.files;
+                (Input::from(region), files)
+            })
+            .unzip();
+        self.rows.push(rows);
+        self.files.push(files);
+    }
+
+    pub(crate) fn anticipate_files(
+        &mut self,
+        repository: usize,
+        begin: usize,
+        arrival: usize,
+    ) {
+        let files = self.files[arrival][repository];
+        for row in &mut self.files[begin..arrival] {
+            row[repository] = files;
         }
     }
 }
@@ -554,7 +597,7 @@ impl Input {
             label: label.to_owned(),
             low: self.low,
             high: self.high,
-            outline: self.outline.clone(),
+            outline: self.outline.to_vec(),
             height: self.height,
             live: self.live,
             files: 0.0,
@@ -567,7 +610,7 @@ impl Input {
 
 fn rotations(
     nodes: &[Node],
-    regions: &[Vec<RepositoryRegion>],
+    regions: &[Vec<Input>],
     samples: &[Sample],
     gutter_scale: f32,
 ) -> Vec<bool> {
@@ -602,6 +645,16 @@ impl Packing {
             + 3 * std::mem::size_of::<f32>()
     }
 
+    pub(crate) fn row_bytes() -> usize {
+        std::mem::size_of::<Vec<Input>>()
+            + std::mem::size_of::<Sample>()
+            + std::mem::size_of::<Vec<f32>>()
+    }
+
+    pub(crate) fn conversion_bytes() -> usize {
+        std::mem::size_of::<Sample>()
+    }
+
     pub(crate) fn with_endings(
         mut self,
         endings: &[crate::model::Time],
@@ -632,12 +685,30 @@ impl Packing {
         Self::with_gutter(regions, 4.0, None).unwrap()
     }
 
+    #[cfg(test)]
     pub(crate) fn with_gutter(
         regions: &[Vec<RepositoryRegion>],
         gutter_scale: f32,
         activation: Option<&[u32]>,
     ) -> Result<Self, CapacityError> {
+        let mut inputs = Inputs::new(regions.len());
+        for row in regions {
+            inputs.push(row.clone());
+        }
+        Self::from_inputs(inputs, gutter_scale, activation)
+    }
+
+    pub(crate) fn from_inputs(
+        inputs: Inputs,
+        gutter_scale: f32,
+        activation: Option<&[u32]>,
+    ) -> Result<Self, CapacityError> {
         let started = std::time::Instant::now();
+        let Inputs {
+            labels,
+            rows: regions,
+            files,
+        } = inputs;
         let Some(first) = regions.first().filter(|r| !r.is_empty()) else {
             return Ok(Self::default());
         };
@@ -655,7 +726,7 @@ impl Packing {
                 .get(position + 1)
                 .map_or(regions.len(), |&j| births[j].min(regions.len()))
                 .max(begin + 1);
-            let (weights, aspects) = birth_weights(regions, &born, begin, end);
+            let (weights, aspects) = birth_weights(&regions, &files, &born, begin, end);
             insert(&mut nodes, i, &weights, &aspects, gutter_scale)?;
         }
         let alpha = 1.0 - (-crate::model::tick_seconds() / 0.25).exp();
@@ -665,8 +736,8 @@ impl Packing {
             .iter()
             .enumerate()
             .map(|(tick, row)| {
-                for (weight, r) in weights.iter_mut().zip(row) {
-                    *weight = weight.lerp(r.files.max(1.0).sqrt(), alpha);
+                for (weight, files) in weights.iter_mut().zip(&files[tick]) {
+                    *weight = weight.lerp(files.max(1.0).sqrt(), alpha);
                 }
                 let mut presence: Vec<_> = row
                     .iter()
@@ -708,21 +779,19 @@ impl Packing {
                 }
             })
             .collect();
-        let rotated = rotations(&nodes, regions, &samples, gutter_scale);
+        let rotated = rotations(&nodes, &regions, &samples, gutter_scale);
         eprintln!(
             "treemap_plan_seconds={:.6} samples={} repositories={}",
             started.elapsed().as_secs_f64(),
             regions.len(),
             first.len()
         );
+        drop(files);
         Ok(Self {
             gutter_scale,
             nodes,
-            labels: first.iter().map(|r| r.label.clone()).collect(),
-            inputs: regions
-                .iter()
-                .map(|row| row.iter().map(Input::from).collect())
-                .collect(),
+            labels: labels.into(),
+            inputs: regions.into(),
             samples: samples.into(),
             rotated,
             zoom: Arc::default(),
@@ -945,7 +1014,8 @@ impl Packing {
 }
 
 fn birth_weights(
-    regions: &[Vec<RepositoryRegion>],
+    regions: &[Vec<Input>],
+    files: &[Vec<f32>],
     born: &[bool],
     begin: usize,
     end: usize,
@@ -953,9 +1023,9 @@ fn birth_weights(
     let mut weights = vec![0.0; born.len()];
     let mut aspects = vec![1.0; born.len()];
     for (j, _) in born.iter().enumerate().filter(|(_, live)| **live) {
-        weights[j] = regions[begin..end]
+        weights[j] = files[begin..end]
             .iter()
-            .map(|r| r[j].files.max(1.0).sqrt())
+            .map(|row| row[j].max(1.0).sqrt())
             .sum::<f32>()
             / crate::model::count_u32(
                 u32::try_from(end - begin).expect("bounded timeline"),

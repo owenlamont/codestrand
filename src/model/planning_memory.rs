@@ -62,9 +62,16 @@ pub(super) fn check(
         .iter()
         .map(|label| label.len() as u128)
         .sum::<u128>();
-    let region_bytes = size_of::<RepositoryRegion>()
-        + crate::layout::outline::NORMALS.len() * size_of::<bevy::math::Vec2>()
-        + crate::layout::packing::Packing::input_bytes();
+    let packing_bytes = regions
+        * crate::layout::packing::Packing::input_bytes() as u128
+        + history_frames * crate::layout::packing::Packing::row_bytes() as u128;
+    let conversion =
+        history_frames * crate::layout::packing::Packing::conversion_bytes() as u128;
+    let row_bytes = repositories.len() as u128
+        * (size_of::<RepositoryRegion>()
+            + crate::layout::outline::NORMALS.len() * size_of::<bevy::math::Vec2>())
+            as u128
+        + labels;
     let changes = events
         .iter()
         .map(|event| event.changes.len() as u128)
@@ -74,18 +81,21 @@ pub(super) fn check(
         .flat_map(|event| &event.changes)
         .map(|change| change.path.len() as u128)
         .sum::<u128>();
+    let input = changes * size_of::<FileChange>() as u128
+        + events.len() as u128 * size_of::<Event>() as u128
+        + paths;
+    let (layout, layout_peak) =
+        layout_bytes(events, options, &history, repositories.len());
+    // Resident code and allocator bookkeeping remain outside the retained payloads.
+    let overhead = 64 * 1024 * 1024 + regions * 16 + history_frames * 3 * 16;
+    let retained = packing_bytes + labels + layout + input + overhead;
+    let global = (packing_bytes + conversion + row_bytes + labels + layout + input * 2)
+        .max(layout_peak + input * 3)
+        + overhead;
+    eprintln!(
+        "planning_memory_parts packing={packing_bytes} layout_retained={layout} layout_peak={layout_peak} input={input} overhead={overhead} global={global}"
+    );
     if options.travel_window_seconds.is_some() {
-        let input = changes * (3 * size_of::<FileChange>()) as u128
-            + events.len() as u128 * (3 * size_of::<Event>()) as u128
-            + paths * 3;
-        let layout = layout_bytes(events, options, &history)?;
-        let retained = regions * crate::layout::packing::Packing::input_bytes() as u128
-            + layout
-            + input / 3;
-        let global = regions * region_bytes as u128
-            + (history_frames + 1) * labels
-            + layout
-            + input;
         return check_streaming(
             events,
             selected,
@@ -96,14 +106,11 @@ pub(super) fn check(
             (retained, global),
         );
     }
-    let bytes = regions * region_bytes as u128
-        + (history_frames + 1) * labels
-        + pose_bytes.max(snapshot_bytes)
-        + frames * (8 * size_of::<Vec<()>>()) as u128
-        + changes * (3 * size_of::<FileChange>()) as u128
-        + events.len() as u128 * (3 * size_of::<Event>()) as u128
-        + paths * 3
-        + layout_bytes(events, options, &history)?;
+    let bytes = global.max(
+        retained
+            + pose_bytes.max(snapshot_bytes)
+            + frames * (8 * size_of::<Vec<()>>()) as u128,
+    );
     check_bytes(bytes, options.available_memory)
 }
 
@@ -144,16 +151,30 @@ fn checkpoint_bytes(events: &[Event], repositories: usize) -> u128 {
                 .sum::<u128>()
         })
         .sum::<u128>();
-    let services = events.len() as u128
-        * (std::mem::size_of::<super::Avatar>()
-            + std::mem::size_of::<super::Pulse>()
-            + 512) as u128;
+    let services = author_count(events) * (size_of::<super::Avatar>() + 512) as u128
+        + events.len() as u128 * size_of::<super::Pulse>() as u128;
     files
         + directory_bytes
         + pulse_data
         + services
         + repositories as u128 * 1024
         + std::mem::size_of::<super::State>() as u128
+}
+
+fn author_count(events: &[Event]) -> u128 {
+    events
+        .iter()
+        .map(|event| {
+            let identity = event.contributor.as_ref().map(|c| &c.key);
+            (
+                identity,
+                identity
+                    .is_none()
+                    .then_some((&event.author.name, &event.author.email)),
+            )
+        })
+        .collect::<HashSet<_>>()
+        .len() as u128
 }
 
 fn check_bytes(bytes: u128, available: u64) -> anyhow::Result<()> {
@@ -195,17 +216,24 @@ fn layout_bytes(
     events: &[Event],
     options: &Options,
     selected: &Schedule,
-) -> anyhow::Result<u128> {
-    let mut directories = HashSet::new();
-    for change in events.iter().flat_map(|event| &event.changes) {
-        let source = match &change.kind {
-            Kind::Moved { from } => Some(from.as_str()),
-            _ => None,
-        };
-        for mut path in std::iter::once(change.path.as_str()).chain(source) {
-            while let Some((parent, _)) = path.rsplit_once('/') {
-                directories.insert(parent);
-                path = parent;
+    repositories: usize,
+) -> (u128, u128) {
+    let mut directories = vec![HashSet::from([""]); repositories];
+    let prefixes: Vec<_> = (0..repositories).map(crate::repositories::prefix).collect();
+    for event in events {
+        for change in &event.changes {
+            let source = match &change.kind {
+                Kind::Moved { from } => Some(from.as_str()),
+                _ => None,
+            };
+            for path in std::iter::once(change.path.as_str()).chain(source) {
+                let mut path = path
+                    .strip_prefix(&prefixes[event.repository])
+                    .unwrap_or(path);
+                while let Some((parent, _)) = path.rsplit_once('/') {
+                    directories[event.repository].insert(parent);
+                    path = parent;
+                }
             }
         }
     }
@@ -220,9 +248,22 @@ fn layout_bytes(
                 .map_or(0, |index| selected.padding(index))
         },
     );
-    let ticks = u128::from(frames_for(schedule.duration(), 60)?);
-    let samples = ticks / (ticks / 8192 + 1).max(15) + 2;
-    Ok((directories.len() as u128 + 1) * samples * 64)
+    let mut ends = vec![super::Time::seconds(0.5); repositories];
+    for (event, &start) in events.iter().zip(&schedule.starts) {
+        ends[event.repository] = start;
+    }
+    directories
+        .iter()
+        .zip(ends)
+        .fold((0, 0), |(retained, peak), (dirs, end)| {
+            let ticks = u128::from((end + 2.5).ticks(true));
+            let samples = ticks / (ticks / 8192 + 1).max(15) + 2;
+            let rows = dirs.len() as u128;
+            (
+                retained + rows * (samples * 8 + 24),
+                peak + rows * (samples * 16 + 72) + samples * 128,
+            )
+        })
 }
 
 fn check_streaming(
@@ -248,19 +289,7 @@ fn check_streaming(
         begin += seconds;
     }
     let frames = u128::from(travel::seconds_ticks(span, true)) + 145;
-    let authors = selected
-        .iter()
-        .map(|event| {
-            let identity = event.contributor.as_ref().map(|c| &c.key);
-            (
-                identity,
-                identity
-                    .is_none()
-                    .then_some((&event.author.name, &event.author.email)),
-            )
-        })
-        .collect::<HashSet<_>>()
-        .len() as u128;
+    let authors = author_count(selected);
     let window = frames
         * (authors
             * (2 * size_of::<travel::Pose>() + 3 * size_of::<bevy::math::Vec2>())

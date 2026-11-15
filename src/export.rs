@@ -597,13 +597,24 @@ mod tests {
         }
     }
 
+    fn sample_memory() -> u64 {
+        let available_memory = std::env::var("CODESTRAND_SAMPLE_MEMORY_BYTES")
+            .map_or_else(
+                |_| model::Options::default().available_memory,
+                |value| value.parse().expect("injected available memory in bytes"),
+            );
+        eprintln!("sample_available_memory_bytes={available_memory}");
+        available_memory
+    }
+
     #[test]
     #[ignore = "requires a graphics adapter and an explicit history fixture"]
     fn streaming_history_sample_export() {
         let (source, output) = sample_source();
         let started = Instant::now();
-        let (simulation, title) =
-            source.load(&crate::progress::Progress::default()).unwrap();
+        let (simulation, title) = source
+            .load_with_memory(&crate::progress::Progress::default(), sample_memory())
+            .unwrap();
         eprintln!(
             "sample_first_window_seconds={}",
             started.elapsed().as_secs_f64()
