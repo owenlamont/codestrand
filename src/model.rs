@@ -472,6 +472,7 @@ impl Simulation {
         options: &Options,
         repositories: &[String],
     ) -> anyhow::Result<()> {
+        Self::check_repository_endings(events, options, repositories)?;
         let schedule = Schedule::with_padding(
             &events[options.selected_range(events.len())],
             options.seconds_per_day,
@@ -479,6 +480,40 @@ impl Simulation {
             |_| 0,
         );
         Self::check_schedule(events, options, repositories, &schedule)
+    }
+
+    fn check_repository_endings(
+        events: &[Event],
+        options: &Options,
+        repositories: &[String],
+    ) -> anyhow::Result<()> {
+        let mut latest = i64::MIN;
+        let mut required = vec![i64::MIN; repositories.len()];
+        let mut first = None;
+        for (index, event) in events.iter().enumerate() {
+            latest = latest.max(event.seconds);
+            required[event.repository] = latest;
+            if let Some(ending) = options
+                .repository_ends
+                .get(event.repository)
+                .copied()
+                .flatten()
+                .filter(|&ending| latest >= ending)
+            {
+                first.get_or_insert((index, event, ending));
+            }
+        }
+        if let Some((index, event, ending)) = first {
+            anyhow::bail!(
+                "repository '{}' has ended = '{}' UTC (inclusive), but commit {} at imported position {} falls after that ending in history order; set ended to '{}' or later, inclusive, or remove ended",
+                crate::terminal_escape(&repositories[event.repository]),
+                date(ending.saturating_sub(1)),
+                event.commit,
+                index + 1,
+                date(required[event.repository]),
+            );
+        }
+        Ok(())
     }
 
     fn check_schedule(
@@ -2430,6 +2465,79 @@ mod tests {
 
     use super::*;
 
+    fn ending_events(rows: &[(usize, i64)]) -> Vec<Event> {
+        rows.iter()
+            .enumerate()
+            .map(|(index, &(repository, seconds))| {
+                let mut event = crate::timeline::synthetic().remove(0);
+                event.commit = format!("commit-{index}");
+                event.seconds = seconds;
+                crate::repositories::namespace(
+                    std::slice::from_mut(&mut event),
+                    repository,
+                );
+                event
+            })
+            .collect()
+    }
+
+    #[test]
+    fn repository_endings_validate_the_whole_imported_order() {
+        let day = 86_400;
+        let ending = crate::repositories::parse_ended("1970-01-02").unwrap();
+        let cases = [
+            (vec![(0, 0), (0, 2 * day)], 0, 1, "1970-01-03"),
+            (vec![(0, 0), (1, 4 * day), (0, 0)], 0, 2, "1970-01-05"),
+            (vec![(0, 0), (0, 3 * day)], 1, 1, "1970-01-04"),
+        ];
+        for (rows, start, offending, remedy) in cases {
+            let options = Options {
+                repository_ends: vec![Some(ending), None],
+                start,
+                commits: Some(1),
+                ..Options::default()
+            };
+            let result = Simulation::try_with_repositories(
+                ending_events(&rows),
+                &options,
+                &Theme::neon(),
+                &Mappings::default(),
+                &["Ended".into(), "Other".into()],
+            );
+            let Err(error) = result else {
+                panic!("ending must reject commit {offending}")
+            };
+            let message = error.to_string();
+            assert!(message.contains("repository 'Ended'"), "{message}");
+            assert!(message.contains("'1970-01-02' UTC (inclusive)"));
+            assert!(message.contains(&format!("commit commit-{offending}")));
+            assert!(message.contains(&format!("set ended to '{remedy}'")));
+        }
+    }
+
+    #[test]
+    fn ending_day_is_inclusive_and_an_ended_repository_can_precede_the_start() {
+        let day = 86_400;
+        let ending = crate::repositories::parse_ended("1970-01-02").unwrap();
+        for (rows, start) in [
+            (vec![(0, day), (0, 2 * day - 1)], 0),
+            (vec![(0, day), (1, 4 * day)], 1),
+        ] {
+            let options = Options {
+                repository_ends: vec![Some(ending), None],
+                start,
+                ..Options::default()
+            };
+            Simulation::try_with_repositories(
+                ending_events(&rows),
+                &options,
+                &Theme::neon(),
+                &Mappings::default(),
+                &["Ended".into(), "Other".into()],
+            )
+            .unwrap();
+        }
+    }
     #[test]
     fn automatic_windows_keep_short_selected_histories_in_one_plan() {
         let mut event = crate::timeline::synthetic().remove(0);

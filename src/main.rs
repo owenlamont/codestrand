@@ -207,13 +207,13 @@ struct Source {
     /// Select opted-in GitLab cache entries offline; allow email lookup with --fetch-avatars.
     #[arg(long)]
     gitlab_email_avatars: bool,
-    /// Commits laid out and settled before playback begins.
+    /// Skip this many commits; the zero-based start index is inclusive.
     #[arg(long, default_value_t = 0)]
     start: usize,
-    /// Begin at the first commit authored on or after this UTC date, settling earlier commits.
+    /// Begin at the first commit on or after this UTC date, inclusive; settle earlier commits.
     #[arg(long, value_name = "YYYY-MM-DD", value_parser = start_date, conflicts_with = "start")]
     start_date: Option<i64>,
-    /// Commits to play after the start; defaults to the rest of the history.
+    /// Play this many commits: start inclusive, start plus count exclusive; default all remaining.
     #[arg(long)]
     commits: Option<usize>,
     /// Canonical timeline seconds per calendar day; live speed keys leave the timeline fixed.

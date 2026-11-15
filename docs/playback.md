@@ -205,8 +205,13 @@ fewer repositories.
 
 `archived = true` ends a repository after the final commit in the selected revision,
 once the commit's activity finishes. `ended = "YYYY-MM-DD"` supplies an explicit UTC
-ending date and overrides `archived`, for example after deletion. Neither field fetches
-platform metadata. Without either field the repository remains visible.
+ending date and overrides `archived`, for example after deletion. The repository is
+shown through the end of that day, inclusive: `ended = "2026-05-01"` includes all of
+1 May UTC and begins ending at 00:00 UTC on 2 May. A commit after the ending in
+imported history order is an error, even when a rebased commit has an older author
+date. The error names the first offending commit and a valid ending date.
+Neither field fetches platform metadata. Without either field the repository remains
+visible.
 An ending before the selected playback interval is already complete when playback starts.
 
 The ending tile, files and directories grey, rise and fade over 2.5 playback seconds.
@@ -421,11 +426,13 @@ codestrand preview --repository /path/to/repository --start 0 --commits 20 \
   --seconds-per-day 2 --max-idle-seconds 1
 ```
 
-- `--start`: commits laid out and settled before playback; default `0`.
+- `--start`: commits laid out and settled before playback; default `0`. The zero-based
+  start index is inclusive.
 - `--start-date YYYY-MM-DD`: begin at the first commit in merged history order authored
-  on or after 00:00 UTC that day, settling preceding commits as with `--start`.
+  on or after 00:00 UTC that day, inclusive, settling preceding commits as with `--start`.
   Conflicts with `--start`; dates after the history report the last commit date.
-- `--commits`: commits to play after the start; default all remaining commits.
+- `--commits`: number of commits to play; default all remaining commits. The selected
+  start is inclusive and start plus this count is exclusive.
 - `--seconds-per-day`: timeline seconds per calendar day; default `0.5`.
 - `--max-idle-seconds`: maximum timeline gap between commits; default `1`.
 

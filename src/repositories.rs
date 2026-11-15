@@ -158,7 +158,7 @@ pub(super) fn parse_ended(value: &str) -> anyhow::Result<i64> {
         crate::model::date(low * 86_400) == value,
         "ended must be a valid UTC date YYYY-MM-DD"
     );
-    Ok(low * 86_400)
+    Ok((low + 1) * 86_400)
 }
 
 pub(super) fn prefix(index: usize) -> String {
@@ -226,7 +226,7 @@ mod tests {
         }
         assert_eq!(
             crate::model::date(parse_ended("2026-05-01").unwrap()),
-            "2026-05-01"
+            "2026-05-02"
         );
         let repository: Repository =
             toml::from_str("path='repo'\narchived=true\nended='2026-05-01'").unwrap();
