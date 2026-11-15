@@ -10,7 +10,8 @@ and wider windows show more scene. See [Export](export.md) for native output siz
 Preview opens its window at once and shows planning progress until playback is ready.
 For long histories, the first frame appears while later history is still being
 planned. Playback pauses if planning falls behind, then resumes without skipping
-history. Rewinding or looping may need another planning pause.
+history. Camera controls remain active during the pause, and a small label shows
+the planning stage and percentage. Rewinding or looping may need another planning pause.
 Export prints the stage and its percentage to standard error at most once a second.
 
 Commit application times are planned ahead for the selected history and pacing.

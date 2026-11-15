@@ -627,6 +627,12 @@ pub(super) fn preview(loading: Loading) -> anyhow::Result<()> {
         )
         .add_systems(
             Update,
+            loading::waiting
+                .after(preview_clock)
+                .run_if(resource_exists::<Playback>),
+        )
+        .add_systems(
+            Update,
             preview_camera
                 .after(animate)
                 .run_if(resource_exists::<Playback>),
@@ -1311,12 +1317,6 @@ fn themed_glyph_image(svg: &str, theme: &Theme) -> Image {
 }
 
 fn preview_camera(world: &mut World, mut navigation: Local<navigation::State>) {
-    if world
-        .get_resource::<PlanningWait>()
-        .is_some_and(|wait| wait.0)
-    {
-        return;
-    }
     let input = navigation.read(world);
     let dt = world.resource::<Time<Real>>().delta_secs();
     world.resource_scope(|world, mut camera: Mut<PreviewCamera>| {
@@ -1340,12 +1340,6 @@ fn preview_camera(world: &mut World, mut navigation: Local<navigation::State>) {
 }
 
 pub(super) fn animate(world: &mut World) {
-    if world
-        .get_resource::<PlanningWait>()
-        .is_some_and(|wait| wait.0)
-    {
-        return;
-    }
     let restored = restore_lifecycle_materials(world);
     let frame = world.resource::<Frame>();
     let (index, fps) = (frame.index, frame.fps);
@@ -3387,11 +3381,25 @@ mod tests {
         world.insert_resource(Playback(simulation));
         world.insert_resource(Frame { index: 0, fps: 60 });
         world.init_resource::<ButtonInput<KeyCode>>();
+        world.init_resource::<ButtonInput<MouseButton>>();
+        world.init_resource::<bevy::input::mouse::AccumulatedMouseScroll>();
+        world.insert_resource(SceneTarget(Handle::<Image>::default().into()));
+        world.insert_resource(Title("Waiting fixture".to_owned()));
+        world.init_resource::<Pools>();
+        world.init_resource::<GreyTextures>();
+        world.init_resource::<Assets<Mesh>>();
+        world.init_resource::<Assets<Image>>();
+        world.init_resource::<Assets<StandardMaterial>>();
+        setup(&mut world);
+        let view = world.resource::<Playback>().0.view();
+        world.insert_resource(PreviewCamera::new(view));
+        world.spawn((Window::default(), bevy::window::PrimaryWindow));
         world.init_resource::<Time<Real>>();
         world
             .resource_mut::<Time<Real>>()
             .update_with_duration(std::time::Duration::ZERO);
         let clock = world.register_system(preview_clock);
+        let camera = world.register_system(preview_camera);
         world.run_system(clock).unwrap();
         for seconds in [3, 60, 60] {
             world
@@ -3400,6 +3408,18 @@ mod tests {
             world.run_system(clock).unwrap();
             assert_eq!(world.resource::<Frame>().index, 0);
             assert!(world.resource::<PlanningWait>().0);
+            let before = world.resource::<PreviewCamera>().pose();
+            world
+                .resource_mut::<ButtonInput<KeyCode>>()
+                .press(KeyCode::KeyD);
+            world.run_system(camera).unwrap();
+            animate(&mut world);
+            assert_ne!(world.resource::<PreviewCamera>().pose(), before);
+            assert_eq!(world.resource::<Frame>().index, 0);
+            assert_eq!(world.resource::<Playback>().0.seconds(), model::Time::ZERO);
+            world
+                .resource_mut::<ButtonInput<KeyCode>>()
+                .release(KeyCode::KeyD);
         }
         release.store(true, Ordering::Release);
         for _ in 0..2000 {

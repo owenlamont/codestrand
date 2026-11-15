@@ -46,6 +46,15 @@ struct Bar;
 #[derive(Component)]
 struct Label;
 
+#[derive(Component)]
+pub(super) struct WaitLabel;
+
+#[derive(Resource)]
+pub(super) struct WindowProgress {
+    updates: Mutex<mpsc::Receiver<Update>>,
+    latest: Option<Update>,
+}
+
 pub(super) fn show(mut commands: Commands) {
     commands.spawn((Screen, Camera2d));
     commands
@@ -119,13 +128,18 @@ pub(super) fn poll(world: &mut World) {
     }
     match planned {
         None => {}
-        Some(Ok(Ok((simulation, title)))) => finish(world, simulation, title),
+        Some(Ok(Ok((simulation, title)))) => finish(world, simulation, title, latest),
         Some(Ok(Err(error))) => fail(world, error),
         Some(Err(_)) => fail(world, anyhow::anyhow!("planning stopped unexpectedly")),
     }
 }
 
-fn finish(world: &mut World, simulation: Simulation, title: String) {
+fn finish(
+    world: &mut World,
+    simulation: Simulation,
+    title: String,
+    latest: Option<Update>,
+) {
     let screen: Vec<_> = world
         .query_filtered::<Entity, With<Screen>>()
         .iter(world)
@@ -133,12 +147,69 @@ fn finish(world: &mut World, simulation: Simulation, title: String) {
     for entity in screen {
         world.despawn(entity);
     }
-    world.remove_resource::<Loading>();
+    let loading = world
+        .remove_resource::<Loading>()
+        .expect("loader completed");
+    world.insert_resource(WindowProgress {
+        updates: loading.updates,
+        latest,
+    });
+    let indicator = world
+        .spawn((
+            WaitLabel,
+            Text::new("Planning next window"),
+            TextFont::from_font_size(16.0),
+            TextColor(Color::WHITE),
+            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.8)),
+            Node {
+                display: Display::None,
+                position_type: PositionType::Absolute,
+                left: px(24),
+                top: px(44),
+                padding: UiRect::axes(px(8), px(4)),
+                ..default()
+            },
+            ZIndex(10),
+        ))
+        .id();
     world.insert_resource(ClearColor(simulation.theme().clear));
     world.insert_resource(PreviewCamera::new(simulation.view()));
     world.insert_resource(Playback(simulation));
     world.insert_resource(Title(title));
     world.run_schedule(Loaded);
+    if let Ok(camera) = world
+        .query_filtered::<Entity, With<super::SceneCamera>>()
+        .single(world)
+    {
+        world.entity_mut(indicator).insert(UiTargetCamera(camera));
+    }
+}
+
+pub(super) fn waiting(
+    mut progress: ResMut<WindowProgress>,
+    wait: Option<Res<super::PlanningWait>>,
+    mut labels: Query<(&mut Text, &mut Node), With<WaitLabel>>,
+) {
+    let latest = progress
+        .updates
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .try_iter()
+        .last();
+    if latest.is_some() {
+        progress.latest = latest;
+    }
+    let waiting = wait.is_some_and(|wait| wait.0);
+    for (mut text, mut node) in &mut labels {
+        node.display = if waiting {
+            Display::Flex
+        } else {
+            Display::None
+        };
+        if let Some(update) = progress.latest {
+            text.0 = update.to_string();
+        }
+    }
 }
 
 pub(super) fn fail(world: &mut World, error: anyhow::Error) {
@@ -233,6 +304,27 @@ mod tests {
         assert_eq!(world.resource::<Built>().0, 1);
         assert_eq!(world.query::<&Screen>().iter(&world).count(), 0);
         assert!(world.resource::<Messages<AppExit>>().is_empty());
+
+        let waiting = world.register_system(waiting);
+        world.insert_resource(super::super::PlanningWait(true));
+        progress.report(Stage::Reservations, 1, 4);
+        world.run_system(waiting).unwrap();
+        let (text, node) = world
+            .query_filtered::<(&Text, &Node), With<WaitLabel>>()
+            .single(&world)
+            .unwrap();
+        assert_eq!(text.0, "Planning: reserving parking 25%");
+        assert_eq!(node.display, Display::Flex);
+        world.resource_mut::<super::super::PlanningWait>().0 = false;
+        world.run_system(waiting).unwrap();
+        assert_eq!(
+            world
+                .query_filtered::<&Node, With<WaitLabel>>()
+                .single(&world)
+                .unwrap()
+                .display,
+            Display::None
+        );
     }
 
     #[test]
