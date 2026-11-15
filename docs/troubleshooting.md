@@ -4,7 +4,7 @@
 
 Open a new terminal after installing and confirm the installation directory is on
 `PATH`. Use `codestrand --version` and `codestrand --help` to check which binary
-runs. The guides track current main; upgrade an older release if an option is
+runs. The guides describe 0.2.0; upgrade an older release if an option is
 missing. See [installation](getting-started/installation.md) for supported targets.
 
 ## Repository or revision cannot be read

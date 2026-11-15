@@ -36,7 +36,7 @@ matching changelog section:
 
 ```sh
 uv run --script scripts/licenses.py
-uv run --script scripts/changelog.py extract v0.1.1
+uv run --script scripts/changelog.py extract v0.2.0
 ```
 
 Dependabot groups Cargo requirement and GitHub Actions updates into one weekly PR.
