@@ -105,8 +105,11 @@ directly without shell expansion, after the fixed raw RGB input and before the
 video filename. Select codecs, filters, pixel format and container options there;
 input dimensions and frame rate come from Codestrand. Frame times stay explicit,
 independent of encoding speed. Stderr is drained concurrently, and failures
-include FFmpeg's diagnostic tail. Frame writes and encoder shutdown each have a
-30-second timeout; failed exports may leave a partial video and manifest.
+include FFmpeg's diagnostic tail. Frame writes have a 30-second timeout. After the
+last frame, Codestrand waits while the output file's size or modification time
+changes; 30 seconds without either changing fails the export. Finalizing a large
+video can therefore take longer than 30 seconds. Failed exports may leave a
+partial video and manifest.
 
 ## Encode PNG frames manually
 
