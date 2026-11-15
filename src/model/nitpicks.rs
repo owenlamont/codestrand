@@ -19,7 +19,7 @@ fn beam_finishes_the_last_emitted_flight_before_fading() {
         sim.advance_to(frame, 60);
         assert_labels_and_beams(&sim);
         let flying = sim.fragments().iter().any(|f| !f.rising);
-        if flying && sim.seconds() > LEAD_IN + PULSE_SECONDS {
+        if flying && sim.seconds() > Time::seconds(LEAD_IN + PULSE_SECONDS) {
             late_flight = true;
             assert!(sim.beams().iter().all(|b| b.width >= 0.999));
         }
@@ -148,9 +148,13 @@ pub(super) fn local_simulation() -> (Simulation, Vec<crate::repositories::Reposi
         .iter()
         .enumerate()
         .map(|(i, r)| {
-            let mut events =
-                crate::cache::load(&r.path, "HEAD", crate::cache::root().as_deref())
-                    .unwrap();
+            let mut events = crate::cache::load_with_options(
+                &r.path,
+                "HEAD",
+                crate::cache::root().as_deref(),
+                crate::history::Options::default(),
+            )
+            .unwrap();
             crate::repositories::namespace(&mut events, i);
             events
         })
@@ -160,11 +164,18 @@ pub(super) fn local_simulation() -> (Simulation, Vec<crate::repositories::Reposi
         &Options {
             seconds_per_day: 1.0,
             max_idle_seconds: 0.1,
-            travel_cap: std::env::var("CODESTRAND_TRAVEL_CAP")
-                .ok()
-                .map_or(Options::default().travel_cap, |value| {
-                    crate::travel_seconds(&value).unwrap()
-                }),
+            travel_cap: std::env::var("CODESTRAND_TRAVEL_CAP").ok().map_or(
+                Options::default().travel_cap,
+                |value| {
+                    if value == "none" {
+                        crate::model::TravelCap::None
+                    } else {
+                        crate::model::TravelCap::Seconds(
+                            value.parse().expect("test cap"),
+                        )
+                    }
+                },
+            ),
             gutter: std::env::var("CODESTRAND_GUTTER")
                 .ok()
                 .map_or(4.0, |v| v.parse().unwrap()),

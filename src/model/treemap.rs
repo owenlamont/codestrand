@@ -194,7 +194,7 @@ pub(crate) fn run(
         "All areas and coverage fractions use the fixed reference field, normalised to its full 1280x720 reference-unit rectangle; they are not rendered-frame fractions. Glass tiles are disjoint world rectangles represented in this field, inside a 24 reference-pixel margin plus the caption reservation below, separated by shared gutters. Largest empty rectangle is the exact maximum axis-aligned rectangle outside their union, including the margin. Content is the world-XZ AABB of current directory discs and file positions padded by their model footprint size, converted with the fixed affine field scale; not projected ground-plane area, glyph ink or opaque pixel occupancy. Content fill divides content-envelope area by tile area; overall fill is area weighted. The first repository owns the empty lead-in tile. Weights are eased square roots of live file counts; empty active repositories retain weight one until archived. Samples include every canonical 1/60 second. Content AABBs are clipped to their own tiles; actual footprints use convex outlines. Content largest-empty rectangles use fully covered cells on a 160x90 grid inside the usable tile viewport, excluding the caption reservation, with 8 reference-pixel boundary uncertainty."}),
     )?;
     writeln!(writer)?;
-    let frames = super::frames_for(simulation.duration(), 60)?;
+    let mut frames = super::frames_for(simulation.duration(), 60)?;
     let started = std::time::Instant::now();
     let placement = simulation.packing.sample(u64::from(frames));
     let elapsed = started.elapsed().as_secs_f64();
@@ -202,14 +202,20 @@ pub(crate) fn run(
     eprintln!("treemap_single_sample_seconds={elapsed:.9}");
     let mut moving_beams = super::slots::diagnostics::MovingBeams::default();
     let mut occlusion = super::occlusion::Audit::default();
-    for frame in 0..=frames {
+    let mut frame = 0;
+    loop {
+        simulation.prepare_frame(frame, 60, true)?;
+        frames = super::frames_for(simulation.duration(), 60)?;
+        if simulation.planning_complete() && frame > frames {
+            break;
+        }
         simulation.advance_to(frame, 60);
         moving_beams.observe(simulation);
         occlusion.observe(simulation);
         serde_json::to_writer(
             &mut *writer,
             &serde_json::json!({
-                "frame": frame, "seconds": super::tick_time(u64::from(frame)),
+                "frame": frame, "seconds": super::tick_time(u64::from(frame)).lossy_secs_f32(),
                 "commit": simulation.commit(), "metrics": measure(simulation.layout())
             }),
         )?;
@@ -217,6 +223,7 @@ pub(crate) fn run(
         if frame.is_multiple_of(600) {
             eprintln!("treemap frame={frame}/{frames}");
         }
+        frame += 1;
     }
     serde_json::to_writer(
         &mut *writer,

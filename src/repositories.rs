@@ -9,9 +9,20 @@ use serde::Deserialize;
 use crate::timeline::{Event, Kind};
 
 const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
-const MAX_MANIFEST_ENTRIES: usize = 4096;
 const MAX_PATH_BYTES: usize = 4096;
-pub(super) const MAX_REPOSITORIES: usize = 30;
+
+pub(super) fn discover(directory: &Path) -> anyhow::Result<PathBuf> {
+    let repository = gix::discover(directory).with_context(|| {
+        format!(
+            "no repository found from {}; pass --repository PATH",
+            directory.display()
+        )
+    })?;
+    Ok(repository
+        .workdir()
+        .unwrap_or(repository.git_dir())
+        .to_path_buf())
+}
 
 #[derive(Clone, Copy, Debug, Default, clap::ValueEnum, serde::Serialize)]
 pub(super) enum Boundary {
@@ -70,10 +81,6 @@ fn read_document(path: &Path) -> anyhow::Result<Document> {
     );
     let document: Document =
         toml::from_str(&text).context("parse repositories file")?;
-    anyhow::ensure!(
-        document.repositories.len() <= MAX_MANIFEST_ENTRIES,
-        "repositories file exceeds 4096 entries"
-    );
     Ok(document)
 }
 
@@ -164,7 +171,7 @@ pub(super) fn parse_ended(value: &str) -> anyhow::Result<i64> {
         crate::model::date(low * 86_400) == value,
         "ended must be a valid UTC date YYYY-MM-DD"
     );
-    Ok(low * 86_400)
+    Ok((low + 1) * 86_400)
 }
 
 pub(super) fn prefix(index: usize) -> String {
@@ -220,6 +227,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn discovers_worktrees_upward_and_bare_repositories() {
+        let scratch = tempfile::tempdir().unwrap();
+        let worktree = scratch.path().join("worktree");
+        gix::init(&worktree).unwrap();
+        let nested = worktree.join("one/two");
+        std::fs::create_dir_all(&nested).unwrap();
+        for directory in [&worktree, &nested] {
+            assert_eq!(
+                discover(directory).unwrap().canonicalize().unwrap(),
+                worktree.canonicalize().unwrap()
+            );
+        }
+        let bare = scratch.path().join("bare");
+        gix::init_bare(&bare).unwrap();
+        assert_eq!(
+            discover(&bare).unwrap().canonicalize().unwrap(),
+            bare.canonicalize().unwrap()
+        );
+        let error = discover(scratch.path()).unwrap_err();
+        assert!(error.to_string().contains("pass --repository PATH"));
+    }
+
+    #[test]
     fn ended_dates_reject_invalid_calendar_values_and_archival_is_opt_in() {
         for value in [
             "2026-02-30",
@@ -232,7 +262,7 @@ mod tests {
         }
         assert_eq!(
             crate::model::date(parse_ended("2026-05-01").unwrap()),
-            "2026-05-01"
+            "2026-05-02"
         );
         let repository: Repository =
             toml::from_str("path='repo'\narchived=true\nended='2026-05-01'").unwrap();
@@ -295,12 +325,6 @@ mod tests {
             "x".repeat(4 * 1024 * 1024)
         );
         assert!(manifest_error(&document).contains("exceeds 1 MiB"));
-    }
-
-    #[test]
-    fn manifest_limits_reject_excess_entries_before_resolving_paths() {
-        let document = "[[repositories]]\npath='missing'\n".repeat(4097);
-        assert!(manifest_error(&document).contains("4096 entries"));
     }
 
     #[test]
@@ -411,6 +435,7 @@ mod tests {
             &events,
             &starts,
             &["First".to_owned(), "Second".to_owned()],
+            &crate::progress::Progress::default(),
         );
         let mut identity = None;
         for event in events.iter().filter(|event| event.repository == 0) {

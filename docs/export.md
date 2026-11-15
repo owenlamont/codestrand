@@ -3,11 +3,12 @@
 ## Numbered PNG frames
 
 ```sh
-codestrand export frames --repository /path/to/repository --commits 20
+codestrand export frames --repository /path/to/repository --start-date 2026-05-01 --end-date 2026-05-31
 ```
 
-The output directory (`frames` here) must not already exist. Without `--repository`,
-export uses the synthetic demo. Export writes `frame-00000.png` onwards and a
+The output directory (`frames` here) must not already exist. Without a repository
+argument or manifest, export discovers the repository from the current directory,
+searching upward. Export writes `frame-00000.png` onwards and a
 `frames.csv` logical-state manifest. Frames default to 1280×720.
 The final `glyphs` and `missing_glyphs` columns count visible text-layout glyphs
 used for each captured frame. A nonzero missing count indicates unavailable glyphs;
@@ -38,26 +39,19 @@ By default the whole playback is exported at 30 fps. To make a short capture:
 codestrand export short-frames --frames 60 --fps 30
 ```
 
-`--frames` accepts 2 through 1,000,000; `--fps` accepts 1 through 240. An explicit
+`--frames` accepts 2 through 4,294,967,295, inclusive, matching the supported frame
+index range; `--fps` accepts 1 through 240, inclusive. An explicit
 frame count stops capture after that many frames rather than changing the timeline
-speed. `--frame-delay-ms` adds a wall-clock delay between captures (default `0`);
-the delay does not change simulated frame times.
+speed.
 
 Export accepts the same repository, revision, range, pacing, contributor and cache
 options as preview. By default, the camera uses the fit-to-scene view. Explicit frame
 times keep export independent of rendering speed. Each capture is confirmed
 written before export completes. Export needs a working graphics adapter.
 
-For readable diff snippets in wider shots, use `--diff-text-distance 4` with either
-the fitted camera or `--camera-path`. The default `1` preserves the 6–14 projected
-beam-pixel reveal; `4` moves the fade to 1.5–3.5 pixels without shrinking the
-14–20 logical-pixel text. The accepted range is `0.1`–`100`. The existing twelve-sample
-limit and collapsed-directory hiding still apply; snippets may overlap.
-
-```sh
-codestrand export wide-diff --repository /path/to/repository \
-  --diff-text-distance 4 --frames 60 --fps 30
-```
+Diff snippets appear in close views, including scripted camera paths. Their text stays
+14–20 logical pixels high (inclusive); the twelve-sample limit and collapsed-directory
+hiding still apply. Snippets may overlap.
 
 Moving translucent surfaces overlap using their current positions. Halos and glyphs
 can look different from older builds.
@@ -104,8 +98,11 @@ directly without shell expansion, after the fixed raw RGB input and before the
 video filename. Select codecs, filters, pixel format and container options there;
 input dimensions and frame rate come from Codestrand. Frame times stay explicit,
 independent of encoding speed. Stderr is drained concurrently, and failures
-include FFmpeg's diagnostic tail. Frame writes and encoder shutdown each have a
-30-second timeout; failed exports may leave a partial video and manifest.
+include FFmpeg's diagnostic tail. Frame writes have a 30-second timeout. After the
+last frame, Codestrand waits while the output file's size or modification time
+changes; 30 seconds without either changing fails the export. Finalizing a large
+video can therefore take longer than 30 seconds. Failed exports may leave a
+partial video and manifest.
 
 ## Encode PNG frames manually
 
@@ -123,19 +120,20 @@ them manually after checking the video.
 
 ## Scripted camera
 
-`--camera-path` replaces the fitted export camera with TOML keys. Download the
-[demo path](examples/demo-camera.toml), then export the synthetic history:
+`--camera-path` replaces the fitted export camera with TOML keys. Save the
+[example path](examples/camera-path.toml) as `camera-path.toml` in a Git working
+tree, then run there:
 
 ```sh
-codestrand export demo-state --camera-path docs/examples/demo-camera.toml \
-  --frames 241 --fps 30 --video demo.mkv --ffmpeg-arg=-c:v --ffmpeg-arg=ffv1
+codestrand export camera-frames --camera-path camera-path.toml \
+  --frames 241 --fps 30 --video camera.mkv --ffmpeg-arg=-c:v --ffmpeg-arg=ffv1
 ```
 
 The file requires `fps` (1–240) and one or more `[[key]]` tables. Each key requires
 an unsigned `frame`, `eye` and `focus`. Frames must increase strictly. Key seconds
 are `frame / file fps`; export `--fps` samples the same path at its own rate.
 A path never changes playback speed or export duration. Frame zero follows the
-selected `--start`; before the first key and after the last, the endpoint key
+selected inclusive start date; before the first key and after the last, the endpoint key
 continues resolving its targets.
 
 ```toml

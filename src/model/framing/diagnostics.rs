@@ -34,7 +34,7 @@ fn realistic_history_has_stable_framing_and_uniform_icons_at_sixty_hz() {
     let mut previous_scales = [None; 5];
     for frame in 0..=frames_for(sim.duration(), 60).unwrap() {
         sim.advance_to(frame, 60);
-        let (regions, _, scales) = sim.packing.sample(u64::from(frame)).unwrap();
+        let (regions, _, scales) = sim.packing_sample(u64::from(frame), None).unwrap();
         for (i, region) in regions.iter().enumerate().filter(|(_, r)| r.live) {
             if let Some(before) = previous_scales[i].filter(|_| scales[i] > 0.0) {
                 let ratio: f32 = scales[i] / before;
@@ -144,9 +144,13 @@ fn local_framing_trace() {
         .iter()
         .enumerate()
         .map(|(i, r)| {
-            let mut events =
-                crate::cache::load(&r.path, "HEAD", crate::cache::root().as_deref())
-                    .unwrap();
+            let mut events = crate::cache::load_with_options(
+                &r.path,
+                "HEAD",
+                crate::cache::root().as_deref(),
+                crate::history::Options::default(),
+            )
+            .unwrap();
             crate::repositories::namespace(&mut events, i);
             events
         })

@@ -19,7 +19,8 @@ codestrand inspect /path/to/repository --revision HEAD
 ```
 
 For stale or damaged playback cache data, retry with `--no-cache`. Inspection
-always reads directly from Git. A small `--commits` window limits playback but
+always reads directly from Git. An inclusive `--start-date` / `--end-date` range
+limits playback but
 still imports the history; the first load of a large repository can take time.
 
 ## Graphics window or export fails
@@ -52,8 +53,8 @@ See the [configuration example](contributors.md).
 
 Portraits stay offline unless `--fetch-avatars` is supplied. Network errors and
 rate limits leave coloured spheres or previously cached images available.
-`--no-cache` disables portrait reuse as well as history caching. Synthetic history
-never fetches portraits. Private GitHub repositories need an API token with access.
+`--no-cache` disables portrait reuse as well as history caching. Private GitHub
+repositories need an API token with access.
 
 ## Report a problem
 

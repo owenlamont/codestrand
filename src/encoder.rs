@@ -72,7 +72,9 @@ impl Options {
         encode.args(input_args(fps, &resolution.to_string()));
         encode.args(output_args(&self.ffmpeg_arg));
         encode.arg(output);
-        Encoder::spawn(&mut encode).map(Some)
+        let mut encoder = Encoder::spawn(&mut encode)?;
+        encoder.output = Some(output.clone());
+        Ok(Some(encoder))
     }
 }
 
@@ -135,6 +137,7 @@ fn output_args(custom: &[OsString]) -> Vec<OsString> {
 
 pub(super) struct Encoder {
     child: Child,
+    output: Option<PathBuf>,
     input: Option<Sender<Vec<u8>>>,
     written: Receiver<std::io::Result<()>>,
     stderr: Receiver<std::io::Result<Vec<u8>>>,
@@ -167,6 +170,7 @@ impl Encoder {
         });
         Ok(Self {
             child,
+            output: None,
             input: Some(input),
             written,
             stderr: diagnostics,
@@ -201,8 +205,12 @@ impl Encoder {
     }
 
     pub(super) fn finish(&mut self) -> anyhow::Result<()> {
+        self.finish_with_quiet_period(TIMEOUT)
+    }
+
+    fn finish_with_quiet_period(&mut self, quiet: Duration) -> anyhow::Result<()> {
         self.input.take();
-        let status = wait(&mut self.child, TIMEOUT);
+        let status = wait_for_output(&mut self.child, self.output.as_deref(), quiet);
         if status.is_err() {
             let _ = self.child.kill();
             let _ = wait(&mut self.child, Duration::from_secs(2));
@@ -218,6 +226,34 @@ impl Encoder {
             bail!("FFmpeg exited with {status}: {diagnostic}");
         }
         Ok(())
+    }
+}
+
+fn wait_for_output(
+    child: &mut Child,
+    output: Option<&Path>,
+    quiet: Duration,
+) -> anyhow::Result<ExitStatus> {
+    let fingerprint = || {
+        output
+            .and_then(|path| std::fs::metadata(path).ok())
+            .map(|metadata| (metadata.len(), metadata.modified().ok()))
+    };
+    let mut previous = fingerprint();
+    let mut last_progress = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        let current = fingerprint();
+        if current != previous {
+            previous = current;
+            last_progress = Instant::now();
+        }
+        if last_progress.elapsed() >= quiet {
+            bail!("FFmpeg output made no progress for {quiet:?}");
+        }
+        thread::sleep(Duration::from_millis(10));
     }
 }
 
@@ -329,6 +365,15 @@ fn main() {
     }
     let mut bytes = Vec::new();
     std::io::stdin().read_to_end(&mut bytes).unwrap();
+    if args.iter().any(|arg| arg == "slow-finish") {
+        let mut output = std::fs::File::create(args.last().unwrap()).unwrap();
+        for _ in 0..12 {
+            output.write_all(b"frame").unwrap();
+            output.flush().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        return;
+    }
     if let Some(path) = args.last().filter(|path| path.as_str() != "-") {
         std::fs::write(path, bytes).unwrap();
     }
@@ -431,5 +476,33 @@ fn main() {
         assert!(message.contains("Unknown encoder 'libx264'"));
         assert!(message.contains("--ffmpeg-arg"));
         assert!(!output.exists());
+    }
+
+    #[test]
+    fn finishing_tracks_progress_and_reaps_a_quiet_encoder() {
+        let (scratch, binary) = fake_ffmpeg();
+        let output = scratch.path().join("slow.mp4");
+        let options = Options {
+            video: Some(output.clone()),
+            ffmpeg: Some(binary.clone()),
+            ffmpeg_arg: vec!["slow-finish".into()],
+        };
+        let mut encoder = options
+            .start(30, crate::resolution::Resolution::default())
+            .unwrap()
+            .unwrap();
+        encoder.write(vec![0; 12]).unwrap();
+        let quiet = Duration::from_millis(500);
+        let start = Instant::now();
+        encoder.finish_with_quiet_period(quiet).unwrap();
+        assert!(start.elapsed() > quiet * 2);
+        assert_eq!(std::fs::read(output).unwrap(), b"frame".repeat(12));
+
+        let mut stalled = command(&binary);
+        stalled.arg("stall");
+        let mut encoder = Encoder::spawn(&mut stalled).unwrap();
+        let error = encoder.finish_with_quiet_period(quiet).unwrap_err();
+        assert!(format!("{error:#}").contains("output made no progress"));
+        assert!(encoder.child.try_wait().unwrap().is_some());
     }
 }

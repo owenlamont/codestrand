@@ -20,8 +20,13 @@ pub(super) struct PreviewSettingsPlugin;
 impl Plugin for PreviewSettingsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Settings>()
-            .add_systems(Startup, setup.after(super::setup))
-            .add_systems(PreUpdate, viewports.before(super::scale_ui))
+            .add_systems(super::loading::Loaded, setup.after(super::setup))
+            .add_systems(
+                PreUpdate,
+                viewports
+                    .before(super::scale_ui)
+                    .run_if(resource_exists::<super::Playback>),
+            )
             .add_systems(
                 Update,
                 (
@@ -34,7 +39,8 @@ impl Plugin for PreviewSettingsPlugin {
                     scroll,
                 )
                     .chain()
-                    .before(super::preview_camera),
+                    .before(super::preview_camera)
+                    .run_if(resource_exists::<super::Playback>),
             );
     }
 }

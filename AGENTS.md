@@ -40,6 +40,20 @@ Cargo configuration and toolchain changes must trigger the Rust checks too.
 Markdown prose wraps at 88 characters. CPU tests run without a GPU; changes to the
 renderer also need a local export and visual inspection.
 
+## Who Codestrand is for, as far as known
+
+Owen is the first user and speaks for himself, not for other users.
+He runs Codestrand on work repositories whose code must stay on his machine.
+Large histories across many repositories should play without tuning the planner.
+Options describe simple, observable properties of the result.
+Do not expose controls that trade planning time against memory;
+a future optional maximum-memory bound is the exception he has named.
+A feature needs a precedent in a comparable tool; Gource is the nearest reference.
+Every range bound says whether it is inclusive or exclusive.
+Revise this model when real user feedback supplies better evidence.
+Check each new option or default against this question: does it help Owen get the
+history he wants to watch without exposing planner implementation details?
+
 ## Priorities
 
 When qualities conflict, earlier wins; a later one still counts in a lesser form.

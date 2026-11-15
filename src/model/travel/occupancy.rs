@@ -19,7 +19,7 @@ fn merge(row: &mut Vec<(u8, Rect)>, edge: u8, mut rect: Rect) {
 }
 fn anticipate_service_reservations(
     events: &[crate::timeline::Event],
-    starts: &[f32],
+    starts: &[crate::model::Time],
     occupied: &mut [Vec<(u8, Rect)>],
     conflicted: &mut [bool],
 ) {
@@ -123,7 +123,14 @@ impl Simulation {
         let frames = crate::model::frames_for(self.duration(), 60)
             .expect("bounded schedule")
             + 144;
-        for frame in 0..=frames {
+        let begin = u32::try_from(self.state.tick).expect("bounded window");
+        for frame in begin..=frames {
+            self.progress.report_range(
+                crate::progress::Stage::Reservations,
+                frame.into(),
+                begin.into(),
+                frames.into(),
+            );
             self.advance_to(frame, 60);
             conflicts += self.reserve_frame(&mut occupied, &mut conflicted);
         }
@@ -136,7 +143,7 @@ impl Simulation {
             &mut conflicted,
         );
         for (index, row) in occupied.into_iter().enumerate() {
-            if conflicted[index] {
+            if conflicted[index] && index >= self.travel.frozen {
                 previous[index] = row;
             }
         }
@@ -231,7 +238,7 @@ mod tests {
         let mut flags = vec![false, false, false, true];
         super::anticipate_service_reservations(
             &events,
-            &[0.0, 2.0, 4.0, 6.0],
+            &[0.0, 2.0, 4.0, 6.0].map(crate::model::Time::seconds),
             &mut rows,
             &mut flags,
         );
@@ -242,7 +249,7 @@ mod tests {
         let mut flags = vec![false, false, false, true];
         super::anticipate_service_reservations(
             &events,
-            &[0.0, 2.0, 4.0, 20.0],
+            &[0.0, 2.0, 4.0, 20.0].map(crate::model::Time::seconds),
             &mut rows,
             &mut flags,
         );

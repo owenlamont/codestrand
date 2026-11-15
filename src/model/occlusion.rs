@@ -54,7 +54,7 @@ impl Audit {
                 }
                 self.avatar_text_observations += 1;
                 if self.examples.len() < 12 {
-                    self.examples.push(serde_json::json!({"seconds":sim.seconds(),"author":author,"text":text,"centre":centre.to_array(),"radius":radius}));
+                    self.examples.push(serde_json::json!({"seconds":sim.seconds().lossy_secs_f32(),"author":author,"text":text,"centre":centre.to_array(),"radius":radius}));
                 }
             }
         }

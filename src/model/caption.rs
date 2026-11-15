@@ -82,7 +82,11 @@ impl Columns {
                     .unwrap_or(0),
                 longest(2),
                 format!("commit {} / {}", sim.total, sim.total).len(),
-                "0.125x".len(),
+                if sim.windowed {
+                    "0.125x 100%".len()
+                } else {
+                    "0.125x".len()
+                },
                 crate::theme::ThemeName::ALL
                     .iter()
                     .map(|t| t.title().chars().count())
@@ -107,17 +111,42 @@ impl Columns {
 const HOLD: u64 = 48;
 const FADE: u64 = 18;
 
+#[derive(Clone, Debug)]
 pub(super) struct Transition {
     tick: u64,
     from: usize,
     to: usize,
 }
 
+#[cfg(test)]
+pub(super) fn frozen(changes: &[Transition], tick: u64) -> String {
+    format!(
+        "{:?}",
+        changes
+            .iter()
+            .take_while(|change| change.tick <= tick)
+            .collect::<Vec<_>>()
+    )
+}
+
 pub(super) fn plan(schedule: &Schedule, events: &[Event]) -> Vec<Transition> {
     let mut changes: Vec<Transition> = Vec::new();
-    for tick in 0..=u64::from(
-        frames_for(schedule.duration(), 60).expect("bounded caption timeline"),
-    ) {
+    extend(schedule, events, 0, &mut changes);
+    changes
+}
+
+pub(super) fn extend(
+    schedule: &Schedule,
+    events: &[Event],
+    begin: u64,
+    changes: &mut Vec<Transition>,
+) {
+    changes.retain(|t| t.tick < begin);
+    for tick in begin
+        ..=u64::from(
+            frames_for(schedule.duration(), 60).expect("bounded caption timeline"),
+        )
+    {
         let Some(event) = schedule
             .applied(tick)
             .checked_sub(1)
@@ -141,7 +170,6 @@ pub(super) fn plan(schedule: &Schedule, events: &[Event]) -> Vec<Transition> {
             });
         }
     }
-    changes
 }
 
 pub(crate) fn background(colour: Color) -> LinearRgba {
@@ -181,7 +209,17 @@ impl Simulation {
                 self.total,
                 digits = self.total.to_string().len()
             ),
-            format!("{}x", self.playback_multiplier),
+            if self.windowed {
+                let (now, end) = self.history_progress();
+                format!(
+                    "{}x {:>3.0}%",
+                    self.playback_multiplier,
+                    (now.lossy_secs_f32() / end.lossy_secs_f32() * 100.0)
+                        .clamp(0.0, 100.0)
+                )
+            } else {
+                format!("{}x", self.playback_multiplier)
+            },
             self.theme.name.title().to_owned(),
         ]
     }
@@ -210,16 +248,52 @@ impl Simulation {
         else {
             return Color::BLACK;
         };
-        let alpha = (super::tick_time(self.state.tick - change.tick)
-            / super::tick_time(FADE))
+        let alpha = (super::ticks_duration(self.state.tick - change.tick)
+            / super::ticks_duration(FADE))
         .min(1.0);
         colour(change.from).mix(&colour(change.to), alpha).into()
     }
 }
 
+pub(super) fn discard_before(changes: &mut Vec<Transition>, tick: u64) {
+    let count = changes
+        .partition_point(|change| change.tick <= tick)
+        .saturating_sub(1);
+    changes.drain(..count);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn window_extension_preserves_a_caption_fade() {
+        let mut sim = Simulation::two_synthetic_repositories();
+        let cut = sim
+            .caption_plan
+            .iter()
+            .find(|t| t.from != t.to)
+            .unwrap()
+            .tick
+            + 6;
+        sim.advance_to(u32::try_from(cut).unwrap(), 60);
+        let saved = sim.state.clone();
+        let before = sim.caption_background();
+        let expected: Vec<_> = (cut + 1..=cut + 12)
+            .map(|tick| {
+                sim.advance_to(u32::try_from(tick).unwrap(), 60);
+                sim.caption_background()
+            })
+            .collect();
+        extend(&sim.schedule, &sim.events, cut + 1, &mut sim.caption_plan);
+        sim.state = saved;
+        assert_eq!(sim.caption_background(), before);
+        for (tick, expected) in (cut + 1..=cut + 12).zip(expected) {
+            sim.advance_to(u32::try_from(tick).unwrap(), 60);
+            assert_eq!(sim.caption_background(), expected);
+        }
+        sim.assert_stitched_travel_rules();
+    }
 
     #[test]
     fn wordmark_strip_has_the_same_clearance_as_the_caption() {

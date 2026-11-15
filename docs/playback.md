@@ -7,9 +7,18 @@ Preview renders at the window's physical resolution, including on HiDPI displays
 Resizing or maximising keeps a 720-logical-pixel-high UI: text scales with height,
 and wider windows show more scene. See [Export](export.md) for native output sizes.
 
-Commit application times are precomputed for the selected history and pacing.
+Preview opens its window at once and shows planning progress until playback is ready.
+For long histories, the first frame appears while later history is still being
+planned. Playback pauses if planning falls behind, then resumes without skipping
+history. Camera controls remain active during the pause, and a small label shows
+the planning stage and percentage. Rewinding or looping may need another planning pause.
+Export prints the stage and its percentage to standard error at most once a second.
+
+Commit application times are planned ahead for the selected history and pacing.
 The caption shows the last applied commit's date; cooling and fades advance in
 playback seconds. Seeking or restarting replays the same fixed simulation ticks.
+The caption's percentage follows history time, excluding extra walking waits, so it
+holds while contributors finish a walk.
 
 Repository captions also name the applying commit's repository, including single-tile
 playback. The default
@@ -26,8 +35,7 @@ Widths use the longest scheduled date, repository and resolved contributor name,
 the total commit counter's digits. Speed and theme columns reserve their longest
 available values so preview controls cannot move separators. Captions always use the
 embedded monospace Fira Mono font, even when another theme uses proportional labels.
-CLI playback uses the same six fixed columns for single repositories and synthetic
-history. The synthetic repository column is named `Synthetic history`.
+CLI playback uses the same six fixed columns for single and multiple repositories.
 
 Text falls back from the selected theme font to bundled IBM Plex Mono for accented
 and Cyrillic names, then to installed system fonts for other scripts, including Greek.
@@ -160,7 +168,7 @@ activity outlines.
 `--heat-half-life 3` sets the cooling half-life in canonical playback seconds for
 preview and export (default `3`, accepted range `0.01` through `86400`). Live speed
 keys speed up cooling along with the rest of playback. Export cooling uses explicit
-frame times. Files settled before `--start` begin cold.
+frame times. Files settled before the inclusive start date begin cold.
 
 ```sh
 codestrand export frames --heat-half-life 3 --frames 90 --fps 30
@@ -190,13 +198,20 @@ ended = "2026-05-01"
 Paths in the TOML file resolve relative to the file. Labels default to the repository
 directory name. Repeated flags and a file can be combined; flag entries come first.
 Paths resolving to the same location are rejected as duplicate repositories. Labels for
-distinct repositories must be unique. The combined list is limited to 30
-unique repositories before any history is imported or avatars are resolved.
+distinct repositories must be unique. There is no fixed repository-count limit.
+Packing refuses an insertion when the minimum tile size, aspect range and selected
+gutter cannot fit the field; the error names those geometric limits and asks for
+fewer repositories.
 
 `archived = true` ends a repository after the final commit in the selected revision,
 once the commit's activity finishes. `ended = "YYYY-MM-DD"` supplies an explicit UTC
-ending date and overrides `archived`, for example after deletion. Neither field fetches
-platform metadata. Without either field the repository remains visible.
+ending date and overrides `archived`, for example after deletion. The repository is
+shown through the end of that day, inclusive: `ended = "2026-05-01"` includes all of
+1 May UTC and begins ending at 00:00 UTC on 2 May. A commit after the ending in
+imported history order is an error, even when a rebased commit has an older author
+date. The error names the first offending commit and a valid ending date.
+Neither field fetches platform metadata. Without either field the repository remains
+visible.
 An ending before the selected playback interval is already complete when playback starts.
 
 The ending tile, files and directories grey, rise and fade over 2.5 playback seconds.
@@ -222,20 +237,20 @@ codestrand preview --repositories-file repositories.toml \
   --contributor-inactivity-days 60
 ```
 
-Repository manifests must be regular files no larger than 1 MiB, with at most 4,096
-entries. Repository paths are limited to 4,096 bytes before filesystem resolution.
+Repository manifests must be regular files no larger than 1 MiB.
+Repository paths are limited to 4,096 bytes before filesystem resolution.
 
 Events merge by comparing the next commit from each repository by author timestamp,
 breaking ties by repository input order. Each repository retains its first-parent
 order, including children authored before their parents. One `--revision` applies
-to every repository; `--start` and `--commits`
+to every repository; `--start-date` and `--end-date`
 select from the merged history. Single-repository playback retains first-parent
 order. Contributor mappings apply across all repositories, so a matched contributor
 uses one avatar that moves between regions.
 
 Live repositories share the inset viewport inside a 24-pixel frame margin. The
-same frame-scaled avatar sizing and gutter placement apply to single repositories and
-synthetic playback. The top wordmark has a separate 26-pixel reserved strip, including
+same frame-scaled avatar sizing and gutter placement apply to single repositories.
+The top wordmark has a separate 26-pixel reserved strip, including
 a four-pixel buffer;
 avatars, gutter routes and name labels stay below the strip, matching caption clearance.
 The default 16:9 export camera stays fixed. Spacing and size floors use a fixed world scale
@@ -303,24 +318,26 @@ Contributors follow their parked gutter slot until their inferred calendar depar
 then fade over 1.2 playback seconds. Capped playback releases faded lanes and re-enters
 at the next service slot after a long idle gap.
 
-`--travel-cap` limits extra waiting per walking trip (default `0.4` seconds; range `0`
-through `3600`, or `none` to wait as long as the route needs). Available gaps between
-commits also count toward travel. If a capped trip
-cannot finish in time, the avatar moves along the safe route, fades out at the deadline
-and fades in at the destination. Blocked capped routes fade across. Zero disables extra
-waiting. `--bot-travel fade` is the default; `--bot-travel walk` gives bots the same
-routing and waiting policy as humans. Bot classification uses an explicit `bot` override
+`--contributor-travel auto` is the default: contributors walk short trips and fade
+when a longer route would delay the commit. `--contributor-travel walk` keeps them
+walking along the shortest safe gutter route, waiting as long as needed.
+`--bot-travel fade` is the default for bots; `--bot-travel walk` gives bots the same
+travel policy selected for other contributors. Bot classification uses an explicit
+`bot` override
 in `contributors.toml`, then a GitHub noreply login ending in `[bot]`, then the displayed
-name's `[bot]` suffix. Travel policies also apply to single repositories and synthetic
-playback.
+name's `[bot]` suffix. Travel policies also apply to single repositories.
 Walking avatars remain visible during travel until an inferred calendar departure.
-With `--travel-cap none`, walking trips
+With `--contributor-travel walk`, walking trips
 also remain routed across long idle gaps instead of disappearing and re-entering at a
 different repository. After the last service, the normal inactivity fade still applies.
 Uncapped walking services trips in commit order and adds another second of waiting
 when tile motion or insufficient travel time blocks a route. New repository tiles get
-a full 0.75-second birth window inside their added wait. Packing weights start
-approaching the upcoming service footprint during that wait. An uncapped plan
+a full 0.75-second birth window inside their added wait. At the start of a wait,
+tile sizes transition toward the upcoming commit for at most 0.75 seconds,
+finishing before arrival. Tiles then hold their size, using the upcoming commit's
+zoom ceiling while fitting the content from before the commit. The content outline
+switches on arrival without moving the tile. Layout and calendar departures follow
+history time, which holds during travel waits. An uncapped plan
 that cannot find safe routes within the planning budgets reports an error instead of
 silently accepting a travel fade.
 A plan that cannot converge within 32 replans stops with an error.
@@ -331,61 +348,98 @@ continue in presentation seconds.
 
 ```sh
 codestrand export frames --repositories-file repositories.toml \
-  --travel-cap none --bot-travel walk --avatar-max-speed 480 --frames 90 --fps 30
+  --contributor-travel walk --bot-travel walk --avatar-max-speed 480 --frames 90 --fps 30
 ```
 
 Planning tests departure ticks from the contributor's fragment completion onward.
 Gaps between that contributor's commits absorb travel before padding is needed.
-Padding is revalidated as scene geometry changes. Numeric caps use at most five
+Padding is revalidated as scene geometry changes. The automatic policy uses at most five
 padded rebuilds, including one cleanup of unused service padding.
-Uncapped padding grows until every walking trip completes, subject to the existing
-216,000-tick, 2,000,000-region-sample and 4,000,000-pose capture budgets. Each Dijkstra
-search is limited to 10,000 graph nodes; thirty repositories need at most 3,844.
+Uncapped padding grows until every walking trip completes, subject to the planning
+memory estimate. Each Dijkstra search is limited to 10,000 graph nodes.
 Numeric caps apply to accumulated extra waiting per commit.
 
 Header and caption remain in the outer frame. Other preview aspect ratios use conservative
 framing;
 free-camera controls remain independent.
 
-Repository planning supports up to 30 repositories, 216,000 simulation ticks,
-2,000,000 region samples and 4,000,000 temporary avatar poses. The preflight includes
-worst-case travel padding for numeric caps. With `none`, each actual padded schedule is
-checked before rebuilding; exceeding a budget reports an error rather than allocating
-an unbounded plan. Route searches stop at 10,000 nodes; capped playback can fade across
-when a search exceeds that bound, while uncapped walking reports an error. Use fewer
-repositories, shorten the imported history or reduce playback times if an input limit
-is exceeded. The same planning limits apply to single repositories and synthetic playback.
+Planning snapshots the machine's available physical memory before importing history.
+Swap does not count. An estimate above that snapshot is refused, with both values
+reported in bytes and MiB. If memory information cannot be read, planning stops.
+The estimate uses the actual selected schedule, repository samples, contributor
+first arrivals, imported changes, path bytes and directory samples. Variable allocation
+sizes are estimates, so the figure is not a process-memory ceiling. Each padded schedule
+is checked before rebuilding; the automatic policy does not reserve hypothetical waits.
+The same check applies to single repositories.
 
-Planning happens before the first frame. Large multi-repository histories can take
-several seconds to plan. To inspect a smaller interval, select the playback with
-`--start` and `--commits`.
+Use fewer repositories or a later inclusive `--start-date` to reduce the estimate.
+The snapshot is not a memory reservation; other processes can consume RAM afterward.
+It is the host's available RAM, without container or job-specific memory limits.
+Rendering and video encoding need additional memory beyond the planning estimate.
+The check is an estimate made before planning, not a guarantee that the process will
+fit in memory. It can be conservative on some inputs and too low on others.
+Packing reserves tiles before applying repository endings, so sequential repositories
+can reach the same geometric limit as repositories visible together.
+Route searches stop at 10,000 nodes; capped playback can fade across when a search
+exceeds that bound, while uncapped walking reports an error.
 
-Tick and region-sample budgets apply to the playback selected by `--start` and `--commits`.
+Large multi-repository histories can take time to begin playback. Consumed travel plans
+are discarded to bound retained travel windows and checkpoints; the shared layout
+remains available throughout playback. This does not bound total process memory.
+To inspect a smaller interval, use inclusive `--start-date` and `--end-date`.
+
+Playback memory and duration checks use the range selected by `--start-date` and `--end-date`;
+the layout estimate also includes the imported history needed to settle that range.
 
 To choose visual treatments, use
 `--repository-boundary none|glass` and `--repository-label-plane files|raised`.
 Defaults are `glass` and `raised`. Glass is a faint, coloured ground-plane tile for
 each live repository; raised labels stay at a constant height of 1.6 scene units.
-Both options apply to preview and export, including single repositories and synthetic
-playback.
+Both options apply to preview and export, including single repositories.
 
 ## Range and pacing
 
+Import refuses truncated history by default, before planning or rendering. The error
+names the exhausted budget. `--allow-truncated-history` accepts completed commits only
+and prints the reason; the incomplete result is never cached. The option applies
+to `inspect`, `preview` and `export`. When a playback prefix was read, both messages
+name its last complete first-parent commit, position and UTC author date, inclusive.
+Commits with no file changes are not shown. If import stopped before completing a
+playback commit, the message says so.
+
+Import budgets are 1,000,000 commits, 2,000,000 changed entries, 20,000,000 diff input
+lines and 512 MiB of retained-input accounting per repository.
+
+Single-object and single-tree limits stay fixed, including 16 MiB objects, 2,000,000
+expanded tree entries, depth 256, 16,384-byte paths and 64 MiB of expanded path bytes.
+The 32 GiB cumulative work ceiling, 8 GiB blob-detail budget and per-diff work limits
+also stay fixed. Oversized or expensive blob diffs keep file changes but omit detail;
+exhausting the cumulative line budget also omits detail. Playback range options do not
+reduce import work: the reachable history is checked before selecting the playback range.
+
 ```sh
-codestrand preview --repository /path/to/repository --start 0 --commits 20 \
+codestrand inspect /path/to/repository --allow-truncated-history
+```
+
+```sh
+codestrand preview --repository /path/to/repository --start-date 2026-05-01 --end-date 2026-05-31 \
   --seconds-per-day 2 --max-idle-seconds 1
 ```
 
-- `--start`: commits laid out and settled before playback; default `0`.
-- `--start-date YYYY-MM-DD`: begin at the first commit in merged history order authored
-  on or after 00:00 UTC that day, settling preceding commits as with `--start`.
-  Conflicts with `--start`; dates after the history report the last commit date.
-- `--commits`: commits to play after the start; default all remaining commits.
+- `--start-date YYYY-MM-DD`: first commit in merged order authored on or after
+  00:00 UTC that day, inclusive; preceding commits are settled before playback.
+- `--end-date YYYY-MM-DD`: last commit in merged order authored on or before that
+  UTC day, inclusive of the whole day. Omitted bounds use the beginning or end of
+  history. A reversed range or one containing no commits reports both bounds.
+
+Selection is a contiguous span of merged history. Rebased commits with older author
+dates remain in that span; date bounds do not reorder or remove interior commits.
+
 - `--seconds-per-day`: timeline seconds per calendar day; default `0.5`.
 - `--max-idle-seconds`: maximum timeline gap between commits; default `1`.
 
 ```sh
-codestrand preview --repository /path/to/repository --start-date 2026-05-01 --commits 20
+codestrand preview --repository /path/to/repository --start-date 2026-05-01 --end-date 2026-05-31
 ```
 
 Pacing preserves within-day timestamp spacing. Coincident, reversed or very close
@@ -436,11 +490,7 @@ Theme switching restyles active snippets without restarting their motion or fade
 
 Snippet text keeps the font's natural proportions with equal X and Y scaling.
 Lines are cut at 88 characters. Samples smoothly appear between 6 and 14 projected
-beam-diameter pixels by default. `--diff-text-distance 4` reveals samples at four times
-the camera range: the same fade spans 1.5–3.5 pixels. Preview and export accept
-`--diff-text-distance` from `0.1` through `100`, default `1`; values below `1` require
-a closer view. The multiplier affects only the reveal, including scripted export
-cameras. Visible text stays between 14 and 20 logical pixels high, making
+beam-diameter pixels. Visible text stays between 14 and 20 logical pixels high, making
 close oblique shots readable while the overview keeps plain fragments.
 Text holds full contrast through the first three quarters of the fragment's alpha
 fade, then fades out with the backing.

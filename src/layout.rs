@@ -154,7 +154,7 @@ pub(super) struct Layout {
 
 impl Layout {
     #[cfg(test)]
-    pub(crate) fn planned_time(&self) -> f32 {
+    pub(crate) fn planned_time(&self) -> crate::model::Time {
         self.plan.time
     }
 

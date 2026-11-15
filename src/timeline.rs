@@ -307,7 +307,13 @@ mod tests {
             path,
             &["merge", "--no-ff", "-s", "ours", "side", "-m", "discard"],
         );
-        let history = crate::history::import(path, "HEAD").expect("fixture imports");
+        let (repo, tip) = crate::history::resolve(path, "HEAD").expect("fixture opens");
+        let history = crate::history::import_with_options(
+            &repo,
+            tip,
+            crate::history::Options::default(),
+        )
+        .expect("fixture imports");
         let paths: Vec<_> = from_history(&history)
             .into_iter()
             .flat_map(|event| event.changes)

@@ -3702,6 +3702,33 @@ DEALINGS IN THE SOFTWARE.
 ================================================================================
 MIT License (MIT)
 Used by:
+  winapi 0.3.9
+  Source: https://crates.io/api/v1/crates/winapi/0.3.9/download
+
+Copyright (c) 2015-2018 The winapi-rs Developers
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+================================================================================
+MIT License (MIT)
+Used by:
   httparse 1.10.1
   Source: https://crates.io/api/v1/crates/httparse/1.10.1/download
 
@@ -7482,6 +7509,8 @@ Used by:
   Source: https://crates.io/api/v1/crates/objc2-foundation/0.2.2/download
   objc2-foundation 0.3.2
   Source: https://crates.io/api/v1/crates/objc2-foundation/0.3.2/download
+  objc2-io-kit 0.3.2
+  Source: https://crates.io/api/v1/crates/objc2-io-kit/0.3.2/download
   objc2-metal 0.3.2
   Source: https://crates.io/api/v1/crates/objc2-metal/0.3.2/download
   objc2-quartz-core 0.3.2
@@ -7512,6 +7541,10 @@ Used by:
   Source: https://crates.io/api/v1/crates/wgsl-parse/0.6.0/download
   wgsl-types 0.6.0
   Source: https://crates.io/api/v1/crates/wgsl-types/0.6.0/download
+  winapi-i686-pc-windows-gnu 0.4.0
+  Source: https://crates.io/api/v1/crates/winapi-i686-pc-windows-gnu/0.4.0/download
+  winapi-x86_64-pc-windows-gnu 0.4.0
+  Source: https://crates.io/api/v1/crates/winapi-x86_64-pc-windows-gnu/0.4.0/download
   windows-collections 0.3.2
   Source: https://crates.io/api/v1/crates/windows-collections/0.3.2/download
   windows-core 0.62.2
@@ -8452,6 +8485,31 @@ SOFTWARE.
 ================================================================================
 MIT License (MIT)
 Used by:
+  ntapi 0.4.3
+  Source: https://crates.io/api/v1/crates/ntapi/0.4.3/download
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"),to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+================================================================================
+MIT License (MIT)
+Used by:
   tinyvec 1.13.3
   Source: https://crates.io/api/v1/crates/tinyvec/1.13.3/download
 
@@ -8709,6 +8767,36 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+
+================================================================================
+MIT License (MIT)
+Used by:
+  sysinfo 0.40.3
+  Source: https://crates.io/api/v1/crates/sysinfo/0.40.3/download
+
+The MIT License (MIT)
+
+Copyright (c) 2015 Guillaume Gomez
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
 
 
 ================================================================================

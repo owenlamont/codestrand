@@ -212,10 +212,11 @@ pub(super) fn root() -> Option<PathBuf> {
     dirs::cache_dir().map(|path| path.join("codestrand"))
 }
 
-pub(super) fn load(
+pub(super) fn load_with_options(
     path: &Path,
     revision: &str,
     cache_root: Option<&Path>,
+    options: history::Options,
 ) -> Result<Vec<timeline::Event>, history::Error> {
     let (repo, tip) = history::resolve(path, revision)?;
     let entry = cache_root
@@ -225,7 +226,7 @@ pub(super) fn load(
     if let Some(events) = entry.as_deref().and_then(|path| read(path, &tip_text)) {
         return Ok(events);
     }
-    let history = history::import_resolved(&repo, tip)?;
+    let history = history::import_with_options(&repo, tip, options)?;
     let snapshot = Snapshot {
         version: timeline::CACHE_VERSION,
         tip: tip_text,
@@ -284,6 +285,14 @@ mod tests {
     use clap::Parser;
 
     use super::*;
+
+    fn load(
+        path: &Path,
+        revision: &str,
+        cache_root: Option<&Path>,
+    ) -> Result<Vec<timeline::Event>, history::Error> {
+        load_with_options(path, revision, cache_root, history::Options::default())
+    }
 
     pub(crate) fn directory_link(target: &Path, link: &Path) {
         #[cfg(windows)]
@@ -518,7 +527,13 @@ mod tests {
             };
             let repositories =
                 crate::repositories::inputs(&source.repository, None).unwrap();
-            let events = source.events(Some(cache.path()), &repositories).unwrap();
+            let events = source
+                .events(
+                    Some(cache.path()),
+                    &repositories,
+                    &crate::progress::Progress::default(),
+                )
+                .unwrap();
             assert!(
                 events
                     .iter()
@@ -620,6 +635,7 @@ emails = ["author@example.invalid"]
                         source.repositories_file.as_deref(),
                     )
                     .unwrap(),
+                    &crate::progress::Progress::default(),
                 )
                 .unwrap();
             assert_eq!(events[0].author.name, b"Author");
@@ -663,7 +679,11 @@ emails = ["author@example.invalid"]
     fn measure_sample_cache_growth() {
         let repository = std::env::var("CODESTRAND_MEASURE_REPOSITORY").unwrap();
         let output = PathBuf::from(std::env::var("CODESTRAND_MEASURE_OUTPUT").unwrap());
-        let history = history::import(Path::new(&repository), "origin/main").unwrap();
+        let (repo, tip) =
+            history::resolve(Path::new(&repository), "origin/main").unwrap();
+        let history =
+            history::import_with_options(&repo, tip, history::Options::default())
+                .unwrap();
         let snapshot = Snapshot {
             version: timeline::CACHE_VERSION,
             tip: history.tip.clone(),
@@ -871,6 +891,7 @@ emails = ["author@example.invalid"]
                     source.repositories_file.as_deref(),
                 )
                 .unwrap(),
+                &crate::progress::Progress::default(),
             )
             .expect("bypass imports");
         assert!(!entry(cache.path(), repo.path()).exists());
@@ -885,7 +906,8 @@ emails = ["author@example.invalid"]
                         &source.repository,
                         source.repositories_file.as_deref()
                     )
-                    .unwrap()
+                    .unwrap(),
+                    &crate::progress::Progress::default()
                 )
                 .expect("bypass imports again"),
             events
@@ -903,7 +925,8 @@ emails = ["author@example.invalid"]
                         &source.repository,
                         source.repositories_file.as_deref()
                     )
-                    .unwrap()
+                    .unwrap(),
+                    &crate::progress::Progress::default()
                 )
                 .is_err()
         );

@@ -17,6 +17,7 @@ nav = [
   { "Playback" = "playback.md" },
   { "Export" = "export.md" },
   { "Contributors and avatars" = "contributors.md" },
+  { "Privacy and local processing" = "security.md" },
   { "Troubleshooting" = "troubleshooting.md" },
   { "Related tools" = "related-tools.md" },
 ]

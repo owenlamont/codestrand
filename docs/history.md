@@ -34,11 +34,12 @@ during diff setup. Import uses no wall-clock deadline.
 
 ## Analysis limits
 
-Global analysis stops at fixed safety limits and prints
-`analysis truncated: history resource budget reached; showing completed commits only`.
-Inspection also sets `truncated` in
-JSON. Playback uses the completed first-parent prefix, which can be empty. Partial
-imports are never cached; later runs retry analysis.
+Import stops at fixed safety limits and refuses incomplete history by default.
+`--allow-truncated-history` accepts completed commits and prints the exhausted budget
+and the inclusive last complete first-parent commit, when known. Inspection sets
+`truncated` in JSON. Playback uses that first-parent prefix, which can be empty;
+commits with no file changes are not shown. Partial imports are never cached;
+later runs retry analysis.
 
 Blob size, diff input and per-diff comparison limits skip line detail only. Inspection
 records the path, change kind and rename with diff kind `skipped`, without line counts

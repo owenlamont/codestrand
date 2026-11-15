@@ -147,6 +147,47 @@ def test_smoke_matrix_covers_all_wheels_natively() -> None:
     assert arm["os"] == "windows-11-arm"
 
 
+@pytest.mark.parametrize(
+    ("second_frame", "success"),
+    [
+        pytest.param("present", True, id="two nonempty frames"),
+        pytest.param("missing", False, id="second frame missing"),
+        pytest.param("empty", False, id="second frame empty"),
+    ],
+)
+def test_wheel_render_requires_both_frames(
+    tmp_path: Path, second_frame: str, *, success: bool
+) -> None:
+    bash = shutil.which("bash")
+    assert bash is not None
+    (step,) = (
+        step
+        for step in _JOBS["smoke-wheels"]["steps"]
+        if step.get("name") == "Render installed wheel"
+    )
+    assert "if" not in step
+    stub = r"""
+uv() {
+  mkdir smoke-render
+  printf png > smoke-render/frame-00000.png
+  case "$SECOND_FRAME" in
+    present) printf png > smoke-render/frame-00001.png ;;
+    empty) touch smoke-render/frame-00001.png ;;
+  esac
+}
+"""
+    result = subprocess.run(
+        [bash, "-c", stub + step["run"]],
+        cwd=tmp_path,
+        env=os.environ | {"RUNNER_OS": "macOS", "SECOND_FRAME": second_frame},
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert (result.returncode == 0) is success, result.stdout + result.stderr
+
+
 def test_publication_requires_smoke_and_preflight_but_dry_builds_do_not() -> None:
     for name in (
         "draft-github-release",

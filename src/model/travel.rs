@@ -3,13 +3,13 @@ use std::{cmp::Reverse, collections::BinaryHeap};
 use bevy::math::{Rect, Vec2};
 use serde::Serialize;
 
-use super::{Simulation, frames_for, slots, tick_time};
+use super::{Simulation, frames_for, slots, tick_time, ticks_duration};
+use crate::progress::Stage;
 mod occupancy;
 mod planning;
 use planning::trips;
 
 const HALF: Vec2 = Vec2::new(640.0, 360.0);
-const MAX_POSES: usize = 4_000_000;
 const NETWORK_EPSILON: f32 = 0.01;
 const JUNCTION_EPSILON: f32 = 0.001;
 
@@ -35,14 +35,16 @@ pub(super) fn in_guard(
 }
 
 #[derive(Clone, Copy, Debug)]
-struct Pose {
+pub(super) struct Pose {
     tick: u64,
     point: Vec2,
     dock: slots::Dock,
 }
 
-struct Service {
-    author: usize,
+#[derive(Clone)]
+pub(super) struct Service {
+    pub(super) commit: usize,
+    pub(super) author: usize,
     repository: usize,
     tick: u64,
     release: u64,
@@ -54,6 +56,8 @@ struct Service {
 
 #[derive(Default)]
 struct Capture {
+    begin: u64,
+    frozen: usize,
     services: Vec<Service>,
     poses: Vec<Vec<Pose>>,
     tiles: Vec<Vec<Option<crate::layout::packing::Tile>>>,
@@ -135,7 +139,7 @@ impl Leg {
 struct Route {
     legs: Vec<Leg>,
     duration: f32,
-    track: Vec<Vec2>,
+    track: std::sync::Arc<[Vec2]>,
 }
 
 impl Route {
@@ -144,7 +148,7 @@ impl Route {
     }
     fn point_at(&self, tick: u64) -> Option<Vec2> {
         if self.track.is_empty() {
-            self.sample(tick_time(tick))
+            self.sample(ticks_duration(tick))
         } else {
             Some(*at_tick(&self.track, tick))
         }
@@ -204,7 +208,7 @@ struct Trip {
     proof: Option<serde_json::Value>,
 }
 
-#[derive(Default, Serialize)]
+#[derive(Clone, Default, Serialize)]
 pub(super) struct Statistics {
     pub human_complete: usize,
     pub human_partial: usize,
@@ -222,25 +226,53 @@ pub(super) struct Statistics {
     pub retained_route_bytes: usize,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct Plan {
     trips: Vec<Trip>,
     pub(super) docks: Vec<Option<slots::Dock>>,
     pub(super) replanning: bool,
+    pub(super) frozen: usize,
     pub(super) occupancy: Vec<Vec<(u8, Rect)>>,
     pub stats: Statistics,
 }
 
 impl Plan {
+    #[cfg(test)]
+    pub(super) fn force_unrouteable(&mut self) -> usize {
+        let trip = self.trips.last_mut().expect("fixture has a trip");
+        trip.fade = true;
+        trip.commit
+    }
+    pub(super) fn first_unresolved(&self) -> Option<usize> {
+        self.trips.iter().find(|t| t.fade).map(|t| t.commit)
+    }
+
+    pub(super) fn freeze_through(&mut self, tick: u64, applied: usize) {
+        self.frozen = self
+            .trips
+            .iter()
+            .filter(|t| t.departure < tick)
+            .map(|t| t.commit + 1)
+            .max()
+            .unwrap_or(0)
+            .max(applied)
+            .max(self.frozen);
+    }
     pub(super) fn preferences(self) -> Self {
         Self {
             docks: self.docks,
             occupancy: self.occupancy,
+            frozen: self.frozen,
+            trips: self
+                .trips
+                .into_iter()
+                .filter(|t| t.commit < self.frozen)
+                .collect(),
             ..Self::default()
         }
     }
     pub fn report(&self) -> serde_json::Value {
-        serde_json::json!({"statistics":self.stats,"trips":self.trips.iter().map(|t| serde_json::json!({"author":t.author,"commit":t.commit,"bot":t.bot,"source_repository":t.source_repository,"destination_repository":t.destination_repository,"free":tick_time(t.free),"slack":tick_time(t.arrival-t.free),"departure":tick_time(t.departure),"service":tick_time(t.arrival),"fade":t.fade,"failure":t.failure,"proof":t.proof,"source":t.source.to_array(),"target":t.destination.to_array(),"visible_distance":planning::progress(t),"travel_seconds":t.route.duration,"points":t.route.points()})).collect::<Vec<_>>()})
+        serde_json::json!({"statistics":self.stats,"trips":self.trips.iter().map(|t| serde_json::json!({"author":t.author,"commit":t.commit,"bot":t.bot,"source_repository":t.source_repository,"destination_repository":t.destination_repository,"free":tick_time(t.free).lossy_secs_f32(),"slack":ticks_duration(t.arrival-t.free),"departure":tick_time(t.departure).lossy_secs_f32(),"service":tick_time(t.arrival).lossy_secs_f32(),"fade":t.fade,"failure":t.failure,"proof":t.proof,"source":t.source.to_array(),"target":t.destination.to_array(),"visible_distance":planning::progress(t),"travel_seconds":t.route.duration,"points":t.route.points()})).collect::<Vec<_>>()})
     }
     pub fn sample(&self, author: usize, tick: u64) -> Option<(Vec2, f32)> {
         let trip = self.trips.iter().find(|t| t.active(author, tick))?;
@@ -329,24 +361,41 @@ pub(super) fn committing_overlap(
         && a.distance(b) < diameter
 }
 fn fade_opacity(remaining: u64, duration: u64) -> f32 {
-    (tick_time(remaining.saturating_sub(1)) / tick_time(duration.max(1))).min(1.0)
+    (ticks_duration(remaining.saturating_sub(1)) / ticks_duration(duration.max(1)))
+        .min(1.0)
 }
 
 fn capture(simulation: &mut Simulation) -> Capture {
     let started = std::time::Instant::now();
     let frames = frames_for(simulation.duration(), 60).expect("validated travel range");
-    let mut capture = Capture::default();
+    simulation.restart();
+    let mut capture = Capture {
+        begin: simulation.state.tick,
+        frozen: simulation.travel.frozen,
+        services: simulation
+            .window
+            .as_ref()
+            .map_or_else(Vec::new, |w| w.services.clone()),
+        ..Capture::default()
+    };
     let visual_updates = simulation.visual_updates;
-    let docks = if simulation.travel.occupancy.is_empty() {
+    let docks = if simulation.travel.occupancy.is_empty() && simulation.window.is_none()
+    {
         std::mem::take(&mut simulation.travel.docks)
     } else {
         simulation.travel.docks.clone()
     };
     simulation.travel.replanning = true;
     simulation.visual_updates = false;
-    let mut seen = 0;
+    let mut seen = simulation.state.next_event;
     let mut poses = 0;
-    for frame in 0..=frames {
+    for frame in u32::try_from(capture.begin).expect("bounded window")..=frames {
+        simulation.progress.report_range(
+            Stage::Travel,
+            frame.into(),
+            capture.begin,
+            frames.into(),
+        );
         simulation.advance_to(frame, 60);
         let state = &simulation.state;
         capture.radii.push(state.avatar_radius());
@@ -358,8 +407,11 @@ fn capture(simulation: &mut Simulation) -> Capture {
             .push(state.layout.repositories.iter().map(|r| r.tile).collect());
         capture.poses.resize_with(state.avatars.len(), Vec::new);
         for (index, avatar) in state.avatars.iter().enumerate() {
-            if let Some(slot) = &avatar.slot {
-                assert!(poses < MAX_POSES, "validated travel pose bound");
+            if let Some(slot) = &avatar.slot
+                && capture.poses[index].last().is_none_or(|last| {
+                    last.point != slot.point || last.dock != slot.dock
+                })
+            {
                 capture.poses[index].push(Pose {
                     tick: state.tick,
                     point: slot.point,
@@ -376,6 +428,7 @@ fn capture(simulation: &mut Simulation) -> Capture {
             let author = state.authors[&contributor.key];
             let avatar = &state.avatars[author];
             capture.services.push(Service {
+                commit: event,
                 author,
                 repository: avatar.repository,
                 tick: state.tick,
@@ -418,7 +471,7 @@ fn capture(simulation: &mut Simulation) -> Capture {
 fn fade_clearance(capture: &Capture, begin: u64, point: Vec2, radius: f32) -> u64 {
     for offset in 0..=9_u64 {
         let tick = begin + offset;
-        let row = at_tick(&capture.tiles, tick);
+        let row = at_tick(&capture.tiles, tick.saturating_sub(capture.begin));
         let tile_collision = row
             .iter()
             .flatten()
@@ -461,14 +514,17 @@ impl Simulation {
         let mut result = padding.to_vec();
         let cap = options.travel_cap.ticks();
         for trip in self.travel.trips.iter().filter(|t| {
-            (!t.bot || options.bot_travel == super::BotTravel::Walk) && t.fade
+            t.commit >= self.travel.frozen
+                && (!t.bot || options.bot_travel == super::BotTravel::Walk)
+                && t.fade
         }) {
             let needed = if trip.route.is_empty() {
                 options.travel_cap.blocked_ticks()
             } else {
                 seconds_ticks(
-                    (trip.route.duration - tick_time(trip.arrival - trip.departure))
-                        .max(0.0),
+                    (trip.route.duration
+                        - ticks_duration(trip.arrival - trip.departure))
+                    .max(0.0),
                     true,
                 )
             };
@@ -497,7 +553,12 @@ impl Simulation {
         padding: &[(usize, u32)],
     ) -> Vec<(usize, u32)> {
         let mut result = padding.to_vec();
-        for trip in self.travel.trips.iter().filter(|t| !t.fade) {
+        for trip in self
+            .travel
+            .trips
+            .iter()
+            .filter(|t| !t.fade && t.commit >= self.travel.frozen)
+        {
             let ready =
                 trip.departure + u64::from(seconds_ticks(trip.route.duration, true));
             let surplus = u32::try_from(trip.arrival.saturating_sub(ready))
@@ -545,10 +606,10 @@ impl Simulation {
                 } else {
                     seconds_ticks(
                         (tick_time(trip.departure)
-                            + tick_time(shifts[departure_event])
+                            + ticks_duration(shifts[departure_event])
                             + trip.route.duration
                             - tick_time(trip.arrival)
-                            - tick_time(extra))
+                            - ticks_duration(extra))
                         .max(0.0),
                         true,
                     )
@@ -572,12 +633,20 @@ impl Simulation {
         padding: &[(usize, u32)],
     ) {
         let capture = capture(self);
-        let (trips, graph_epochs) = trips(
+        let (mut trips, graph_epochs) = trips(
             &capture,
             options.avatar_max_speed,
             options.bot_travel,
             options.travel_cap == super::TravelCap::None,
         );
+        trips.extend(
+            self.travel
+                .trips
+                .iter()
+                .filter(|t| t.commit < self.travel.frozen)
+                .cloned(),
+        );
+        trips.sort_by_key(|t| t.commit);
         let mut previous = vec![None; capture.poses.len()];
         let mut human_switches = 0;
         for service in &capture.services {
@@ -610,7 +679,7 @@ impl Simulation {
                     .iter()
                     .map(|t| {
                         t.route.legs.capacity() * std::mem::size_of::<Leg>()
-                            + t.route.track.capacity() * std::mem::size_of::<Vec2>()
+                            + t.route.track.len() * std::mem::size_of::<Vec2>()
                     })
                     .sum::<usize>(),
             graph_epochs,
@@ -626,15 +695,23 @@ impl Simulation {
                 .count(),
             padding_seconds: padding
                 .iter()
-                .map(|&(_, t)| tick_time(u64::from(t)))
+                .map(|&(_, t)| ticks_duration(u64::from(t)))
                 .sum(),
         };
-        let docks = capture.services.iter().map(|s| Some(s.dock)).collect();
+        let mut docks = self.travel.docks.clone();
+        docks.resize(self.events.len(), None);
+        for service in &capture.services {
+            docks[service.commit] = Some(service.dock);
+        }
+        if let Some(window) = &mut self.window {
+            window.captured.clone_from(&capture.services);
+        }
         self.travel = Plan {
             trips,
             docks,
             stats,
             replanning: false,
+            frozen: self.travel.frozen,
             occupancy: std::mem::take(&mut self.travel.occupancy),
         };
     }
@@ -812,7 +889,7 @@ impl Router {
         if distance[end] == u64::MAX {
             return Err(RouteFailure::Disconnected);
         }
-        let mut path = vec![target];
+        let mut path = vec![point(end)];
         let mut node = end;
         while node != start {
             node = previous[node];
@@ -887,9 +964,114 @@ fn simplify_path(path: &[Vec2]) -> Vec<Vec2> {
     result
 }
 
+impl Plan {
+    pub(super) fn discard_before(
+        &mut self,
+        boundary: u64,
+        next: usize,
+        keep: &std::collections::BTreeSet<usize>,
+    ) {
+        self.trips.retain(|trip| trip.arrival > boundary);
+        self.trips.shrink_to_fit();
+        for (commit, dock) in self.docks.iter_mut().enumerate() {
+            if commit < next && !keep.contains(&commit) {
+                *dock = None;
+            }
+        }
+        for (commit, row) in self.occupancy.iter_mut().enumerate() {
+            if commit < next && !keep.contains(&commit) {
+                *row = Vec::new();
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn near_coincident_gutters_keep_route_segments_axis_aligned() {
+        let cells = [
+            Rect::from_corners(Vec2::new(-20.0, -10.0), Vec2::ZERO),
+            Rect::from_corners(Vec2::new(0.0, -10.0), Vec2::new(20.0, 0.0004)),
+        ];
+        let points = Router::default()
+            .route(Vec2::new(-10.0, 0.0), Vec2::new(10.0, 0.0004), &cells)
+            .unwrap();
+        assert!(points.windows(2).all(|pair| {
+            pair[0].x.to_bits() == pair[1].x.to_bits()
+                || pair[0].y.to_bits() == pair[1].y.to_bits()
+        }));
+        assert!(points.iter().all(|&point| on_network(point, &cells)));
+        assert!(
+            points.last().unwrap().distance(Vec2::new(10.0, 0.0004)) < JUNCTION_EPSILON
+        );
+    }
+    #[test]
+    fn faded_contributor_returns_from_the_moved_gutter() {
+        let mut events = Vec::new();
+        for (index, repository) in [0, 1, 1].into_iter().enumerate() {
+            let mut event = crate::timeline::synthetic().remove(0);
+            event.seconds = i64::try_from(index).unwrap() * 20 * 86_400;
+            if index == 1 {
+                event.author.email = b"other@example.invalid".to_vec();
+                let change = event.changes[0].clone();
+                event.changes = (0..40)
+                    .map(|file| crate::timeline::FileChange {
+                        path: format!("large/file{file}.rs"),
+                        ..change.clone()
+                    })
+                    .collect();
+            }
+            let mut history = vec![event];
+            crate::repositories::namespace(&mut history, repository);
+            events.extend(history);
+        }
+        let options = super::super::Options {
+            seconds_per_day: 1.0,
+            max_idle_seconds: 30.0,
+            contributor_inactivity_days: 5,
+            travel_cap: super::super::TravelCap::None,
+            ..Default::default()
+        };
+        let mut simulation = Simulation::build(
+            events,
+            &options,
+            &crate::theme::Theme::neon(),
+            &crate::contributors::Mappings::default(),
+            &[],
+            &["first".into(), "second".into()],
+            &mut None,
+        )
+        .unwrap();
+        let captured = capture(&mut simulation);
+        let mut faded_move = false;
+        let mut previous = None;
+        for frame in 0..=frames_for(simulation.duration(), 60).unwrap() {
+            simulation.advance_to(frame, 60);
+            if let Some(avatar) = simulation.state.avatars.first()
+                && let Some(slot) = &avatar.slot
+            {
+                let pose = captured.pose(0, u64::from(frame)).unwrap();
+                assert_eq!(pose.point, slot.point);
+                assert_eq!(pose.dock, slot.dock);
+                faded_move |= avatar.presence == 0.0
+                    && previous.is_some_and(|point| point != slot.point);
+                previous = Some(slot.point);
+            }
+        }
+        assert!(faded_move);
+        let (routes, _) = trips(&captured, 480.0, options.bot_travel, true);
+        let route = routes.iter().find(|route| route.author == 0).unwrap();
+        assert!(!route.fade);
+        assert_ne!(route.source, captured.poses[0][0].point);
+        assert_eq!(
+            route.source,
+            captured.pose(0, route.departure).unwrap().point
+        );
+        assert!(captured.poses[0].len() < captured.radii.len() / 2);
+    }
 
     #[test]
     fn nearby_gutter_boundaries_do_not_create_unanchorable_micro_legs() {
@@ -1021,7 +1203,7 @@ mod tests {
     #[test]
     fn cap_quantization_never_rounds_above_the_requested_wait() {
         for cap in [0.0, 0.001, 0.1, 0.4, 0.999, 3600.0] {
-            assert!(tick_time(u64::from(seconds_ticks(cap, false))) <= cap + 1e-5);
+            assert!(ticks_duration(u64::from(seconds_ticks(cap, false))) <= cap + 1e-5);
         }
     }
 
@@ -1126,8 +1308,13 @@ mod tests {
             );
             let mut prior = route.sample(0.0).unwrap();
             let mut prior_velocity = Vec2::ZERO;
-            for frame in 1..=super::frames_for(route.duration + 0.1, 60).unwrap() {
-                let point = route.sample(tick_time(u64::from(frame))).unwrap();
+            for frame in 1..=super::frames_for(
+                crate::model::Time::seconds(route.duration + 0.1),
+                60,
+            )
+            .unwrap()
+            {
+                let point = route.sample(ticks_duration(u64::from(frame))).unwrap();
                 assert!(point.distance(prior) * 60.0 <= 240.01);
                 let velocity = (point - prior) * 60.0;
                 let acceleration = (velocity - prior_velocity).length() * 60.0;

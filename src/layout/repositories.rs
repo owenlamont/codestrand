@@ -6,53 +6,98 @@ use crate::timeline::Event;
 impl Layout {
     pub(crate) fn scheduled_repositories(
         events: &[Event],
-        starts: &[f32],
+        starts: &[crate::model::Time],
         names: &[String],
+        progress: &crate::progress::Progress,
     ) -> Self {
         let mut combined = Self::empty();
         combined.dirs.clear();
         combined.dir_index.clear();
-        for (repository, label) in names.iter().enumerate() {
-            let prefix = crate::repositories::prefix(repository);
-            let mut local = Vec::new();
-            let mut times = Vec::new();
-            for (event, &time) in events.iter().zip(starts) {
-                if event.repository != repository {
-                    continue;
-                }
+        let workers = std::thread::available_parallelism().map_or(1, usize::from);
+        for first in (0..names.len()).step_by(workers) {
+            progress.report(
+                crate::progress::Stage::Directories,
+                first as u64,
+                names.len() as u64,
+            );
+            let end = first.saturating_add(workers).min(names.len());
+            let layouts = Self::scheduled_batch(events, starts, first..end);
+            for (repository, layout) in (first..end).zip(layouts) {
+                combined.append_repository(repository, &names[repository], layout);
+            }
+        }
+        combined
+    }
+
+    fn scheduled_batch(
+        events: &[Event],
+        starts: &[crate::model::Time],
+        repositories: std::ops::Range<usize>,
+    ) -> Vec<Self> {
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = repositories
+                .map(|repository| {
+                    scope.spawn(move || {
+                        Self::scheduled_repository(events, starts, repository)
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| {
+                    handle
+                        .join()
+                        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+                })
+                .collect::<Vec<_>>()
+        })
+    }
+
+    fn append_repository(&mut self, repository: usize, label: &str, layout: Self) {
+        let prefix = crate::repositories::prefix(repository);
+        let region = RepositoryRegion {
+            label: label.to_owned(),
+            low: Vec2::splat(-2.0),
+            high: Vec2::splat(2.0),
+            live: false,
+            files: 0.0,
+            tile: None,
+            gutter: None,
+            outline: Vec::new(),
+            height: 0.0,
+            rotated: false,
+        };
+        self.repositories.push(region);
+        let base = self.dirs.len();
+        for (index, mut dir) in layout.dirs.into_iter().enumerate() {
+            dir.repository = repository;
+            dir.path = if index == 0 {
+                repository.to_string()
+            } else {
+                format!("{prefix}{}", dir.path)
+            };
+            dir.parent = dir.parent.map(|parent| base + parent);
+            self.dir_index.insert(dir.path.clone(), base + index);
+            self.dirs.push(dir);
+        }
+        self.plan.add_part(base, layout.plan);
+    }
+
+    fn scheduled_repository(
+        events: &[Event],
+        starts: &[crate::model::Time],
+        repository: usize,
+    ) -> Self {
+        let prefix = crate::repositories::prefix(repository);
+        let mut local = Vec::new();
+        let mut times = Vec::new();
+        for (event, &time) in events.iter().zip(starts) {
+            if event.repository == repository {
                 local.push(crate::repositories::local_event(event, &prefix));
                 times.push(time);
             }
-            let layout = Self::scheduled(&local, &times);
-
-            let region = RepositoryRegion {
-                label: label.clone(),
-                low: Vec2::splat(-2.0),
-                high: Vec2::splat(2.0),
-                live: false,
-                files: 0.0,
-                tile: None,
-                gutter: None,
-                outline: Vec::new(),
-                height: 0.0,
-                rotated: false,
-            };
-            combined.repositories.push(region);
-            let base = combined.dirs.len();
-            for (index, mut dir) in layout.dirs.into_iter().enumerate() {
-                dir.repository = repository;
-                dir.path = if index == 0 {
-                    repository.to_string()
-                } else {
-                    format!("{prefix}{}", dir.path)
-                };
-                dir.parent = dir.parent.map(|parent| base + parent);
-                combined.dir_index.insert(dir.path.clone(), base + index);
-                combined.dirs.push(dir);
-            }
-            combined.plan.add_part(base, layout.plan);
         }
-        combined
+        Self::scheduled(&local, &times)
     }
 
     pub(crate) fn local_regions(
@@ -281,6 +326,7 @@ mod tests {
             &events,
             &starts,
             &["Same".to_owned(), "Same".to_owned()],
+            &crate::progress::Progress::default(),
         );
         let first = layout.add("0/src/layout.rs", 0.0, 0);
         let second = layout.add("1/src/layout.rs", 0.0, 0);

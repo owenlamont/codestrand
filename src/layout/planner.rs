@@ -1,10 +1,10 @@
-use std::{collections::VecDeque, sync::Arc, time::Duration};
+use std::{collections::VecDeque, sync::Arc};
 
 use bevy::math::Vec2;
 
 use super::{Layout, MAX_ACCELERATION, MAX_SPEED, Presence, parent_path};
 use crate::{
-    model,
+    model::{self, Time},
     timeline::{Event, Kind},
 };
 
@@ -16,8 +16,8 @@ pub(super) const RELEASE_RADIUS: f32 = 0.05;
 pub(super) struct Plan {
     pub(super) parts: Vec<(usize, Plan)>,
     samples: Arc<[Vec<Vec2>]>,
-    pub(super) time: f32,
-    origin: f32,
+    pub(super) time: Time,
+    origin: Time,
     step: f32,
     seconds: f64,
 }
@@ -37,7 +37,7 @@ impl Plan {
         self.seconds += plan.seconds;
         self.parts.push((base, plan));
     }
-    fn new(layout: &mut Layout, events: &[Event], starts: &[f32]) -> Self {
+    fn new(layout: &mut Layout, events: &[Event], starts: &[Time]) -> Self {
         for event in events {
             for change in &event.changes {
                 layout.ensure_dir(parent_path(&change.path));
@@ -81,8 +81,8 @@ impl Plan {
         Self {
             parts: Vec::new(),
             samples: samples.into(),
-            time: 0.0,
-            origin: 0.0,
+            time: Time::ZERO,
+            origin: Time::ZERO,
             step,
             seconds: 0.0,
         }
@@ -97,12 +97,12 @@ impl Plan {
         self.at(dir, self.time)
     }
 
-    fn at(&self, dir: usize, time: f32) -> Option<Vec2> {
+    fn at(&self, dir: usize, time: Time) -> Option<Vec2> {
         let row = self.samples.get(dir)?;
         Some(interpolate(row, time, self.step))
     }
 
-    fn place(&self, time: f32, dirs: &mut [super::Dir]) {
+    fn place(&self, time: Time, dirs: &mut [super::Dir]) {
         if self.parts.is_empty() {
             assert_eq!(dirs.len(), self.samples.len(), "planned directories");
             let sample = interpolator(time, self.step, self.samples[0].len());
@@ -118,20 +118,13 @@ impl Plan {
     }
 }
 
-fn interpolate(row: &[Vec2], time: f32, step: f32) -> Vec2 {
+fn interpolate(row: &[Vec2], time: Time, step: f32) -> Vec2 {
     interpolator(time, step, row.len())(row)
 }
 
-fn interpolator(time: f32, step: f32, length: usize) -> impl Fn(&[Vec2]) -> Vec2 {
-    let at = (time.max(0.0) / step).floor();
-    let index = usize::try_from(std::time::Duration::from_secs_f32(at).as_secs())
-        .unwrap_or(usize::MAX)
-        .min(length - 1);
-    let fraction = ((time
-        - model::count_u32(u32::try_from(index).expect("sample index fits u32"))
-            * step)
-        / step)
-        .clamp(0.0, 1.0);
+fn interpolator(time: Time, step: f32, length: usize) -> impl Fn(&[Vec2]) -> Vec2 {
+    let (index, rest) = time.steps(step, length - 1);
+    let fraction = (rest / step).clamp(0.0, 1.0);
     let u = fraction;
     let weights = [
         (1.0 - u).powi(3),
@@ -157,15 +150,15 @@ fn interpolator(time: f32, step: f32, length: usize) -> impl Fn(&[Vec2]) -> Vec2
 fn occupancy(
     layout: &Layout,
     events: &[Event],
-    starts: &[f32],
+    starts: &[Time],
 ) -> (Vec<Vec<f32>>, f32) {
     let mut shadow = layout.clone();
-    let duration = starts.last().copied().unwrap_or(0.5) + 2.5;
-    let ticks = tick_at(duration);
+    let duration = starts.last().copied().unwrap_or(Time::seconds(0.5)) + 2.5;
+    let ticks = duration.ticks(true);
     let sample_ticks = (usize::try_from(ticks).expect("tick count fits usize") / 8_192
         + 1)
     .max(SAMPLE_TICKS);
-    let step = model::tick_time(
+    let step = model::ticks_duration(
         u64::try_from(sample_ticks).expect("sample interval fits u64"),
     );
     let samples =
@@ -183,11 +176,11 @@ fn occupancy(
                 if matches!(change.kind, Kind::Deleted)
                     && shadow.files[&id].state == Presence::Leaving
                 {
-                    let end = tick_at(
-                        time + shadow.files[&id].delay
-                            + super::FADE_SECONDS
-                            + 2.0 / 60.0,
-                    );
+                    let end = (time
+                        + shadow.files[&id].delay
+                        + super::FADE_SECONDS
+                        + 2.0 / 60.0)
+                        .ticks(true);
                     deadlines.insert(id, end);
                     releases.push(std::cmp::Reverse((end, id)));
                 } else if shadow.files[&id].state != Presence::Leaving {
@@ -234,21 +227,13 @@ fn occupancy(
             u64::try_from((sample + 1) * sample_ticks).expect("sample tick fits u64");
         let next_event = starts
             .get(event_index)
-            .map_or(ticks.saturating_add(1), |&start| tick_at(start));
+            .map_or(ticks.saturating_add(1), |&start| start.ticks(true));
         let next_release = releases
             .peek()
             .map_or(ticks.saturating_add(1), |&std::cmp::Reverse((end, _))| end);
         tick = next_sample.min(next_event).min(next_release).max(tick + 1);
     }
     (required, step)
-}
-
-fn tick_at(time: f32) -> u64 {
-    u64::try_from(
-        (Duration::from_secs_f32(time).as_nanos() * u128::from(model::TICK_RATE))
-            .div_ceil(1_000_000_000),
-    )
-    .expect("playback tick fits u64")
 }
 
 fn maximum(values: &[f32], window: usize) -> Vec<f32> {
@@ -539,12 +524,23 @@ fn pack_with_residual(
 
 impl Layout {
     #[cfg(test)]
+    pub(crate) fn shares_repository_plan(&self, other: &Self) -> bool {
+        self.plan.parts.len() == other.plan.parts.len()
+            && self.plan.parts.iter().zip(&other.plan.parts).all(
+                |((base, plan), (other_base, other_plan))| {
+                    base == other_base
+                        && Arc::ptr_eq(&plan.samples, &other_plan.samples)
+                },
+            )
+    }
+
+    #[cfg(test)]
     pub(crate) fn planned(events: &[Event]) -> Self {
         let starts = model::schedule::Schedule::new(events, 0.5, 1.0).starts;
         Self::scheduled(events, &starts)
     }
 
-    pub(crate) fn scheduled(events: &[Event], starts: &[f32]) -> Self {
+    pub(crate) fn scheduled(events: &[Event], starts: &[Time]) -> Self {
         let mut layout = Self::empty();
         let started = std::time::Instant::now();
         layout.plan = Plan::new(&mut layout, events, starts);
@@ -563,13 +559,13 @@ impl Layout {
         self.plan.seconds
     }
 
-    pub(crate) fn plan_time(&mut self, time: f32) {
-        self.plan.time = time;
-        self.plan.origin = time;
+    pub(crate) fn plan_time(&mut self, origin: Time) {
+        self.plan.time = origin;
+        self.plan.origin = origin;
     }
 
-    pub(crate) fn sample_plan(&mut self, time: f32, dt: f32) {
-        self.plan.time = self.plan.origin + time - dt;
+    pub(crate) fn sample_plan(&mut self, time: Time, dt: f32) {
+        self.plan.time = time.after(self.plan.origin) - dt;
     }
 
     pub(super) fn relax(&mut self, dt: f32) {
@@ -612,6 +608,7 @@ mod tests {
             &events,
             &starts,
             &["First".into(), "Second".into(), "Third".into()],
+            &crate::progress::Progress::default(),
         );
         for mut layout in [Layout::planned(&crate::timeline::synthetic()), combined] {
             for tick in [0, 1, 13, 90, 1000, 10_000, 90, 1] {
@@ -780,9 +777,9 @@ mod tests {
                 .distance(plan.position(z).unwrap())
         };
         let early = separation(&plan);
-        plan.time = 10.0;
+        plan.time = Time::seconds(10.0);
         let before = separation(&plan);
-        plan.time = 10.5;
+        plan.time = Time::seconds(10.5);
         let at_growth = separation(&plan);
         assert!(before > early + 0.5, "early={early}, before={before}");
         assert!(at_growth >= before);
@@ -931,7 +928,7 @@ mod tests {
             .map(|day| event(i64::from(day) * 86_400, &[("a/file", Kind::Modified)]))
             .collect();
         let starts = model::schedule::Schedule::new(&events, 86_400.0, 86_400.0).starts;
-        assert!(tick_at(starts[999]) > u64::from(u32::MAX));
+        assert!(starts[999].ticks(true) > u64::from(u32::MAX));
         let layout = Layout::scheduled(&events, &starts);
         assert!(layout.plan.samples[0].len() <= 8_194);
     }
@@ -1202,13 +1199,13 @@ mod rate_probe {
                 &Mappings::default(),
             );
             sim.change_rate(factor);
-            let ticks = u32::try_from(tick_at(sim.duration())).unwrap();
+            let ticks = u32::try_from(sim.duration().ticks(true)).unwrap();
             for _ in 0..ticks {
                 sim.tick_layout();
                 super::probes::assert_separated(&sim);
             }
             sim.restart();
-            let ticks = u32::try_from(tick_at(sim.duration())).unwrap();
+            let ticks = u32::try_from(sim.duration().ticks(true)).unwrap();
             for _ in 0..ticks {
                 sim.tick_layout();
                 super::probes::assert_separated(&sim);

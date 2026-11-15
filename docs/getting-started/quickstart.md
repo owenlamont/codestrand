@@ -1,13 +1,14 @@
 # First use
 
-## Play the demo
+## Play the current repository
 
 ```sh
 codestrand preview
 ```
 
-The built-in synthetic history includes moves, deletions and a crowded 65-file
-commit. No repository or network access is needed. Escape closes the window.
+Run the command inside a Git working tree or one of its subdirectories. Codestrand
+searches upward for the repository. Outside a repository, pass `--repository PATH`.
+Escape closes the window.
 
 ## Play a local repository
 
@@ -22,11 +23,13 @@ uncommitted working-tree edits are not shown.
 To choose a revision and a smaller playback window:
 
 ```sh
-codestrand preview --repository /path/to/repository --revision HEAD --start 0 --commits 20
+codestrand preview --repository /path/to/repository --revision HEAD \
+  --start-date 2026-05-01 --end-date 2026-05-31
 ```
 
-`--start` counts commits to lay out and settle before playback. `--commits` limits
-commits played after the start. The default is the rest of the history.
+Both UTC date bounds are inclusive: playback includes the whole named end day.
+Choose dates present in the repository. Omit either bound to use the beginning or
+end of history; earlier commits are settled before playback.
 
 ## Next steps
 

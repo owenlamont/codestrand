@@ -8,8 +8,8 @@ const TRANSITION_SECONDS: f32 = 0.3;
 
 #[derive(Default)]
 pub(super) struct Lod {
-    seconds: Option<f32>,
-    transition_seconds: f32,
+    seconds: Option<crate::model::Time>,
+    transition_seconds: crate::model::Time,
     collapsed: Vec<bool>,
     blend: Vec<f32>,
     pub detail: Vec<f32>,
@@ -68,14 +68,15 @@ impl Lod {
 
     #[cfg(test)]
     pub(super) fn sample(&mut self, layout: &Layout, seconds: f32, view: View) {
+        let seconds = crate::model::Time::seconds(seconds);
         self.sample_clocks(layout, seconds, seconds, view);
     }
 
     pub(super) fn sample_clocks(
         &mut self,
         layout: &Layout,
-        seconds: f32,
-        transition_seconds: f32,
+        seconds: crate::model::Time,
+        transition_seconds: crate::model::Time,
         view: View,
     ) {
         let reset = self.seconds.is_none_or(|previous| seconds < previous);
@@ -317,10 +318,11 @@ mod tests {
         let layout = layout();
         for speed in [0.125, 8.0] {
             let mut lod = Lod::default();
-            lod.sample_clocks(&layout, 0.0, 0.0, view(10000.0));
-            lod.sample_clocks(&layout, 0.15 * speed, 0.15, view(1.0));
+            let clocks = |seconds| crate::model::Time::seconds(seconds);
+            lod.sample_clocks(&layout, clocks(0.0), clocks(0.0), view(10000.0));
+            lod.sample_clocks(&layout, clocks(0.15 * speed), clocks(0.15), view(1.0));
             assert_eq!(lod.detail[1], 0.5);
-            lod.sample_clocks(&layout, 0.3 * speed, 0.3, view(1.0));
+            lod.sample_clocks(&layout, clocks(0.3 * speed), clocks(0.3), view(1.0));
             assert_eq!(lod.detail[1], 1.0);
         }
     }

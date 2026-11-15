@@ -4,6 +4,19 @@
 use std::{fmt::Write as _, process::Command};
 
 #[test]
+fn omitted_repository_outside_git_explains_how_to_supply_one() {
+    let scratch = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_codestrand"))
+        .current_dir(scratch.path())
+        .args(["export", "frames"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("pass --repository PATH"));
+    assert!(!scratch.path().join("frames").exists());
+}
+
+#[test]
 fn camera_targets_fail_before_output_or_encoder_starts() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("camera.toml");
@@ -16,6 +29,7 @@ fn camera_targets_fail_before_output_or_encoder_starts() {
         let result = Command::new(env!("CARGO_BIN_EXE_codestrand"))
             .arg("export")
             .arg(&output)
+            .args(["--test-input", "synthetic"])
             .arg("--camera-path")
             .arg(&path)
             .args([
@@ -35,7 +49,7 @@ fn camera_targets_fail_before_output_or_encoder_starts() {
 }
 
 #[test]
-fn repository_limit_is_checked_before_import_or_contributor_loading() {
+fn more_than_thirty_repositories_reach_contributor_loading() {
     let scratch = tempfile::tempdir().unwrap();
     for index in 0..60 {
         std::fs::create_dir(scratch.path().join(format!("repo-{index}"))).unwrap();
@@ -65,7 +79,7 @@ fn repository_limit_is_checked_before_import_or_contributor_loading() {
         let output = command.output().unwrap();
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(!output.status.success());
-        assert!(stderr.contains("at most 30 repositories"), "{stderr}");
+        assert!(stderr.contains("read contributors file"), "{stderr}");
         assert!(!stderr.contains("repository="), "{stderr}");
         assert!(!destination.exists());
     }
@@ -180,7 +194,12 @@ fn invalid_timing_is_rejected_before_creating_output() {
 #[test]
 fn export_refuses_an_existing_directory() {
     let output = Command::new(env!("CARGO_BIN_EXE_codestrand"))
-        .args(["export", env!("CARGO_MANIFEST_DIR")])
+        .args([
+            "export",
+            env!("CARGO_MANIFEST_DIR"),
+            "--test-input",
+            "synthetic",
+        ])
         .output()
         .expect("CLI can start");
     assert!(!output.status.success());

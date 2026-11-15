@@ -326,7 +326,14 @@ impl Simulation {
         let mut envelopes = vec![Envelope::default(); self.events.len()];
         let frames = super::frames_for(self.duration(), 60)
             .expect("validated playback frame bound");
-        for _ in 0..frames {
+        let frozen: Vec<_> = self
+            .envelopes
+            .iter()
+            .take(self.travel.frozen)
+            .cloned()
+            .collect();
+        self.restart();
+        for _ in self.state.tick..u64::from(frames) {
             self.tick_local_layout();
             let now = super::tick_time(self.state.tick);
             self.state.pulses.retain(|p| now < p.end);
@@ -338,8 +345,7 @@ impl Simulation {
             needed.sort_unstable();
             needed.dedup();
             let (regions, origins, scales) = self
-                .packing
-                .sample_repositories(self.state.tick, &needed)
+                .packing_sample(self.state.tick, Some(&needed))
                 .expect("planned repository samples");
             for pulse in &self.state.pulses {
                 let Some(tile) = regions[pulse.repository].tile else {
@@ -373,13 +379,14 @@ impl Simulation {
         }
         self.envelopes = envelopes;
         self.plan_ray_runs();
-        self.state = self.initial.clone();
+        self.envelopes[..frozen.len()].clone_from_slice(&frozen);
+        self.restart();
     }
 }
 
 impl State {
     #[cfg(test)]
-    pub(super) fn place_slots(&mut self, envelopes: &[Envelope], now: f32) {
+    pub(super) fn place_slots(&mut self, envelopes: &[Envelope], now: super::Time) {
         self.place_slots_planned(envelopes, now, &super::travel::Plan::default());
     }
     fn slot_peers(
@@ -414,7 +421,7 @@ impl State {
             })
             .collect()
     }
-    fn retained_slots(&self, now: f32, radius: f32) -> Vec<Option<Rect>> {
+    fn retained_slots(&self, now: super::Time, radius: f32) -> Vec<Option<Rect>> {
         self.avatars
             .iter()
             .map(|avatar| {
@@ -430,7 +437,7 @@ impl State {
     pub(super) fn place_slots_planned(
         &mut self,
         envelopes: &[Envelope],
-        now: f32,
+        now: super::Time,
         plan: &super::travel::Plan,
     ) {
         let gap = Vec2::splat(self.gutter);
@@ -461,7 +468,7 @@ impl State {
         order.sort_by(|&a, &b| {
             self.avatars[b]
                 .last_active
-                .total_cmp(&self.avatars[a].last_active)
+                .total_cmp(self.avatars[a].last_active)
                 .then(a.cmp(&b))
         });
         for index in order {
@@ -514,7 +521,7 @@ impl State {
                 }),
                 commit,
                 plan.docks.get(commit).copied().flatten(),
-                !plan.replanning,
+                !plan.replanning || commit < plan.frozen,
             );
             chosen.commit = commit;
             let record = self.slot_records.entry(commit).or_default();
@@ -1896,7 +1903,7 @@ mod tests {
         }
         sim.envelopes = envelopes;
         sim.plan_ray_runs();
-        sim.state = sim.initial.clone();
+        sim.state = super::super::SharedState(sim.initial.clone());
     }
     #[test]
     fn selective_envelopes_match_full_scene_replay_exactly() {
@@ -1948,15 +1955,15 @@ mod tests {
         );
         sim.advance_to(120, 60);
         let mut state = sim.state.clone();
-        state.avatars[0].last_active = 0.0;
+        state.avatars[0].last_active = crate::model::Time::ZERO;
         state.avatars[0].presence = 0.0;
         state.avatars[0].slot_presence = 0.0;
-        state.avatars[1].last_active = 12.0;
-        state.place_slots(&sim.envelopes, 12.0);
+        state.avatars[1].last_active = crate::model::Time::seconds(12.0);
+        state.place_slots(&sim.envelopes, crate::model::Time::seconds(12.0));
         let expected = state.avatars[1].slot.as_ref().unwrap().point;
         state.avatars[0].slot.as_mut().unwrap().point = expected;
         state.avatars[0].presence = 1.0;
-        state.place_slots(&sim.envelopes, 12.0);
+        state.place_slots(&sim.envelopes, crate::model::Time::seconds(12.0));
         assert_eq!(state.avatars[1].slot.as_ref().unwrap().point, expected);
         assert!(state.avatars[1].slot.as_ref().unwrap().valid());
     }
@@ -2022,7 +2029,7 @@ mod tests {
         }
         sim.advance_to(frames, 60);
         assert_eq!(first, report(&sim.state));
-        let summary = serde_json::json!({"avatar_slots":first,"moving_beams":moving,"travel":sim.travel.report(),"duration":sim.duration()});
+        let summary = serde_json::json!({"avatar_slots":first,"moving_beams":moving,"travel":sim.travel.report(),"duration":sim.duration().lossy_secs_f32()});
         if let Ok(path) = std::env::var("CODESTRAND_SLOT_DIAGNOSTIC") {
             std::fs::write(path, serde_json::to_vec_pretty(&summary).unwrap()).unwrap();
         }
@@ -2127,13 +2134,15 @@ mod tests {
         let labels: Vec<_> = (0..30).map(|i| format!("Repository {i}")).collect();
         let start = std::time::Instant::now();
         let mut base = Simulation::build(
-            sim.events.clone(),
+            sim.events.to_vec(),
             &options,
             &Theme::neon(),
             &Mappings::default(),
             &[],
             &labels,
-        );
+            &mut None,
+        )
+        .unwrap();
         let build = start.elapsed();
         let start = std::time::Instant::now();
         let padding = base.travel_padding(&options);
@@ -2157,10 +2166,11 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(i, r)| {
-                let mut events = crate::cache::load(
+                let mut events = crate::cache::load_with_options(
                     &r.path,
                     "HEAD",
                     crate::cache::root().as_deref(),
+                    crate::history::Options::default(),
                 )
                 .unwrap();
                 crate::repositories::namespace(&mut events, i);
@@ -2178,11 +2188,18 @@ mod tests {
                     .map_or(Options::default().avatar_max_speed, |v| {
                         v.parse().expect("test speed")
                     }),
-                travel_cap: std::env::var("CODESTRAND_TRAVEL_CAP")
-                    .ok()
-                    .map_or(Options::default().travel_cap, |v| {
-                        crate::travel_seconds(&v).expect("test cap")
-                    }),
+                travel_cap: std::env::var("CODESTRAND_TRAVEL_CAP").ok().map_or(
+                    Options::default().travel_cap,
+                    |v| {
+                        if v == "none" {
+                            crate::model::TravelCap::None
+                        } else {
+                            crate::model::TravelCap::Seconds(
+                                v.parse().expect("test cap"),
+                            )
+                        }
+                    },
+                ),
                 ..Default::default()
             },
             &Theme::neon(),

@@ -233,7 +233,20 @@ impl Simulation {
         let mut costs = vec![Vec::new(); self.state.layout.repositories.len()];
         self.restart();
         let frames = super::frames_for(self.duration(), 60).expect("bounded schedule");
-        for frame in (0..=frames + STEP).step_by(STEP as usize) {
+        let first = if self.state.tick == 0 {
+            0
+        } else {
+            u32::try_from(self.state.tick).expect("bounded window") / STEP + 1
+        };
+        let begin = first * STEP;
+        let last = (frames + STEP) / STEP * STEP;
+        for frame in (begin..=frames + STEP).step_by(STEP as usize) {
+            self.progress.report_range(
+                crate::progress::Stage::Titles,
+                frame.into(),
+                begin.into(),
+                last.into(),
+            );
             self.advance_to(frame, 60);
             let blocked = obstacles(self);
             let names: Vec<_> = self
@@ -267,54 +280,103 @@ impl Simulation {
                 costs[index].push(row);
             }
         }
-        self.title_plan = costs.iter().map(|row| plan(row, CHANGE_COST)).collect();
+        self.title_plan = costs
+            .iter_mut()
+            .enumerate()
+            .map(|(index, row)| {
+                let prefix = self.title_plan.get(index).map_or(&[][..], |p| {
+                    &p[..(first as usize)
+                        .saturating_sub(self.title_start)
+                        .min(p.len())]
+                });
+                if let Some(&corner) = prefix.last() {
+                    let mut fixed = [f64::INFINITY; 4];
+                    fixed[usize::from(corner)] = 0.0;
+                    row.insert(0, fixed);
+                }
+                let planned = plan(row, CHANGE_COST);
+                prefix
+                    .iter()
+                    .copied()
+                    .chain(planned.into_iter().skip(usize::from(!prefix.is_empty())))
+                    .collect()
+            })
+            .collect();
         self.restart();
     }
     pub(super) fn place_titles(&mut self) {
+        let state = &mut *self.state;
         let sample =
-            usize::try_from(self.state.tick / u64::from(STEP)).expect("bounded tick");
-        self.state.titles.clear();
-        for (index, region) in self.state.layout.repositories.iter().enumerate() {
+            usize::try_from(state.tick / u64::from(STEP)).expect("bounded tick");
+        state.titles.clear();
+        for (index, region) in state.layout.repositories.iter().enumerate() {
             let Some(tile) = region.tile else { continue };
             let row = self.title_plan.get(index).map_or(&[][..], Vec::as_slice);
             let at = |sample: usize| {
-                row.get(sample)
+                sample
+                    .checked_sub(self.title_start)
+                    .and_then(|sample| row.get(sample))
                     .copied()
                     .or_else(|| row.last().copied())
                     .unwrap_or(0)
             };
             let corner = at(sample);
-            let Some(mut current) = title(
-                tile,
-                &region.label,
-                self.state.geometry.label_height,
-                corner,
-            ) else {
+            let Some(mut current) =
+                title(tile, &region.label, state.geometry.label_height, corner)
+            else {
                 continue;
             };
             if let Some(change) =
                 (1..=sample).rev().take(2).find(|&t| at(t) != at(t - 1))
             {
-                let age = self.state.tick
+                let age = state.tick
                     - u64::try_from(change).expect("bounded sample") * u64::from(STEP);
                 if age < 18 {
                     current.old = title(
                         tile,
                         &region.label,
-                        self.state.geometry.label_height,
+                        state.geometry.label_height,
                         at(change - 1),
                     )
                     .map(|t| t.point);
-                    current.opacity = super::tick_time(age) / 0.3;
+                    current.opacity = super::ticks_duration(age) / 0.3;
                 }
             }
-            self.state.titles.insert(index, current);
+            state.titles.insert(index, current);
         }
     }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn window_extension_preserves_a_title_fade() {
+        let mut sim = Simulation::two_synthetic_repositories();
+        sim.title_plan[0].fill(0);
+        sim.title_plan[0][4..].fill(1);
+        sim.advance_to(65, 60);
+        assert!(sim.state.titles[&0].old.is_some());
+        let saved = sim.state.clone();
+        let expected: Vec<_> = (66..=78)
+            .map(|tick| {
+                sim.advance_to(tick, 60);
+                format!("{:?}", sim.state.titles)
+            })
+            .collect();
+        sim.window = Some(super::super::windows::Planning {
+            state: saved.0,
+            end: sim.duration(),
+            services: Vec::new(),
+            captured: Vec::new(),
+        });
+        sim.plan_titles();
+        for (tick, expected) in (66..=78).zip(expected) {
+            sim.advance_to(tick, 60);
+            assert_eq!(format!("{:?}", sim.state.titles), expected);
+        }
+        sim.assert_stitched_travel_rules();
+    }
     #[test]
     fn title_height_does_not_move_its_world_anchor() {
         let title =

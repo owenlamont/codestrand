@@ -107,7 +107,8 @@ fn every_multiplier_samples_the_canonical_timeline() {
         let mut canonical = simulation(growth(), &Options::default());
         sim.change_rate(multiplier);
         let mut elapsed = Duration::ZERO;
-        for _ in 0..frames_for(sim.duration() / multiplier, 8).unwrap() {
+        let scaled = Time::seconds(sim.duration().lossy_secs_f32() / multiplier);
+        for _ in 0..frames_for(scaled, 8).unwrap() {
             elapsed += Duration::from_millis(125).mul_f32(sim.playback_multiplier());
             let frame = preview_frame(elapsed, 60);
             sim.advance_to(frame, 60);
@@ -199,7 +200,9 @@ fn padded(
         &Mappings::default(),
         padding,
         &["Synthetic history".into()],
+        &mut None,
     )
+    .unwrap()
 }
 
 #[test]

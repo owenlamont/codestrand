@@ -9,6 +9,7 @@ use bevy::math::{Vec2, Vec3};
 use crate::{
     contributors::{Contributor, Key, Mappings},
     layout::Layout,
+    progress::{Progress, Stage},
     theme::{BeamStyle, Geometry, Theme},
     timeline::{Event, Kind},
 };
@@ -24,19 +25,32 @@ mod nitpicks;
 pub(crate) mod occlusion;
 #[cfg(test)]
 mod pacing_tests;
+mod planning_memory;
+
 pub(crate) mod quality;
 pub(crate) mod schedule;
 mod slots;
+#[cfg(test)]
+pub(crate) use slots::diagnostics::MovingBeams;
+pub(crate) mod streaming;
+mod time;
 mod titles;
 mod travel;
+mod windows;
 pub(super) use names::rect as label_rect;
+#[cfg(not(test))]
+pub(super) use planning_memory::available as available_memory;
 use schedule::Schedule;
+pub(crate) use time::Time;
 pub(crate) mod treemap;
 
 pub(super) const TICK_RATE: u32 = 60;
 pub(super) const PREVIEW_FPS: u16 = 30;
 const LEAD_IN: f32 = 0.5;
 const TAIL: f32 = 2.5;
+// Sixty-second windows beat fifteen on whole mid30 (459 vs 514 s) and the matched
+// all48 prefix (971 vs 1026 s), with first frames at 24/136 s rather than 19/112 s.
+const WINDOW_SECONDS: f32 = 60.0;
 const PULSE_SECONDS: f32 = 1.3;
 const FRAGMENT_SPEED: f32 = 1.1;
 const FRAGMENT_FLIGHT: f32 = 1.0 / FRAGMENT_SPEED;
@@ -60,7 +74,14 @@ fn check_travel_pass(pass: u32) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// When a pulse starting at `start` ends unless its author's next commit cuts it short.
+fn pulse_end(start: Time) -> Time {
+    start + PULSE_SECONDS + FRAGMENT_FLIGHT
+}
+
+#[derive(Clone)]
 pub(super) struct Options {
+    pub available_memory: u64,
     pub contributor_inactivity_days: u32,
     pub repository_ends: Vec<Option<i64>>,
     pub repository_archived: Vec<bool>,
@@ -70,10 +91,16 @@ pub(super) struct Options {
     pub start: usize,
     pub commits: Option<usize>,
     pub travel_cap: TravelCap,
+    pub travel_window_seconds: Option<f32>,
+    #[cfg(test)]
+    pub eager_windows: bool,
+    #[cfg(test)]
+    pub window_hook: Option<streaming::WindowHook>,
     pub bot_travel: BotTravel,
     pub avatar_max_speed: f32,
     pub avatar_size: f32,
     pub gutter: f32,
+    pub progress: Progress,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize)]
@@ -108,6 +135,22 @@ pub(super) enum BotTravel {
 }
 
 impl Options {
+    pub(super) fn choose_window(&mut self, events: &[Event]) -> Time {
+        let history = Schedule::with_padding(
+            &events[self.selected_range(events.len())],
+            self.seconds_per_day,
+            self.max_idle_seconds,
+            |_| 0,
+        );
+        let (_, endings) =
+            lifecycle::plan(events, &history, self, self.selected_range(events.len()));
+        let duration = lifecycle::duration(&history, &endings);
+        self.travel_window_seconds = (duration
+            > Time::seconds(WINDOW_SECONDS + windows::MARGIN))
+        .then_some(WINDOW_SECONDS);
+        duration
+    }
+
     fn selected_range(&self, events: usize) -> Range<usize> {
         let start = self.start.min(events);
         let end = self
@@ -117,9 +160,11 @@ impl Options {
     }
 }
 
+#[cfg(test)]
 impl Default for Options {
     fn default() -> Self {
         Self {
+            available_memory: 2 * 1024 * 1024 * 1024,
             contributor_inactivity_days: 60,
             repository_ends: Vec::new(),
             repository_archived: Vec::new(),
@@ -129,10 +174,16 @@ impl Default for Options {
             start: 0,
             commits: None,
             travel_cap: TravelCap::Seconds(0.4),
+            travel_window_seconds: None,
+            #[cfg(test)]
+            eager_windows: false,
+            #[cfg(test)]
+            window_hook: None,
             bot_travel: BotTravel::Fade,
             avatar_max_speed: 480.0,
             avatar_size: 2.0,
             gutter: 4.0,
+            progress: Progress::default(),
         }
     }
 }
@@ -148,8 +199,8 @@ struct Pulse {
     commit: usize,
     repository: usize,
     touched: Vec<u64>,
-    start: f32,
-    end: f32,
+    start: Time,
+    end: Time,
     author: usize,
     targets: Vec<(Target, f32, u32, u32)>,
     aggregated: bool,
@@ -234,8 +285,8 @@ pub(super) struct DiffLine {
 
 #[derive(Clone, Debug)]
 pub(super) struct Avatar {
-    expires: f32,
-    arrived: f32,
+    expires: Time,
+    arrived: Time,
     pub lifecycle_scale: f32,
     pub grey: f32,
     pub key: Key,
@@ -245,7 +296,7 @@ pub(super) struct Avatar {
     target: Vec3,
     repository: usize,
     touched: Vec<u64>,
-    last_active: f32,
+    last_active: Time,
     pub presence: f32,
     // Travel fades do not release a reserved parking slot.
     slot_presence: f32,
@@ -273,6 +324,7 @@ impl Avatar {
     }
 }
 
+#[cfg_attr(test, derive(Debug))]
 pub(super) struct Beam {
     pub author: usize,
     pub from: Vec3,
@@ -280,6 +332,7 @@ pub(super) struct Beam {
     pub width: f32,
 }
 
+#[cfg_attr(test, derive(Debug))]
 pub(super) struct Fragment {
     #[cfg(test)]
     beam: Option<(usize, Target)>,
@@ -317,6 +370,7 @@ pub(super) enum LabelKind {
 }
 
 #[derive(Clone)]
+#[cfg_attr(test, derive(Debug))]
 pub(super) struct Label {
     pub position: Vec3,
     pub text: String,
@@ -346,12 +400,35 @@ struct State {
     titles: BTreeMap<usize, titles::Title>,
 }
 
+#[derive(Clone)]
+struct SharedState(std::sync::Arc<State>);
+
+impl std::ops::Deref for SharedState {
+    type Target = State;
+    fn deref(&self) -> &State {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for SharedState {
+    fn deref_mut(&mut self) -> &mut State {
+        std::sync::Arc::make_mut(&mut self.0)
+    }
+}
+
+impl std::fmt::Debug for SharedState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
 /// Deterministic playback stepped at a fixed tick rate, independent of output frame rate.
+#[derive(Clone)]
 pub(super) struct Simulation {
     file_ids: HashMap<String, FileIdentity>,
     first_arrivals: Vec<bool>,
-    departures: Vec<f32>,
-    repository_ends: Vec<f32>,
+    departures: Vec<Time>,
+    repository_ends: Vec<Time>,
     pub caption_style: caption::Style,
     caption_plan: Vec<caption::Transition>,
     packing: crate::layout::packing::Packing,
@@ -360,18 +437,27 @@ pub(super) struct Simulation {
     pub(super) collapse_directories: bool,
     pub(super) diff_text_distance: f32,
     pub repository_label_plane: crate::repositories::LabelPlane,
-    events: Vec<Event>,
+    events: windows::Events,
     offset: usize,
     total: usize,
     schedule: Schedule,
+    clock: schedule::Clock,
+    births: Vec<(usize, u64, u64)>,
     playback_multiplier: f32,
     heat_half_life: f32,
-    initial: State,
-    state: State,
+    initial: std::sync::Arc<State>,
+    state: SharedState,
     theme: Theme,
     travel: travel::Plan,
     visual_updates: bool,
     title_plan: Vec<Vec<u8>>,
+    progress: Progress,
+    window: Option<windows::Planning>,
+    boundaries: Vec<std::sync::Arc<State>>,
+    windowed: bool,
+    stream: Option<std::sync::Arc<std::sync::Mutex<windows::Stream>>>,
+    ready_end: Option<(u64, bool)>,
+    title_start: usize,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -384,24 +470,56 @@ impl Simulation {
     pub(super) fn check_repository_plan(
         events: &[Event],
         options: &Options,
-        repositories: usize,
+        repositories: &[String],
     ) -> anyhow::Result<()> {
+        Self::check_repository_endings(events, options, repositories)?;
         let schedule = Schedule::with_padding(
             &events[options.selected_range(events.len())],
             options.seconds_per_day,
             options.max_idle_seconds,
-            |_| match options.travel_cap {
-                TravelCap::Seconds(_) => options.travel_cap.ticks(),
-                TravelCap::None => 0,
-            },
+            |_| 0,
         );
         Self::check_schedule(events, options, repositories, &schedule)
+    }
+
+    fn check_repository_endings(
+        events: &[Event],
+        options: &Options,
+        repositories: &[String],
+    ) -> anyhow::Result<()> {
+        let mut latest = i64::MIN;
+        let mut required = vec![i64::MIN; repositories.len()];
+        let mut first = None;
+        for (index, event) in events.iter().enumerate() {
+            latest = latest.max(event.seconds);
+            required[event.repository] = latest;
+            if let Some(ending) = options
+                .repository_ends
+                .get(event.repository)
+                .copied()
+                .flatten()
+                .filter(|&ending| latest >= ending)
+            {
+                first.get_or_insert((index, event, ending));
+            }
+        }
+        if let Some((index, event, ending)) = first {
+            anyhow::bail!(
+                "repository '{}' has ended = '{}' UTC (inclusive), but commit {} at imported position {} falls after that ending in history order; set ended to '{}' or later, inclusive, or remove ended",
+                crate::terminal_escape(&repositories[event.repository]),
+                date(ending.saturating_sub(1)),
+                event.commit,
+                index + 1,
+                date(required[event.repository]),
+            );
+        }
+        Ok(())
     }
 
     fn check_schedule(
         events: &[Event],
         options: &Options,
-        repositories: usize,
+        repositories: &[String],
         schedule: &Schedule,
     ) -> anyhow::Result<()> {
         let (_, endings) = lifecycle::plan(
@@ -410,25 +528,8 @@ impl Simulation {
             options,
             options.selected_range(events.len()),
         );
-        let ticks = frames_for(lifecycle::duration(schedule, &endings), 60)?;
-        let authors = events[options.selected_range(events.len())]
-            .iter()
-            .map(|e| (e.author.name.as_slice(), e.author.email.as_slice()))
-            .collect::<std::collections::HashSet<_>>()
-            .len();
-        anyhow::ensure!(
-            repositories <= crate::repositories::MAX_REPOSITORIES
-                && ticks <= 216_000
-                && usize::try_from(ticks)
-                    .ok()
-                    .and_then(|ticks| ticks.checked_mul(repositories))
-                    .is_some_and(|samples| samples <= 2_000_000)
-                && usize::try_from(ticks)
-                    .ok()
-                    .and_then(|t| (t + 1).checked_mul(authors))
-                    .is_some_and(|n| n <= 4_000_000),
-            "multi-repository planning exceeds 30 repositories, 216000 ticks, 2000000 region samples or 4000000 avatar poses including worst-case travel padding; use fewer repositories, shorten the history or reduce the playback times"
-        );
+        let duration = lifecycle::duration(schedule, &endings);
+        planning_memory::check(events, options, repositories, schedule, duration)?;
         Ok(())
     }
 
@@ -455,7 +556,7 @@ impl Simulation {
     }
 
     #[cfg(test)]
-    pub(super) fn scheduled_starts(&self) -> &[f32] {
+    pub(super) fn scheduled_starts(&self) -> &[Time] {
         &self.schedule.starts
     }
 
@@ -502,37 +603,54 @@ impl Simulation {
         if events.iter().any(|event| event.contributor.is_none()) {
             mappings.apply(&mut events);
         }
-        Self::check_repository_plan(&events, options, repositories.len())?;
-        let mut simulation =
-            Self::build(events.clone(), options, theme, mappings, &[], repositories);
+        Self::check_repository_plan(&events, options, repositories)?;
+        let global_started = std::time::Instant::now();
+        let mut layout_cache = None;
+        let mut simulation = Self::build(
+            events.clone(),
+            options,
+            theme,
+            mappings,
+            &[],
+            repositories,
+            &mut layout_cache,
+        )?;
+        if let Some(seconds) = options.travel_window_seconds {
+            eprintln!(
+                "global_plan_seconds={}",
+                global_started.elapsed().as_secs_f64()
+            );
+            return simulation.plan_windows(&events, options, repositories, seconds);
+        }
         let mut padding = simulation.travel_padding(options);
+        let history = simulation.schedule.clone();
+        let departures = simulation.departures.clone();
+        let endings = simulation.repository_ends.clone();
         let mut pass = 0;
         let mut compactions = 0;
         loop {
             pass += 1;
             check_travel_pass(pass)?;
+            options.progress.pass(pass);
             if pass > 1 || padding.iter().any(|&(_, ticks)| ticks > 0) {
                 let schedule = Schedule::with_padding(
                     &events[options.selected_range(events.len())],
                     options.seconds_per_day,
                     options.max_idle_seconds,
-                    |index| {
-                        padding
-                            .iter()
-                            .find(|&&(event, _)| event == options.start + index)
-                            .map_or(0, |&(_, ticks)| ticks)
-                    },
+                    |index| schedule::padding_at(&padding, options.start + index),
                 );
-                Self::check_schedule(&events, options, repositories.len(), &schedule)?;
+                Self::check_schedule(&events, options, repositories, &schedule)?;
                 let preferences = std::mem::take(&mut simulation.travel).preferences();
-                simulation = Self::build(
-                    events.clone(),
-                    options,
-                    theme,
-                    mappings,
-                    &padding,
-                    repositories,
-                );
+                let clock = schedule::Clock::new(history.clone(), schedule.clone());
+                simulation.plan_waiting_births(options, &clock, &schedule);
+                simulation.departures =
+                    departures.iter().map(|&time| clock.present(time)).collect();
+                simulation.repository_ends =
+                    endings.iter().map(|&time| clock.present(time)).collect();
+                simulation.clock = clock;
+                simulation.schedule = schedule;
+                simulation.state = SharedState(simulation.initial.clone());
+                simulation.plan_avatar_envelopes(None);
                 simulation.travel = preferences;
             }
             simulation.plan_travel(options, &padding);
@@ -568,11 +686,87 @@ impl Simulation {
         let Range { start, end } = options.selected_range(events.len());
         events.truncate(end);
         events.drain(..start);
-        simulation.events = events;
+        simulation.events = events.into();
         simulation.caption_plan =
             caption::plan(&simulation.schedule, &simulation.events);
+        options.progress.pass(1);
         simulation.plan_titles();
+        simulation.progress = Progress::default();
         Ok(simulation)
+    }
+
+    fn plan_waiting_births(
+        &mut self,
+        options: &Options,
+        clock: &schedule::Clock,
+        schedule: &Schedule,
+    ) {
+        self.births.clear();
+        let mut born: Vec<_> = self
+            .initial
+            .layout
+            .repositories
+            .iter()
+            .map(|region| region.live)
+            .collect();
+        for (index, event) in self.events.iter().enumerate() {
+            let first = !std::mem::replace(&mut born[event.repository], true);
+            if first
+                && options.travel_cap == TravelCap::None
+                && schedule.padding(index) >= crate::layout::packing::BIRTH_TICKS
+            {
+                let (_, history) = clock.service_ticks(index);
+                self.births
+                    .push((event.repository, clock.wait_begin(index), history));
+            }
+        }
+    }
+
+    fn scheduled_layout(
+        events: &[Event],
+        layout_starts: &[Time],
+        repositories: &[String],
+        layout_cache: &mut Option<(Vec<Time>, Layout)>,
+        progress: &Progress,
+    ) -> Layout {
+        if let Some((starts, layout)) = layout_cache
+            && *starts == layout_starts
+        {
+            layout.clone()
+        } else {
+            #[cfg(test)]
+            tests::LAYOUT_COUNTS
+                .with(|counts| counts.set((counts.get().0 + 1, counts.get().1)));
+            let layout = Layout::scheduled_repositories(
+                events,
+                layout_starts,
+                repositories,
+                progress,
+            );
+            *layout_cache = Some((layout_starts.to_vec(), layout.clone()));
+            layout
+        }
+    }
+
+    fn build_schedules(
+        events: &[Event],
+        options: &Options,
+        padding: &[(usize, u32)],
+    ) -> (Schedule, Schedule) {
+        let start = options.start;
+        let schedule = Schedule::with_padding(
+            &events[options.selected_range(events.len())],
+            options.seconds_per_day,
+            options.max_idle_seconds,
+            |index| schedule::padding_at(padding, start + index),
+        );
+        let layout_starts = Schedule::with_padding(
+            events,
+            options.seconds_per_day,
+            options.max_idle_seconds,
+            |index| schedule::padding_at(padding, index) * u32::from(index >= start),
+        );
+        (schedule, layout_starts)
     }
 
     fn build(
@@ -582,30 +776,23 @@ impl Simulation {
         mappings: &Mappings,
         padding: &[(usize, u32)],
         repositories: &[String],
-    ) -> Self {
+        layout_cache: &mut Option<(Vec<Time>, Layout)>,
+    ) -> anyhow::Result<Self> {
         if events.iter().any(|event| event.contributor.is_none()) {
             mappings.apply(&mut events);
         }
         let Range { start, end } = options.selected_range(events.len());
-        let schedule = Schedule::with_padding(
-            &events[start..end],
-            options.seconds_per_day,
-            options.max_idle_seconds,
-            |index| schedule::padding_at(padding, start + index),
-        );
-        let layout_starts = Schedule::with_padding(
-            &events,
-            options.seconds_per_day,
-            options.max_idle_seconds,
-            |index| schedule::padding_at(padding, index) * u32::from(index >= start),
-        );
+        let (schedule, layout_starts) =
+            Self::build_schedules(&events, options, padding);
         let mut state = State {
             region_depth: 0.0,
             tick: 0,
-            layout: Layout::scheduled_repositories(
+            layout: Self::scheduled_layout(
                 &events,
                 &layout_starts.starts,
                 repositories,
+                layout_cache,
+                &options.progress,
             ),
             avatars: Vec::new(),
             authors: HashMap::new(),
@@ -625,8 +812,13 @@ impl Simulation {
         state.apply_history(&events[..start]);
         if start > 0 {
             state.layout.plan_time(
-                layout_starts.starts[start.min(layout_starts.starts.len() - 1)]
-                    - schedule.starts.first().copied().unwrap_or(LEAD_IN),
+                layout_starts.starts[start.min(layout_starts.starts.len() - 1)].since(
+                    schedule
+                        .starts
+                        .first()
+                        .copied()
+                        .unwrap_or(Time::seconds(LEAD_IN)),
+                ),
             );
             state.layout.settle(SETTLE_TICKS, tick_seconds());
             state.avatars.clear();
@@ -640,11 +832,7 @@ impl Simulation {
         events.truncate(end);
         events.drain(..start);
         let mut simulation = Self {
-            file_ids: state
-                .layout
-                .files()
-                .map(|(id, file)| (file.path.clone(), FileIdentity::Unique(id)))
-                .collect(),
+            file_ids: file_identities(&state),
             first_arrivals,
             departures,
             repository_ends,
@@ -656,30 +844,44 @@ impl Simulation {
             collapse_directories: true,
             diff_text_distance: 1.0,
             repository_label_plane: crate::repositories::LabelPlane::default(),
-            events,
+            events: events.into(),
             offset: start,
             total,
+            clock: schedule::Clock::new(schedule.clone(), schedule.clone()),
+            births: Vec::new(),
             schedule,
             playback_multiplier: 1.0,
             heat_half_life: options.heat_half_life,
-            initial: state.clone(),
-            state,
+            initial: std::sync::Arc::new(state.clone()),
+            state: SharedState(std::sync::Arc::new(state)),
             theme: theme.clone(),
             travel: travel::Plan::default(),
             visual_updates: true,
             title_plan: Vec::new(),
+            progress: options.progress.clone(),
+            window: None,
+            boundaries: Vec::new(),
+            windowed: options.travel_window_seconds.is_some(),
+            stream: None,
+            ready_end: None,
+            title_start: 0,
         };
         let snapshots = simulation
-            .plan_repositories(prior_active, options.travel_cap == TravelCap::None);
-        simulation.plan_avatar_envelopes(snapshots);
-        simulation
+            .plan_repositories(prior_active, options.travel_cap == TravelCap::None)?;
+        if options.travel_window_seconds.is_none() {
+            simulation.plan_avatar_envelopes(snapshots);
+        }
+        Ok(simulation)
     }
 
     fn plan_repositories(
         &mut self,
         mut active: Vec<bool>,
         uncapped: bool,
-    ) -> Option<slots::Snapshots> {
+    ) -> anyhow::Result<Option<slots::Snapshots>> {
+        #[cfg(test)]
+        tests::LAYOUT_COUNTS
+            .with(|counts| counts.set((counts.get().0, counts.get().1 + 1)));
         let mut activation = vec![u32::MAX; active.len()];
         for (repository, live) in active.iter().enumerate() {
             if *live {
@@ -687,7 +889,8 @@ impl Simulation {
             }
         }
         for (index, event) in self.events.iter().enumerate() {
-            let arrival = travel::seconds_ticks(self.schedule.starts[index], false);
+            let arrival = u32::try_from(self.schedule.starts[index].ticks(false))
+                .expect("bounded service tick");
             let padding = self.schedule.padding(index);
             activation[event.repository] = activation[event.repository].min(
                 arrival
@@ -696,7 +899,8 @@ impl Simulation {
                     .min(arrival),
             );
         }
-        let mut snapshots = Some(slots::Snapshots::default());
+        let mut snapshots =
+            (!self.windowed).then(|| slots::Snapshots::new(&self.events));
         for (_, file) in self.layout().files() {
             active[self.layout().dir(file.dir).repository] = true;
         }
@@ -706,22 +910,24 @@ impl Simulation {
             active[event.repository] = true;
         }
         let geometry = self.state.geometry;
-        let mut samples = vec![self.layout().local_regions(&active, geometry)];
         let mut sampled_events = 0;
         let ticks = frames_for(self.duration(), 60)
             .expect("multi-repository playback fits the supported frame range");
-        for _ in 0..ticks {
+        let mut samples = crate::layout::packing::Inputs::new(
+            usize::try_from(ticks).expect("bounded packing ticks") + 1,
+        );
+        samples.push(self.layout().local_regions(&active, geometry));
+        for tick in 0..ticks {
+            self.progress
+                .report(Stage::Layout, tick.into(), ticks.into());
             self.tick_layout();
             for event in &self.events[sampled_events..self.state.next_event] {
                 active[event.repository] = true;
             }
             sampled_events = self.state.next_event;
             samples.push(self.layout().local_regions(&active, geometry));
-            if snapshots
-                .as_mut()
-                .is_some_and(|cache| !cache.capture(&self.state))
-            {
-                snapshots = None;
+            if let Some(snapshots) = &mut snapshots {
+                snapshots.capture(&self.state);
             }
         }
         if uncapped {
@@ -735,31 +941,34 @@ impl Simulation {
                     usize::try_from(self.schedule.padding(index))
                         .expect("bounded padding"),
                 );
-                let files = samples[arrival][event.repository].files;
-                for row in &mut samples[begin..arrival] {
-                    row[event.repository].files = files;
-                }
+                samples.anticipate_files(event.repository, begin, arrival);
             }
         }
-        self.packing = crate::layout::packing::Packing::with_gutter(
-            &samples,
+        self.packing = crate::layout::packing::Packing::from_inputs(
+            samples,
             self.state.gutter,
             uncapped.then_some(activation.as_slice()),
-        )
+        )?
         .with_endings(
             &self.repository_ends,
             lifecycle::REPOSITORY_EXIT,
             lifecycle::REFLOW,
         );
-        self.state = self.initial.clone();
+        self.state = SharedState(self.initial.clone());
         self.state.region_depth = framing::depth_bound();
         if let Some((regions, offsets, scales)) = self.packing.sample(0) {
             self.state.layout.place_regions(regions, &offsets, &scales);
         }
-        self.initial = self.state.clone();
-        snapshots
+        self.initial = self.state.0.clone();
+        Ok(snapshots)
     }
-    pub(super) fn duration(&self) -> f32 {
+    pub(super) fn duration(&self) -> Time {
+        if let Some((end, _)) = self.ready_end {
+            return tick_time(end);
+        }
+        if let Some(window) = &self.window {
+            return self.clock.present(window.end);
+        }
         lifecycle::duration(&self.schedule, &self.repository_ends)
     }
 
@@ -768,7 +977,7 @@ impl Simulation {
             .repository_ends
             .get(repository)
             .copied()
-            .unwrap_or(f32::INFINITY);
+            .unwrap_or(Time::INFINITY);
         let u = lifecycle::progress(self.seconds(), end, lifecycle::REPOSITORY_EXIT);
         (u.min(0.2) * 5.0, 1.0 - u, u * self.scale() * 1.5)
     }
@@ -826,7 +1035,12 @@ impl Simulation {
     }
 
     pub(super) fn restart(&mut self) {
-        self.state = self.initial.clone();
+        self.state = SharedState(
+            self.window
+                .as_ref()
+                .map_or(&self.initial, |w| &w.state)
+                .clone(),
+        );
     }
 
     pub(super) fn change_rate(&mut self, factor: f32) {
@@ -838,22 +1052,54 @@ impl Simulation {
         self.playback_multiplier
     }
 
-    pub(super) fn seconds(&self) -> f32 {
+    pub(super) fn seconds(&self) -> Time {
         tick_time(self.state.tick)
     }
 
     pub(super) fn advance_to(&mut self, frame: u32, fps: u16) {
+        if self.stream.is_some() {
+            self.prepare_frame(frame, fps, true)
+                .expect("streaming frame ready");
+        }
         let target = Schedule::frame_tick(frame, fps);
         if target < self.state.tick {
-            self.state = self.initial.clone();
+            self.state = SharedState(self.initial.clone());
         }
         while self.state.tick < target {
             self.tick();
         }
     }
 
+    fn packing_sample(
+        &self,
+        tick: u64,
+        repositories: Option<&[usize]>,
+    ) -> Option<(Vec<crate::layout::RepositoryRegion>, Vec<Vec2>, Vec<f32>)> {
+        let (tiles, content) = self.clock.rows(tick);
+        let window = u64::from(crate::layout::packing::BIRTH_TICKS);
+        let mut presence = None;
+        for &(repository, begin, history) in &self.births {
+            if content + window < history || tick >= begin + window {
+                continue;
+            }
+            let u = (ticks_duration(tick.saturating_sub(begin))
+                / ticks_duration(window))
+            .min(1.0);
+            presence.get_or_insert_with(|| {
+                vec![1.0; self.initial.layout.repositories.len()]
+            })[repository] = u * u * (3.0 - 2.0 * u);
+        }
+        self.packing.sample_split(
+            tiles,
+            content,
+            self.clock.tile_transition(tick),
+            presence.as_deref(),
+            repositories,
+        )
+    }
+
     pub(crate) fn tick_layout(&mut self) {
-        let placement = self.packing.sample(self.state.tick + 1);
+        let placement = self.packing_sample(self.state.tick + 1, None);
         self.tick_local_layout();
         if let Some((regions, offsets, scales)) = placement {
             self.state.layout.place_regions(regions, &offsets, &scales);
@@ -863,8 +1109,11 @@ impl Simulation {
     fn tick_local_layout(&mut self) {
         let canonical = self.state.tick + 1;
         self.state.layout.remove_offsets();
-        let plan_time = self.schedule.layout_time(tick_time(canonical));
-        let state = &mut self.state;
+        let plan_time = self
+            .clock
+            .history
+            .layout_time(tick_time(self.clock.rows(canonical).1));
+        let state = &mut *self.state;
         state.tick = canonical;
 
         state.layout.cool_heat(tick_seconds(), self.heat_half_life);
@@ -882,7 +1131,7 @@ impl Simulation {
                 if !self.first_arrivals[state.next_event]
                     && state.avatars[author].arrived >= start
                 {
-                    state.avatars[author].arrived = f32::NEG_INFINITY;
+                    state.avatars[author].arrived = Time::NEG_INFINITY;
                     state.avatars[author].lifecycle_scale = 1.0;
                 }
             }
@@ -895,8 +1144,18 @@ impl Simulation {
 
     fn tick(&mut self) {
         self.tick_layout();
-        let state = &mut self.state;
+        let state = &mut *self.state;
         let now = tick_time(state.tick);
+        if self.windowed {
+            for avatar in &mut state.avatars {
+                let expires = self.departures[avatar.commit];
+                avatar.expires = if expires - now > windows::MARGIN {
+                    Time::INFINITY
+                } else {
+                    expires
+                };
+            }
+        }
         let dt = tick_seconds();
         state.pulses.retain(|pulse| now < pulse.end);
         let active = state
@@ -1334,6 +1593,14 @@ impl Simulation {
     }
 }
 
+fn file_identities(state: &State) -> HashMap<String, FileIdentity> {
+    state
+        .layout
+        .files()
+        .map(|(id, file)| (file.path.clone(), FileIdentity::Unique(id)))
+        .collect()
+}
+
 impl State {
     fn apply_history(&mut self, events: &[Event]) {
         for event in events {
@@ -1342,7 +1609,7 @@ impl State {
                     .contributor
                     .as_ref()
                     .expect("contributors are resolved"),
-                0.0,
+                Time::ZERO,
             );
             for change in &event.changes {
                 apply(&mut self.layout, change, author);
@@ -1354,7 +1621,7 @@ impl State {
         6.5 * self.avatar_scale * self.avatar_size * ARRIVAL_SCALE + 1.0
     }
 
-    fn author(&mut self, contributor: &Contributor, now: f32) -> usize {
+    fn author(&mut self, contributor: &Contributor, now: Time) -> usize {
         if let Some(&index) = self.authors.get(&contributor.key) {
             return index;
         }
@@ -1388,7 +1655,7 @@ impl State {
     fn begin(
         &mut self,
         event: &Event,
-        start: f32,
+        start: Time,
         file_ids: &mut HashMap<String, FileIdentity>,
     ) {
         let author = self.author(
@@ -1466,7 +1733,7 @@ impl State {
             repository: event.repository,
             touched: self.avatars[author].touched.clone(),
             start,
-            end: start + PULSE_SECONDS + FRAGMENT_FLIGHT,
+            end: pulse_end(start),
             author,
             targets,
             aggregated,
@@ -1642,11 +1909,16 @@ pub(super) fn tick_seconds() -> f32 {
     1.0 / count_u32(TICK_RATE)
 }
 
-pub(crate) fn tick_time(tick: u64) -> f32 {
-    let whole = u32::try_from(tick / u64::from(TICK_RATE)).unwrap_or(u32::MAX);
+/// The length of `ticks` simulation ticks in seconds.
+pub(crate) fn ticks_duration(ticks: u64) -> f32 {
+    let whole = u32::try_from(ticks / u64::from(TICK_RATE)).unwrap_or(u32::MAX);
     let part =
-        u32::try_from(tick % u64::from(TICK_RATE)).expect("remainder fits in u32");
+        u32::try_from(ticks % u64::from(TICK_RATE)).expect("remainder fits in u32");
     count_u32(whole) + count_u32(part) * tick_seconds()
+}
+
+pub(crate) fn tick_time(tick: u64) -> Time {
+    Time::from_tick(tick)
 }
 
 #[expect(
@@ -1692,8 +1964,8 @@ pub(super) fn date(seconds: i64) -> String {
     clippy::cast_sign_loss,
     reason = "frame count is validated before conversion"
 )]
-pub(super) fn frames_for(duration: f32, fps: u16) -> anyhow::Result<u32> {
-    let frames = (f64::from(duration) * f64::from(fps)).ceil();
+pub(super) fn frames_for(duration: Time, fps: u16) -> anyhow::Result<u32> {
+    let frames = (duration.as_secs_f64() * f64::from(fps)).ceil();
     anyhow::ensure!(
         frames.is_finite() && frames >= 0.0 && frames <= f64::from(u32::MAX),
         "whole playback exceeds the supported export range of {} frames; use --frames or reduce duration or fps",
@@ -1720,6 +1992,128 @@ fn prior_activity(events: &[Event], count: usize) -> Vec<bool> {
 
 #[cfg(test)]
 mod tests {
+    thread_local! {
+        pub(super) static LAYOUT_COUNTS: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+    }
+
+    #[test]
+    fn waiting_birth_finishes_before_arrival_without_replanning_layout() {
+        let histories = (0..3)
+            .map(|repository| {
+                let mut events = crate::timeline::synthetic();
+                events.truncate(2);
+                for event in &mut events {
+                    event.seconds += i64::try_from(repository).unwrap() * 86_400 * 3;
+                }
+                crate::repositories::namespace(&mut events, repository);
+                events
+            })
+            .collect();
+        LAYOUT_COUNTS.with(|counts| counts.set((0, 0)));
+        let simulation = Simulation::with_repositories(
+            crate::repositories::merge(histories),
+            &Options {
+                seconds_per_day: 0.02,
+                max_idle_seconds: 0.05,
+                travel_cap: TravelCap::None,
+                ..Default::default()
+            },
+            &Theme::neon(),
+            &Mappings::default(),
+            &["One".to_owned(), "Two".to_owned(), "Three".to_owned()],
+        );
+        assert_eq!(LAYOUT_COUNTS.with(std::cell::Cell::get), (1, 1));
+        assert_eq!(simulation.births.len(), 2);
+        for &(repository, begin, history) in &simulation.births {
+            let commit = simulation
+                .events
+                .iter()
+                .position(|e| e.repository == repository)
+                .unwrap();
+            let (arrival, _) = simulation.clock.service_ticks(commit);
+            let ready = begin + u64::from(crate::layout::packing::BIRTH_TICKS);
+            assert!(ready < arrival);
+            let tile = |tick| {
+                simulation.packing_sample(tick, None).unwrap().0[repository].tile
+            };
+            assert!(tile(ready).is_some());
+            assert_eq!(tile(ready), tile(arrival));
+            assert_eq!(tile(arrival - 1), tile(arrival));
+            assert_eq!(simulation.clock.rows(arrival - 1), (history, history - 1));
+        }
+    }
+
+    #[test]
+    fn unchanged_rebuild_reuses_layout_but_changed_times_replan() {
+        let mut events = crate::timeline::synthetic();
+        events.truncate(2);
+        crate::repositories::namespace(&mut events, 0);
+        let options = Options::default();
+        let theme = Theme::neon();
+        let mappings = Mappings::default();
+        let names = ["One".to_owned()];
+        let build = |padding: &[(usize, u32)],
+                     cache: &mut Option<(Vec<Time>, Layout)>| {
+            Simulation::build(
+                events.clone(),
+                &options,
+                &theme,
+                &mappings,
+                padding,
+                &names,
+                cache,
+            )
+            .unwrap()
+        };
+        let mut cache = None;
+        let first = build(&[], &mut cache);
+        let repeated = build(&[], &mut cache);
+        assert!(
+            first
+                .initial
+                .layout
+                .shares_repository_plan(&repeated.initial.layout)
+        );
+        let changed = build(&[(1, 60)], &mut cache);
+        assert!(
+            !first
+                .initial
+                .layout
+                .shares_repository_plan(&changed.initial.layout)
+        );
+    }
+
+    #[test]
+    fn a_pulse_is_live_for_at_most_the_snapshot_tick_capacity() {
+        let capacity = u64::try_from(slots::Snapshots::pulse_ticks()).unwrap();
+        let lifetime = pulse_end(Time::ZERO) - Time::ZERO;
+        let assert_bounded = |near: Time, mut first: u64| {
+            for start in [near.next_down(), near, near.next_up()] {
+                while first > 0 && tick_time(first - 1) >= start {
+                    first -= 1;
+                }
+                while tick_time(first) < start {
+                    first += 1;
+                }
+                assert!(
+                    tick_time(first + capacity) >= pulse_end(start),
+                    "a pulse starting at {start} outlives {capacity} ticks"
+                );
+            }
+        };
+        // The live tick count only changes where a start or an end crosses a tick.
+        let span = 16_384 * u64::from(TICK_RATE);
+        for tick in (0..span + 200).chain(11 * span - 200..11 * span + 20_000) {
+            let aligned = tick_time(tick);
+            let ending = aligned - lifetime;
+            let begun = tick.saturating_sub(capacity);
+            assert_bounded(aligned, tick);
+            assert_bounded(ending.next_down().next_down(), begun);
+            assert_bounded(ending, begun);
+            assert_bounded(ending.next_up().next_up(), begun);
+        }
+    }
+
     #[test]
     fn convergence_limit_does_not_recommend_an_already_capped_policy() {
         assert!(super::check_travel_pass(32).is_ok());
@@ -2068,22 +2462,127 @@ mod tests {
 
     use super::*;
 
+    fn ending_events(rows: &[(usize, i64)]) -> Vec<Event> {
+        rows.iter()
+            .enumerate()
+            .map(|(index, &(repository, seconds))| {
+                let mut event = crate::timeline::synthetic().remove(0);
+                event.commit = format!("commit-{index}");
+                event.seconds = seconds;
+                crate::repositories::namespace(
+                    std::slice::from_mut(&mut event),
+                    repository,
+                );
+                event
+            })
+            .collect()
+    }
+
+    #[test]
+    fn repository_endings_validate_the_whole_imported_order() {
+        let day = 86_400;
+        let ending = crate::repositories::parse_ended("1970-01-02").unwrap();
+        let cases = [
+            (vec![(0, 0), (0, 2 * day)], 0, 1, "1970-01-03"),
+            (vec![(0, 0), (1, 4 * day), (0, 0)], 0, 2, "1970-01-05"),
+            (vec![(0, 0), (0, 3 * day)], 1, 1, "1970-01-04"),
+        ];
+        for (rows, start, offending, remedy) in cases {
+            let options = Options {
+                repository_ends: vec![Some(ending), None],
+                start,
+                commits: Some(1),
+                ..Options::default()
+            };
+            let result = Simulation::try_with_repositories(
+                ending_events(&rows),
+                &options,
+                &Theme::neon(),
+                &Mappings::default(),
+                &["Ended".into(), "Other".into()],
+            );
+            let Err(error) = result else {
+                panic!("ending must reject commit {offending}")
+            };
+            let message = error.to_string();
+            assert!(message.contains("repository 'Ended'"), "{message}");
+            assert!(message.contains("'1970-01-02' UTC (inclusive)"));
+            assert!(message.contains(&format!("commit commit-{offending}")));
+            assert!(message.contains(&format!("set ended to '{remedy}'")));
+        }
+    }
+
+    #[test]
+    fn ending_day_is_inclusive_and_an_ended_repository_can_precede_the_start() {
+        let day = 86_400;
+        let ending = crate::repositories::parse_ended("1970-01-02").unwrap();
+        for (rows, start) in [
+            (vec![(0, day), (0, 2 * day - 1)], 0),
+            (vec![(0, day), (1, 4 * day)], 1),
+        ] {
+            let options = Options {
+                repository_ends: vec![Some(ending), None],
+                start,
+                ..Options::default()
+            };
+            Simulation::try_with_repositories(
+                ending_events(&rows),
+                &options,
+                &Theme::neon(),
+                &Mappings::default(),
+                &["Ended".into(), "Other".into()],
+            )
+            .unwrap();
+        }
+    }
+    #[test]
+    fn automatic_windows_keep_short_selected_histories_in_one_plan() {
+        let mut event = crate::timeline::synthetic().remove(0);
+        event.seconds = 0;
+        let mut later = event.clone();
+        later.seconds = 86_400;
+        let events = vec![event, later];
+        let mut options = Options {
+            seconds_per_day: WINDOW_SECONDS + windows::MARGIN - LEAD_IN - TAIL,
+            max_idle_seconds: WINDOW_SECONDS * 2.0,
+            ..Options::default()
+        };
+        options.choose_window(&events);
+        assert_eq!(options.travel_window_seconds, None);
+        options.seconds_per_day += tick_seconds();
+        options.choose_window(&events);
+        assert_eq!(options.travel_window_seconds, Some(WINDOW_SECONDS));
+        options.start = 1;
+        options.choose_window(&events);
+        assert_eq!(options.travel_window_seconds, None);
+    }
+
     #[test]
     fn repository_plan_limits_reject_slow_or_oversized_inputs() {
         let events = crate::timeline::synthetic();
         assert!(
-            Simulation::check_repository_plan(&events, &Options::default(), 5).is_ok()
+            Simulation::check_repository_plan(
+                &events,
+                &Options::default(),
+                &vec![String::new(); 5]
+            )
+            .is_ok()
         );
         assert!(
-            Simulation::check_repository_plan(&events, &Options::default(), 30).is_ok()
+            Simulation::check_repository_plan(
+                &events,
+                &Options::default(),
+                &vec![String::new(); 30]
+            )
+            .is_ok()
         );
         assert!(
-            Simulation::check_repository_plan(&events, &Options::default(), 31)
-                .is_err()
-        );
-        assert!(
-            Simulation::check_repository_plan(&events, &Options::default(), usize::MAX)
-                .is_err()
+            Simulation::check_repository_plan(
+                &events,
+                &Options::default(),
+                &vec![String::new(); 31]
+            )
+            .is_ok()
         );
         assert!(
             Simulation::check_repository_plan(
@@ -2093,10 +2592,62 @@ mod tests {
                     max_idle_seconds: 86_400.0,
                     ..Options::default()
                 },
-                5
+                &vec![String::new(); 5]
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn ended_sequential_repositories_report_the_packing_limit() {
+        let count = 128;
+        let mut events = Vec::new();
+        let mut endings = Vec::new();
+        for repository in 0..count {
+            let mut event = crate::timeline::synthetic().remove(0);
+            event.seconds = i64::try_from(repository).unwrap() * 2 * 86_400;
+            endings.push(Some(event.seconds + 86_400));
+            crate::repositories::namespace(
+                std::slice::from_mut(&mut event),
+                repository,
+            );
+            events.push(event);
+        }
+        for (ending, next) in endings.iter().zip(events.iter().skip(1)) {
+            assert!(ending.unwrap() < next.seconds);
+        }
+        let options = Options {
+            start: events.len(),
+            repository_ends: endings,
+            ..Options::default()
+        };
+        let labels: Vec<_> = (0..count).map(|i| format!("Repository {i}")).collect();
+        let Err(error) = Simulation::try_with_repositories(
+            events,
+            &options,
+            &Theme::neon(),
+            &Mappings::default(),
+            &labels,
+        ) else {
+            panic!("ended repositories still reserve their packing tree")
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("minimum tile size 144 by 64 reference pixels")
+        );
+        assert!(error.to_string().contains("gutter 4 pixels"));
+    }
+
+    #[test]
+    fn numeric_travel_cap_does_not_reserve_worst_case_waits() {
+        let events = crate::timeline::synthetic();
+        let options = Options {
+            travel_cap: TravelCap::Seconds(3600.0),
+            ..Options::default()
+        };
+        Simulation::check_repository_plan(&events, &options, &vec![String::new(); 48])
+            .unwrap();
     }
 
     #[test]
@@ -2106,17 +2657,32 @@ mod tests {
             travel_cap: TravelCap::None,
             ..Options::default()
         };
-        assert!(Simulation::check_repository_plan(&events, &options, 5).is_ok());
+        assert!(
+            Simulation::check_repository_plan(
+                &events,
+                &options,
+                &vec![String::new(); 5]
+            )
+            .is_ok()
+        );
         let schedule = Schedule::with_padding(
             &events,
             options.seconds_per_day,
             options.max_idle_seconds,
-            |_| 216_000,
+            |_| 2_160_000,
         );
-        assert!(Simulation::check_schedule(&events, &options, 5, &schedule).is_err());
+        assert!(
+            Simulation::check_schedule(
+                &events,
+                &options,
+                &vec![String::new(); 5],
+                &schedule
+            )
+            .is_err()
+        );
     }
 
-    fn short_repository_history(count: usize) -> (Vec<Event>, Vec<String>) {
+    pub(super) fn short_repository_history(count: usize) -> (Vec<Event>, Vec<String>) {
         let events = (0..count * 3)
             .map(|index| {
                 let mut row = vec![timeline::synthetic().remove(0)];
@@ -2149,7 +2715,9 @@ mod tests {
                 &Mappings::default(),
                 &[],
                 &labels,
-            );
+                &mut None,
+            )
+            .unwrap();
             for tick in 0..=frames_for(simulation.duration(), 60).unwrap() {
                 let (regions, _, _) =
                     simulation.packing.sample(u64::from(tick)).unwrap();
@@ -2285,7 +2853,12 @@ mod tests {
                 max_idle_seconds: 86_400.0,
                 ..Options::default()
             };
-            Simulation::check_repository_plan(&events, &options, 2).unwrap();
+            Simulation::check_repository_plan(
+                &events,
+                &options,
+                &vec![String::new(); 2],
+            )
+            .unwrap();
             let simulation = Simulation::with_repositories(
                 events.clone(),
                 &options,
@@ -2297,7 +2870,12 @@ mod tests {
         }
         events[1].seconds = events[0].seconds;
         assert!(
-            Simulation::check_repository_plan(&events, &Options::default(), 2).is_ok()
+            Simulation::check_repository_plan(
+                &events,
+                &Options::default(),
+                &vec![String::new(); 2]
+            )
+            .is_ok()
         );
     }
     use crate::timeline;
@@ -2541,7 +3119,7 @@ mod tests {
                 .contains("supported export range")
         );
         assert!(frames_for(schedule.duration(), 30).is_ok());
-        assert_eq!(frames_for(1.0, 30).unwrap(), 30);
+        assert_eq!(frames_for(Time::seconds(1.0), 30).unwrap(), 30);
     }
 
     #[test]
@@ -2560,7 +3138,7 @@ mod tests {
         assert_eq!(sim.schedule.starts[1], 1.0);
         assert!(sim.schedule.starts.windows(2).all(|pair| pair[1] > pair[0]));
         sim.change_rate(2.0);
-        assert!((sim.schedule.starts[1] - 1.0).abs() < 0.0001);
+        assert!((sim.schedule.starts[1] - Time::seconds(1.0)).abs() < 0.0001);
         assert!(sim.caption().contains("1x"));
         sim.restart();
         assert_eq!(
@@ -2809,7 +3387,7 @@ mod tests {
     fn crowded_commit_aggregates_beams() {
         let mut sim = simulation();
         let crowded = sim.schedule.starts[7] + 0.5;
-        sim.advance_to(frame_at(crowded), 30);
+        sim.advance_to(frame_at(crowded.lossy_secs_f32()), 30);
         let beams = sim.beams();
         assert!(!beams.is_empty());
         assert!(beams.len() <= BEAM_LIMIT * 2, "{} beams", beams.len());
@@ -2889,7 +3467,7 @@ mod tests {
     #[test]
     fn whole_history_plays_out() {
         let mut sim = simulation();
-        let end = frame_at(sim.duration());
+        let end = frame_at(sim.duration().lossy_secs_f32());
         sim.advance_to(end, 30);
         assert_eq!(sim.commit(), sim.total());
         assert!(sim.beams().is_empty());

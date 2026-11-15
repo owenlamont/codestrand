@@ -1,10 +1,11 @@
 use super::{
-    Capture, HALF, Pose, Rect, Route, Router, Trip, Vec2, fade_clearance, tick_time,
+    Capture, HALF, Pose, Rect, Route, Router, Trip, Vec2, fade_clearance,
+    ticks_duration,
 };
 use crate::layout::packing::Tile;
 
 impl Capture {
-    fn pose(&self, author: usize, tick: u64) -> Option<Pose> {
+    pub(super) fn pose(&self, author: usize, tick: u64) -> Option<Pose> {
         let poses = self.poses.get(author)?;
         poses
             .partition_point(|p| p.tick <= tick)
@@ -12,10 +13,10 @@ impl Capture {
             .map(|i| poses[i])
     }
     fn row(&self, tick: u64) -> &[Option<Tile>] {
-        super::at_tick(&self.gutters, tick)
+        super::at_tick(&self.gutters, tick.saturating_sub(self.begin))
     }
     fn radius(&self, tick: u64) -> f32 {
-        *super::at_tick(&self.radii, tick)
+        *super::at_tick(&self.radii, tick.saturating_sub(self.begin))
     }
 }
 
@@ -26,7 +27,7 @@ fn hard_clearance(capture: &Capture, tick: u64, point: Vec2) -> bool {
         .all()
         && point.y - capture.radius(tick) >= super::super::caption::BOTTOM
         && point.y + capture.radius(tick) <= super::super::caption::TOP
-        && !super::at_tick(&capture.tiles, tick)
+        && !super::at_tick(&capture.tiles, tick.saturating_sub(capture.begin))
             .iter()
             .flatten()
             .any(|t| super::in_guard(*t, capture.radius(tick), point))
@@ -144,12 +145,12 @@ fn moving_route(
 ) -> Option<Route> {
     let anchors = route_anchors(capture.row(epoch), trip, points)?;
     let shape = Route::new(points, speed * 0.8);
-    let duration = shape.duration + tick_time(animation_delay);
+    let duration = shape.duration + ticks_duration(animation_delay);
     let mut track = Vec::new();
     for offset in 0..=trip.arrival - trip.departure {
         let tick = trip.departure + offset;
         let row = capture.row(tick);
-        let elapsed = tick_time(offset.saturating_sub(animation_delay));
+        let elapsed = ticks_duration(offset.saturating_sub(animation_delay));
         let leg = shape
             .legs
             .iter()
@@ -188,7 +189,7 @@ fn moving_route(
     }
     Some(Route {
         legs: Vec::new(),
-        track,
+        track: track.into(),
         duration,
     })
 }
@@ -256,9 +257,9 @@ fn search(
         candidate.source = source;
         let animation_delay = release.saturating_sub(begin);
         candidate.route = Route::new(&points, speed * 0.8);
-        candidate.route.duration += tick_time(animation_delay);
+        candidate.route.duration += ticks_duration(animation_delay);
         candidate.fade =
-            candidate.route.duration > tick_time(candidate.arrival - begin);
+            candidate.route.duration > ticks_duration(candidate.arrival - begin);
         candidate.failure = Some("moving_network");
         if let Some(route) =
             moving_route(capture, &candidate, &points, begin, speed, animation_delay)
@@ -284,21 +285,26 @@ pub(super) fn trips(
     let mut previous = vec![None; capture.poses.len()];
     let mut result = Vec::<Trip>::new();
     let mut router = Router::default();
-    for (commit, service) in capture.services.iter().enumerate() {
+    for (index, service) in capture.services.iter().enumerate() {
         let Some(prior) = previous[service.author]
-            .replace(commit)
+            .replace(index)
             .map(|i| &capture.services[i])
         else {
             continue;
         };
+        let commit = service.commit;
+        if commit < capture.frozen {
+            continue;
+        }
         if (prior.repository == service.repository && prior.dock == service.dock)
             || ((!keep_idle || (service.bot && bots == crate::model::BotTravel::Fade))
-                && tick_time(service.tick - prior.tick)
+                && ticks_duration(service.tick - prior.tick)
                     >= crate::model::AVATAR_IDLE + 1.2)
         {
             continue;
         }
-        let free = (prior.tick + 1).min(service.tick - 1);
+        let earliest = capture.begin + if capture.begin == 0 { 0 } else { 120 };
+        let free = (prior.tick + 1).max(earliest).min(service.tick - 1);
         let source = capture
             .pose(service.author, free)
             .expect("existing author")
@@ -375,7 +381,7 @@ mod tests {
             &crate::theme::Theme::neon(),
             &crate::contributors::Mappings::default(),
         );
-        sim.departures[0] = 1.2;
+        sim.departures[0] = crate::model::Time::seconds(1.2);
         let (trips, _) = trips(&fixture(), 480.0, crate::model::BotTravel::Walk, true);
         sim.travel = Plan {
             trips,
@@ -399,22 +405,28 @@ mod tests {
             high: Vec2::new(100.0, 50.0) / HALF,
         };
         Capture {
+            begin: 0,
+            frozen: 0,
             services: [
                 (0, 0, 10, 70, Vec2::new(-100.0, 0.0)),
                 (1, 1, 90, 150, Vec2::new(100.0, 0.0)),
                 (0, 1, 400, 460, Vec2::new(100.0, 0.0)),
             ]
             .into_iter()
-            .map(|(author, repository, tick, release, point)| Service {
-                author,
-                repository,
-                tick,
-                release,
-                point,
-                radius: 7.5,
-                bot: false,
-                dock: dock(if author == 0 && tick < 400 { 3 } else { 1 }, 0.5),
-            })
+            .enumerate()
+            .map(
+                |(commit, (author, repository, tick, release, point))| Service {
+                    commit,
+                    author,
+                    repository,
+                    tick,
+                    release,
+                    point,
+                    radius: 7.5,
+                    bot: false,
+                    dock: dock(if author == 0 && tick < 400 { 3 } else { 1 }, 0.5),
+                },
+            )
             .collect(),
             poses: (0..2)
                 .map(|author| {
@@ -449,11 +461,12 @@ mod tests {
         assert_eq!(trips.len(), 1);
         assert_eq!(trips[0].departure, 70);
         assert!(!trips[0].fade);
-        assert!(trips[0].route.duration + tick_time(70) > tick_time(90));
+        assert!(trips[0].route.duration + ticks_duration(70) > ticks_duration(90));
         let plan = Plan {
             trips,
             docks: Vec::new(),
             replanning: false,
+            frozen: 0,
             occupancy: Vec::new(),
             stats: Statistics::default(),
         };
@@ -475,6 +488,7 @@ mod tests {
             trips,
             docks: Vec::new(),
             replanning: false,
+            frozen: 0,
             occupancy: Vec::new(),
             stats: Statistics::default(),
         };
@@ -489,6 +503,7 @@ mod tests {
             trips,
             docks: Vec::new(),
             replanning: false,
+            frozen: 0,
             occupancy: Vec::new(),
             stats: Statistics::default(),
         }
@@ -504,6 +519,7 @@ mod tests {
                 trips,
                 docks: Vec::new(),
                 replanning: false,
+                frozen: 0,
                 occupancy: Vec::new(),
                 stats: Statistics::default()
             }
@@ -522,6 +538,7 @@ mod tests {
             trips,
             docks: Vec::new(),
             replanning: false,
+            frozen: 0,
             occupancy: Vec::new(),
             stats: Statistics::default(),
         };

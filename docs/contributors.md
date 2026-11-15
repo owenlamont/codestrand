@@ -71,7 +71,7 @@ Playback time drives crowd scaling and placement, so export speed does not chang
 Preview and export stay offline by default: local overrides and cached portraits are
 used, with the coloured sphere as the fallback. Add `--fetch-avatars` to either command
 to opt in to network requests before playback starts. Export never fetches during frame
-capture. Synthetic history never fetches.
+capture.
 
 ```sh
 codestrand preview --repository /path/to/repo --fetch-avatars

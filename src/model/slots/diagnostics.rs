@@ -25,6 +25,8 @@ pub(crate) struct MovingBeams {
     first: Option<serde_json::Value>,
     missing_tile_beams: u64,
     travelling_disc_foreign_tile: u64,
+    travelling_disc_max_depth_px: f32,
+    travelling_avatar_frames: u64,
     travelling_avatar_overlaps: u64,
     avatar_overlap_max_px: f32,
     worst_overlap_tick: u64,
@@ -54,7 +56,7 @@ impl MovingBeams {
         }
     }
     #[cfg(test)]
-    pub(in crate::model) fn assert_clear(&self, speed: f32) {
+    pub(crate) fn assert_clear(&self, speed: f32) {
         assert_eq!(self.wordmark_avatar_observations, 0, "avatar over wordmark");
         assert_eq!(self.wordmark_label_observations, 0, "label over wordmark");
         assert_eq!(self.pair_frames, 0, "beam/foreign tile intersections");
@@ -105,7 +107,7 @@ impl MovingBeams {
             self.wordmark_avatar_observations += u64::from(avatar_overlap);
             if avatar_overlap && self.first_wordmark_overlap.is_none() {
                 self.first_wordmark_overlap = Some(
-                    serde_json::json!({"seconds":crate::model::tick_time(state.tick),"avatar":avatar.name,"kind":"avatar"}),
+                    serde_json::json!({"seconds":crate::model::tick_time(state.tick).lossy_secs_f32(),"avatar":avatar.name,"kind":"avatar"}),
                 );
             }
             self.visible_avatar_frames += 1;
@@ -132,7 +134,7 @@ impl MovingBeams {
                     && !bounds.intersect(wordmark).is_empty()
                 {
                     self.wordmark_label_observations += 1;
-                    self.first_wordmark_overlap.get_or_insert_with(|| serde_json::json!({"seconds":crate::model::tick_time(state.tick),"avatar":avatar.name,"kind":"label"}));
+                    self.first_wordmark_overlap.get_or_insert_with(|| serde_json::json!({"seconds":crate::model::tick_time(state.tick).lossy_secs_f32(),"avatar":avatar.name,"kind":"label"}));
                 }
                 if depth > self.name_content_max_px {
                     self.name_content_max_px = depth;
@@ -302,6 +304,7 @@ impl MovingBeams {
             self.observe_content(state, avatar, point, radius, &content);
             let moving = avatar.presence > 0.0
                 && simulation.travel.travelling(author, state.tick);
+            self.travelling_avatar_frames += u64::from(moving);
             if moving && simulation.travel.walking(author, state.tick) {
                 let cells = super::super::travel::network(
                     state.layout.repositories.iter().filter_map(|r| r.gutter),
@@ -316,7 +319,7 @@ impl MovingBeams {
             {
                 self.maximum_travel_speed = self.maximum_travel_speed.max(
                     point.distance(position)
-                        / crate::model::tick_time(state.tick - before),
+                        / crate::model::ticks_duration(state.tick - before),
                 );
             }
             for (other, position) in projected.iter().enumerate().skip(author + 1) {
@@ -357,6 +360,9 @@ impl MovingBeams {
                     continue;
                 }
                 self.travelling_disc_foreign_tile += 1;
+                self.travelling_disc_max_depth_px = self
+                    .travelling_disc_max_depth_px
+                    .max(radius - point.distance(nearest));
                 self.first_disc.get_or_insert_with(|| serde_json::json!({"frame":state.tick,"author":author,"commit":avatar.commit,"point":point.to_array(),"radius":radius,"foreign":index,"tile":[tile.low.to_array(),tile.high.to_array()],"travel_sample":simulation.travel.sample(author,state.tick).map(|(p,a)| (p.to_array(),a))}));
             }
         }
@@ -393,31 +399,44 @@ impl MovingBeams {
             };
             self.missing_tile_beams +=
                 u64::from(state.layout.repositories[own].tile.is_none());
-            let points = [state.avatars[pulse.author].position, to + Vec3::Y * 0.12];
-            let mut projected =
-                project(view_direction() * framing::DISTANCE, Vec3::ZERO, &points)
-                    .flatten();
-            let (Some(from), Some(to)) = (projected.next(), projected.next()) else {
-                continue;
+            let position = state.avatars[pulse.author].position;
+            let from = bevy::math::Vec2::new(position.x, position.z);
+            let to = bevy::math::Vec2::new(to.x, to.z);
+            let footprint = match target {
+                Target::File(id) => {
+                    let file = state.layout.file(id).expect("existing beam file");
+                    let scale = file.visible_presence(state.layout.dir(file.dir));
+                    let low = state.geometry.file_min;
+                    let high = state.geometry.file_max;
+                    Rect::from_corners(
+                        to + bevy::math::Vec2::new(low.x, low.z) * scale,
+                        to + bevy::math::Vec2::new(high.x, high.z) * scale,
+                    )
+                }
+                Target::Dir(_) => Rect::from_corners(to, to),
             };
             for (index, region) in state.layout.repositories.iter().enumerate() {
                 let Some(tile) = region.tile.filter(|_| index != own) else {
                     continue;
                 };
-                if !segment(
-                    from * HALF,
-                    to * HALF,
-                    Rect::from_corners(tile.low * HALF, tile.high * HALF),
-                ) {
+                let ground = tile.ground();
+                let bounds = Rect::from_corners(ground[0], ground[2]);
+                let endpoint_inside = to.cmpgt(bounds.min).all()
+                    && to.cmplt(bounds.max).all()
+                    || footprint
+                        .intersect(bounds)
+                        .size()
+                        .cmpgt(bevy::math::Vec2::ZERO)
+                        .all();
+                if !segment(from, to, bounds) && !endpoint_inside {
                     continue;
                 }
                 self.pair_frames += 1;
-                self.endpoint_inside_foreign +=
-                    u64::from(to.cmpgt(tile.low).all() && to.cmplt(tile.high).all());
+                self.endpoint_inside_foreign += u64::from(endpoint_inside);
                 self.origin_inside_foreign += u64::from(
-                    from.cmpgt(tile.low).all() && from.cmplt(tile.high).all(),
+                    from.cmpgt(bounds.min).all() && from.cmplt(bounds.max).all(),
                 );
-                self.first.get_or_insert_with(|| serde_json::json!({"frame":state.tick,"seconds":simulation.seconds(),"commit":simulation.commit(),"target_repository":own,"crossed_repository":index,"from":from.to_array(),"to":to.to_array(),"target_tile":state.layout.repositories[own].tile.map(|t| [t.low.to_array(),t.high.to_array()]),"tile_low":tile.low.to_array(),"tile_high":tile.high.to_array()}));
+                self.first.get_or_insert_with(|| serde_json::json!({"frame":state.tick,"seconds":simulation.seconds().lossy_secs_f32(),"commit":simulation.commit(),"target_repository":own,"crossed_repository":index,"from":from.to_array(),"to":to.to_array(),"coordinate_space":"world_ground","target_tile":state.layout.repositories[own].tile.map(|t| t.ground().map(|p| p.to_array())),"tile_low":bounds.min.to_array(),"tile_high":bounds.max.to_array()}));
             }
         }
     }
