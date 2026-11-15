@@ -13,10 +13,10 @@ impl Capture {
             .map(|i| poses[i])
     }
     fn row(&self, tick: u64) -> &[Option<Tile>] {
-        super::at_tick(&self.gutters, tick)
+        super::at_tick(&self.gutters, tick.saturating_sub(self.begin))
     }
     fn radius(&self, tick: u64) -> f32 {
-        *super::at_tick(&self.radii, tick)
+        *super::at_tick(&self.radii, tick.saturating_sub(self.begin))
     }
 }
 
@@ -27,7 +27,7 @@ fn hard_clearance(capture: &Capture, tick: u64, point: Vec2) -> bool {
         .all()
         && point.y - capture.radius(tick) >= super::super::caption::BOTTOM
         && point.y + capture.radius(tick) <= super::super::caption::TOP
-        && !super::at_tick(&capture.tiles, tick)
+        && !super::at_tick(&capture.tiles, tick.saturating_sub(capture.begin))
             .iter()
             .flatten()
             .any(|t| super::in_guard(*t, capture.radius(tick), point))
@@ -292,6 +292,9 @@ pub(super) fn trips(
         else {
             continue;
         };
+        if commit < capture.frozen {
+            continue;
+        }
         if (prior.repository == service.repository && prior.dock == service.dock)
             || ((!keep_idle || (service.bot && bots == crate::model::BotTravel::Fade))
                 && ticks_duration(service.tick - prior.tick)
@@ -299,7 +302,8 @@ pub(super) fn trips(
         {
             continue;
         }
-        let free = (prior.tick + 1).min(service.tick - 1);
+        let earliest = capture.begin + if capture.begin == 0 { 0 } else { 120 };
+        let free = (prior.tick + 1).max(earliest).min(service.tick - 1);
         let source = capture
             .pose(service.author, free)
             .expect("existing author")
@@ -400,6 +404,8 @@ mod tests {
             high: Vec2::new(100.0, 50.0) / HALF,
         };
         Capture {
+            begin: 0,
+            frozen: 0,
             services: [
                 (0, 0, 10, 70, Vec2::new(-100.0, 0.0)),
                 (1, 1, 90, 150, Vec2::new(100.0, 0.0)),
@@ -455,6 +461,7 @@ mod tests {
             trips,
             docks: Vec::new(),
             replanning: false,
+            frozen: 0,
             occupancy: Vec::new(),
             stats: Statistics::default(),
         };
@@ -476,6 +483,7 @@ mod tests {
             trips,
             docks: Vec::new(),
             replanning: false,
+            frozen: 0,
             occupancy: Vec::new(),
             stats: Statistics::default(),
         };
@@ -490,6 +498,7 @@ mod tests {
             trips,
             docks: Vec::new(),
             replanning: false,
+            frozen: 0,
             occupancy: Vec::new(),
             stats: Statistics::default(),
         }
@@ -505,6 +514,7 @@ mod tests {
                 trips,
                 docks: Vec::new(),
                 replanning: false,
+                frozen: 0,
                 occupancy: Vec::new(),
                 stats: Statistics::default()
             }
@@ -523,6 +533,7 @@ mod tests {
             trips,
             docks: Vec::new(),
             replanning: false,
+            frozen: 0,
             occupancy: Vec::new(),
             stats: Statistics::default(),
         };

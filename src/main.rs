@@ -218,6 +218,9 @@ struct Source {
     /// Maximum extra seconds per walking trip; none waits for the route, zero never waits.
     #[arg(long, default_value = "0.4", value_parser = travel_seconds)]
     travel_cap: model::TravelCap,
+    /// Experimental travel window length in unpadded history seconds.
+    #[arg(long, hide = true, value_parser = positive_seconds)]
+    travel_window_seconds: Option<f32>,
     /// Bot travel policy: fade across or walk the shortest gutter route.
     #[arg(long, value_enum, default_value = "fade")]
     bot_travel: model::BotTravel,
@@ -353,6 +356,7 @@ impl Source {
             start,
             commits: self.commits,
             travel_cap: self.travel_cap,
+            travel_window_seconds: self.travel_window_seconds,
             bot_travel: self.bot_travel,
             avatar_max_speed: self.avatar_max_speed,
             avatar_size: self.avatar_scale,

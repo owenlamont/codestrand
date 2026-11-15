@@ -32,6 +32,7 @@ mod slots;
 mod time;
 mod titles;
 mod travel;
+mod windows;
 pub(super) use names::rect as label_rect;
 use schedule::Schedule;
 pub(crate) use time::Time;
@@ -79,6 +80,7 @@ pub(super) struct Options {
     pub start: usize,
     pub commits: Option<usize>,
     pub travel_cap: TravelCap,
+    pub travel_window_seconds: Option<f32>,
     pub bot_travel: BotTravel,
     pub avatar_max_speed: f32,
     pub avatar_size: f32,
@@ -139,6 +141,7 @@ impl Default for Options {
             start: 0,
             commits: None,
             travel_cap: TravelCap::Seconds(0.4),
+            travel_window_seconds: None,
             bot_travel: BotTravel::Fade,
             avatar_max_speed: 480.0,
             avatar_size: 2.0,
@@ -386,6 +389,9 @@ pub(super) struct Simulation {
     visual_updates: bool,
     title_plan: Vec<Vec<u8>>,
     progress: Progress,
+    window: Option<windows::Planning>,
+    boundaries: Vec<State>,
+    windowed: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -507,6 +513,9 @@ impl Simulation {
             repositories,
             &mut layout_cache,
         )?;
+        if let Some(seconds) = options.travel_window_seconds {
+            return simulation.plan_windows(&events, options, repositories, seconds);
+        }
         let mut padding = simulation.travel_padding(options);
         let history = simulation.schedule.clone();
         let departures = simulation.departures.clone();
@@ -714,11 +723,7 @@ impl Simulation {
         events.truncate(end);
         events.drain(..start);
         let mut simulation = Self {
-            file_ids: state
-                .layout
-                .files()
-                .map(|(id, file)| (file.path.clone(), FileIdentity::Unique(id)))
-                .collect(),
+            file_ids: file_identities(&state),
             first_arrivals,
             departures,
             repository_ends,
@@ -745,6 +750,9 @@ impl Simulation {
             visual_updates: true,
             title_plan: Vec::new(),
             progress: options.progress.clone(),
+            window: None,
+            boundaries: Vec::new(),
+            windowed: false,
         };
         let snapshots = simulation
             .plan_repositories(prior_active, options.travel_cap == TravelCap::None)?;
@@ -838,6 +846,9 @@ impl Simulation {
         Ok(Some(snapshots))
     }
     pub(super) fn duration(&self) -> Time {
+        if let Some(window) = &self.window {
+            return self.clock.present(window.end);
+        }
         lifecycle::duration(&self.schedule, &self.repository_ends)
     }
 
@@ -904,7 +915,11 @@ impl Simulation {
     }
 
     pub(super) fn restart(&mut self) {
-        self.state = self.initial.clone();
+        self.state = self
+            .window
+            .as_ref()
+            .map_or(&self.initial, |w| &w.state)
+            .clone();
     }
 
     pub(super) fn change_rate(&mut self, factor: f32) {
@@ -1006,6 +1021,16 @@ impl Simulation {
         self.tick_layout();
         let state = &mut self.state;
         let now = tick_time(state.tick);
+        if self.windowed {
+            for avatar in &mut state.avatars {
+                let expires = self.departures[avatar.commit];
+                avatar.expires = if expires - now > windows::MARGIN {
+                    Time::INFINITY
+                } else {
+                    expires
+                };
+            }
+        }
         let dt = tick_seconds();
         state.pulses.retain(|pulse| now < pulse.end);
         let active = state
@@ -1441,6 +1466,14 @@ impl Simulation {
         }
         labels
     }
+}
+
+fn file_identities(state: &State) -> HashMap<String, FileIdentity> {
+    state
+        .layout
+        .files()
+        .map(|(id, file)| (file.path.clone(), FileIdentity::Unique(id)))
+        .collect()
 }
 
 impl State {
@@ -2429,7 +2462,7 @@ mod tests {
         );
     }
 
-    fn short_repository_history(count: usize) -> (Vec<Event>, Vec<String>) {
+    pub(super) fn short_repository_history(count: usize) -> (Vec<Event>, Vec<String>) {
         let events = (0..count * 3)
             .map(|index| {
                 let mut row = vec![timeline::synthetic().remove(0)];

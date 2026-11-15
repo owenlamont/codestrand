@@ -41,7 +41,8 @@ pub(super) struct Pose {
     dock: slots::Dock,
 }
 
-struct Service {
+#[derive(Clone)]
+pub(super) struct Service {
     author: usize,
     repository: usize,
     tick: u64,
@@ -54,6 +55,8 @@ struct Service {
 
 #[derive(Default)]
 struct Capture {
+    begin: u64,
+    frozen: usize,
     services: Vec<Service>,
     poses: Vec<Vec<Pose>>,
     tiles: Vec<Vec<Option<crate::layout::packing::Tile>>>,
@@ -227,15 +230,37 @@ pub(super) struct Plan {
     trips: Vec<Trip>,
     pub(super) docks: Vec<Option<slots::Dock>>,
     pub(super) replanning: bool,
+    pub(super) frozen: usize,
     pub(super) occupancy: Vec<Vec<(u8, Rect)>>,
     pub stats: Statistics,
 }
 
 impl Plan {
+    pub(super) fn first_unresolved(&self) -> Option<usize> {
+        self.trips.iter().find(|t| t.fade).map(|t| t.commit)
+    }
+
+    pub(super) fn freeze_through(&mut self, tick: u64, applied: usize) {
+        self.frozen = self
+            .trips
+            .iter()
+            .filter(|t| t.departure < tick)
+            .map(|t| t.commit + 1)
+            .max()
+            .unwrap_or(0)
+            .max(applied)
+            .max(self.frozen);
+    }
     pub(super) fn preferences(self) -> Self {
         Self {
             docks: self.docks,
             occupancy: self.occupancy,
+            frozen: self.frozen,
+            trips: self
+                .trips
+                .into_iter()
+                .filter(|t| t.commit < self.frozen)
+                .collect(),
             ..Self::default()
         }
     }
@@ -336,18 +361,28 @@ fn fade_opacity(remaining: u64, duration: u64) -> f32 {
 fn capture(simulation: &mut Simulation) -> Capture {
     let started = std::time::Instant::now();
     let frames = frames_for(simulation.duration(), 60).expect("validated travel range");
-    let mut capture = Capture::default();
+    simulation.restart();
+    let mut capture = Capture {
+        begin: simulation.state.tick,
+        frozen: simulation.travel.frozen,
+        services: simulation
+            .window
+            .as_ref()
+            .map_or_else(Vec::new, |w| w.services.clone()),
+        ..Capture::default()
+    };
     let visual_updates = simulation.visual_updates;
-    let docks = if simulation.travel.occupancy.is_empty() {
+    let docks = if simulation.travel.occupancy.is_empty() && simulation.window.is_none()
+    {
         std::mem::take(&mut simulation.travel.docks)
     } else {
         simulation.travel.docks.clone()
     };
     simulation.travel.replanning = true;
     simulation.visual_updates = false;
-    let mut seen = 0;
+    let mut seen = simulation.state.next_event;
     let mut poses = 0;
-    for frame in 0..=frames {
+    for frame in u32::try_from(capture.begin).expect("bounded window")..=frames {
         simulation
             .progress
             .report(Stage::Travel, frame.into(), frames.into());
@@ -425,7 +460,7 @@ fn capture(simulation: &mut Simulation) -> Capture {
 fn fade_clearance(capture: &Capture, begin: u64, point: Vec2, radius: f32) -> u64 {
     for offset in 0..=9_u64 {
         let tick = begin + offset;
-        let row = at_tick(&capture.tiles, tick);
+        let row = at_tick(&capture.tiles, tick.saturating_sub(capture.begin));
         let tile_collision = row
             .iter()
             .flatten()
@@ -468,7 +503,9 @@ impl Simulation {
         let mut result = padding.to_vec();
         let cap = options.travel_cap.ticks();
         for trip in self.travel.trips.iter().filter(|t| {
-            (!t.bot || options.bot_travel == super::BotTravel::Walk) && t.fade
+            t.commit >= self.travel.frozen
+                && (!t.bot || options.bot_travel == super::BotTravel::Walk)
+                && t.fade
         }) {
             let needed = if trip.route.is_empty() {
                 options.travel_cap.blocked_ticks()
@@ -505,7 +542,12 @@ impl Simulation {
         padding: &[(usize, u32)],
     ) -> Vec<(usize, u32)> {
         let mut result = padding.to_vec();
-        for trip in self.travel.trips.iter().filter(|t| !t.fade) {
+        for trip in self
+            .travel
+            .trips
+            .iter()
+            .filter(|t| !t.fade && t.commit >= self.travel.frozen)
+        {
             let ready =
                 trip.departure + u64::from(seconds_ticks(trip.route.duration, true));
             let surplus = u32::try_from(trip.arrival.saturating_sub(ready))
@@ -580,12 +622,20 @@ impl Simulation {
         padding: &[(usize, u32)],
     ) {
         let capture = capture(self);
-        let (trips, graph_epochs) = trips(
+        let (mut trips, graph_epochs) = trips(
             &capture,
             options.avatar_max_speed,
             options.bot_travel,
             options.travel_cap == super::TravelCap::None,
         );
+        trips.extend(
+            self.travel
+                .trips
+                .iter()
+                .filter(|t| t.commit < self.travel.frozen)
+                .cloned(),
+        );
+        trips.sort_by_key(|t| t.commit);
         let mut previous = vec![None; capture.poses.len()];
         let mut human_switches = 0;
         for service in &capture.services {
@@ -638,11 +688,15 @@ impl Simulation {
                 .sum(),
         };
         let docks = capture.services.iter().map(|s| Some(s.dock)).collect();
+        if let Some(window) = &mut self.window {
+            window.captured.clone_from(&capture.services);
+        }
         self.travel = Plan {
             trips,
             docks,
             stats,
             replanning: false,
+            frozen: self.travel.frozen,
             occupancy: std::mem::take(&mut self.travel.occupancy),
         };
     }

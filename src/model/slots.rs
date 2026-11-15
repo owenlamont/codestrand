@@ -326,7 +326,14 @@ impl Simulation {
         let mut envelopes = vec![Envelope::default(); self.events.len()];
         let frames = super::frames_for(self.duration(), 60)
             .expect("validated playback frame bound");
-        for _ in 0..frames {
+        let frozen: Vec<_> = self
+            .envelopes
+            .iter()
+            .take(self.travel.frozen)
+            .cloned()
+            .collect();
+        self.restart();
+        for _ in self.state.tick..u64::from(frames) {
             self.tick_local_layout();
             let now = super::tick_time(self.state.tick);
             self.state.pulses.retain(|p| now < p.end);
@@ -372,7 +379,8 @@ impl Simulation {
         }
         self.envelopes = envelopes;
         self.plan_ray_runs();
-        self.state = self.initial.clone();
+        self.envelopes[..frozen.len()].clone_from_slice(&frozen);
+        self.restart();
     }
 }
 
@@ -513,7 +521,7 @@ impl State {
                 }),
                 commit,
                 plan.docks.get(commit).copied().flatten(),
-                !plan.replanning,
+                !plan.replanning || commit < plan.frozen,
             );
             chosen.commit = commit;
             let record = self.slot_records.entry(commit).or_default();

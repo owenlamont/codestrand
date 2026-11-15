@@ -58,10 +58,13 @@ impl Clock {
             .history
             .starts
             .partition_point(|&start| start <= history);
-        next.checked_sub(1).map_or(history, |last| {
-            history
-                .after(self.presentation.starts[last].since(self.history.starts[last]))
-        })
+        next.min(self.presentation.starts.len())
+            .checked_sub(1)
+            .map_or(history, |last| {
+                history.after(
+                    self.presentation.starts[last].since(self.history.starts[last]),
+                )
+            })
     }
 
     pub(super) fn tile_transition(&self, tick: u64) -> Option<(u64, f32)> {

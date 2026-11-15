@@ -233,7 +233,12 @@ impl Simulation {
         let mut costs = vec![Vec::new(); self.state.layout.repositories.len()];
         self.restart();
         let frames = super::frames_for(self.duration(), 60).expect("bounded schedule");
-        for frame in (0..=frames + STEP).step_by(STEP as usize) {
+        let first = if self.state.tick == 0 {
+            0
+        } else {
+            u32::try_from(self.state.tick).expect("bounded window") / STEP + 1
+        };
+        for frame in (first * STEP..=frames + STEP).step_by(STEP as usize) {
             self.progress.report(
                 crate::progress::Stage::Titles,
                 frame.into(),
@@ -272,7 +277,27 @@ impl Simulation {
                 costs[index].push(row);
             }
         }
-        self.title_plan = costs.iter().map(|row| plan(row, CHANGE_COST)).collect();
+        self.title_plan = costs
+            .iter_mut()
+            .enumerate()
+            .map(|(index, row)| {
+                let prefix = self
+                    .title_plan
+                    .get(index)
+                    .map_or(&[][..], |p| &p[..(first as usize).min(p.len())]);
+                if let Some(&corner) = prefix.last() {
+                    let mut fixed = [f64::INFINITY; 4];
+                    fixed[usize::from(corner)] = 0.0;
+                    row.insert(0, fixed);
+                }
+                let planned = plan(row, CHANGE_COST);
+                prefix
+                    .iter()
+                    .copied()
+                    .chain(planned.into_iter().skip(usize::from(!prefix.is_empty())))
+                    .collect()
+            })
+            .collect();
         self.restart();
     }
     pub(super) fn place_titles(&mut self) {
@@ -320,6 +345,34 @@ impl Simulation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn window_extension_preserves_a_title_fade() {
+        let mut sim = Simulation::two_synthetic_repositories();
+        sim.title_plan[0].fill(0);
+        sim.title_plan[0][4..].fill(1);
+        sim.advance_to(65, 60);
+        assert!(sim.state.titles[&0].old.is_some());
+        let saved = sim.state.clone();
+        let expected: Vec<_> = (66..=78)
+            .map(|tick| {
+                sim.advance_to(tick, 60);
+                format!("{:?}", sim.state.titles)
+            })
+            .collect();
+        sim.window = Some(super::super::windows::Planning {
+            state: saved,
+            end: sim.duration(),
+            services: Vec::new(),
+            captured: Vec::new(),
+        });
+        sim.plan_titles();
+        for (tick, expected) in (66..=78).zip(expected) {
+            sim.advance_to(tick, 60);
+            assert_eq!(format!("{:?}", sim.state.titles), expected);
+        }
+        sim.assert_stitched_travel_rules();
+    }
     #[test]
     fn title_height_does_not_move_its_world_anchor() {
         let title =

@@ -107,17 +107,42 @@ impl Columns {
 const HOLD: u64 = 48;
 const FADE: u64 = 18;
 
+#[derive(Debug)]
 pub(super) struct Transition {
     tick: u64,
     from: usize,
     to: usize,
 }
 
+#[cfg(test)]
+pub(super) fn frozen(changes: &[Transition], tick: u64) -> String {
+    format!(
+        "{:?}",
+        changes
+            .iter()
+            .take_while(|change| change.tick <= tick)
+            .collect::<Vec<_>>()
+    )
+}
+
 pub(super) fn plan(schedule: &Schedule, events: &[Event]) -> Vec<Transition> {
     let mut changes: Vec<Transition> = Vec::new();
-    for tick in 0..=u64::from(
-        frames_for(schedule.duration(), 60).expect("bounded caption timeline"),
-    ) {
+    extend(schedule, events, 0, &mut changes);
+    changes
+}
+
+pub(super) fn extend(
+    schedule: &Schedule,
+    events: &[Event],
+    begin: u64,
+    changes: &mut Vec<Transition>,
+) {
+    changes.retain(|t| t.tick < begin);
+    for tick in begin
+        ..=u64::from(
+            frames_for(schedule.duration(), 60).expect("bounded caption timeline"),
+        )
+    {
         let Some(event) = schedule
             .applied(tick)
             .checked_sub(1)
@@ -141,7 +166,6 @@ pub(super) fn plan(schedule: &Schedule, events: &[Event]) -> Vec<Transition> {
             });
         }
     }
-    changes
 }
 
 pub(crate) fn background(colour: Color) -> LinearRgba {
@@ -220,6 +244,35 @@ impl Simulation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn window_extension_preserves_a_caption_fade() {
+        let mut sim = Simulation::two_synthetic_repositories();
+        let cut = sim
+            .caption_plan
+            .iter()
+            .find(|t| t.from != t.to)
+            .unwrap()
+            .tick
+            + 6;
+        sim.advance_to(u32::try_from(cut).unwrap(), 60);
+        let saved = sim.state.clone();
+        let before = sim.caption_background();
+        let expected: Vec<_> = (cut + 1..=cut + 12)
+            .map(|tick| {
+                sim.advance_to(u32::try_from(tick).unwrap(), 60);
+                sim.caption_background()
+            })
+            .collect();
+        extend(&sim.schedule, &sim.events, cut + 1, &mut sim.caption_plan);
+        sim.state = saved;
+        assert_eq!(sim.caption_background(), before);
+        for (tick, expected) in (cut + 1..=cut + 12).zip(expected) {
+            sim.advance_to(u32::try_from(tick).unwrap(), 60);
+            assert_eq!(sim.caption_background(), expected);
+        }
+        sim.assert_stitched_travel_rules();
+    }
 
     #[test]
     fn wordmark_strip_has_the_same_clearance_as_the_caption() {

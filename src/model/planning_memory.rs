@@ -60,8 +60,72 @@ pub(super) fn check(
         + changes * (3 * size_of::<FileChange>()) as u128
         + events.len() as u128 * (3 * size_of::<Event>()) as u128
         + paths * 3
-        + layout_bytes(events, options, &history)?;
+        + layout_bytes(events, options, &history)?
+        + window_bytes(events, options, history_frames, repositories.len());
     check_bytes(bytes)
+}
+
+fn window_bytes(
+    events: &[Event],
+    options: &Options,
+    frames: u128,
+    repositories: usize,
+) -> u128 {
+    let Some(seconds) = options.travel_window_seconds else {
+        return 0;
+    };
+    if !seconds.is_finite() || seconds < super::tick_seconds() {
+        return LIMIT + 1;
+    }
+    let ticks = u128::from(travel::seconds_ticks(seconds.min(14_400.0), true)).max(1);
+    let windows = frames.div_ceil(ticks) + 1;
+    let paths: HashSet<_> = events
+        .iter()
+        .flat_map(|e| &e.changes)
+        .map(|c| c.path.as_str())
+        .collect();
+    let files = paths
+        .iter()
+        .map(|p| {
+            (std::mem::size_of::<crate::layout::File>() + 256 + p.len() * 3) as u128
+        })
+        .sum::<u128>();
+    let mut directories = HashSet::new();
+    for mut path in paths {
+        while let Some((parent, _)) = path.rsplit_once('/') {
+            directories.insert(parent);
+            path = parent;
+        }
+    }
+    let directory_bytes = directories
+        .iter()
+        .map(|path| (size_of::<crate::layout::Dir>() + 128 + path.len() * 2) as u128)
+        .sum::<u128>();
+    let pulse_data = events
+        .iter()
+        .flat_map(|event| &event.changes)
+        .map(|change| {
+            64 + change
+                .samples
+                .iter()
+                .map(|sample| {
+                    (size_of::<crate::diff_samples::Sample>() + sample.text.len())
+                        as u128
+                })
+                .sum::<u128>()
+        })
+        .sum::<u128>();
+    let services = events.len() as u128
+        * (std::mem::size_of::<super::Avatar>()
+            + std::mem::size_of::<super::Pulse>()
+            + 512) as u128;
+    windows
+        * (files
+            + directory_bytes
+            + pulse_data
+            + services
+            + repositories as u128 * 1024
+            + std::mem::size_of::<super::State>() as u128)
 }
 
 fn check_bytes(bytes: u128) -> anyhow::Result<()> {

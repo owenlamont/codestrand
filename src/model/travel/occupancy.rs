@@ -123,7 +123,7 @@ impl Simulation {
         let frames = crate::model::frames_for(self.duration(), 60)
             .expect("bounded schedule")
             + 144;
-        for frame in 0..=frames {
+        for frame in u32::try_from(self.state.tick).expect("bounded window")..=frames {
             self.progress.report(
                 crate::progress::Stage::Reservations,
                 frame.into(),
@@ -141,7 +141,7 @@ impl Simulation {
             &mut conflicted,
         );
         for (index, row) in occupied.into_iter().enumerate() {
-            if conflicted[index] {
+            if conflicted[index] && index >= self.travel.frozen {
                 previous[index] = row;
             }
         }
