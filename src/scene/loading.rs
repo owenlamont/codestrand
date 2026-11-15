@@ -141,7 +141,7 @@ fn finish(world: &mut World, simulation: Simulation, title: String) {
     world.run_schedule(Loaded);
 }
 
-fn fail(world: &mut World, error: anyhow::Error) {
+pub(super) fn fail(world: &mut World, error: anyhow::Error) {
     world.remove_resource::<Loading>();
     *world
         .get_resource_or_init::<Failure>()

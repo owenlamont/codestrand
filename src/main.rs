@@ -357,6 +357,10 @@ impl Source {
             commits: self.commits,
             travel_cap: self.travel_cap,
             travel_window_seconds: self.travel_window_seconds,
+            #[cfg(test)]
+            eager_windows: false,
+            #[cfg(test)]
+            window_hook: None,
             bot_travel: self.bot_travel,
             avatar_max_speed: self.avatar_max_speed,
             avatar_size: self.avatar_scale,
@@ -593,7 +597,11 @@ fn between(value: &str, low: f32, high: f32, name: &str) -> Result<f32, String> 
 }
 
 fn main() -> std::process::ExitCode {
-    match run() {
+    termination(run())
+}
+
+fn termination(result: anyhow::Result<()>) -> std::process::ExitCode {
+    match result {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
             if let Some(usage) = error.downcast_ref::<clap::Error>() {
@@ -689,8 +697,7 @@ fn run() -> anyhow::Result<()> {
                     eprintln!("{update}");
                 })?;
             simulation.set_theme(theme.build());
-            let frames = frames
-                .map_or_else(|| model::frames_for(simulation.duration(), fps), Ok)?;
+
             let camera_path = camera_path
                 .as_deref()
                 .map(|path| camera_path::CameraPath::load(path, &simulation))

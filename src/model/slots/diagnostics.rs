@@ -25,6 +25,8 @@ pub(crate) struct MovingBeams {
     first: Option<serde_json::Value>,
     missing_tile_beams: u64,
     travelling_disc_foreign_tile: u64,
+    travelling_disc_max_depth_px: f32,
+    travelling_avatar_frames: u64,
     travelling_avatar_overlaps: u64,
     avatar_overlap_max_px: f32,
     worst_overlap_tick: u64,
@@ -302,6 +304,7 @@ impl MovingBeams {
             self.observe_content(state, avatar, point, radius, &content);
             let moving = avatar.presence > 0.0
                 && simulation.travel.travelling(author, state.tick);
+            self.travelling_avatar_frames += u64::from(moving);
             if moving && simulation.travel.walking(author, state.tick) {
                 let cells = super::super::travel::network(
                     state.layout.repositories.iter().filter_map(|r| r.gutter),
@@ -357,6 +360,9 @@ impl MovingBeams {
                     continue;
                 }
                 self.travelling_disc_foreign_tile += 1;
+                self.travelling_disc_max_depth_px = self
+                    .travelling_disc_max_depth_px
+                    .max(radius - point.distance(nearest));
                 self.first_disc.get_or_insert_with(|| serde_json::json!({"frame":state.tick,"author":author,"commit":avatar.commit,"point":point.to_array(),"radius":radius,"foreign":index,"tile":[tile.low.to_array(),tile.high.to_array()],"travel_sample":simulation.travel.sample(author,state.tick).map(|(p,a)| (p.to_array(),a))}));
             }
         }

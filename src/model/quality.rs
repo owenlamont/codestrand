@@ -223,33 +223,43 @@ fn positions(
     )
 }
 /// Writes definitions, per-tick records, and a summary as JSON Lines without GPU startup.
+fn write_record(
+    writer: &mut impl Write,
+    record: &impl serde::Serialize,
+) -> anyhow::Result<()> {
+    serde_json::to_writer(&mut *writer, record)?;
+    writeln!(writer)?;
+    Ok(())
+}
 /// Runtime is deliberately excluded so identical inputs produce identical report bytes.
 pub(crate) fn run(
     simulation: &mut Simulation,
     writer: &mut impl Write,
 ) -> anyhow::Result<()> {
     definitions(writer)?;
-    let frames = super::frames_for(simulation.duration(), 60)?;
-    let mut previous_files = BTreeMap::new();
-    let mut previous_dirs = BTreeMap::new();
+    let mut frames;
+    let (mut previous_files, mut previous_dirs) = (BTreeMap::new(), BTreeMap::new());
     let mut hotspots: BTreeMap<String, Hotspot> = BTreeMap::new();
     let mut commits: BTreeMap<usize, Movement> = BTreeMap::new();
     let mut total = Movement::default();
-    let mut file_speeds = Speeds::default();
-    let mut directory_speeds = Speeds::default();
-    let mut net = NetMovement::default();
-    let mut interval = NetMovement::default();
+    let (mut file_speeds, mut directory_speeds) =
+        (Speeds::default(), Speeds::default());
+    let (mut net, mut interval) = (NetMovement::default(), NetMovement::default());
     let mut interval_commit = simulation.commit();
     let mut per_commit_net = BTreeMap::new();
     let (mut overlapped_frames, mut worst_pairs, mut pair_frames) = (0, 0, 0_u64);
-    let mut diameter_sum = 0.0;
-    let mut observations = 0.0;
-    let mut minimum = f64::INFINITY;
-    let mut extent_sum = 0.0;
-    let mut file_clearance = FileClearance::default();
-    let mut visible_file_clearance = FileClearance::default();
+    let (mut diameter_sum, mut observations, mut minimum, mut extent_sum) =
+        (0.0, 0.0, f64::INFINITY, 0.0);
+    let (mut file_clearance, mut visible_file_clearance) =
+        (FileClearance::default(), FileClearance::default());
     let mut moving_beams = super::slots::diagnostics::MovingBeams::default();
-    for frame in 0..=frames {
+    let mut frame = 0;
+    loop {
+        simulation.prepare_frame(frame, 60, true)?;
+        frames = super::frames_for(simulation.duration(), 60)?;
+        if simulation.planning_complete() && frame > frames {
+            break;
+        }
         simulation.advance_to(frame, 60);
         moving_beams.observe(simulation);
         progress(frame, frames, simulation.commit());
@@ -300,11 +310,11 @@ pub(crate) fn run(
         };
         file_clearance.accumulate(&record.file_clearance);
         visible_file_clearance.accumulate(&record.visible_file_clearance);
-        serde_json::to_writer(&mut *writer, &record)?;
-        writeln!(writer)?;
+        write_record(writer, &record)?;
+        frame += 1;
     }
     per_commit_net.insert(interval_commit, interval.measure());
-    serde_json::to_writer(
+    write_record(
         &mut *writer,
         &serde_json::json!({
             "summary": {
@@ -325,7 +335,6 @@ pub(crate) fn run(
             }
         }),
     )?;
-    writeln!(writer)?;
     Ok(())
 }
 
@@ -552,12 +561,11 @@ fn overlap_pairs(
 }
 
 fn definitions(writer: &mut impl Write) -> anyhow::Result<()> {
-    serde_json::to_writer(
+    write_record(
         &mut *writer,
         &serde_json::json!({"definitions": DEFINITIONS,
             "file_clearance_definitions": "Raw file_clearance uses lifecycle presence > 0 and radius 0.27 * presence. visible_file_clearance uses the rendered boundary-limited presence, excluding hidden transit. Foreign pair-ticks count each file/live-foreign-directory strict disc intersection; outside-own ticks count each file whose disc exceeds its own directory disc. Penetrations <= 0.0001 world units are excluded. Worst depths are world units.",
             "speed_definitions": "Nearest-rank p95/p99/max over retained-ID per-tick speeds, including stationary observations, separately for files and live directories. World units per playback second (tick distance times 60). Birth/reactivation placement excluded. Fast distance sums the full tick distance when speed strictly exceeds 6 world units/s: 0.1 units per 60 Hz tick, approximately 19% of a full-size file's 0.54-unit diameter per tick. Threshold is world-space, independent of camera zoom."}),
     )?;
-    writeln!(writer)?;
     Ok(())
 }

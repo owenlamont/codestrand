@@ -36,7 +36,7 @@ pub(super) fn prepare(directory: &Path) -> anyhow::Result<()> {
 pub(super) fn render(
     directory: &Path,
     (mut app, target): (App, Handle<Image>),
-    frames: u32,
+    frames: Option<u32>,
     fps: u16,
     delay_ms: u16,
     mut encoder: Option<crate::encoder::Encoder>,
@@ -50,13 +50,41 @@ pub(super) fn render(
     initialize(&mut app, &target)?;
     let mut png = encoder.is_none().then(png::Writer::new).transpose()?;
     let started = Instant::now();
-    let mut previous_camera = None;
-    let mut captures = Captures::default();
+    let (mut previous_camera, mut captures) = (None, Captures::default());
+    let mut index = 0;
     let rendered = (|| -> anyhow::Result<()> {
         let mut write = |index, image| {
             write_frame(directory, &mut encoder, png.as_mut(), index, image)
         };
-        for index in 0..frames {
+        loop {
+            if frames.is_some_and(|count| index >= count) {
+                break;
+            }
+            let waiting = !app
+                .world()
+                .resource::<scene::Playback>()
+                .0
+                .frame_ready(index, fps);
+            prepare_after_captures(
+                &mut app,
+                &mut captures,
+                index,
+                waiting,
+                update,
+                &mut write,
+                |app| {
+                    app.world_mut()
+                        .resource_mut::<scene::Playback>()
+                        .0
+                        .prepare_frame(index, fps, true)
+                        .map(|_| ())
+                },
+            )?;
+            let playback = &app.world().resource::<scene::Playback>().0;
+            let planned = crate::model::frames_for(playback.duration(), fps)?;
+            if frames.is_none() && playback.planning_complete() && index >= planned {
+                break;
+            }
             if let Err(error) = place_export_camera(
                 &mut app,
                 camera_path,
@@ -75,36 +103,25 @@ pub(super) fn render(
                 });
             update(&mut app)?;
             captures.write_ready(&mut write)?;
-            let (glyphs, missing_glyphs) = glyph_coverage(&mut app);
-            let playback = &app.world().resource::<scene::Playback>().0;
-            writeln!(
-                manifest,
-                "{index},{:.9},{},{},{},{},{glyphs},{missing_glyphs}",
-                playback.seconds(),
-                playback.commit(),
-                playback.layout().present_files(),
-                playback
-                    .avatars()
-                    .iter()
-                    .filter(|avatar| avatar.presence > 0.0)
-                    .count(),
-                playback.beams().len()
-            )?;
+            record_frame(&mut app, &mut manifest, index)?;
             while captures.pending.len() >= MAX_PENDING_CAPTURES {
                 update(&mut app)?;
                 captures.write_ready(&mut write)?;
             }
             thread::sleep(Duration::from_millis(u64::from(delay_ms)));
-            if index % u32::from(fps) == 0 && index + 1 < frames {
+            if index % u32::from(fps) == 0
+                && frames.is_none_or(|frames| index + 1 < frames)
+            {
                 eprintln!(
                     "Exported {}/{} frames ({:.1}s elapsed)",
                     index + 1,
-                    frames,
+                    frames.unwrap_or(planned),
                     started.elapsed().as_secs_f32()
                 );
             }
+            index += 1;
         }
-        captures.finish(frames, || update(&mut app), &mut write)?;
+        captures.finish(index, || update(&mut app), &mut write)?;
         Ok(())
     })();
     let png_result = png.map_or(Ok(()), png::Writer::finish);
@@ -115,7 +132,7 @@ pub(super) fn render(
     }
     png_result?;
     eprintln!(
-        "Exported {frames}/{frames} frames ({:.1}s elapsed)",
+        "Exported {index}/{index} frames ({:.1}s elapsed)",
         started.elapsed().as_secs_f32()
     );
     manifest.flush()?;
@@ -125,6 +142,44 @@ pub(super) fn render(
         crate::terminal_escape(&directory.to_string_lossy())
     );
     Ok(())
+}
+
+fn record_frame(
+    app: &mut App,
+    manifest: &mut impl Write,
+    index: u32,
+) -> anyhow::Result<()> {
+    let (glyphs, missing_glyphs) = glyph_coverage(app);
+    let playback = &app.world().resource::<scene::Playback>().0;
+    writeln!(
+        manifest,
+        "{index},{:.9},{},{},{},{},{glyphs},{missing_glyphs}",
+        playback.seconds(),
+        playback.commit(),
+        playback.layout().present_files(),
+        playback
+            .avatars()
+            .iter()
+            .filter(|avatar| avatar.presence > 0.0)
+            .count(),
+        playback.beams().len()
+    )?;
+    Ok(())
+}
+
+fn prepare_after_captures<T>(
+    context: &mut T,
+    captures: &mut Captures,
+    index: u32,
+    waiting: bool,
+    mut update: impl FnMut(&mut T) -> anyhow::Result<()>,
+    write: impl FnMut(u32, Image) -> anyhow::Result<()>,
+    prepare: impl FnOnce(&mut T) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    if waiting {
+        captures.finish(index, || update(context), write)?;
+    }
+    prepare(context)
 }
 
 fn place_export_camera(
@@ -379,6 +434,269 @@ mod tests {
     }
 
     #[test]
+    fn pending_capture_drains_before_planning_exceeds_its_deadline() {
+        let mut captures = Captures::default();
+        let sender = captures.request();
+        let mut updates = 0;
+        let mut written = Vec::new();
+        prepare_after_captures(
+            &mut updates,
+            &mut captures,
+            1,
+            true,
+            |updates| {
+                *updates += 1;
+                if *updates == 2 {
+                    sender.send(Image::default()).unwrap();
+                }
+                Ok(())
+            },
+            |frame, _| {
+                written.push(frame);
+                Ok(())
+            },
+            |updates| {
+                assert_eq!(*updates, 2);
+                thread::sleep(WAIT_LIMIT + Duration::from_millis(10));
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(written, [0]);
+        assert!(captures.pending.is_empty());
+        let next = captures.request();
+        next.send(Image::default()).unwrap();
+        captures
+            .finish(
+                2,
+                || Ok(()),
+                |frame, _| {
+                    written.push(frame);
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert_eq!(written, [0, 1]);
+    }
+
+    fn sample_source() -> (crate::Source, std::path::PathBuf) {
+        use clap::Parser;
+        let manifest_path = std::env::var("CODESTRAND_SAMPLE_MANIFEST").unwrap();
+        let output = std::path::PathBuf::from(
+            std::env::var_os("CODESTRAND_SAMPLE_OUTPUT").unwrap(),
+        );
+        let mut args = vec![
+            "codestrand".to_owned(),
+            "layout-quality".into(),
+            "unused.jsonl".into(),
+            "--repositories-file".into(),
+            manifest_path,
+        ];
+        if let Ok(seconds) = std::env::var("CODESTRAND_SAMPLE_WINDOW") {
+            args.extend(["--travel-window-seconds".into(), seconds]);
+        }
+        if let Ok(commits) = std::env::var("CODESTRAND_SAMPLE_COMMITS") {
+            args.extend(["--commits".into(), commits]);
+        }
+        let cli = crate::Cli::try_parse_from(args).unwrap();
+        let Some(crate::Command::LayoutQuality { source, .. }) = cli.command else {
+            panic!("fixture source");
+        };
+        (source, output)
+    }
+
+    fn first_sample(app: &mut App, target: &Handle<Image>, output: &Path) {
+        let mut captures = Captures::default();
+        let sender = captures.request();
+        app.world_mut()
+            .spawn(Screenshot::image(target.clone()))
+            .observe(move |event: On<ScreenshotCaptured>| {
+                let _ = sender.send(event.image.clone());
+            });
+        captures
+            .finish(
+                1,
+                || update(app),
+                |_, image| {
+                    image
+                        .try_into_dynamic()
+                        .unwrap()
+                        .save(output.join("first.png"))
+                        .map_err(Into::into)
+                },
+            )
+            .unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires a graphics adapter; verifies streamed export bytes and failures"]
+    fn streaming_export_timing_and_failure_paths() {
+        use std::sync::Arc;
+        let scratch = tempfile::tempdir().unwrap();
+        let mut expected = Vec::new();
+        for arm in 0..5 {
+            let hook: model::streaming::WindowHook = Arc::new(move |index, sim| {
+                if index != 1 {
+                    return;
+                }
+                match arm {
+                    2 => thread::sleep(WAIT_LIMIT + Duration::from_secs(1)),
+                    3 => sim.force_unrouteable_test(),
+                    4 => panic!("forced export worker panic"),
+                    _ => (),
+                }
+            });
+            let cap = if arm >= 3 {
+                model::TravelCap::None
+            } else {
+                model::TravelCap::Seconds(0.4)
+            };
+            let simulation =
+                model::streaming::tests::fixture_with(false, Some(hook), cap);
+            let output = scratch.path().join(arm.to_string());
+            prepare(&output).unwrap();
+            let app = scene::headless(
+                simulation,
+                "Streaming fixture".into(),
+                10,
+                "640x360".parse().unwrap(),
+            );
+            let result = render(&output, app, None, 10, 0, None, None);
+            if arm >= 3 {
+                let failure = result.unwrap_err();
+                let error = failure.to_string();
+                assert!(
+                    error.contains(if arm == 3 {
+                        "no route for commit"
+                    } else {
+                        "forced export worker panic"
+                    }),
+                    "{error}"
+                );
+                assert!(output.join("frame-00000.png").exists());
+                assert_eq!(
+                    crate::termination(Err(failure)),
+                    std::process::ExitCode::FAILURE
+                );
+                continue;
+            }
+            result.unwrap();
+            let mut paths: Vec<_> = fs::read_dir(&output)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .collect();
+            paths.sort();
+            let bytes: Vec<_> =
+                paths.iter().map(|path| fs::read(path).unwrap()).collect();
+            assert!(bytes.len() > 100);
+            if arm == 0 {
+                expected = bytes;
+            } else {
+                assert_eq!(bytes, expected, "export arm {arm}");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a graphics adapter and an explicit history fixture"]
+    fn streaming_history_sample_export() {
+        let (source, output) = sample_source();
+        let started = Instant::now();
+        let (simulation, title) =
+            source.load(&crate::progress::Progress::default()).unwrap();
+        eprintln!(
+            "sample_first_window_seconds={}",
+            started.elapsed().as_secs_f64()
+        );
+        prepare(&output).unwrap();
+        let (mut app, target) =
+            scene::headless(simulation, title, 60, "1280x720".parse().unwrap());
+        initialize(&mut app, &target).unwrap();
+        first_sample(&mut app, &target, &output);
+        eprintln!(
+            "sample_first_frame_seconds={}",
+            started.elapsed().as_secs_f64()
+        );
+        let mut captures = Captures::default();
+        let mut png = png::Writer::new().unwrap();
+        let mut samples =
+            BufWriter::new(File::create(output.join("samples.csv")).unwrap());
+        writeln!(samples, "sample,frame,history_seconds").unwrap();
+        let mut frame = 0;
+        let mut sample = 1;
+        loop {
+            let waiting = !app
+                .world()
+                .resource::<scene::Playback>()
+                .0
+                .frame_ready(frame, 60);
+            prepare_after_captures(
+                &mut app,
+                &mut captures,
+                sample - 1,
+                waiting,
+                update,
+                |index, image| {
+                    png.write(output.join(format!("frame-{index:05}.png")), image)
+                },
+                |app| {
+                    app.world_mut()
+                        .resource_mut::<scene::Playback>()
+                        .0
+                        .prepare_frame(frame, 60, true)
+                        .map(|_| ())
+                },
+            )
+            .unwrap();
+            let mut playback = app.world_mut().resource_mut::<scene::Playback>();
+            playback.0.advance_to(frame, 60);
+            let (history, duration) = playback.0.history_progress();
+            let last = playback.0.planning_complete()
+                && frame >= model::frames_for(playback.0.duration(), 60).unwrap();
+            if (sample < 4
+                && history.lossy_secs_f32()
+                    >= duration.lossy_secs_f32() * model::count_u32(sample) / 4.0)
+                || last
+            {
+                writeln!(samples, "{sample},{frame},{history}").unwrap();
+                app.world_mut().resource_mut::<scene::Frame>().index = frame;
+                let sender = captures.request();
+                app.world_mut()
+                    .spawn(Screenshot::image(target.clone()))
+                    .observe(move |event: On<ScreenshotCaptured>| {
+                        let _ = sender.send(event.image.clone());
+                    });
+                update(&mut app).unwrap();
+                captures
+                    .write_ready(|index, image| {
+                        png.write(output.join(format!("frame-{index:05}.png")), image)
+                    })
+                    .unwrap();
+                sample += 1;
+            }
+            if last {
+                break;
+            }
+            frame += 1;
+        }
+        captures
+            .finish(
+                sample - 1,
+                || update(&mut app),
+                |index, image| {
+                    png.write(output.join(format!("frame-{index:05}.png")), image)
+                },
+            )
+            .unwrap();
+        png.finish().unwrap();
+        assert_eq!(sample, 5);
+        eprintln!(
+            "sample_complete_frames={frame} seconds={}",
+            started.elapsed().as_secs_f64()
+        );
+    }
+
+    #[test]
     fn captures_reject_manifest_count_mismatch() {
         let error = Captures::default()
             .finish(1, || Ok(()), |_, _| Ok(()))
@@ -454,7 +772,7 @@ mod tests {
             })
             .before(scene::animate),
         );
-        render(&output, (app, target), 70, 5, 0, None, None).unwrap();
+        render(&output, (app, target), Some(70), 5, 0, None, None).unwrap();
         for index in 0..70 {
             let name = ThemeName::ALL[index / 10];
             let image = image::open(output.join(format!("frame-{index:05}.png")))

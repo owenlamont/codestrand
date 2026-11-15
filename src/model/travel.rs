@@ -43,7 +43,8 @@ pub(super) struct Pose {
 
 #[derive(Clone)]
 pub(super) struct Service {
-    author: usize,
+    pub(super) commit: usize,
+    pub(super) author: usize,
     repository: usize,
     tick: u64,
     release: u64,
@@ -138,7 +139,7 @@ impl Leg {
 struct Route {
     legs: Vec<Leg>,
     duration: f32,
-    track: Vec<Vec2>,
+    track: std::sync::Arc<[Vec2]>,
 }
 
 impl Route {
@@ -207,7 +208,7 @@ struct Trip {
     proof: Option<serde_json::Value>,
 }
 
-#[derive(Default, Serialize)]
+#[derive(Clone, Default, Serialize)]
 pub(super) struct Statistics {
     pub human_complete: usize,
     pub human_partial: usize,
@@ -225,7 +226,7 @@ pub(super) struct Statistics {
     pub retained_route_bytes: usize,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct Plan {
     trips: Vec<Trip>,
     pub(super) docks: Vec<Option<slots::Dock>>,
@@ -236,6 +237,12 @@ pub(super) struct Plan {
 }
 
 impl Plan {
+    #[cfg(test)]
+    pub(super) fn force_unrouteable(&mut self) -> usize {
+        let trip = self.trips.last_mut().expect("fixture has a trip");
+        trip.fade = true;
+        trip.commit
+    }
     pub(super) fn first_unresolved(&self) -> Option<usize> {
         self.trips.iter().find(|t| t.fade).map(|t| t.commit)
     }
@@ -418,6 +425,7 @@ fn capture(simulation: &mut Simulation) -> Capture {
             let author = state.authors[&contributor.key];
             let avatar = &state.avatars[author];
             capture.services.push(Service {
+                commit: event,
                 author,
                 repository: avatar.repository,
                 tick: state.tick,
@@ -668,7 +676,7 @@ impl Simulation {
                     .iter()
                     .map(|t| {
                         t.route.legs.capacity() * std::mem::size_of::<Leg>()
-                            + t.route.track.capacity() * std::mem::size_of::<Vec2>()
+                            + t.route.track.len() * std::mem::size_of::<Vec2>()
                     })
                     .sum::<usize>(),
             graph_epochs,
@@ -687,7 +695,11 @@ impl Simulation {
                 .map(|&(_, t)| ticks_duration(u64::from(t)))
                 .sum(),
         };
-        let docks = capture.services.iter().map(|s| Some(s.dock)).collect();
+        let mut docks = self.travel.docks.clone();
+        docks.resize(self.events.len(), None);
+        for service in &capture.services {
+            docks[service.commit] = Some(service.dock);
+        }
         if let Some(window) = &mut self.window {
             window.captured.clone_from(&capture.services);
         }
@@ -947,6 +959,28 @@ fn simplify_path(path: &[Vec2]) -> Vec<Vec2> {
         }
     }
     result
+}
+
+impl Plan {
+    pub(super) fn discard_before(
+        &mut self,
+        boundary: u64,
+        next: usize,
+        keep: &std::collections::BTreeSet<usize>,
+    ) {
+        self.trips.retain(|trip| trip.arrival > boundary);
+        self.trips.shrink_to_fit();
+        for (commit, dock) in self.docks.iter_mut().enumerate() {
+            if commit < next && !keep.contains(&commit) {
+                *dock = None;
+            }
+        }
+        for (commit, row) in self.occupancy.iter_mut().enumerate() {
+            if commit < next && !keep.contains(&commit) {
+                *row = Vec::new();
+            }
+        }
+    }
 }
 
 #[cfg(test)]

@@ -82,7 +82,11 @@ impl Columns {
                     .unwrap_or(0),
                 longest(2),
                 format!("commit {} / {}", sim.total, sim.total).len(),
-                "0.125x".len(),
+                if sim.windowed {
+                    "0.125x 100%".len()
+                } else {
+                    "0.125x".len()
+                },
                 crate::theme::ThemeName::ALL
                     .iter()
                     .map(|t| t.title().chars().count())
@@ -107,7 +111,7 @@ impl Columns {
 const HOLD: u64 = 48;
 const FADE: u64 = 18;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(super) struct Transition {
     tick: u64,
     from: usize,
@@ -205,7 +209,17 @@ impl Simulation {
                 self.total,
                 digits = self.total.to_string().len()
             ),
-            format!("{}x", self.playback_multiplier),
+            if self.windowed {
+                let (now, end) = self.history_progress();
+                format!(
+                    "{}x {:>3.0}%",
+                    self.playback_multiplier,
+                    (now.lossy_secs_f32() / end.lossy_secs_f32() * 100.0)
+                        .clamp(0.0, 100.0)
+                )
+            } else {
+                format!("{}x", self.playback_multiplier)
+            },
             self.theme.name.title().to_owned(),
         ]
     }
@@ -239,6 +253,13 @@ impl Simulation {
         .min(1.0);
         colour(change.from).mix(&colour(change.to), alpha).into()
     }
+}
+
+pub(super) fn discard_before(changes: &mut Vec<Transition>, tick: u64) {
+    let count = changes
+        .partition_point(|change| change.tick <= tick)
+        .saturating_sub(1);
+    changes.drain(..count);
 }
 
 #[cfg(test)]

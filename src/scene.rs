@@ -57,6 +57,9 @@ pub(super) struct Frame {
 #[derive(Resource)]
 pub(super) struct Playback(pub Simulation);
 
+#[derive(Resource, Default)]
+struct PlanningWait(bool);
+
 #[derive(Resource)]
 pub(super) struct ScriptedCamera(pub Transform);
 
@@ -985,6 +988,8 @@ fn preview_clock(
     world: &mut World,
     mut started: Local<bool>,
     mut elapsed: Local<std::time::Duration>,
+    mut pending: Local<Option<std::time::Duration>>,
+    mut looping: Local<bool>,
 ) {
     preview_theme(world);
     let keys = world.resource::<ButtonInput<KeyCode>>();
@@ -1000,24 +1005,43 @@ fn preview_clock(
     }
     let multiplier = world.resource::<Playback>().0.playback_multiplier();
     // The update that first has a simulation also carries the time spent planning it.
-    if std::mem::replace(&mut *started, true) {
-        *elapsed += world.resource::<Time<Real>>().delta().mul_f32(multiplier);
+    let delta = if std::mem::replace(&mut *started, true) {
+        world.resource::<Time<Real>>().delta().mul_f32(multiplier)
+    } else {
+        std::time::Duration::ZERO
+    };
+    let mut next = pending.unwrap_or(*elapsed + delta);
+    let fps = world.resource::<Frame>().fps;
+    if !ready_preview(world, model::preview_frame(next, fps), fps) {
+        *pending = Some(next);
+        return;
     }
     let duration = world.resource::<Playback>().0.duration();
     let fps = world.resource::<Frame>().fps;
     let frames = model::frames_for(duration, fps).unwrap_or(u32::MAX);
     let period_nanos = (u128::from(frames) * 1_000_000_000).div_ceil(u128::from(fps));
-    if elapsed.as_nanos() >= period_nanos {
-        *elapsed = std::time::Duration::from_nanos(
-            u64::try_from(elapsed.as_nanos() % period_nanos)
+    if world.resource::<Playback>().0.planning_complete()
+        && next.as_nanos() >= period_nanos
+    {
+        next = std::time::Duration::from_nanos(
+            u64::try_from(next.as_nanos() % period_nanos)
                 .expect("loop period fits in u64 nanoseconds"),
         );
+        *looping = true;
+        if !ready_preview(world, model::preview_frame(next, fps), fps) {
+            *pending = Some(next);
+            return;
+        }
+    }
+    if std::mem::take(&mut *looping) {
         world.resource_mut::<Playback>().0.restart();
         if let Some(mut pools) = world.get_resource_mut::<Pools>() {
             pools.sync_stamp = None;
             pools.names.invalidate();
         }
     }
+    *pending = None;
+    *elapsed = next;
     world.resource_mut::<Frame>().index = model::preview_frame(*elapsed, fps);
 }
 
@@ -1287,6 +1311,12 @@ fn themed_glyph_image(svg: &str, theme: &Theme) -> Image {
 }
 
 fn preview_camera(world: &mut World, mut navigation: Local<navigation::State>) {
+    if world
+        .get_resource::<PlanningWait>()
+        .is_some_and(|wait| wait.0)
+    {
+        return;
+    }
     let input = navigation.read(world);
     let dt = world.resource::<Time<Real>>().delta_secs();
     world.resource_scope(|world, mut camera: Mut<PreviewCamera>| {
@@ -1310,6 +1340,12 @@ fn preview_camera(world: &mut World, mut navigation: Local<navigation::State>) {
 }
 
 pub(super) fn animate(world: &mut World) {
+    if world
+        .get_resource::<PlanningWait>()
+        .is_some_and(|wait| wait.0)
+    {
+        return;
+    }
     let restored = restore_lifecycle_materials(world);
     let frame = world.resource::<Frame>();
     let (index, fps) = (frame.index, frame.fps);
@@ -2625,6 +2661,34 @@ fn face_portraits(world: &mut World) {
     }
 }
 
+fn ready_preview(world: &mut World, frame: u32, fps: u16) -> bool {
+    if world
+        .get_resource::<loading::Failure>()
+        .is_some_and(|failure| {
+            failure
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_some()
+        })
+    {
+        return false;
+    }
+    let result = world
+        .resource_mut::<Playback>()
+        .0
+        .prepare_frame(frame, fps, false);
+    let ready = match result {
+        Ok(ready) => ready,
+        Err(error) => {
+            loading::fail(world, error);
+            false
+        }
+    };
+    world.get_resource_or_init::<PlanningWait>().0 = !ready;
+    ready
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3291,6 +3355,163 @@ mod tests {
                 model::tick_time(u64::from(expected) * 2),
             );
         }
+    }
+
+    #[test]
+    fn preview_clock_stalls_without_skipping_or_wrapping_unplanned_history() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        let release = Arc::new(AtomicBool::new(false));
+        let gate = release.clone();
+        let hook: model::streaming::WindowHook = Arc::new(move |index, _| {
+            if index != 1 {
+                return;
+            }
+            for _ in 0..2000 {
+                if gate.load(Ordering::Acquire) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            panic!("test did not release planning worker");
+        });
+        let simulation = model::streaming::tests::fixture_with(
+            false,
+            Some(hook),
+            model::TravelCap::Seconds(0.4),
+        );
+        let initial_duration = simulation.duration();
+        let mut world = World::new();
+        world.insert_resource(Playback(simulation));
+        world.insert_resource(Frame { index: 0, fps: 60 });
+        world.init_resource::<ButtonInput<KeyCode>>();
+        world.init_resource::<Time<Real>>();
+        world
+            .resource_mut::<Time<Real>>()
+            .update_with_duration(std::time::Duration::ZERO);
+        let clock = world.register_system(preview_clock);
+        world.run_system(clock).unwrap();
+        for seconds in [3, 60, 60] {
+            world
+                .resource_mut::<Time<Real>>()
+                .update_with_duration(std::time::Duration::from_secs(seconds));
+            world.run_system(clock).unwrap();
+            assert_eq!(world.resource::<Frame>().index, 0);
+            assert!(world.resource::<PlanningWait>().0);
+        }
+        release.store(true, Ordering::Release);
+        for _ in 0..2000 {
+            world.run_system(clock).unwrap();
+            if !world.resource::<PlanningWait>().0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(!world.resource::<PlanningWait>().0);
+        assert_eq!(world.resource::<Frame>().index, 180);
+        assert!(world.resource::<Playback>().0.duration() > initial_duration);
+        world
+            .resource_mut::<Time<Real>>()
+            .update_with_duration(std::time::Duration::from_millis(17));
+        world.run_system(clock).unwrap();
+        assert_eq!(world.resource::<Frame>().index, 181);
+    }
+
+    #[test]
+    fn preview_surfaces_route_failure_and_worker_panic() {
+        for panic in [false, true] {
+            let hook: model::streaming::WindowHook =
+                std::sync::Arc::new(move |index, sim| {
+                    if index == 1 {
+                        assert!(!panic, "forced preview worker panic");
+                        sim.force_unrouteable_test();
+                    }
+                });
+            let simulation = model::streaming::tests::fixture_with(
+                false,
+                Some(hook),
+                model::TravelCap::None,
+            );
+            let mut world = World::new();
+            world.insert_resource(Playback(simulation));
+            world.init_resource::<Messages<AppExit>>();
+            for _ in 0..2000 {
+                ready_preview(&mut world, 600, 60);
+                if world.contains_resource::<loading::Failure>() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            let failure = world.resource::<loading::Failure>().0.lock().unwrap();
+            let error = failure.as_ref().unwrap().to_string();
+            assert!(
+                error.contains(if panic {
+                    "forced preview worker panic"
+                } else {
+                    "no route for commit"
+                }),
+                "{error}"
+            );
+            assert!(!world.resource::<Messages<AppExit>>().is_empty());
+        }
+    }
+
+    #[test]
+    fn streamed_preview_clock_repeats_the_complete_simulation_loop() {
+        let simulation = model::streaming::tests::fixture_with(
+            false,
+            None,
+            model::TravelCap::Seconds(0.4),
+        );
+        let mut world = World::new();
+        world.insert_resource(Playback(simulation));
+        world.insert_resource(Frame { index: 0, fps: 60 });
+        world.init_resource::<ButtonInput<KeyCode>>();
+        world.init_resource::<Time<Real>>();
+        world
+            .resource_mut::<Time<Real>>()
+            .update_with_duration(std::time::Duration::ZERO);
+        let clock = world.register_system(preview_clock);
+        world.run_system(clock).unwrap();
+        let mut expected = Vec::new();
+        let mut loops = 0;
+        let mut previous = 0;
+        for _ in 0..4000 {
+            let frame = world.resource::<Frame>().index;
+            world.resource_mut::<Playback>().0.advance_to(frame, 60);
+            let visible =
+                model::streaming::tests::visible(&world.resource::<Playback>().0);
+            if frame < previous {
+                loops += 1;
+            }
+            if loops == 2 {
+                break;
+            }
+            if loops == 0 {
+                expected.push(visible);
+            } else {
+                assert_eq!(visible, expected[frame as usize], "loop frame {frame}");
+            }
+            previous = frame;
+            world
+                .resource_mut::<Time<Real>>()
+                .update_with_duration(std::time::Duration::from_nanos(16_666_667));
+            world.run_system(clock).unwrap();
+            for _ in 0..2000 {
+                if !world.resource::<PlanningWait>().0 {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                world
+                    .resource_mut::<Time<Real>>()
+                    .update_with_duration(std::time::Duration::ZERO);
+                world.run_system(clock).unwrap();
+            }
+            assert!(!world.resource::<PlanningWait>().0);
+        }
+        assert_eq!(loops, 2);
     }
 
     #[test]

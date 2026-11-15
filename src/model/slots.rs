@@ -1903,7 +1903,7 @@ mod tests {
         }
         sim.envelopes = envelopes;
         sim.plan_ray_runs();
-        sim.state = sim.initial.clone();
+        sim.state = super::super::SharedState(sim.initial.clone());
     }
     #[test]
     fn selective_envelopes_match_full_scene_replay_exactly() {
@@ -2134,7 +2134,7 @@ mod tests {
         let labels: Vec<_> = (0..30).map(|i| format!("Repository {i}")).collect();
         let start = std::time::Instant::now();
         let mut base = Simulation::build(
-            sim.events.clone(),
+            sim.events.to_vec(),
             &options,
             &Theme::neon(),
             &Mappings::default(),

@@ -29,6 +29,7 @@ mod planning_memory;
 pub(crate) mod quality;
 pub(crate) mod schedule;
 mod slots;
+pub(crate) mod streaming;
 mod time;
 mod titles;
 mod travel;
@@ -70,6 +71,7 @@ fn pulse_end(start: Time) -> Time {
     start + PULSE_SECONDS + FRAGMENT_FLIGHT
 }
 
+#[derive(Clone)]
 pub(super) struct Options {
     pub contributor_inactivity_days: u32,
     pub repository_ends: Vec<Option<i64>>,
@@ -81,6 +83,10 @@ pub(super) struct Options {
     pub commits: Option<usize>,
     pub travel_cap: TravelCap,
     pub travel_window_seconds: Option<f32>,
+    #[cfg(test)]
+    pub eager_windows: bool,
+    #[cfg(test)]
+    pub window_hook: Option<streaming::WindowHook>,
     pub bot_travel: BotTravel,
     pub avatar_max_speed: f32,
     pub avatar_size: f32,
@@ -142,6 +148,10 @@ impl Default for Options {
             commits: None,
             travel_cap: TravelCap::Seconds(0.4),
             travel_window_seconds: None,
+            #[cfg(test)]
+            eager_windows: false,
+            #[cfg(test)]
+            window_hook: None,
             bot_travel: BotTravel::Fade,
             avatar_max_speed: 480.0,
             avatar_size: 2.0,
@@ -287,6 +297,7 @@ impl Avatar {
     }
 }
 
+#[cfg_attr(test, derive(Debug))]
 pub(super) struct Beam {
     pub author: usize,
     pub from: Vec3,
@@ -294,6 +305,7 @@ pub(super) struct Beam {
     pub width: f32,
 }
 
+#[cfg_attr(test, derive(Debug))]
 pub(super) struct Fragment {
     #[cfg(test)]
     beam: Option<(usize, Target)>,
@@ -331,6 +343,7 @@ pub(super) enum LabelKind {
 }
 
 #[derive(Clone)]
+#[cfg_attr(test, derive(Debug))]
 pub(super) struct Label {
     pub position: Vec3,
     pub text: String,
@@ -360,7 +373,30 @@ struct State {
     titles: BTreeMap<usize, titles::Title>,
 }
 
+#[derive(Clone)]
+struct SharedState(std::sync::Arc<State>);
+
+impl std::ops::Deref for SharedState {
+    type Target = State;
+    fn deref(&self) -> &State {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for SharedState {
+    fn deref_mut(&mut self) -> &mut State {
+        std::sync::Arc::make_mut(&mut self.0)
+    }
+}
+
+impl std::fmt::Debug for SharedState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
 /// Deterministic playback stepped at a fixed tick rate, independent of output frame rate.
+#[derive(Clone)]
 pub(super) struct Simulation {
     file_ids: HashMap<String, FileIdentity>,
     first_arrivals: Vec<bool>,
@@ -374,7 +410,7 @@ pub(super) struct Simulation {
     pub(super) collapse_directories: bool,
     pub(super) diff_text_distance: f32,
     pub repository_label_plane: crate::repositories::LabelPlane,
-    events: Vec<Event>,
+    events: windows::Events,
     offset: usize,
     total: usize,
     schedule: Schedule,
@@ -382,16 +418,19 @@ pub(super) struct Simulation {
     births: Vec<(usize, u64, u64)>,
     playback_multiplier: f32,
     heat_half_life: f32,
-    initial: State,
-    state: State,
+    initial: std::sync::Arc<State>,
+    state: SharedState,
     theme: Theme,
     travel: travel::Plan,
     visual_updates: bool,
     title_plan: Vec<Vec<u8>>,
     progress: Progress,
     window: Option<windows::Planning>,
-    boundaries: Vec<State>,
+    boundaries: Vec<std::sync::Arc<State>>,
     windowed: bool,
+    stream: Option<std::sync::Arc<std::sync::Mutex<windows::Stream>>>,
+    ready_end: Option<(u64, bool)>,
+    title_start: usize,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -503,6 +542,7 @@ impl Simulation {
             mappings.apply(&mut events);
         }
         Self::check_repository_plan(&events, options, repositories)?;
+        let global_started = std::time::Instant::now();
         let mut layout_cache = None;
         let mut simulation = Self::build(
             events.clone(),
@@ -514,6 +554,10 @@ impl Simulation {
             &mut layout_cache,
         )?;
         if let Some(seconds) = options.travel_window_seconds {
+            eprintln!(
+                "global_plan_seconds={}",
+                global_started.elapsed().as_secs_f64()
+            );
             return simulation.plan_windows(&events, options, repositories, seconds);
         }
         let mut padding = simulation.travel_padding(options);
@@ -531,12 +575,7 @@ impl Simulation {
                     &events[options.selected_range(events.len())],
                     options.seconds_per_day,
                     options.max_idle_seconds,
-                    |index| {
-                        padding
-                            .iter()
-                            .find(|&&(event, _)| event == options.start + index)
-                            .map_or(0, |&(_, ticks)| ticks)
-                    },
+                    |index| schedule::padding_at(&padding, options.start + index),
                 );
                 Self::check_schedule(&events, options, repositories, &schedule)?;
                 let preferences = std::mem::take(&mut simulation.travel).preferences();
@@ -548,7 +587,7 @@ impl Simulation {
                     endings.iter().map(|&time| clock.present(time)).collect();
                 simulation.clock = clock;
                 simulation.schedule = schedule;
-                simulation.state = simulation.initial.clone();
+                simulation.state = SharedState(simulation.initial.clone());
                 simulation.plan_avatar_envelopes(None);
                 simulation.travel = preferences;
             }
@@ -585,7 +624,7 @@ impl Simulation {
         let Range { start, end } = options.selected_range(events.len());
         events.truncate(end);
         events.drain(..start);
-        simulation.events = events;
+        simulation.events = events.into();
         simulation.caption_plan =
             caption::plan(&simulation.schedule, &simulation.events);
         options.progress.pass(1);
@@ -650,6 +689,27 @@ impl Simulation {
         }
     }
 
+    fn build_schedules(
+        events: &[Event],
+        options: &Options,
+        padding: &[(usize, u32)],
+    ) -> (Schedule, Schedule) {
+        let start = options.start;
+        let schedule = Schedule::with_padding(
+            &events[options.selected_range(events.len())],
+            options.seconds_per_day,
+            options.max_idle_seconds,
+            |index| schedule::padding_at(padding, start + index),
+        );
+        let layout_starts = Schedule::with_padding(
+            events,
+            options.seconds_per_day,
+            options.max_idle_seconds,
+            |index| schedule::padding_at(padding, index) * u32::from(index >= start),
+        );
+        (schedule, layout_starts)
+    }
+
     fn build(
         mut events: Vec<Event>,
         options: &Options,
@@ -663,18 +723,8 @@ impl Simulation {
             mappings.apply(&mut events);
         }
         let Range { start, end } = options.selected_range(events.len());
-        let schedule = Schedule::with_padding(
-            &events[start..end],
-            options.seconds_per_day,
-            options.max_idle_seconds,
-            |index| schedule::padding_at(padding, start + index),
-        );
-        let layout_starts = Schedule::with_padding(
-            &events,
-            options.seconds_per_day,
-            options.max_idle_seconds,
-            |index| schedule::padding_at(padding, index) * u32::from(index >= start),
-        );
+        let (schedule, layout_starts) =
+            Self::build_schedules(&events, options, padding);
         let mut state = State {
             region_depth: 0.0,
             tick: 0,
@@ -735,7 +785,7 @@ impl Simulation {
             collapse_directories: true,
             diff_text_distance: 1.0,
             repository_label_plane: crate::repositories::LabelPlane::default(),
-            events,
+            events: events.into(),
             offset: start,
             total,
             clock: schedule::Clock::new(schedule.clone(), schedule.clone()),
@@ -743,8 +793,8 @@ impl Simulation {
             schedule,
             playback_multiplier: 1.0,
             heat_half_life: options.heat_half_life,
-            initial: state.clone(),
-            state,
+            initial: std::sync::Arc::new(state.clone()),
+            state: SharedState(std::sync::Arc::new(state)),
             theme: theme.clone(),
             travel: travel::Plan::default(),
             visual_updates: true,
@@ -752,11 +802,16 @@ impl Simulation {
             progress: options.progress.clone(),
             window: None,
             boundaries: Vec::new(),
-            windowed: false,
+            windowed: options.travel_window_seconds.is_some(),
+            stream: None,
+            ready_end: None,
+            title_start: 0,
         };
         let snapshots = simulation
             .plan_repositories(prior_active, options.travel_cap == TravelCap::None)?;
-        simulation.plan_avatar_envelopes(snapshots);
+        if options.travel_window_seconds.is_none() {
+            simulation.plan_avatar_envelopes(snapshots);
+        }
         Ok(simulation)
     }
 
@@ -785,7 +840,8 @@ impl Simulation {
                     .min(arrival),
             );
         }
-        let mut snapshots = slots::Snapshots::new(&self.events);
+        let mut snapshots =
+            (!self.windowed).then(|| slots::Snapshots::new(&self.events));
         for (_, file) in self.layout().files() {
             active[self.layout().dir(file.dir).repository] = true;
         }
@@ -808,7 +864,9 @@ impl Simulation {
             }
             sampled_events = self.state.next_event;
             samples.push(self.layout().local_regions(&active, geometry));
-            snapshots.capture(&self.state);
+            if let Some(snapshots) = &mut snapshots {
+                snapshots.capture(&self.state);
+            }
         }
         if uncapped {
             for (index, event) in self.events.iter().enumerate() {
@@ -837,15 +895,18 @@ impl Simulation {
             lifecycle::REPOSITORY_EXIT,
             lifecycle::REFLOW,
         );
-        self.state = self.initial.clone();
+        self.state = SharedState(self.initial.clone());
         self.state.region_depth = framing::depth_bound();
         if let Some((regions, offsets, scales)) = self.packing.sample(0) {
             self.state.layout.place_regions(regions, &offsets, &scales);
         }
-        self.initial = self.state.clone();
-        Ok(Some(snapshots))
+        self.initial = self.state.0.clone();
+        Ok(snapshots)
     }
     pub(super) fn duration(&self) -> Time {
+        if let Some((end, _)) = self.ready_end {
+            return tick_time(end);
+        }
         if let Some(window) = &self.window {
             return self.clock.present(window.end);
         }
@@ -915,11 +976,12 @@ impl Simulation {
     }
 
     pub(super) fn restart(&mut self) {
-        self.state = self
-            .window
-            .as_ref()
-            .map_or(&self.initial, |w| &w.state)
-            .clone();
+        self.state = SharedState(
+            self.window
+                .as_ref()
+                .map_or(&self.initial, |w| &w.state)
+                .clone(),
+        );
     }
 
     pub(super) fn change_rate(&mut self, factor: f32) {
@@ -936,9 +998,13 @@ impl Simulation {
     }
 
     pub(super) fn advance_to(&mut self, frame: u32, fps: u16) {
+        if self.stream.is_some() {
+            self.prepare_frame(frame, fps, true)
+                .expect("streaming frame ready");
+        }
         let target = Schedule::frame_tick(frame, fps);
         if target < self.state.tick {
-            self.state = self.initial.clone();
+            self.state = SharedState(self.initial.clone());
         }
         while self.state.tick < target {
             self.tick();
@@ -988,7 +1054,7 @@ impl Simulation {
             .clock
             .history
             .layout_time(tick_time(self.clock.rows(canonical).1));
-        let state = &mut self.state;
+        let state = &mut *self.state;
         state.tick = canonical;
 
         state.layout.cool_heat(tick_seconds(), self.heat_half_life);
@@ -1019,7 +1085,7 @@ impl Simulation {
 
     fn tick(&mut self) {
         self.tick_layout();
-        let state = &mut self.state;
+        let state = &mut *self.state;
         let now = tick_time(state.tick);
         if self.windowed {
             for avatar in &mut state.avatars {

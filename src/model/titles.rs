@@ -281,10 +281,11 @@ impl Simulation {
             .iter_mut()
             .enumerate()
             .map(|(index, row)| {
-                let prefix = self
-                    .title_plan
-                    .get(index)
-                    .map_or(&[][..], |p| &p[..(first as usize).min(p.len())]);
+                let prefix = self.title_plan.get(index).map_or(&[][..], |p| {
+                    &p[..(first as usize)
+                        .saturating_sub(self.title_start)
+                        .min(p.len())]
+                });
                 if let Some(&corner) = prefix.last() {
                     let mut fixed = [f64::INFINITY; 4];
                     fixed[usize::from(corner)] = 0.0;
@@ -301,44 +302,44 @@ impl Simulation {
         self.restart();
     }
     pub(super) fn place_titles(&mut self) {
+        let state = &mut *self.state;
         let sample =
-            usize::try_from(self.state.tick / u64::from(STEP)).expect("bounded tick");
-        self.state.titles.clear();
-        for (index, region) in self.state.layout.repositories.iter().enumerate() {
+            usize::try_from(state.tick / u64::from(STEP)).expect("bounded tick");
+        state.titles.clear();
+        for (index, region) in state.layout.repositories.iter().enumerate() {
             let Some(tile) = region.tile else { continue };
             let row = self.title_plan.get(index).map_or(&[][..], Vec::as_slice);
             let at = |sample: usize| {
-                row.get(sample)
+                sample
+                    .checked_sub(self.title_start)
+                    .and_then(|sample| row.get(sample))
                     .copied()
                     .or_else(|| row.last().copied())
                     .unwrap_or(0)
             };
             let corner = at(sample);
-            let Some(mut current) = title(
-                tile,
-                &region.label,
-                self.state.geometry.label_height,
-                corner,
-            ) else {
+            let Some(mut current) =
+                title(tile, &region.label, state.geometry.label_height, corner)
+            else {
                 continue;
             };
             if let Some(change) =
                 (1..=sample).rev().take(2).find(|&t| at(t) != at(t - 1))
             {
-                let age = self.state.tick
+                let age = state.tick
                     - u64::try_from(change).expect("bounded sample") * u64::from(STEP);
                 if age < 18 {
                     current.old = title(
                         tile,
                         &region.label,
-                        self.state.geometry.label_height,
+                        state.geometry.label_height,
                         at(change - 1),
                     )
                     .map(|t| t.point);
                     current.opacity = super::ticks_duration(age) / 0.3;
                 }
             }
-            self.state.titles.insert(index, current);
+            state.titles.insert(index, current);
         }
     }
 }
@@ -361,7 +362,7 @@ mod tests {
             })
             .collect();
         sim.window = Some(super::super::windows::Planning {
-            state: saved,
+            state: saved.0,
             end: sim.duration(),
             services: Vec::new(),
             captured: Vec::new(),

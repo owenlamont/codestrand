@@ -189,7 +189,7 @@ fn moving_route(
     }
     Some(Route {
         legs: Vec::new(),
-        track,
+        track: track.into(),
         duration,
     })
 }
@@ -285,13 +285,14 @@ pub(super) fn trips(
     let mut previous = vec![None; capture.poses.len()];
     let mut result = Vec::<Trip>::new();
     let mut router = Router::default();
-    for (commit, service) in capture.services.iter().enumerate() {
+    for (index, service) in capture.services.iter().enumerate() {
         let Some(prior) = previous[service.author]
-            .replace(commit)
+            .replace(index)
             .map(|i| &capture.services[i])
         else {
             continue;
         };
+        let commit = service.commit;
         if commit < capture.frozen {
             continue;
         }
@@ -412,16 +413,20 @@ mod tests {
                 (0, 1, 400, 460, Vec2::new(100.0, 0.0)),
             ]
             .into_iter()
-            .map(|(author, repository, tick, release, point)| Service {
-                author,
-                repository,
-                tick,
-                release,
-                point,
-                radius: 7.5,
-                bot: false,
-                dock: dock(if author == 0 && tick < 400 { 3 } else { 1 }, 0.5),
-            })
+            .enumerate()
+            .map(
+                |(commit, (author, repository, tick, release, point))| Service {
+                    commit,
+                    author,
+                    repository,
+                    tick,
+                    release,
+                    point,
+                    radius: 7.5,
+                    bot: false,
+                    dock: dock(if author == 0 && tick < 400 { 3 } else { 1 }, 0.5),
+                },
+            )
             .collect(),
             poses: (0..2)
                 .map(|author| {

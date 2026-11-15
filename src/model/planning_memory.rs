@@ -53,6 +53,28 @@ pub(super) fn check(
         .flat_map(|event| &event.changes)
         .map(|change| change.path.len() as u128)
         .sum::<u128>();
+    if options.travel_window_seconds.is_some() {
+        let input = changes * (3 * size_of::<FileChange>()) as u128
+            + events.len() as u128 * (3 * size_of::<Event>()) as u128
+            + paths * 3;
+        let layout = layout_bytes(events, options, &history)?;
+        let retained = regions * crate::layout::packing::Packing::input_bytes() as u128
+            + layout
+            + input / 3;
+        let global = regions * region_bytes as u128
+            + (history_frames + 1) * labels
+            + layout
+            + input;
+        return check_streaming(
+            events,
+            selected,
+            options,
+            repositories.len(),
+            &history,
+            schedule,
+            (retained, global),
+        );
+    }
     let bytes = regions * region_bytes as u128
         + (history_frames + 1) * labels
         + pose_bytes.max(snapshot_bytes)
@@ -60,25 +82,11 @@ pub(super) fn check(
         + changes * (3 * size_of::<FileChange>()) as u128
         + events.len() as u128 * (3 * size_of::<Event>()) as u128
         + paths * 3
-        + layout_bytes(events, options, &history)?
-        + window_bytes(events, options, history_frames, repositories.len());
+        + layout_bytes(events, options, &history)?;
     check_bytes(bytes)
 }
 
-fn window_bytes(
-    events: &[Event],
-    options: &Options,
-    frames: u128,
-    repositories: usize,
-) -> u128 {
-    let Some(seconds) = options.travel_window_seconds else {
-        return 0;
-    };
-    if !seconds.is_finite() || seconds < super::tick_seconds() {
-        return LIMIT + 1;
-    }
-    let ticks = u128::from(travel::seconds_ticks(seconds.min(14_400.0), true)).max(1);
-    let windows = frames.div_ceil(ticks) + 1;
+fn checkpoint_bytes(events: &[Event], repositories: usize) -> u128 {
     let paths: HashSet<_> = events
         .iter()
         .flat_map(|e| &e.changes)
@@ -119,13 +127,12 @@ fn window_bytes(
         * (std::mem::size_of::<super::Avatar>()
             + std::mem::size_of::<super::Pulse>()
             + 512) as u128;
-    windows
-        * (files
-            + directory_bytes
-            + pulse_data
-            + services
-            + repositories as u128 * 1024
-            + std::mem::size_of::<super::State>() as u128)
+    files
+        + directory_bytes
+        + pulse_data
+        + services
+        + repositories as u128 * 1024
+        + std::mem::size_of::<super::State>() as u128
 }
 
 fn check_bytes(bytes: u128) -> anyhow::Result<()> {
@@ -195,6 +202,58 @@ fn layout_bytes(
     let ticks = u128::from(frames_for(schedule.duration(), 60)?);
     let samples = ticks / (ticks / 8192 + 1).max(15) + 2;
     Ok((directories.len() as u128 + 1) * samples * 64)
+}
+
+fn check_streaming(
+    events: &[Event],
+    selected: &[Event],
+    options: &Options,
+    repositories: usize,
+    history: &Schedule,
+    schedule: &Schedule,
+    (retained, global): (u128, u128),
+) -> anyhow::Result<()> {
+    let seconds = options.travel_window_seconds.expect("window option");
+    anyhow::ensure!(
+        seconds.is_finite() && seconds >= super::tick_seconds(),
+        "travel window must be at least one tick of finite history time"
+    );
+    let clock = super::schedule::Clock::new(history.clone(), schedule.clone());
+    let mut begin = super::Time::ZERO;
+    let mut span = 0.0_f32;
+    while begin < history.duration() {
+        let end = (begin + seconds + super::windows::MARGIN).min(history.duration());
+        span = span.max(clock.present(end) - clock.present(begin));
+        begin += seconds;
+    }
+    let frames = u128::from(travel::seconds_ticks(span, true)) + 145;
+    let authors = selected
+        .iter()
+        .map(|event| {
+            let identity = event.contributor.as_ref().map(|c| &c.key);
+            (
+                identity,
+                identity
+                    .is_none()
+                    .then_some((&event.author.name, &event.author.email)),
+            )
+        })
+        .collect::<HashSet<_>>()
+        .len() as u128;
+    let window = frames
+        * (authors
+            * (2 * size_of::<travel::Pose>() + 3 * size_of::<bevy::math::Vec2>())
+                as u128
+            + (8 * size_of::<Vec<()>>()) as u128);
+    let checkpoint = checkpoint_bytes(events, repositories);
+    let states = super::streaming::STATE_COPIES * checkpoint;
+    let windows = super::streaming::PLAN_COPIES * window;
+    let global_states = super::streaming::GLOBAL_STATE_COPIES * checkpoint;
+    let bytes = (global + global_states).max(retained + states + windows);
+    eprintln!(
+        "streaming_memory global_peak={global} global_retained={retained} window={window} checkpoint={checkpoint} global_states={global_states} window_states={states} total={bytes}"
+    );
+    check_bytes(bytes).map_err(|error| error.context(format!("streaming memory: global peak {global} plus state copies {global_states}, global retained {retained}, three windows {windows}, ten window state copies {states}")))
 }
 
 #[cfg(test)]
