@@ -1,9 +1,3 @@
-#![expect(
-    clippy::disallowed_types,
-    clippy::disallowed_methods,
-    reason = "opt-in avatar fetching is the application's only network client"
-)]
-
 use std::{
     collections::{HashMap, HashSet},
     io::{Cursor, Read, Write},
@@ -122,6 +116,7 @@ pub(super) trait Network {
 }
 
 pub(super) struct Http {
+    #[expect(clippy::disallowed_types, reason = "opt-in avatar HTTP client")]
     client: ureq::Agent,
     token: Option<String>,
     deadline: Instant,
@@ -132,6 +127,11 @@ pub(super) struct Http {
 }
 
 impl Http {
+    #[expect(
+        clippy::disallowed_types,
+        clippy::disallowed_methods,
+        reason = "construct the opt-in avatar HTTP client"
+    )]
     pub(super) fn new() -> Self {
         Self {
             client: ureq::Agent::config_builder()
@@ -898,10 +898,12 @@ mod tests {
         }
     }
 
+    #[expect(clippy::disallowed_types, reason = "local HTTP test server")]
     fn serve_once(listener: &std::net::TcpListener, status: u16) {
         let _ = serve_body(listener, status, b"ok");
     }
 
+    #[expect(clippy::disallowed_types, reason = "local HTTP test server")]
     fn serve_body(
         listener: &std::net::TcpListener,
         status: u16,
@@ -997,6 +999,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::disallowed_types,
+        clippy::disallowed_methods,
+        reason = "exercise the avatar HTTP client against a local test server"
+    )]
     fn gitlab_lookup_over_local_http_keeps_tokens_off_all_requests() {
         struct Local {
             http: Http,
@@ -1792,6 +1799,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::disallowed_types,
+        clippy::disallowed_methods,
+        reason = "exercise the avatar HTTP client against a local test server"
+    )]
     fn http_get_uses_status_mapping_with_local_server() {
         use std::{net::TcpListener, thread};
 

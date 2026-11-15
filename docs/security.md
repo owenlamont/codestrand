@@ -10,8 +10,9 @@ available portrait and account information, requests can disclose:
 
 - A GitHub repository's owner and name and a commit hash to `api.github.com`, to find
   the matching account. API authentication uses `GH_TOKEN`, or `GITHUB_TOKEN` when
-  `GH_TOKEN` is absent; empty tokens are ignored. GitHub avatar servers receive the
-  account name or numeric ID.
+  `GH_TOKEN` is unset or not valid Unicode. An empty `GH_TOKEN` disables authentication
+  without falling back to `GITHUB_TOKEN`; empty tokens are ignored. GitHub avatar
+  servers receive the account name or numeric ID.
 - A SHA-256 digest of a selected email address, or its configured Gravatar address,
   to Gravatar when a portrait is still missing. The address is trimmed and lowercased
   first. A hash is not anonymity:

@@ -50,8 +50,8 @@ times keep export independent of rendering speed. Each capture is confirmed
 written before export completes. Export needs a working graphics adapter.
 
 Diff snippets appear in close views, including scripted camera paths. Their text stays
-14–20 logical pixels high; the twelve-sample limit and collapsed-directory hiding
-still apply. Snippets may overlap.
+14–20 logical pixels high (inclusive); the twelve-sample limit and collapsed-directory
+hiding still apply. Snippets may overlap.
 
 Moving translucent surfaces overlap using their current positions. Halos and glyphs
 can look different from older builds.

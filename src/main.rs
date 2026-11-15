@@ -167,7 +167,7 @@ enum Command {
         #[command(flatten)]
         history: history::Options,
     },
-    /// Play history as planning progresses; [ halves and ] doubles live speed (0.125x–8x).
+    /// Play history in a loop as planning progresses; [ halves and ] doubles live speed (0.125x–8x).
     #[command(
         after_help = "Camera: overhead by default; pitch clamps to ±90° and the eye stays above the file plane. Right drag orbits. With settings closed, C or a left viewport click captures the mouse to aim; while captured, hold left / right buttons to move up / down. C or Escape releases capture; Escape otherwise closes preview. WASD pans, scroll zooms, Tab cycles visible contributors, Space restores overhead. Orbit, captured aim and zoom retain follow; pan or button elevation releases it. F10 toggles display settings; F11 toggles borderless fullscreen."
     )]
@@ -473,36 +473,21 @@ impl Source {
                 WindowOverride::Seconds(seconds) => Some(seconds),
             };
         }
-        eprintln!(
-            "planning_history_seconds={} travel_window_seconds={}",
-            history_duration.lossy_secs_f32(),
-            options
-                .travel_window_seconds
-                .map_or_else(|| "single".to_owned(), |seconds| seconds.to_string())
-        );
+        if cfg!(test) {
+            eprintln!(
+                "planning_history_seconds={} travel_window_seconds={}",
+                history_duration.lossy_secs_f32(),
+                options
+                    .travel_window_seconds
+                    .map_or_else(|| "single".to_owned(), |seconds| seconds.to_string())
+            );
+        }
         let mut simulation = Self::playback(events, &options, &mappings, &names)?;
         simulation.repository_boundary = self.repository_boundary;
         simulation.collapse_directories = self.collapse_directories;
         simulation.caption_style = self.caption_style;
         simulation.repository_label_plane = self.repository_label_plane;
         Ok((simulation, title))
-    }
-
-    fn resolve_start(&self, events: &[timeline::Event]) -> anyhow::Result<usize> {
-        let Some(date) = self.start_date else {
-            return Ok(self.start);
-        };
-        if let Some(index) = events.iter().position(|event| event.seconds >= date) {
-            return Ok(index);
-        }
-        let last = events.last().ok_or_else(|| {
-            anyhow::anyhow!("--start-date requires a non-empty history")
-        })?;
-        anyhow::bail!(
-            "--start-date {} is after the history; last commit date is {} UTC",
-            model::date(date),
-            model::date(last.seconds)
-        )
     }
 
     fn resolve_range(
@@ -521,16 +506,30 @@ impl Source {
                 .is_none_or(|(start, end)| end >= start),
             "inclusive date range {start_label} through {end_label}: end precedes start"
         );
-        if self.start_date.is_some() || self.end_date.is_some() {
-            anyhow::ensure!(
-                events.iter().any(|event| {
-                    self.start_date.is_none_or(|start| event.seconds >= start)
-                        && self.end_date.is_none_or(|end| event.seconds < end + 86_400)
-                }),
-                "inclusive date range {start_label} through {end_label} contains no commits"
+        if (self.start_date.is_some() || self.end_date.is_some())
+            && !events.iter().any(|event| {
+                self.start_date.is_none_or(|start| event.seconds >= start)
+                    && self.end_date.is_none_or(|end| event.seconds < end + 86_400)
+            })
+        {
+            let last = events.last().map_or_else(
+                || "history is empty".to_owned(),
+                |event| {
+                    format!("last commit date is {} UTC", model::date(event.seconds))
+                },
+            );
+            anyhow::bail!(
+                "inclusive date range {start_label} through {end_label} contains no commits; {last}"
             );
         }
-        let start = self.resolve_start(events)?.min(events.len());
+        let start = self
+            .start_date
+            .map_or(self.start.min(events.len()), |date| {
+                events
+                    .iter()
+                    .position(|event| event.seconds >= date)
+                    .unwrap_or(events.len())
+            });
         let end = self.end_date.map_or_else(
             || {
                 self.commits.map_or(events.len(), |count| {
@@ -966,28 +965,29 @@ mod tests {
                 [("2026-05-01", 0), ("2026-05-02", 1), ("2026-05-03", 2)]
             {
                 source.start_date = Some(start_date(date).unwrap());
-                assert_eq!(source.resolve_start(&events).unwrap(), expected);
+                assert_eq!(source.resolve_range(&events).unwrap().start, expected);
             }
             source.start_date = Some(start_date("2026-05-04").unwrap());
             assert!(
                 source
-                    .resolve_start(&events)
+                    .resolve_range(&events)
                     .unwrap_err()
                     .to_string()
-                    .contains("2026-05-03")
+                    .contains("inclusive date range 2026-05-04 through end of history contains no commits; last commit date is 2026-05-03 UTC")
             );
         }
         source.start_date = Some(midnight);
         assert_eq!(
             source
-                .resolve_start(&[event(midnight - 1), event(midnight + 1)])
-                .unwrap(),
+                .resolve_range(&[event(midnight - 1), event(midnight + 1)])
+                .unwrap()
+                .start,
             1
         );
         let reversed = vec![event(midnight + 1), event(midnight - 1)];
-        assert_eq!(source.resolve_start(&reversed).unwrap(), 0);
+        assert_eq!(source.resolve_range(&reversed).unwrap().start, 0);
         let merged = repositories::merge(vec![reversed, vec![event(midnight - 2)]]);
-        assert_eq!(source.resolve_start(&merged).unwrap(), 1);
+        assert_eq!(source.resolve_range(&merged).unwrap().start, 1);
     }
 
     #[test]
