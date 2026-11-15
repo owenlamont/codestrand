@@ -715,12 +715,9 @@ impl Simulation {
                 && options.travel_cap == TravelCap::None
                 && schedule.padding(index) >= crate::layout::packing::BIRTH_TICKS
             {
-                let (arrival, history) = clock.service_ticks(index);
-                self.births.push((
-                    event.repository,
-                    arrival.saturating_sub(u64::from(schedule.padding(index))),
-                    history,
-                ));
+                let (_, history) = clock.service_ticks(index);
+                self.births
+                    .push((event.repository, clock.wait_begin(index), history));
             }
         }
     }

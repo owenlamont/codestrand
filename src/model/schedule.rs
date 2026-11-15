@@ -70,16 +70,25 @@ impl Clock {
     pub(super) fn tile_transition(&self, tick: u64) -> Option<(u64, f32)> {
         let next = self.presentation.applied(tick);
         let service = self.presentation.services.get(next)?;
-        let span = service.padding.checked_sub(1)?.min(45);
-        let begin = service.tick.saturating_sub(u64::from(service.padding));
-        if span == 0 || tick < begin || tick >= begin + u64::from(span) {
+        service.padding.checked_sub(1)?;
+        let begin = self.wait_begin(next);
+        let span = service.tick.saturating_sub(begin).saturating_sub(1).min(45);
+        if span == 0 || tick < begin || tick >= begin + span {
             return None;
         }
         Some((
             self.history.services[next].tick.saturating_sub(1),
-            super::ticks_duration(tick - begin)
-                / super::ticks_duration(u64::from(span)),
+            super::ticks_duration(tick - begin) / super::ticks_duration(span),
         ))
+    }
+
+    pub(super) fn wait_begin(&self, index: usize) -> u64 {
+        let arrival = self.history.services[index].tick;
+        index.checked_sub(1).map_or(arrival, |previous| {
+            self.presentation.services[previous]
+                .tick
+                .saturating_add(arrival - self.history.services[previous].tick)
+        })
     }
 
     pub(super) fn service_ticks(&self, index: usize) -> (u64, u64) {
@@ -192,6 +201,37 @@ fn first_tick(start: Time) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wait_weights_never_jump_to_arrival_before_blending() {
+        let mut event = crate::timeline::synthetic().remove(0);
+        event.seconds = 0;
+        let events = vec![event; 100];
+        let history = Schedule::new(&events, 0.5, 1.0);
+        let presentation = Schedule::with_padding(&events, 0.5, 1.0, |index| {
+            u32::try_from(index % 4 + 1).unwrap() * 20
+        });
+        let clock = Clock::new(history, presentation);
+        for index in 0..events.len() {
+            let arrival = clock.history.services[index].tick;
+            let start = index
+                .checked_sub(1)
+                .map_or(0, |previous| clock.presentation.services[previous].tick);
+            let mut previous = 0.0;
+            for tick in start..=clock.presentation.services[index].tick {
+                let weight = if clock.rows(tick).0 < arrival {
+                    0.0
+                } else {
+                    clock.tile_transition(tick).map_or(1.0, |(_, blend)| blend)
+                };
+                assert!(
+                    weight >= previous,
+                    "wait {index}, tick {tick}: {previous} -> {weight}"
+                );
+                previous = weight;
+            }
+        }
+    }
 
     #[test]
     fn a_later_wait_leaves_an_idle_gap_departure_unchanged() {
