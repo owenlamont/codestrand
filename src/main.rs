@@ -103,16 +103,40 @@ impl Cli {
         I: IntoIterator<Item = T>,
         T: Into<std::ffi::OsString> + Clone,
     {
-        let mut cli = Self::try_parse_from(arguments)?;
+        let mut arguments = arguments.into_iter().map(Into::into);
+        let mut public = Vec::new();
+        let mut start = 0;
+        let mut commits = None;
+        let mut delay = 0;
+        while let Some(argument) = arguments.next() {
+            match argument.to_str() {
+                Some("--start" | "--commits" | "--frame-delay-ms") => {
+                    let value = arguments.next().expect("fixture option value");
+                    let value = value.to_str().unwrap().parse().unwrap();
+                    match argument.to_str().unwrap() {
+                        "--start" => start = value,
+                        "--commits" => commits = Some(value),
+                        _ => delay = u16::try_from(value).unwrap(),
+                    }
+                }
+                _ => public.push(argument),
+            }
+        }
+        let mut cli = Self::try_parse_from(public)?;
+        if let Some(Command::Export { frame_delay_ms, .. }) = &mut cli.command {
+            *frame_delay_ms = delay;
+        }
         if let Some(
             Command::Preview { source, .. }
             | Command::Export { source, .. }
             | Command::LayoutQuality { source, .. },
         ) = &mut cli.command
-            && source.repository.is_empty()
-            && source.repositories_file.is_none()
         {
-            source.test_input = Some(TestInput::Synthetic);
+            source.start = start;
+            source.commits = commits;
+            if source.repository.is_empty() && source.repositories_file.is_none() {
+                source.test_input = Some(TestInput::Synthetic);
+            }
         }
         Ok(cli)
     }
@@ -171,7 +195,7 @@ enum Command {
         frames: Option<u32>,
         #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u16).range(1..=240))]
         fps: u16,
-        #[arg(long, default_value_t = 0)]
+        #[arg(skip)]
         frame_delay_ms: u16,
         #[command(flatten)]
         encoding: encoder::Options,
@@ -183,6 +207,21 @@ enum Command {
 enum WindowOverride {
     Whole,
     Seconds(f32),
+}
+
+#[derive(Clone, Copy, clap::ValueEnum, serde::Serialize)]
+enum ContributorTravel {
+    Auto,
+    Walk,
+}
+
+impl ContributorTravel {
+    fn cap(self) -> model::TravelCap {
+        match self {
+            Self::Auto => model::TravelCap::Seconds(0.4),
+            Self::Walk => model::TravelCap::None,
+        }
+    }
 }
 
 #[derive(clap::Args, serde::Serialize)]
@@ -224,9 +263,6 @@ struct Source {
     /// Hide changed source lines in preview and exported frames.
     #[arg(long)]
     no_diff_samples: bool,
-    /// Diff text reveal distance multiplier (0.1–100); larger reveals farther away.
-    #[arg(long, default_value_t = 1.0, value_parser = diff_text_distance)]
-    diff_text_distance: f32,
     /// Collapse small directory subtrees into file-sized folder icons (on|off).
     #[arg(long, action = clap::ArgAction::Set, default_value = "on", value_parser = directory_collapsing)]
     collapse_directories: bool,
@@ -239,14 +275,17 @@ struct Source {
     /// Select opted-in GitLab cache entries offline; allow email lookup with --fetch-avatars.
     #[arg(long)]
     gitlab_email_avatars: bool,
-    /// Skip this many commits; the zero-based start index is inclusive.
-    #[arg(long, default_value_t = 0)]
+    #[arg(skip)]
+    #[serde(skip)]
     start: usize,
     /// Begin at the first commit on or after this UTC date, inclusive; settle earlier commits.
-    #[arg(long, value_name = "YYYY-MM-DD", value_parser = start_date, conflicts_with = "start")]
+    #[arg(long, value_name = "YYYY-MM-DD", value_parser = start_date)]
     start_date: Option<i64>,
-    /// Play this many commits: start inclusive, start plus count exclusive; default all remaining.
-    #[arg(long)]
+    /// End at the last commit on or before this UTC date, inclusive of the whole day.
+    #[arg(long, value_name = "YYYY-MM-DD", value_parser = start_date)]
+    end_date: Option<i64>,
+    #[arg(skip)]
+    #[serde(skip)]
     commits: Option<usize>,
     /// Canonical timeline seconds per calendar day; live speed keys leave the timeline fixed.
     #[arg(long, default_value_t = 0.5, value_parser = positive_seconds)]
@@ -254,9 +293,9 @@ struct Source {
     /// Maximum canonical timeline seconds between commits, compressing idle gaps.
     #[arg(long, default_value_t = 1.0, value_parser = idle_seconds)]
     max_idle_seconds: f32,
-    /// Maximum extra seconds per walking trip; none waits for the route, zero never waits.
-    #[arg(long, default_value = "0.4", value_parser = travel_seconds)]
-    travel_cap: model::TravelCap,
+    /// Contributors: auto walks short trips and fades longer ones; walk always walks.
+    #[arg(long, value_enum, default_value = "auto")]
+    contributor_travel: ContributorTravel,
     #[cfg(test)]
     #[arg(skip)]
     #[serde(skip)]
@@ -324,7 +363,7 @@ impl Source {
         &self,
         events: &mut [timeline::Event],
         repositories: &[repositories::Repository],
-        start: usize,
+        range: std::ops::Range<usize>,
     ) {
         let fetch = self.fetch_avatars && !repositories.is_empty();
         let mut resolver = avatars::Resolver::new(
@@ -334,10 +373,8 @@ impl Source {
             avatars::now(),
         );
         resolver.gitlab_email = self.gitlab_email_avatars;
-        let start = start.min(events.len());
-        let end = self.commits.map_or(events.len(), |count| {
-            start.saturating_add(count).min(events.len())
-        });
+        let start = range.start.min(events.len());
+        let end = range.end.min(events.len());
         if repositories.is_empty() {
             resolver.resolve(&mut events[start..end], None);
         }
@@ -385,9 +422,9 @@ impl Source {
         let mappings = contributors::load(self.contributors.as_deref())?;
         let mut events =
             self.events(cache::root().as_deref(), &repositories, progress)?;
-        let start = self.resolve_start(&events)?;
+        let range = self.resolve_range(&events)?;
         mappings.apply(&mut events);
-        self.resolve_avatars(&mut events, &repositories, start);
+        self.resolve_avatars(&mut events, &repositories, range.clone());
         let names: Vec<_> = repositories
             .iter()
             .map(repositories::Repository::name)
@@ -414,9 +451,9 @@ impl Source {
             heat_half_life: self.heat_half_life,
             seconds_per_day: self.seconds_per_day,
             max_idle_seconds: self.max_idle_seconds,
-            start,
-            commits: self.commits,
-            travel_cap: self.travel_cap,
+            start: range.start,
+            commits: Some(range.len()),
+            travel_cap: self.contributor_travel.cap(),
             travel_window_seconds: None,
             #[cfg(test)]
             eager_windows: false,
@@ -446,7 +483,6 @@ impl Source {
         let mut simulation = Self::playback(events, &options, &mappings, &names)?;
         simulation.repository_boundary = self.repository_boundary;
         simulation.collapse_directories = self.collapse_directories;
-        simulation.diff_text_distance = self.diff_text_distance;
         simulation.caption_style = self.caption_style;
         simulation.repository_label_plane = self.repository_label_plane;
         Ok((simulation, title))
@@ -467,6 +503,52 @@ impl Source {
             model::date(date),
             model::date(last.seconds)
         )
+    }
+
+    fn resolve_range(
+        &self,
+        events: &[timeline::Event],
+    ) -> anyhow::Result<std::ops::Range<usize>> {
+        let start_label = self
+            .start_date
+            .map_or_else(|| "beginning of history".to_owned(), model::date);
+        let end_label = self
+            .end_date
+            .map_or_else(|| "end of history".to_owned(), model::date);
+        anyhow::ensure!(
+            self.start_date
+                .zip(self.end_date)
+                .is_none_or(|(start, end)| end >= start),
+            "inclusive date range {start_label} through {end_label}: end precedes start"
+        );
+        if self.start_date.is_some() || self.end_date.is_some() {
+            anyhow::ensure!(
+                events.iter().any(|event| {
+                    self.start_date.is_none_or(|start| event.seconds >= start)
+                        && self.end_date.is_none_or(|end| event.seconds < end + 86_400)
+                }),
+                "inclusive date range {start_label} through {end_label} contains no commits"
+            );
+        }
+        let start = self.resolve_start(events)?.min(events.len());
+        let end = self.end_date.map_or_else(
+            || {
+                self.commits.map_or(events.len(), |count| {
+                    start.saturating_add(count).min(events.len())
+                })
+            },
+            |end| {
+                events
+                    .iter()
+                    .rposition(|event| event.seconds < end + 86_400)
+                    .map_or(0, |last| last + 1)
+            },
+        );
+        anyhow::ensure!(
+            start <= end,
+            "inclusive date range {start_label} through {end_label} contains no commits"
+        );
+        Ok(start..end)
     }
 
     fn playback(
@@ -652,18 +734,6 @@ fn idle_seconds(value: &str) -> Result<f32, String> {
     Ok(seconds)
 }
 
-fn travel_seconds(value: &str) -> Result<model::TravelCap, String> {
-    if value == "none" {
-        return Ok(model::TravelCap::None);
-    }
-    let seconds = value.parse::<f32>().map_err(|e| e.to_string())?;
-    if seconds.is_finite() && (0.0..=3600.0).contains(&seconds) {
-        Ok(model::TravelCap::Seconds(seconds))
-    } else {
-        Err("travel cap must be none or finite seconds between 0 and 3600".to_owned())
-    }
-}
-
 fn avatar_speed(value: &str) -> Result<f32, String> {
     let speed = positive_seconds(value)?;
     if speed >= 1.0 {
@@ -675,10 +745,6 @@ fn avatar_speed(value: &str) -> Result<f32, String> {
 
 fn avatar_size(value: &str) -> Result<f32, String> {
     between(value, 0.5, 2.0, "avatar scale")
-}
-
-fn diff_text_distance(value: &str) -> Result<f32, String> {
-    between(value, 0.1, 100.0, "diff text distance")
 }
 
 fn between(value: &str, low: f32, high: f32, name: &str) -> Result<f32, String> {
@@ -729,6 +795,10 @@ fn run() -> anyhow::Result<()> {
             return Ok(());
         }
     };
+    dispatch(cli)
+}
+
+fn dispatch(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Some(Command::LayoutQuality {
             source,
@@ -827,7 +897,7 @@ fn gutter_pixels(value: &str) -> Result<f32, String> {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn start_date_cli_rejects_conflicts_and_invalid_dates() {
+    fn date_cli_rejects_positions_and_invalid_dates() {
         for command in [
             vec!["preview"],
             vec!["export", "frames"],
@@ -842,7 +912,7 @@ mod tests {
                 .expect("invalid date");
                 assert!(error.to_string().contains("YYYY-MM-DD"));
             }
-            let error = Cli::try_fixture_from(
+            let error = Cli::try_parse_from(
                 [
                     args.clone(),
                     vec!["--start-date", "2026-05-01", "--start", "0"],
@@ -850,8 +920,8 @@ mod tests {
                 .concat(),
             )
             .err()
-            .expect("conflicting start options");
-            assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+            .expect("removed positional option");
+            assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
             assert!(error.to_string().contains("--start"));
             assert!(
                 Cli::try_fixture_from(
@@ -921,34 +991,23 @@ mod tests {
     }
 
     #[test]
-    fn diff_text_distance_is_shared_by_preview_and_export() {
+    fn diff_reveal_uses_the_same_fixed_distance_in_preview_and_export() {
         for command in [vec!["preview"], vec!["export", "frames"]] {
-            for value in ["0", "-1", "0.09", "101", "NaN", "inf", "bad"] {
-                let args = [
-                    vec!["codestrand"],
-                    command.clone(),
-                    vec!["--diff-text-distance", value],
-                ]
-                .concat();
-                assert!(Cli::try_fixture_from(args).is_err());
-            }
-            for (flags, expected) in [
-                (vec![], 1.0),
-                (vec!["--diff-text-distance", "4"], 4.0),
-                (vec!["--diff-text-distance", "0.1"], 0.1),
-                (vec!["--diff-text-distance", "100"], 100.0),
-            ] {
-                let args = [vec!["codestrand"], command.clone(), flags].concat();
-                let cli = Cli::try_fixture_from(args).unwrap();
-                let (Command::Preview { source, .. } | Command::Export { source, .. }) =
-                    cli.command.unwrap()
-                else {
-                    panic!("playback command")
-                };
-                let (simulation, _) =
-                    source.load(&crate::progress::Progress::default()).unwrap();
-                assert_eq!(simulation.diff_text_distance, expected);
-            }
+            let args = [vec!["codestrand"], command].concat();
+            assert!(
+                Cli::try_parse_from(
+                    [args.clone(), vec!["--diff-text-distance", "4"]].concat()
+                )
+                .is_err()
+            );
+            let cli = Cli::try_fixture_from(args).unwrap();
+            let (Command::Preview { source, .. } | Command::Export { source, .. }) =
+                cli.command.unwrap()
+            else {
+                panic!("playback command")
+            };
+            let (simulation, _) = source.load(&Progress::default()).unwrap();
+            assert_eq!(simulation.diff_text_distance, 1.0);
         }
     }
 
@@ -1288,12 +1347,12 @@ mod tests {
     }
 
     #[test]
-    fn cli_accepts_uncapped_travel_and_walking_bots_but_rejects_invalid_limits() {
+    fn cli_accepts_walking_contributors_and_bots_without_numeric_budgets() {
         let cli = Cli::try_fixture_from([
             "codestrand",
             "preview",
-            "--travel-cap",
-            "none",
+            "--contributor-travel",
+            "walk",
             "--bot-travel",
             "walk",
         ])
@@ -1301,17 +1360,87 @@ mod tests {
         let Some(Command::Preview { source, .. }) = cli.command else {
             panic!("preview")
         };
-        assert_eq!(source.travel_cap, model::TravelCap::None);
+        assert_eq!(source.contributor_travel.cap(), model::TravelCap::None);
         assert_eq!(source.bot_travel, model::BotTravel::Walk);
-        for value in ["NaN", "inf", "-1", "3601", "unlimited"] {
+        for value in ["0.4", "none", "NaN", "inf", "-1", "3601", "unlimited"] {
             assert!(
-                Cli::try_fixture_from(["codestrand", "preview", "--travel-cap", value])
+                Cli::try_parse_from(["codestrand", "preview", "--travel-cap", value])
                     .is_err()
+            );
+            assert!(
+                Cli::try_parse_from([
+                    "codestrand",
+                    "preview",
+                    "--contributor-travel",
+                    value
+                ])
+                .is_err()
             );
         }
         assert_eq!(
-            travel_seconds("3600").unwrap(),
-            model::TravelCap::Seconds(3600.0)
+            ContributorTravel::Auto.cap(),
+            model::TravelCap::Seconds(0.4)
         );
+    }
+
+    #[test]
+    fn inclusive_date_ranges_keep_both_days_and_reject_empty_or_reversed_ranges() {
+        let day = start_date("2026-05-02").unwrap();
+        let events: Vec<_> = [-1, 0, 86_399, 86_400, 172_800]
+            .map(|offset| {
+                let mut event = timeline::synthetic().remove(0);
+                event.seconds = day + offset;
+                event
+            })
+            .into();
+        for (start, end, expected) in [
+            ("2026-05-02", "2026-05-02", Some(1..3)),
+            ("2026-05-02", "2026-05-03", Some(1..4)),
+            ("2026-05-03", "2026-05-02", None),
+            ("2026-05-05", "2026-05-06", None),
+        ] {
+            let cli = Cli::try_fixture_from([
+                "codestrand",
+                "preview",
+                "--start-date",
+                start,
+                "--end-date",
+                end,
+            ])
+            .unwrap();
+            let Some(Command::Preview { source, .. }) = cli.command else {
+                panic!("preview")
+            };
+            let actual = source.resolve_range(&events);
+            if let Some(expected) = expected {
+                assert_eq!(actual.unwrap(), expected);
+            } else {
+                let error = actual.unwrap_err().to_string();
+                assert!(error.contains(start) && error.contains(end), "{error}");
+            }
+        }
+    }
+
+    #[test]
+    fn internal_settled_fixture_clamps_positions_after_history() {
+        let cli = Cli::try_fixture_from(["codestrand", "preview", "--start", "1000"])
+            .unwrap();
+        let Some(Command::Preview { source, .. }) = cli.command else {
+            panic!("preview")
+        };
+        let events = timeline::synthetic();
+        assert_eq!(
+            source.resolve_range(&events).unwrap(),
+            events.len()..events.len()
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a graphics adapter and explicit fixture arguments"]
+    fn export_cli_fixture() {
+        let args: Vec<String> =
+            serde_json::from_str(&std::env::var("CODESTRAND_FIXTURE_ARGS").unwrap())
+                .unwrap();
+        dispatch(Cli::try_fixture_from(args).unwrap()).unwrap();
     }
 }

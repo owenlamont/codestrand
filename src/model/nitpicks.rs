@@ -164,11 +164,18 @@ pub(super) fn local_simulation() -> (Simulation, Vec<crate::repositories::Reposi
         &Options {
             seconds_per_day: 1.0,
             max_idle_seconds: 0.1,
-            travel_cap: std::env::var("CODESTRAND_TRAVEL_CAP")
-                .ok()
-                .map_or(Options::default().travel_cap, |value| {
-                    crate::travel_seconds(&value).unwrap()
-                }),
+            travel_cap: std::env::var("CODESTRAND_TRAVEL_CAP").ok().map_or(
+                Options::default().travel_cap,
+                |value| {
+                    if value == "none" {
+                        crate::model::TravelCap::None
+                    } else {
+                        crate::model::TravelCap::Seconds(
+                            value.parse().expect("test cap"),
+                        )
+                    }
+                },
+            ),
             gutter: std::env::var("CODESTRAND_GUTTER")
                 .ok()
                 .map_or(4.0, |v| v.parse().unwrap()),

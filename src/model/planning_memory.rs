@@ -180,7 +180,7 @@ fn author_count(events: &[Event]) -> u128 {
 fn check_bytes(bytes: u128, available: u64) -> anyhow::Result<()> {
     anyhow::ensure!(
         bytes <= u128::from(available),
-        "estimated planning memory {bytes} bytes ({} MiB) exceeds available physical memory {available} bytes ({} MiB) at startup; use fewer repositories or a later --start or --start-date",
+        "estimated planning memory {bytes} bytes ({} MiB) exceeds available physical memory {available} bytes ({} MiB) at startup; use fewer repositories or a later --start-date",
         bytes.div_ceil(1024 * 1024),
         available / (1024 * 1024)
     );
@@ -318,7 +318,7 @@ mod tests {
             check_bytes(u128::from(available) + 1, available)
                 .unwrap_err()
                 .to_string(),
-            "estimated planning memory 1048577 bytes (2 MiB) exceeds available physical memory 1048576 bytes (1 MiB) at startup; use fewer repositories or a later --start or --start-date"
+            "estimated planning memory 1048577 bytes (2 MiB) exceeds available physical memory 1048576 bytes (1 MiB) at startup; use fewer repositories or a later --start-date"
         );
     }
 

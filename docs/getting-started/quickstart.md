@@ -23,12 +23,13 @@ uncommitted working-tree edits are not shown.
 To choose a revision and a smaller playback window:
 
 ```sh
-codestrand preview --repository /path/to/repository --revision HEAD --start 0 --commits 20
+codestrand preview --repository /path/to/repository --revision HEAD \
+  --start-date 2026-05-01 --end-date 2026-05-31
 ```
 
-`--start` is the inclusive zero-based position after settling earlier commits.
-`--commits` gives a count: the start is inclusive and start plus count is exclusive.
-The default is the rest of the history.
+Both UTC date bounds are inclusive: playback includes the whole named end day.
+Choose dates present in the repository. Omit either bound to use the beginning or
+end of history; earlier commits are settled before playback.
 
 ## Next steps
 

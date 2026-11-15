@@ -2188,11 +2188,18 @@ mod tests {
                     .map_or(Options::default().avatar_max_speed, |v| {
                         v.parse().expect("test speed")
                     }),
-                travel_cap: std::env::var("CODESTRAND_TRAVEL_CAP")
-                    .ok()
-                    .map_or(Options::default().travel_cap, |v| {
-                        crate::travel_seconds(&v).expect("test cap")
-                    }),
+                travel_cap: std::env::var("CODESTRAND_TRAVEL_CAP").ok().map_or(
+                    Options::default().travel_cap,
+                    |v| {
+                        if v == "none" {
+                            crate::model::TravelCap::None
+                        } else {
+                            crate::model::TravelCap::Seconds(
+                                v.parse().expect("test cap"),
+                            )
+                        }
+                    },
+                ),
                 ..Default::default()
             },
             &Theme::neon(),

@@ -168,7 +168,7 @@ activity outlines.
 `--heat-half-life 3` sets the cooling half-life in canonical playback seconds for
 preview and export (default `3`, accepted range `0.01` through `86400`). Live speed
 keys speed up cooling along with the rest of playback. Export cooling uses explicit
-frame times. Files settled before `--start` begin cold.
+frame times. Files settled before the inclusive start date begin cold.
 
 ```sh
 codestrand export frames --heat-half-life 3 --frames 90 --fps 30
@@ -243,7 +243,7 @@ Repository paths are limited to 4,096 bytes before filesystem resolution.
 Events merge by comparing the next commit from each repository by author timestamp,
 breaking ties by repository input order. Each repository retains its first-parent
 order, including children authored before their parents. One `--revision` applies
-to every repository; `--start` and `--commits`
+to every repository; `--start-date` and `--end-date`
 select from the merged history. Single-repository playback retains first-parent
 order. Contributor mappings apply across all repositories, so a matched contributor
 uses one avatar that moves between regions.
@@ -318,17 +318,16 @@ Contributors follow their parked gutter slot until their inferred calendar depar
 then fade over 1.2 playback seconds. Capped playback releases faded lanes and re-enters
 at the next service slot after a long idle gap.
 
-`--travel-cap` limits extra waiting per walking trip (default `0.4` seconds; range `0`
-through `3600`, or `none` to wait as long as the route needs). Available gaps between
-commits also count toward travel. If a capped trip
-cannot finish in time, the avatar moves along the safe route, fades out at the deadline
-and fades in at the destination. Blocked capped routes fade across. Zero disables extra
-waiting. `--bot-travel fade` is the default; `--bot-travel walk` gives bots the same
-routing and waiting policy as humans. Bot classification uses an explicit `bot` override
+`--contributor-travel auto` is the default: contributors walk short trips and fade
+when a longer route would delay the commit. `--contributor-travel walk` keeps them
+walking along the shortest safe gutter route, waiting as long as needed.
+`--bot-travel fade` is the default for bots; `--bot-travel walk` gives bots the same
+travel policy selected for other contributors. Bot classification uses an explicit
+`bot` override
 in `contributors.toml`, then a GitHub noreply login ending in `[bot]`, then the displayed
 name's `[bot]` suffix. Travel policies also apply to single repositories.
 Walking avatars remain visible during travel until an inferred calendar departure.
-With `--travel-cap none`, walking trips
+With `--contributor-travel walk`, walking trips
 also remain routed across long idle gaps instead of disappearing and re-entering at a
 different repository. After the last service, the normal inactivity fade still applies.
 Uncapped walking services trips in commit order and adds another second of waiting
@@ -349,12 +348,12 @@ continue in presentation seconds.
 
 ```sh
 codestrand export frames --repositories-file repositories.toml \
-  --travel-cap none --bot-travel walk --avatar-max-speed 480 --frames 90 --fps 30
+  --contributor-travel walk --bot-travel walk --avatar-max-speed 480 --frames 90 --fps 30
 ```
 
 Planning tests departure ticks from the contributor's fragment completion onward.
 Gaps between that contributor's commits absorb travel before padding is needed.
-Padding is revalidated as scene geometry changes. Numeric caps use at most five
+Padding is revalidated as scene geometry changes. The automatic policy uses at most five
 padded rebuilds, including one cleanup of unused service padding.
 Uncapped padding grows until every walking trip completes, subject to the planning
 memory estimate. Each Dijkstra search is limited to 10,000 graph nodes.
@@ -370,10 +369,10 @@ reported in bytes and MiB. If memory information cannot be read, planning stops.
 The estimate uses the actual selected schedule, repository samples, contributor
 first arrivals, imported changes, path bytes and directory samples. Variable allocation
 sizes are estimates, so the figure is not a process-memory ceiling. Each padded schedule
-is checked before rebuilding; numeric travel caps do not reserve hypothetical waits.
+is checked before rebuilding; the automatic policy does not reserve hypothetical waits.
 The same check applies to single repositories.
 
-Use fewer repositories or a later `--start` or `--start-date` to reduce the estimate.
+Use fewer repositories or a later inclusive `--start-date` to reduce the estimate.
 The snapshot is not a memory reservation; other processes can consume RAM afterward.
 It is the host's available RAM, without container or job-specific memory limits.
 Rendering and video encoding need additional memory beyond the planning estimate.
@@ -384,9 +383,9 @@ exceeds that bound, while uncapped walking reports an error.
 
 Large multi-repository histories can take time to begin playback. Consumed travel plans
 are discarded to keep memory bounded; the shared layout remains available throughout
-playback. To inspect a smaller interval, use `--start`, `--start-date` and `--commits`.
+playback. To inspect a smaller interval, use inclusive `--start-date` and `--end-date`.
 
-Playback memory and duration checks use the range selected by `--start` and `--commits`;
+Playback memory and duration checks use the range selected by `--start-date` and `--end-date`;
 the layout estimate also includes the imported history needed to settle that range.
 
 To choose visual treatments, use
@@ -420,22 +419,24 @@ codestrand inspect /path/to/repository --allow-truncated-history
 ```
 
 ```sh
-codestrand preview --repository /path/to/repository --start 0 --commits 20 \
+codestrand preview --repository /path/to/repository --start-date 2026-05-01 --end-date 2026-05-31 \
   --seconds-per-day 2 --max-idle-seconds 1
 ```
 
-- `--start`: commits laid out and settled before playback; default `0`. The zero-based
-  start index is inclusive.
-- `--start-date YYYY-MM-DD`: begin at the first commit in merged history order authored
-  on or after 00:00 UTC that day, inclusive, settling preceding commits as with `--start`.
-  Conflicts with `--start`; dates after the history report the last commit date.
-- `--commits`: number of commits to play; default all remaining commits. The selected
-  start is inclusive and start plus this count is exclusive.
+- `--start-date YYYY-MM-DD`: first commit in merged order authored on or after
+  00:00 UTC that day, inclusive; preceding commits are settled before playback.
+- `--end-date YYYY-MM-DD`: last commit in merged order authored on or before that
+  UTC day, inclusive of the whole day. Omitted bounds use the beginning or end of
+  history. A reversed range or one containing no commits reports both bounds.
+
+Selection is a contiguous span of merged history. Rebased commits with older author
+dates remain in that span; date bounds do not reorder or remove interior commits.
+
 - `--seconds-per-day`: timeline seconds per calendar day; default `0.5`.
 - `--max-idle-seconds`: maximum timeline gap between commits; default `1`.
 
 ```sh
-codestrand preview --repository /path/to/repository --start-date 2026-05-01 --commits 20
+codestrand preview --repository /path/to/repository --start-date 2026-05-01 --end-date 2026-05-31
 ```
 
 Pacing preserves within-day timestamp spacing. Coincident, reversed or very close
@@ -486,11 +487,7 @@ Theme switching restyles active snippets without restarting their motion or fade
 
 Snippet text keeps the font's natural proportions with equal X and Y scaling.
 Lines are cut at 88 characters. Samples smoothly appear between 6 and 14 projected
-beam-diameter pixels by default. `--diff-text-distance 4` reveals samples at four times
-the camera range: the same fade spans 1.5–3.5 pixels. Preview and export accept
-`--diff-text-distance` from `0.1` through `100`, default `1`; values below `1` require
-a closer view. The multiplier affects only the reveal, including scripted export
-cameras. Visible text stays between 14 and 20 logical pixels high, making
+beam-diameter pixels. Visible text stays between 14 and 20 logical pixels high, making
 close oblique shots readable while the overview keeps plain fragments.
 Text holds full contrast through the first three quarters of the fragment's alpha
 fade, then fades out with the backing.

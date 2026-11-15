@@ -3,7 +3,7 @@
 ## Numbered PNG frames
 
 ```sh
-codestrand export frames --repository /path/to/repository --commits 20
+codestrand export frames --repository /path/to/repository --start-date 2026-05-01 --end-date 2026-05-31
 ```
 
 The output directory (`frames` here) must not already exist. Without a repository
@@ -42,24 +42,16 @@ codestrand export short-frames --frames 60 --fps 30
 `--frames` accepts 2 through 4,294,967,295, inclusive, matching the supported frame
 index range; `--fps` accepts 1 through 240, inclusive. An explicit
 frame count stops capture after that many frames rather than changing the timeline
-speed. `--frame-delay-ms` adds a wall-clock delay between captures (default `0`);
-the delay does not change simulated frame times.
+speed.
 
 Export accepts the same repository, revision, range, pacing, contributor and cache
 options as preview. By default, the camera uses the fit-to-scene view. Explicit frame
 times keep export independent of rendering speed. Each capture is confirmed
 written before export completes. Export needs a working graphics adapter.
 
-For readable diff snippets in wider shots, use `--diff-text-distance 4` with either
-the fitted camera or `--camera-path`. The default `1` preserves the 6–14 projected
-beam-pixel reveal; `4` moves the fade to 1.5–3.5 pixels without shrinking the
-14–20 logical-pixel text. The accepted range is `0.1`–`100`. The existing twelve-sample
-limit and collapsed-directory hiding still apply; snippets may overlap.
-
-```sh
-codestrand export wide-diff --repository /path/to/repository \
-  --diff-text-distance 4 --frames 60 --fps 30
-```
+Diff snippets appear in close views, including scripted camera paths. Their text stays
+14–20 logical pixels high; the twelve-sample limit and collapsed-directory hiding
+still apply. Snippets may overlap.
 
 Moving translucent surfaces overlap using their current positions. Halos and glyphs
 can look different from older builds.
@@ -141,7 +133,7 @@ The file requires `fps` (1–240) and one or more `[[key]]` tables. Each key req
 an unsigned `frame`, `eye` and `focus`. Frames must increase strictly. Key seconds
 are `frame / file fps`; export `--fps` samples the same path at its own rate.
 A path never changes playback speed or export duration. Frame zero follows the
-selected `--start`; before the first key and after the last, the endpoint key
+selected inclusive start date; before the first key and after the last, the endpoint key
 continues resolving its targets.
 
 ```toml

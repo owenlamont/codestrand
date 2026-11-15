@@ -321,7 +321,8 @@ mod tests {
         ];
         if std::env::var_os("CODESTRAND_LIFECYCLE_WALKING").is_some() {
             arguments.extend(
-                ["--travel-cap", "none", "--bot-travel", "walk"].map(str::to_owned),
+                ["--contributor-travel", "walk", "--bot-travel", "walk"]
+                    .map(str::to_owned),
             );
         }
         let crate::Command::Preview { source, .. } =
