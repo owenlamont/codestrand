@@ -105,10 +105,12 @@ jobs:
         run: |
           cargo llvm-cov clean --workspace
           cargo llvm-cov nextest --locked --all-targets --all-features --no-report
+          cargo llvm-cov report --summary-only > coverage.txt
+          cat coverage.txt
           {
             echo '### Test coverage'
             echo '```text'
-            cargo llvm-cov report --summary-only
+            cat coverage.txt
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
