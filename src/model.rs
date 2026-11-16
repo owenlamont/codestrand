@@ -462,7 +462,7 @@ pub(super) struct Simulation {
     state: SharedState,
     theme: Theme,
     travel: travel::Plan,
-    visual_updates: bool,
+    visuals: Visuals,
     title_plan: Vec<Vec<u8>>,
     progress: Progress,
     trace: Trace,
@@ -473,6 +473,15 @@ pub(super) struct Simulation {
     stream: Option<std::sync::Arc<std::sync::Mutex<windows::Stream>>>,
     ready_end: Option<(u64, bool)>,
     title_start: usize,
+}
+
+/// What a tick places beyond layout, slots and avatars.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Visuals {
+    None,
+    /// Repository titles only: all the title pass reads.
+    Titles,
+    All,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -921,7 +930,7 @@ impl Simulation {
             state: SharedState(std::sync::Arc::new(state)),
             theme: theme.clone(),
             travel: travel::Plan::default(),
-            visual_updates: true,
+            visuals: Visuals::All,
             title_plan: Vec::new(),
             progress: options.progress.clone(),
             trace: options.trace.clone(),
@@ -1321,9 +1330,11 @@ impl Simulation {
             }
         }
         self.tick_times.laps.end(Phase::TickAvatars);
-        if self.visual_updates {
+        if self.visuals != Visuals::None {
             self.place_titles();
             self.tick_times.laps.end(Phase::TickTitles);
+        }
+        if self.visuals == Visuals::All {
             let texts: Vec<_> = self
                 .labels_for_detail(|_| true)
                 .iter()

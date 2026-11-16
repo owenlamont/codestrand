@@ -182,7 +182,6 @@ impl Simulation {
         repository: usize,
         corner: u8,
         blocked: &[(usize, Rect)],
-        names: &[Rect],
         rays: &[(Vec2, Vec2)],
         bodies: &[Vec2],
     ) -> f64 {
@@ -209,7 +208,6 @@ impl Simulation {
                     }
             })
             .sum::<f32>()
-            + names.iter().map(|r| area(rect, *r) * 50.0).sum::<f32>()
             + bodies
                 .iter()
                 .map(|p| {
@@ -232,6 +230,7 @@ impl Simulation {
     pub(super) fn plan_titles(&mut self) {
         let _phase = self.trace.phase(super::trace::Phase::PlanTitles);
         let mut costs = vec![Vec::new(); self.state.layout.repositories.len()];
+        let visuals = std::mem::replace(&mut self.visuals, super::Visuals::Titles);
         self.restart();
         let frames = super::frames_for(self.duration(), 60).expect("bounded schedule");
         let first = if self.state.tick == 0 {
@@ -256,12 +255,6 @@ impl Simulation {
             );
             self.advance_to(frame, 60);
             let blocked = obstacles(self);
-            let names: Vec<_> = self
-                .labels_for_detail(|_| true)
-                .iter()
-                .filter(|l| l.kind == super::LabelKind::Avatar && l.opacity > 0.0)
-                .map(|l| label_bounds(self, l))
-                .collect();
             let rays: Vec<_> = self
                 .beams()
                 .iter()
@@ -279,7 +272,6 @@ impl Simulation {
                         index,
                         u8::try_from(corner).expect("four corners"),
                         &blocked,
-                        &names,
                         &rays,
                         &bodies,
                     )
@@ -310,6 +302,7 @@ impl Simulation {
             })
             .collect();
         self.trace.add_ticks(&mut self.tick_times);
+        self.visuals = visuals;
         self.restart();
     }
     pub(super) fn place_titles(&mut self) {

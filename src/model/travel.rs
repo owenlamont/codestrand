@@ -400,7 +400,7 @@ fn replay(simulation: &mut Simulation, frames: u32) -> Capture {
             .map_or_else(Vec::new, |w| w.services.clone()),
         ..Capture::default()
     };
-    let visual_updates = simulation.visual_updates;
+    let visuals = std::mem::replace(&mut simulation.visuals, super::Visuals::None);
     let docks = if simulation.travel.occupancy.is_empty() && simulation.window.is_none()
     {
         std::mem::take(&mut simulation.travel.docks)
@@ -408,7 +408,6 @@ fn replay(simulation: &mut Simulation, frames: u32) -> Capture {
         simulation.travel.docks.clone()
     };
     simulation.travel.replanning = true;
-    simulation.visual_updates = false;
     let mut seen = simulation.state.next_event;
     for frame in u32::try_from(capture.begin).expect("bounded window")..=frames {
         simulation.progress.report_range(
@@ -477,7 +476,7 @@ fn replay(simulation: &mut Simulation, frames: u32) -> Capture {
         seen = state.next_event;
     }
     simulation.restart();
-    simulation.visual_updates = visual_updates;
+    simulation.visuals = visuals;
     simulation.travel.docks = docks;
     simulation.travel.replanning = false;
     simulation.trace.add_ticks(&mut simulation.tick_times);

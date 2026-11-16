@@ -122,8 +122,7 @@ impl Simulation {
         previous.resize_with(self.events.len(), Vec::new);
         let mut occupied = vec![Vec::new(); self.events.len()];
         let mut conflicted = vec![false; self.events.len()];
-        let visual = self.visual_updates;
-        self.visual_updates = false;
+        let visuals = std::mem::replace(&mut self.visuals, crate::model::Visuals::None);
         self.restart();
         let mut conflicts = 0;
         let mut pairs = 0;
@@ -148,7 +147,7 @@ impl Simulation {
         self.trace.count(Counter::PairComparisons, pairs);
         self.trace.add_ticks(&mut self.tick_times);
         self.restart();
-        self.visual_updates = visual;
+        self.visuals = visuals;
         anticipate_service_reservations(
             &self.events,
             &self.schedule.starts,

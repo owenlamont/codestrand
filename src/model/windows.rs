@@ -360,7 +360,7 @@ impl Simulation {
             initial,
             theme: self.theme.clone(),
             travel: self.travel.clone(),
-            visual_updates: self.visual_updates,
+            visuals: self.visuals,
             title_plan: self.title_plan.clone(),
             progress: crate::progress::Progress::default(),
             trace: super::Trace::default(),
@@ -516,6 +516,8 @@ mod tests {
                 window.calls(&[Phase::CheckpointReplay, Phase::TickNames]),
                 1
             );
+            assert_eq!(window.calls(&[Phase::PlanTitles, Phase::TickTitles]), 1);
+            assert_eq!(window.calls(&[Phase::PlanTitles, Phase::TickNames]), 0);
             assert!(window.counter(&[], Counter::Files) > 0);
             let capture = [Phase::PlanTravel, Phase::Capture];
             assert_eq!(
