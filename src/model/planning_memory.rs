@@ -10,14 +10,16 @@ use crate::{
 /// reclaim without swapping. Swap is excluded. The snapshot is reused for every
 /// padded schedule and window; it is not a reservation against other processes.
 #[cfg(not(test))]
-pub(crate) fn available() -> anyhow::Result<u64> {
+pub(crate) fn available(trace: &super::Trace) -> anyhow::Result<u64> {
     use anyhow::Context;
     let mut system = sysinfo::System::new()
         .context("cannot read available physical memory; planning stopped")?;
     system.refresh_memory_specifics(sysinfo::MemoryRefreshKind::nothing().with_ram());
     let available =
         validate_available(system.total_memory(), system.available_memory())?;
-    eprintln!("planning_available_memory_bytes={available}");
+    if trace.on() {
+        eprintln!("planning_available_memory_bytes={available}");
+    }
     Ok(available)
 }
 
@@ -84,17 +86,29 @@ pub(super) fn check(
     let input = changes * size_of::<FileChange>() as u128
         + events.len() as u128 * size_of::<Event>() as u128
         + paths;
-    let (layout, layout_peak) =
+    let (layout, layout_peak, directories) =
         layout_bytes(events, options, &history, repositories.len());
+    let files = events
+        .iter()
+        .flat_map(|event| &event.changes)
+        .map(|change| change.path.as_str())
+        .collect::<HashSet<_>>()
+        .len();
+    // The global replay holds a batch of region samples and the rows computed from them.
+    let batch = super::REGION_BATCH as u128
+        * (crate::layout::RegionSample::bytes(directories, files) as u128 + row_bytes);
     // Resident code and allocator bookkeeping remain outside the retained payloads.
     let overhead = 64 * 1024 * 1024 + regions * 16 + history_frames * 3 * 16;
     let retained = packing_bytes + labels + layout + input + overhead;
-    let global = (packing_bytes + conversion + row_bytes + labels + layout + input * 2)
-        .max(layout_peak + input * 3)
-        + overhead;
-    eprintln!(
-        "planning_memory_parts packing={packing_bytes} layout_retained={layout} layout_peak={layout_peak} input={input} overhead={overhead} global={global}"
-    );
+    let global =
+        (packing_bytes + conversion + row_bytes + batch + labels + layout + input * 2)
+            .max(layout_peak + input * 3)
+            + overhead;
+    if options.trace.on() {
+        eprintln!(
+            "planning_memory_parts packing={packing_bytes} layout_retained={layout} layout_peak={layout_peak} input={input} overhead={overhead} global={global}"
+        );
+    }
     if options.travel_window_seconds.is_some() {
         return check_streaming(
             events,
@@ -217,7 +231,7 @@ fn layout_bytes(
     options: &Options,
     selected: &Schedule,
     repositories: usize,
-) -> (u128, u128) {
+) -> (u128, u128, usize) {
     let mut directories = vec![HashSet::from([""]); repositories];
     let prefixes: Vec<_> = (0..repositories).map(crate::repositories::prefix).collect();
     for event in events {
@@ -252,18 +266,21 @@ fn layout_bytes(
     for (event, &start) in events.iter().zip(&schedule.starts) {
         ends[event.repository] = start;
     }
-    directories
-        .iter()
-        .zip(ends)
-        .fold((0, 0), |(retained, peak), (dirs, end)| {
-            let ticks = u128::from((end + 2.5).ticks(true));
-            let samples = ticks / (ticks / 8192 + 1).max(15) + 2;
-            let rows = dirs.len() as u128;
-            (
-                retained + rows * (samples * 8 + 24),
-                peak + rows * (samples * 16 + 72) + samples * 128,
-            )
-        })
+    let count = directories.iter().map(HashSet::len).sum();
+    let (retained, peak) =
+        directories
+            .iter()
+            .zip(ends)
+            .fold((0, 0), |(retained, peak), (dirs, end)| {
+                let ticks = u128::from((end + 2.5).ticks(true));
+                let samples = ticks / (ticks / 8192 + 1).max(15) + 2;
+                let rows = dirs.len() as u128;
+                (
+                    retained + rows * (samples * 8 + 24),
+                    peak + rows * (samples * 16 + 72) + samples * 128,
+                )
+            });
+    (retained, peak, count)
 }
 
 fn check_streaming(
@@ -300,9 +317,11 @@ fn check_streaming(
     let windows = super::streaming::PLAN_COPIES * window;
     let global_states = super::streaming::GLOBAL_STATE_COPIES * checkpoint;
     let bytes = (global + global_states).max(retained + states + windows);
-    eprintln!(
-        "streaming_memory global_peak={global} global_retained={retained} window={window} checkpoint={checkpoint} global_states={global_states} window_states={states} total={bytes}"
-    );
+    if options.trace.on() {
+        eprintln!(
+            "streaming_memory global_peak={global} global_retained={retained} window={window} checkpoint={checkpoint} global_states={global_states} window_states={states} total={bytes}"
+        );
+    }
     check_bytes(bytes, options.available_memory).map_err(|error| error.context(format!("streaming memory: global peak {global} plus state copies {global_states}, global retained {retained}, three windows {windows}, ten window state copies {states}")))
 }
 
@@ -329,6 +348,36 @@ mod tests {
         assert_eq!(validate_available(10, 0).unwrap(), 0);
         assert!(check_bytes(1, 0).is_err());
         assert_eq!(validate_available(10, 4).unwrap(), 4);
+    }
+
+    #[test]
+    fn a_batch_of_region_samples_counts_towards_the_estimate() {
+        let mut events = crate::timeline::synthetic();
+        events.truncate(1);
+        let template = events[0].changes[0].clone();
+        events[0].changes = (0..40_000)
+            .map(|index| FileChange {
+                path: format!("f{index}"),
+                ..template.clone()
+            })
+            .collect();
+        let schedule = Schedule::with_padding(&events, 1.0, 1.0, |_| 0);
+        let batch = 512 * crate::layout::RegionSample::bytes(1, 40_000) as u64;
+        let fits = |available_memory| {
+            let options = Options {
+                available_memory,
+                ..Options::default()
+            };
+            check(
+                &events,
+                &options,
+                &["r".into()],
+                &schedule,
+                schedule.duration(),
+            )
+        };
+        assert!(fits(u64::MAX).is_ok());
+        assert!(fits(batch).is_err());
     }
 
     #[test]

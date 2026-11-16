@@ -7,6 +7,7 @@ pub(crate) mod outline;
 pub(crate) mod packing;
 mod planner;
 mod repositories;
+pub(crate) use repositories::{RegionSample, in_order};
 
 #[derive(Clone, Debug)]
 pub(super) struct RepositoryRegion {
@@ -78,10 +79,13 @@ impl File {
     }
 
     pub(super) fn visible_presence(&self, dir: &Dir) -> f32 {
-        let clearance = dir.radius() - self.position.distance(dir.position);
-        self.presence
-            .min((clearance / (0.27 * dir.scale).max(f32::EPSILON)).clamp(0.0, 1.0))
-            * dir.scale
+        visible_presence(
+            self.presence,
+            self.position,
+            dir.radius(),
+            dir.position,
+            dir.scale,
+        )
     }
 
     pub(super) fn name(&self) -> &str {
@@ -150,6 +154,66 @@ pub(super) struct Layout {
     plan: Plan,
     pub repositories: Vec<RepositoryRegion>,
     placed: bool,
+}
+
+/// How much of a file shows, from its presence and how far inside its directory disc it sits.
+fn visible_presence(
+    presence: f32,
+    position: Vec2,
+    radius: f32,
+    centre: Vec2,
+    scale: f32,
+) -> f32 {
+    let clearance = radius - position.distance(centre);
+    presence.min((clearance / (0.27 * scale).max(f32::EPSILON)).clamp(0.0, 1.0)) * scale
+}
+
+/// The parts of [`Layout::step_observed`], in the order it runs them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StepPart {
+    Fade,
+    Compact,
+    Prune,
+    Relax,
+    Files,
+}
+
+/// File and directory visits by layout steps, and how many of them could change nothing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct StepCounts {
+    pub(crate) files: usize,
+    /// Files with no delay or fade pending.
+    pub(crate) steady_files: usize,
+    /// Files at their slot with no velocity before the move.
+    pub(crate) resting_files: usize,
+    /// Files whose heat is already zero.
+    pub(crate) cold_files: usize,
+    pub(crate) directories: usize,
+    /// Directories whose position and reserve the relax left unchanged.
+    pub(crate) still_directories: usize,
+}
+
+impl StepCounts {
+    fn count(&mut self, layout: &Layout, before: &[(Vec2, f32)]) {
+        self.directories += layout.dirs.len();
+        self.still_directories += layout
+            .dirs
+            .iter()
+            .zip(before)
+            .filter(|(dir, before)| (dir.position, dir.reserve) == **before)
+            .count();
+        for file in layout.files.values() {
+            self.files += 1;
+            self.steady_files +=
+                usize::from(file.state == Presence::Present && file.delay <= 0.0);
+            self.resting_files += usize::from(
+                file.velocity == Vec2::ZERO
+                    && file.position
+                        == layout.dirs[file.dir].position + file.slot_offset,
+            );
+            self.cold_files += usize::from(file.heat == 0.0);
+        }
+    }
 }
 
 impl Layout {
@@ -349,12 +413,38 @@ impl Layout {
         id
     }
 
+    /// Every directory, file and region with floats printed exactly, in a stable order.
+    #[cfg(test)]
+    pub(crate) fn exact_state(&self) -> String {
+        format!("{:?}{:?}{:?}", self.dirs, self.files, self.repositories)
+    }
+
     pub(super) fn step(&mut self, dt: f32) {
+        self.step_observed(dt, None, |_| ());
+    }
+
+    /// One step, calling `done` after each part and counting idle work into `counts`.
+    pub(super) fn step_observed(
+        &mut self,
+        dt: f32,
+        mut counts: Option<&mut StepCounts>,
+        mut done: impl FnMut(StepPart),
+    ) {
         self.revision += 1;
         self.fade_files(dt);
+        done(StepPart::Fade);
         self.compact_slots();
+        done(StepPart::Compact);
         self.prune_empty();
+        done(StepPart::Prune);
+        let before: Option<Vec<_>> = counts
+            .is_some()
+            .then(|| self.dirs.iter().map(|d| (d.position, d.reserve)).collect());
         self.relax(dt);
+        if let (Some(counts), Some(before)) = (&mut counts, before) {
+            counts.count(self, &before);
+        }
+        done(StepPart::Relax);
         for file in self.files.values_mut() {
             let target = self.dirs[file.dir].position + file.slot_offset;
             let desired =
@@ -363,6 +453,7 @@ impl Layout {
                 (desired - file.velocity).clamp_length_max(MAX_ACCELERATION * dt);
             file.position += file.velocity * dt;
         }
+        done(StepPart::Files);
     }
 
     pub(super) fn heat(&mut self, id: u64, amount: f32) {
@@ -370,12 +461,21 @@ impl Layout {
         file.heat = (file.heat + amount).min(1.0);
     }
 
-    pub(super) fn cool_heat(&mut self, dt: f32, half_life: f32) {
+    /// Undoes region placement, if any, and cools heat, visiting each file once.
+    pub(super) fn begin_tick(&mut self, dt: f32, half_life: f32) {
+        let placed = std::mem::take(&mut self.placed);
         for dir in &mut self.dirs {
+            if placed {
+                dir.position = dir.local_position;
+                dir.scale = 1.0;
+            }
             dir.touch_age += dt;
         }
         let decay = (-dt / half_life).exp2();
         for file in self.files.values_mut() {
+            if placed {
+                file.position = file.local_position;
+            }
             file.heat *= decay;
             if file.heat < 0.001 {
                 file.heat = 0.0;

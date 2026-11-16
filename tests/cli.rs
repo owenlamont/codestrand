@@ -224,3 +224,39 @@ fn failed_import_leaves_no_export_directory() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("open local repository"));
     assert!(!output_dir.exists());
 }
+
+#[test]
+fn planning_trace_lines_follow_the_environment_variable() {
+    let scratch = tempfile::tempdir().unwrap();
+    let stderr = |traced: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_codestrand"));
+        command
+            .current_dir(scratch.path())
+            .args([
+                "layout-quality",
+                "quality.jsonl",
+                "--test-input",
+                "synthetic",
+            ])
+            .env_remove("CODESTRAND_TRACE_PLANNING");
+        if traced {
+            command.env("CODESTRAND_TRACE_PLANNING", "1");
+        }
+        let output = command.output().unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stderr).unwrap()
+    };
+    let lines = [
+        "planning_trace window=global",
+        "planning_available_memory_bytes=",
+        "planning_memory_parts ",
+        "travel_capture_seconds=",
+        "travel_replan ",
+        "committing_overlap_observations=",
+    ];
+    let (quiet, traced) = (stderr(false), stderr(true));
+    for line in lines {
+        assert!(!quiet.contains(line), "{line} in {quiet}");
+        assert!(traced.contains(line), "{line} missing from {traced}");
+    }
+}

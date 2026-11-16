@@ -3,7 +3,10 @@ use std::{cmp::Reverse, collections::BinaryHeap};
 use bevy::math::{Rect, Vec2};
 use serde::Serialize;
 
-use super::{Simulation, frames_for, slots, tick_time, ticks_duration};
+use super::{
+    Simulation, frames_for, slots, tick_time, ticks_duration,
+    trace::{Counter, Phase},
+};
 use crate::progress::Stage;
 mod occupancy;
 mod planning;
@@ -41,7 +44,7 @@ pub(super) struct Pose {
     dock: slots::Dock,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(super) struct Service {
     pub(super) commit: usize,
     pub(super) author: usize,
@@ -243,6 +246,9 @@ impl Plan {
         trip.fade = true;
         trip.commit
     }
+    pub(super) fn trip_count(&self) -> usize {
+        self.trips.len()
+    }
     pub(super) fn first_unresolved(&self) -> Option<usize> {
         self.trips.iter().find(|t| t.fade).map(|t| t.commit)
     }
@@ -366,9 +372,25 @@ fn fade_opacity(remaining: u64, duration: u64) -> f32 {
 }
 
 fn capture(simulation: &mut Simulation) -> Capture {
+    let _phase = simulation.trace.phase(Phase::Capture);
     let started = std::time::Instant::now();
     let frames = frames_for(simulation.duration(), 60).expect("validated travel range");
+    let capture = replay(simulation, frames);
+    if simulation.trace.on() {
+        eprintln!(
+            "travel_capture_seconds={:.6} frames={frames} poses={}",
+            started.elapsed().as_secs_f64(),
+            capture.poses.iter().map(Vec::len).sum::<usize>()
+        );
+    }
+    capture
+}
+
+fn replay(simulation: &mut Simulation, frames: u32) -> Capture {
     simulation.restart();
+    simulation
+        .trace
+        .count_replay(u64::from(frames).saturating_sub(simulation.state.tick));
     let mut capture = Capture {
         begin: simulation.state.tick,
         frozen: simulation.travel.frozen,
@@ -378,7 +400,7 @@ fn capture(simulation: &mut Simulation) -> Capture {
             .map_or_else(Vec::new, |w| w.services.clone()),
         ..Capture::default()
     };
-    let visual_updates = simulation.visual_updates;
+    let visuals = std::mem::replace(&mut simulation.visuals, super::Visuals::None);
     let docks = if simulation.travel.occupancy.is_empty() && simulation.window.is_none()
     {
         std::mem::take(&mut simulation.travel.docks)
@@ -386,9 +408,7 @@ fn capture(simulation: &mut Simulation) -> Capture {
         simulation.travel.docks.clone()
     };
     simulation.travel.replanning = true;
-    simulation.visual_updates = false;
     let mut seen = simulation.state.next_event;
-    let mut poses = 0;
     for frame in u32::try_from(capture.begin).expect("bounded window")..=frames {
         simulation.progress.report_range(
             Stage::Travel,
@@ -417,7 +437,6 @@ fn capture(simulation: &mut Simulation) -> Capture {
                     point: slot.point,
                     dock: slot.dock,
                 });
-                poses += 1;
             }
         }
         for event in seen..state.next_event {
@@ -457,14 +476,10 @@ fn capture(simulation: &mut Simulation) -> Capture {
         seen = state.next_event;
     }
     simulation.restart();
-    simulation.visual_updates = visual_updates;
+    simulation.visuals = visuals;
     simulation.travel.docks = docks;
     simulation.travel.replanning = false;
-    eprintln!(
-        "travel_capture_seconds={:.6} frames={} poses={poses}",
-        started.elapsed().as_secs_f64(),
-        frames
-    );
+    simulation.trace.add_ticks(&mut simulation.tick_times);
     capture
 }
 
@@ -484,6 +499,22 @@ fn fade_clearance(capture: &Capture, begin: u64, point: Vec2, radius: f32) -> u6
 }
 
 impl Simulation {
+    fn routes(
+        &self,
+        capture: &Capture,
+        options: &super::Options,
+    ) -> (Vec<Trip>, usize) {
+        let _phase = self.trace.phase(Phase::Routes);
+        let (trips, epochs) = trips(
+            capture,
+            options.avatar_max_speed,
+            options.bot_travel,
+            options.travel_cap == super::TravelCap::None,
+        );
+        self.trace.count(Counter::RouteCandidates, epochs);
+        (trips, epochs)
+    }
+
     fn pad_births(&self, padding: &mut Vec<(usize, u32)>) {
         let mut born = vec![false; self.initial.layout.repositories.len()];
         for (_, file) in self.initial.layout.files() {
@@ -511,6 +542,7 @@ impl Simulation {
         options: &super::Options,
         padding: &[(usize, u32)],
     ) -> Vec<(usize, u32)> {
+        let _phase = self.trace.phase(Phase::AdjustPadding);
         let mut result = padding.to_vec();
         let cap = options.travel_cap.ticks();
         for trip in self.travel.trips.iter().filter(|t| {
@@ -552,6 +584,7 @@ impl Simulation {
         options: &super::Options,
         padding: &[(usize, u32)],
     ) -> Vec<(usize, u32)> {
+        let _phase = self.trace.phase(Phase::CompactPadding);
         let mut result = padding.to_vec();
         for trip in self
             .travel
@@ -579,13 +612,9 @@ impl Simulation {
         &mut self,
         options: &super::Options,
     ) -> Vec<(usize, u32)> {
+        let _phase = self.trace.phase(Phase::TravelPadding);
         let capture = capture(self);
-        let (routes, _) = trips(
-            &capture,
-            options.avatar_max_speed,
-            options.bot_travel,
-            options.travel_cap == super::TravelCap::None,
-        );
+        let (routes, _) = self.routes(&capture, options);
         let cap = options.travel_cap.ticks();
         let mut shifts = vec![0_u64; self.events.len()];
         let mut extra = 0_u64;
@@ -632,13 +661,9 @@ impl Simulation {
         options: &super::Options,
         padding: &[(usize, u32)],
     ) {
+        let _phase = self.trace.phase(Phase::PlanTravel);
         let capture = capture(self);
-        let (mut trips, graph_epochs) = trips(
-            &capture,
-            options.avatar_max_speed,
-            options.bot_travel,
-            options.travel_cap == super::TravelCap::None,
-        );
+        let (mut trips, graph_epochs) = self.routes(&capture, options);
         trips.extend(
             self.travel
                 .trips

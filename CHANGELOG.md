@@ -5,6 +5,15 @@ All notable changes to Codestrand are documented here, following
 
 ## Unreleased
 
+### Changed
+
+- Planning is faster: on thirty repositories, about 35% less time per window and 40%
+  less before the first frame.
+  ([#176](https://github.com/owenlamont/codestrand/pull/176))
+- Repository titles choose their corner from contributor discs, beams and tiles, no
+  longer from contributor names, so some titles sit in a different corner and switch
+  less often. ([#176](https://github.com/owenlamont/codestrand/pull/176))
+
 ## v0.2.0 - 2026-11-16
 
 Watch the [feature tour video](https://youtu.be/gmueXAHnvAE).

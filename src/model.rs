@@ -8,7 +8,7 @@ use bevy::math::{Vec2, Vec3};
 
 use crate::{
     contributors::{Contributor, Key, Mappings},
-    layout::Layout,
+    layout::{Layout, StepPart},
     progress::{Progress, Stage},
     theme::{BeamStyle, Geometry, Theme},
     timeline::{Event, Kind},
@@ -35,6 +35,7 @@ pub(crate) use slots::diagnostics::MovingBeams;
 pub(crate) mod streaming;
 mod time;
 mod titles;
+mod trace;
 mod travel;
 mod windows;
 pub(super) use names::rect as label_rect;
@@ -42,6 +43,8 @@ pub(super) use names::rect as label_rect;
 pub(super) use planning_memory::available as available_memory;
 use schedule::Schedule;
 pub(crate) use time::Time;
+pub(crate) use trace::Trace;
+use trace::{Phase, Scope};
 pub(crate) mod treemap;
 
 pub(super) const TICK_RATE: u32 = 60;
@@ -64,6 +67,8 @@ const ARRIVAL_SCALE: f32 = 1.15;
 const BEAM_LIMIT: usize = 24;
 const FRAGMENT_TARGETS: usize = 24;
 const SETTLE_TICKS: u32 = 1200;
+/// Ticks of the global replay whose region samples are held before they become inputs.
+const REGION_BATCH: usize = 512;
 const DIR_LABELS: usize = 20;
 
 fn check_travel_pass(pass: u32) -> anyhow::Result<()> {
@@ -96,11 +101,16 @@ pub(super) struct Options {
     pub eager_windows: bool,
     #[cfg(test)]
     pub window_hook: Option<streaming::WindowHook>,
+    /// Runs every replay even where its result is already held; tests compare against it.
+    pub replay_everything: bool,
+    /// Threads that turn sampled ticks into regions; zero takes the machine's parallelism.
+    pub region_threads: usize,
     pub bot_travel: BotTravel,
     pub avatar_max_speed: f32,
     pub avatar_size: f32,
     pub gutter: f32,
     pub progress: Progress,
+    pub trace: Trace,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize)]
@@ -179,11 +189,14 @@ impl Default for Options {
             eager_windows: false,
             #[cfg(test)]
             window_hook: None,
+            replay_everything: false,
+            region_threads: 0,
             bot_travel: BotTravel::Fade,
             avatar_max_speed: 480.0,
             avatar_size: 2.0,
             gutter: 4.0,
             progress: Progress::default(),
+            trace: Trace::default(),
         }
     }
 }
@@ -449,15 +462,26 @@ pub(super) struct Simulation {
     state: SharedState,
     theme: Theme,
     travel: travel::Plan,
-    visual_updates: bool,
+    visuals: Visuals,
     title_plan: Vec<Vec<u8>>,
     progress: Progress,
+    trace: Trace,
+    tick_times: trace::TickTimes,
     window: Option<windows::Planning>,
     boundaries: Vec<std::sync::Arc<State>>,
     windowed: bool,
     stream: Option<std::sync::Arc<std::sync::Mutex<windows::Stream>>>,
     ready_end: Option<(u64, bool)>,
     title_start: usize,
+}
+
+/// What a tick places beyond layout, slots and avatars.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Visuals {
+    None,
+    /// Repository titles only: all the title pass reads.
+    Titles,
+    All,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -605,6 +629,7 @@ impl Simulation {
         }
         Self::check_repository_plan(&events, options, repositories)?;
         let global_started = std::time::Instant::now();
+        let trace = &options.trace;
         let mut layout_cache = None;
         let mut simulation = Self::build(
             events.clone(),
@@ -615,11 +640,13 @@ impl Simulation {
             repositories,
             &mut layout_cache,
         )?;
+        simulation.packing.tile_fresh(options.replay_everything);
         if let Some(seconds) = options.travel_window_seconds {
-            eprintln!(
-                "global_plan_seconds={}",
-                global_started.elapsed().as_secs_f64()
-            );
+            let elapsed = global_started.elapsed();
+            if trace.on() {
+                eprintln!("global_plan_seconds={}", elapsed.as_secs_f64());
+            }
+            simulation.report_global(0, elapsed);
             return simulation.plan_windows(&events, options, repositories, seconds);
         }
         let mut padding = simulation.travel_padding(options);
@@ -632,34 +659,25 @@ impl Simulation {
             pass += 1;
             check_travel_pass(pass)?;
             options.progress.pass(pass);
+            let _pass = trace.phase(Phase::Pass);
             if pass > 1 || padding.iter().any(|&(_, ticks)| ticks > 0) {
-                let schedule = Schedule::with_padding(
-                    &events[options.selected_range(events.len())],
-                    options.seconds_per_day,
-                    options.max_idle_seconds,
-                    |index| schedule::padding_at(&padding, options.start + index),
-                );
-                Self::check_schedule(&events, options, repositories, &schedule)?;
-                let preferences = std::mem::take(&mut simulation.travel).preferences();
-                let clock = schedule::Clock::new(history.clone(), schedule.clone());
-                simulation.plan_waiting_births(options, &clock, &schedule);
-                simulation.departures =
-                    departures.iter().map(|&time| clock.present(time)).collect();
-                simulation.repository_ends =
-                    endings.iter().map(|&time| clock.present(time)).collect();
-                simulation.clock = clock;
-                simulation.schedule = schedule;
-                simulation.state = SharedState(simulation.initial.clone());
-                simulation.plan_avatar_envelopes(None);
-                simulation.travel = preferences;
+                simulation.apply_padding(
+                    &events,
+                    options,
+                    repositories,
+                    &padding,
+                    (&history, &departures, &endings),
+                )?;
             }
             simulation.plan_travel(options, &padding);
-            eprintln!(
-                "travel_replan pass={} fades={} padding_seconds={}",
-                pass,
-                simulation.travel.stats.faded,
-                simulation.travel.stats.padding_seconds
-            );
+            if trace.on() {
+                eprintln!(
+                    "travel_replan pass={} fades={} padding_seconds={}",
+                    pass,
+                    simulation.travel.stats.faded,
+                    simulation.travel.stats.padding_seconds
+                );
+            }
             let adjusted = simulation.adjust_travel_padding(options, &padding);
             let settled = adjusted == padding
                 || (options.travel_cap != TravelCap::None && pass >= 4);
@@ -687,12 +705,64 @@ impl Simulation {
         events.truncate(end);
         events.drain(..start);
         simulation.events = events.into();
-        simulation.caption_plan =
-            caption::plan(&simulation.schedule, &simulation.events);
+        {
+            let _phase = trace.phase(Phase::Caption);
+            simulation.caption_plan =
+                caption::plan(&simulation.schedule, &simulation.events);
+        }
         options.progress.pass(1);
         simulation.plan_titles();
         simulation.progress = Progress::default();
+        simulation.report_global(pass, global_started.elapsed());
         Ok(simulation)
+    }
+
+    fn report_global(&self, passes: u32, elapsed: Duration) {
+        self.count_tilings();
+        self.trace
+            .report(Scope::Global, self.events.len(), passes, elapsed);
+    }
+
+    fn apply_padding(
+        &mut self,
+        events: &[Event],
+        options: &Options,
+        repositories: &[String],
+        padding: &[(usize, u32)],
+        (history, departures, endings): (&Schedule, &[Time], &[Time]),
+    ) -> anyhow::Result<()> {
+        let trace = &options.trace;
+        let schedule = {
+            let _phase = trace.phase(Phase::ScheduleRebuild);
+            let selected = &events[options.selected_range(events.len())];
+            trace.count_rebuild(selected.len(), padding.len());
+            Schedule::with_padding(
+                selected,
+                options.seconds_per_day,
+                options.max_idle_seconds,
+                |index| schedule::padding_at(padding, options.start + index),
+            )
+        };
+        {
+            let _phase = trace.phase(Phase::CheckSchedule);
+            Self::check_schedule(events, options, repositories, &schedule)?;
+        }
+        let preferences = std::mem::take(&mut self.travel).preferences();
+        {
+            let _phase = trace.phase(Phase::WindowClock);
+            let clock = schedule::Clock::new(history.clone(), schedule.clone());
+            self.plan_waiting_births(options, &clock, &schedule);
+            self.departures =
+                departures.iter().map(|&time| clock.present(time)).collect();
+            self.repository_ends =
+                endings.iter().map(|&time| clock.present(time)).collect();
+            self.clock = clock;
+        }
+        self.schedule = schedule;
+        self.state = SharedState(self.initial.clone());
+        self.plan_avatar_envelopes(None);
+        self.travel = preferences;
+        Ok(())
     }
 
     fn plan_waiting_births(
@@ -778,6 +848,7 @@ impl Simulation {
         repositories: &[String],
         layout_cache: &mut Option<(Vec<Time>, Layout)>,
     ) -> anyhow::Result<Self> {
+        let _phase = options.trace.phase(Phase::Build);
         if events.iter().any(|event| event.contributor.is_none()) {
             mappings.apply(&mut events);
         }
@@ -787,13 +858,16 @@ impl Simulation {
         let mut state = State {
             region_depth: 0.0,
             tick: 0,
-            layout: Self::scheduled_layout(
-                &events,
-                &layout_starts.starts,
-                repositories,
-                layout_cache,
-                &options.progress,
-            ),
+            layout: {
+                let _phase = options.trace.phase(Phase::ScheduledLayout);
+                Self::scheduled_layout(
+                    &events,
+                    &layout_starts.starts,
+                    repositories,
+                    layout_cache,
+                    &options.progress,
+                )
+            },
             avatars: Vec::new(),
             authors: HashMap::new(),
             next_event: 0,
@@ -856,9 +930,11 @@ impl Simulation {
             state: SharedState(std::sync::Arc::new(state)),
             theme: theme.clone(),
             travel: travel::Plan::default(),
-            visual_updates: true,
+            visuals: Visuals::All,
             title_plan: Vec::new(),
             progress: options.progress.clone(),
+            trace: options.trace.clone(),
+            tick_times: trace::TickTimes::default(),
             window: None,
             boundaries: Vec::new(),
             windowed: options.travel_window_seconds.is_some(),
@@ -866,22 +942,46 @@ impl Simulation {
             ready_end: None,
             title_start: 0,
         };
-        let snapshots = simulation
-            .plan_repositories(prior_active, options.travel_cap == TravelCap::None)?;
+        let snapshots = simulation.plan_repositories(prior_active, options)?;
         if options.travel_window_seconds.is_none() {
             simulation.plan_avatar_envelopes(snapshots);
         }
         Ok(simulation)
     }
 
+    /// Turns a batch of sampled ticks into packing inputs, in tick order, on scoped threads.
+    fn push_regions(
+        &self,
+        samples: &mut crate::layout::packing::Inputs,
+        pending: &mut Vec<crate::layout::RegionSample>,
+        labels: &[String],
+        threads: usize,
+    ) {
+        let _phase = self.trace.phase(Phase::Regions);
+        let geometry = self.state.geometry;
+        let regions = crate::layout::in_order(pending, 32, threads, |chunk| {
+            chunk
+                .iter()
+                .map(|sample| sample.regions(labels, geometry))
+                .collect()
+        });
+        for regions in regions {
+            samples.push(regions);
+        }
+        pending.clear();
+    }
+
     fn plan_repositories(
         &mut self,
         mut active: Vec<bool>,
-        uncapped: bool,
+        options: &Options,
     ) -> anyhow::Result<Option<slots::Snapshots>> {
+        let uncapped = options.travel_cap == TravelCap::None;
+        let threads = options.region_threads;
         #[cfg(test)]
         tests::LAYOUT_COUNTS
             .with(|counts| counts.set((counts.get().0, counts.get().1 + 1)));
+        let _phase = self.trace.phase(Phase::PlanRepositories);
         let mut activation = vec![u32::MAX; active.len()];
         for (repository, live) in active.iter().enumerate() {
             if *live {
@@ -909,14 +1009,15 @@ impl Simulation {
         {
             active[event.repository] = true;
         }
-        let geometry = self.state.geometry;
         let mut sampled_events = 0;
         let ticks = frames_for(self.duration(), 60)
             .expect("multi-repository playback fits the supported frame range");
+        self.trace.count_replay(ticks.into());
         let mut samples = crate::layout::packing::Inputs::new(
             usize::try_from(ticks).expect("bounded packing ticks") + 1,
         );
-        samples.push(self.layout().local_regions(&active, geometry));
+        let labels = self.layout().region_labels();
+        let mut pending = vec![self.layout().region_sample(&active)];
         for tick in 0..ticks {
             self.progress
                 .report(Stage::Layout, tick.into(), ticks.into());
@@ -925,11 +1026,15 @@ impl Simulation {
                 active[event.repository] = true;
             }
             sampled_events = self.state.next_event;
-            samples.push(self.layout().local_regions(&active, geometry));
+            pending.push(self.layout().region_sample(&active));
+            if pending.len() >= REGION_BATCH {
+                self.push_regions(&mut samples, &mut pending, &labels, threads);
+            }
             if let Some(snapshots) = &mut snapshots {
                 snapshots.capture(&self.state);
             }
         }
+        self.push_regions(&mut samples, &mut pending, &labels, threads);
         if uncapped {
             for (index, event) in self.events.iter().enumerate() {
                 let arrival = usize::try_from(
@@ -944,10 +1049,12 @@ impl Simulation {
                 samples.anticipate_files(event.repository, begin, arrival);
             }
         }
+        self.trace.add_ticks(&mut self.tick_times);
         self.packing = crate::layout::packing::Packing::from_inputs(
             samples,
             self.state.gutter,
             uncapped.then_some(activation.as_slice()),
+            threads,
         )?
         .with_endings(
             &self.repository_ends,
@@ -960,6 +1067,7 @@ impl Simulation {
             self.state.layout.place_regions(regions, &offsets, &scales);
         }
         self.initial = self.state.0.clone();
+        self.count_tilings();
         Ok(snapshots)
     }
     pub(super) fn duration(&self) -> Time {
@@ -1099,16 +1207,19 @@ impl Simulation {
     }
 
     pub(crate) fn tick_layout(&mut self) {
+        self.tick_times.laps.begin(&self.trace);
         let placement = self.packing_sample(self.state.tick + 1, None);
+        self.tick_times.laps.end(Phase::TickPacking);
         self.tick_local_layout();
         if let Some((regions, offsets, scales)) = placement {
             self.state.layout.place_regions(regions, &offsets, &scales);
         }
+        self.tick_times.laps.end(Phase::TickPlace);
     }
 
     fn tick_local_layout(&mut self) {
+        self.tick_times.laps.begin(&self.trace);
         let canonical = self.state.tick + 1;
-        self.state.layout.remove_offsets();
         let plan_time = self
             .clock
             .history
@@ -1116,7 +1227,8 @@ impl Simulation {
         let state = &mut *self.state;
         state.tick = canonical;
 
-        state.layout.cool_heat(tick_seconds(), self.heat_half_life);
+        state.layout.begin_tick(tick_seconds(), self.heat_half_life);
+        self.tick_times.laps.end(Phase::TickHeat);
         while let Some(event) = self.events.get(state.next_event) {
             let Some(start) = self.schedule.start(state.next_event, canonical) else {
                 break;
@@ -1137,9 +1249,23 @@ impl Simulation {
             }
             state.next_event += 1;
         }
+        self.tick_times.laps.end(Phase::TickEvents);
         let dt = tick_seconds();
         state.layout.sample_plan(plan_time, dt);
-        state.layout.step(dt);
+        let laps = &mut self.tick_times.laps;
+        state.layout.step_observed(
+            dt,
+            self.trace.on().then_some(&mut self.tick_times.counts),
+            |part| {
+                laps.end(match part {
+                    StepPart::Fade => Phase::TickFade,
+                    StepPart::Compact => Phase::TickCompact,
+                    StepPart::Prune => Phase::TickPrune,
+                    StepPart::Relax => Phase::TickRelax,
+                    StepPart::Files => Phase::TickFiles,
+                });
+            },
+        );
     }
 
     fn tick(&mut self) {
@@ -1169,6 +1295,7 @@ impl Simulation {
         );
         state.avatar_scale += (scale - state.avatar_scale) * (1.0 - (-dt / 0.6).exp());
         state.place_slots_planned(&self.envelopes, now, &self.travel);
+        self.tick_times.laps.end(Phase::TickSlots);
         let targets: Vec<_> = state
             .avatars
             .iter()
@@ -1202,8 +1329,12 @@ impl Simulation {
                 avatar.presence = avatar.presence.min(opacity);
             }
         }
-        if self.visual_updates {
+        self.tick_times.laps.end(Phase::TickAvatars);
+        if self.visuals != Visuals::None {
             self.place_titles();
+            self.tick_times.laps.end(Phase::TickTitles);
+        }
+        if self.visuals == Visuals::All {
             let texts: Vec<_> = self
                 .labels_for_detail(|_| true)
                 .iter()
@@ -1211,7 +1342,9 @@ impl Simulation {
                 .map(|l| titles::label_bounds(self, l))
                 .chain(caption::frame_text_rects())
                 .collect();
+            self.tick_times.laps.end(Phase::TickLabels);
             self.state.place_names(dt, &self.travel, &texts);
+            self.tick_times.laps.end(Phase::TickNames);
         }
     }
 
@@ -2941,7 +3074,7 @@ mod tests {
         let id = apply(&mut layout, &change, 0);
         let heat = layout.file(id).unwrap().heat;
         assert_eq!(layout.file(id).unwrap().activity, 1.0);
-        layout.cool_heat(6.0, 86400.0);
+        layout.begin_tick(6.0, 86400.0);
         assert!(layout.file(id).unwrap().activity < 0.03);
         assert!(layout.file(id).unwrap().heat > heat * 0.99);
         change.kind = Kind::Deleted;
@@ -2949,7 +3082,7 @@ mod tests {
         apply(&mut layout, &change, 0);
         assert_eq!(layout.file(id).unwrap().heat, before);
         assert_eq!(layout.file(id).unwrap().activity, 1.0);
-        layout.cool_heat(1.0, 0.01);
+        layout.begin_tick(1.0, 0.01);
         assert_eq!(layout.file(id).unwrap().heat, 0.0);
         assert!(layout.file(id).unwrap().activity > 0.5);
         layout.settle(0, 0.0);

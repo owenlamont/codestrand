@@ -82,3 +82,9 @@ opt-level = 0
 lto = "fat"
 codegen-units = 1
 strip = true
+
+# Planner measurement builds: release code generation without the long fat-LTO link.
+[profile.fast]
+inherits = "release"
+lto = "off"
+codegen-units = 16
