@@ -632,7 +632,7 @@ impl Simulation {
             if trace.on() {
                 eprintln!("global_plan_seconds={}", elapsed.as_secs_f64());
             }
-            trace.report(Scope::Global, simulation.events.len(), 0, elapsed);
+            simulation.report_global(0, elapsed);
             return simulation.plan_windows(&events, options, repositories, seconds);
         }
         let mut padding = simulation.travel_padding(options);
@@ -699,13 +699,14 @@ impl Simulation {
         options.progress.pass(1);
         simulation.plan_titles();
         simulation.progress = Progress::default();
-        trace.report(
-            Scope::Global,
-            simulation.events.len(),
-            pass,
-            global_started.elapsed(),
-        );
+        simulation.report_global(pass, global_started.elapsed());
         Ok(simulation)
+    }
+
+    fn report_global(&self, passes: u32, elapsed: Duration) {
+        self.count_tilings();
+        self.trace
+            .report(Scope::Global, self.events.len(), passes, elapsed);
     }
 
     fn apply_padding(
@@ -1024,6 +1025,7 @@ impl Simulation {
             self.state.layout.place_regions(regions, &offsets, &scales);
         }
         self.initial = self.state.0.clone();
+        self.count_tilings();
         Ok(snapshots)
     }
     pub(super) fn duration(&self) -> Time {

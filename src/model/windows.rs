@@ -320,6 +320,13 @@ impl Simulation {
             self.trace.count(Counter::Directories, layout.dir_count());
             self.trace.count(Counter::Avatars, self.state.avatars.len());
             self.trace.count(Counter::Trips, self.travel.trip_count());
+        }
+        self.count_tilings();
+    }
+
+    /// Moves the packing's tiling counts into the trace, under the open phase.
+    pub(super) fn count_tilings(&self) {
+        if self.trace.on() {
             let (tiled, reused) = self.packing.take_tiling_counts();
             self.trace.count(Counter::Tilings, tiled);
             self.trace.count(Counter::TilingReuses, reused);
@@ -474,10 +481,9 @@ mod tests {
         };
         assert_eq!(counts(&reports), counts(&traced(Some(1.0)).1));
         assert_eq!(reports[0].calls(&[Phase::Build]), 1);
-        assert_eq!(
-            reports[0].calls(&[Phase::Build, Phase::PlanRepositories]),
-            1
-        );
+        let build = [Phase::Build, Phase::PlanRepositories];
+        assert_eq!(reports[0].calls(&build), 1);
+        assert!(reports[0].counter(&build, Counter::Tilings) > 0);
         let windows = &reports[1..];
         assert_eq!(windows.len(), sim.boundaries.len());
         assert!(windows.len() > 1);
@@ -744,6 +750,7 @@ mod tests {
         assert_eq!(report.calls(&[Phase::Pass]), passes);
         assert_eq!(report.calls(&[Phase::Pass, Phase::PlanTravel]), passes);
         assert_eq!(report.calls(&[Phase::PlanTitles]), 1);
+        assert!(report.counter(&[], Counter::Tilings) > 0);
     }
 
     #[test]
