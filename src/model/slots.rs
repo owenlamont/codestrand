@@ -318,6 +318,7 @@ impl Simulation {
         }
     }
     pub(super) fn plan_avatar_envelopes(&mut self, snapshots: Option<Snapshots>) {
+        let _phase = self.trace.phase(super::trace::Phase::AvatarEnvelopes);
         if let Some(snapshots) = snapshots {
             self.envelopes = snapshots.project(&self.packing, self.events.len());
             self.plan_ray_runs();
@@ -333,6 +334,8 @@ impl Simulation {
             .cloned()
             .collect();
         self.restart();
+        self.trace
+            .count_replay(u64::from(frames).saturating_sub(self.state.tick));
         for _ in self.state.tick..u64::from(frames) {
             self.tick_local_layout();
             let now = super::tick_time(self.state.tick);

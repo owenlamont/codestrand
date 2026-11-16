@@ -230,6 +230,7 @@ impl Simulation {
         f64::from(cost) * 0.25
     }
     pub(super) fn plan_titles(&mut self) {
+        let _phase = self.trace.phase(super::trace::Phase::PlanTitles);
         let mut costs = vec![Vec::new(); self.state.layout.repositories.len()];
         self.restart();
         let frames = super::frames_for(self.duration(), 60).expect("bounded schedule");
@@ -240,6 +241,12 @@ impl Simulation {
         };
         let begin = first * STEP;
         let last = (frames + STEP) / STEP * STEP;
+        self.trace
+            .count_replay(u64::from(last).saturating_sub(self.state.tick));
+        self.trace.count(
+            super::trace::Counter::TitleCorners,
+            (begin..=frames + STEP).step_by(STEP as usize).count() * costs.len() * 4,
+        );
         for frame in (begin..=frames + STEP).step_by(STEP as usize) {
             self.progress.report_range(
                 crate::progress::Stage::Titles,

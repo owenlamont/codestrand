@@ -10,14 +10,16 @@ use crate::{
 /// reclaim without swapping. Swap is excluded. The snapshot is reused for every
 /// padded schedule and window; it is not a reservation against other processes.
 #[cfg(not(test))]
-pub(crate) fn available() -> anyhow::Result<u64> {
+pub(crate) fn available(trace: &super::Trace) -> anyhow::Result<u64> {
     use anyhow::Context;
     let mut system = sysinfo::System::new()
         .context("cannot read available physical memory; planning stopped")?;
     system.refresh_memory_specifics(sysinfo::MemoryRefreshKind::nothing().with_ram());
     let available =
         validate_available(system.total_memory(), system.available_memory())?;
-    eprintln!("planning_available_memory_bytes={available}");
+    if trace.on() {
+        eprintln!("planning_available_memory_bytes={available}");
+    }
     Ok(available)
 }
 
@@ -92,9 +94,11 @@ pub(super) fn check(
     let global = (packing_bytes + conversion + row_bytes + labels + layout + input * 2)
         .max(layout_peak + input * 3)
         + overhead;
-    eprintln!(
-        "planning_memory_parts packing={packing_bytes} layout_retained={layout} layout_peak={layout_peak} input={input} overhead={overhead} global={global}"
-    );
+    if options.trace.on() {
+        eprintln!(
+            "planning_memory_parts packing={packing_bytes} layout_retained={layout} layout_peak={layout_peak} input={input} overhead={overhead} global={global}"
+        );
+    }
     if options.travel_window_seconds.is_some() {
         return check_streaming(
             events,
@@ -300,9 +304,11 @@ fn check_streaming(
     let windows = super::streaming::PLAN_COPIES * window;
     let global_states = super::streaming::GLOBAL_STATE_COPIES * checkpoint;
     let bytes = (global + global_states).max(retained + states + windows);
-    eprintln!(
-        "streaming_memory global_peak={global} global_retained={retained} window={window} checkpoint={checkpoint} global_states={global_states} window_states={states} total={bytes}"
-    );
+    if options.trace.on() {
+        eprintln!(
+            "streaming_memory global_peak={global} global_retained={retained} window={window} checkpoint={checkpoint} global_states={global_states} window_states={states} total={bytes}"
+        );
+    }
     check_bytes(bytes, options.available_memory).map_err(|error| error.context(format!("streaming memory: global peak {global} plus state copies {global_states}, global retained {retained}, three windows {windows}, ten window state copies {states}")))
 }
 

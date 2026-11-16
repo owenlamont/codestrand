@@ -1,5 +1,8 @@
 use super::{HALF, Rect, Vec2};
-use crate::model::{Simulation, titles};
+use crate::model::{
+    Simulation, titles,
+    trace::{Counter, Phase},
+};
 
 fn merge(row: &mut Vec<(u8, Rect)>, edge: u8, mut rect: Rect) {
     loop {
@@ -63,8 +66,9 @@ impl Simulation {
         &self,
         occupied: &mut [Vec<(u8, Rect)>],
         conflicted: &mut [bool],
-    ) -> usize {
+    ) -> (usize, usize) {
         let mut conflicts = 0;
+        let mut pairs = 0;
         let state = &self.state;
         let radius = state.avatar_radius();
         let live: Vec<_> = state
@@ -91,6 +95,7 @@ impl Simulation {
             };
             let low = tile.low * HALF;
             let span = (tile.high - tile.low) * HALF;
+            pairs += live.len() - 1;
             for &(j, other, _) in &live {
                 if i == j {
                     continue;
@@ -108,10 +113,11 @@ impl Simulation {
                 reserve_other(&mut occupied[avatar.commit], low, span, other, radius);
             }
         }
-        conflicts
+        (conflicts, pairs)
     }
 
     pub(in crate::model) fn reserve_service_slots(&mut self) -> bool {
+        let _phase = self.trace.phase(Phase::Reserve);
         let mut previous = std::mem::take(&mut self.travel.occupancy);
         previous.resize_with(self.events.len(), Vec::new);
         let mut occupied = vec![Vec::new(); self.events.len()];
@@ -120,10 +126,12 @@ impl Simulation {
         self.visual_updates = false;
         self.restart();
         let mut conflicts = 0;
+        let mut pairs = 0;
         let frames = crate::model::frames_for(self.duration(), 60)
             .expect("bounded schedule")
             + 144;
         let begin = u32::try_from(self.state.tick).expect("bounded window");
+        self.trace.count_replay((frames - begin).into());
         for frame in begin..=frames {
             self.progress.report_range(
                 crate::progress::Stage::Reservations,
@@ -132,8 +140,12 @@ impl Simulation {
                 frames.into(),
             );
             self.advance_to(frame, 60);
-            conflicts += self.reserve_frame(&mut occupied, &mut conflicted);
+            let (conflicting, compared) =
+                self.reserve_frame(&mut occupied, &mut conflicted);
+            conflicts += conflicting;
+            pairs += compared;
         }
+        self.trace.count(Counter::PairComparisons, pairs);
         self.restart();
         self.visual_updates = visual;
         anticipate_service_reservations(
@@ -148,7 +160,9 @@ impl Simulation {
             }
         }
         self.travel.occupancy = previous;
-        eprintln!("committing_overlap_observations={conflicts}");
+        if self.trace.on() {
+            eprintln!("committing_overlap_observations={conflicts}");
+        }
         conflicts > 0
     }
 }
@@ -203,6 +217,7 @@ impl Simulation {
         options: &crate::model::Options,
         padding: &[(usize, u32)],
     ) -> Vec<(usize, u32)> {
+        let _phase = self.trace.phase(Phase::RefineServiceSlots);
         for _ in 0..8 {
             if !self.reserve_service_slots() {
                 break;

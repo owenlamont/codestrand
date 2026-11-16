@@ -1,5 +1,7 @@
 use super::{
-    Options, Schedule, Simulation, State, Time, TravelCap, caption, schedule, travel,
+    Options, Schedule, Simulation, State, Time, TravelCap, caption, schedule,
+    trace::{Phase, Scope},
+    travel,
 };
 
 pub(super) use super::streaming::{Events, Stream};
@@ -43,30 +45,39 @@ impl Simulation {
 
     fn finish_window(&mut self, end: Time) -> anyhow::Result<u64> {
         let begin = self.window.as_ref().expect("planning window").state.tick;
-        caption::extend(
-            &self.schedule,
-            &self.events,
-            begin + u64::from(begin > 0),
-            &mut self.caption_plan,
-        );
+        {
+            let _phase = self.trace.phase(Phase::Caption);
+            caption::extend(
+                &self.schedule,
+                &self.events,
+                begin + u64::from(begin > 0),
+                &mut self.caption_plan,
+            );
+        }
         self.plan_titles();
         let boundary = self.clock.present(end).ticks(true);
-        self.restart();
-        for frame in u32::try_from(begin)?..=u32::try_from(boundary)? {
-            self.progress.report_range(
-                crate::progress::Stage::Checkpoint,
-                frame.into(),
-                begin,
-                boundary,
-            );
-            self.advance_to(frame, 60);
+        {
+            let _phase = self.trace.phase(Phase::CheckpointReplay);
+            self.trace.count_replay(boundary.saturating_sub(begin));
+            self.restart();
+            for frame in u32::try_from(begin)?..=u32::try_from(boundary)? {
+                self.progress.report_range(
+                    crate::progress::Stage::Checkpoint,
+                    frame.into(),
+                    begin,
+                    boundary,
+                );
+                self.advance_to(frame, 60);
+            }
         }
         self.boundaries.push(self.state.0.clone());
-        eprintln!(
-            "travel_window end={} commits={} boundary_tick={boundary}",
-            end.lossy_secs_f32(),
-            self.events.len()
-        );
+        if self.trace.on() {
+            eprintln!(
+                "travel_window end={} commits={} boundary_tick={boundary}",
+                end.lossy_secs_f32(),
+                self.events.len()
+            );
+        }
         Ok(boundary)
     }
 
@@ -116,7 +127,8 @@ impl Simulation {
         (history, departures, endings): (&Schedule, &[Time], &[Time]),
         events: &Events,
         padding: &mut Vec<(usize, u32)>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<u32> {
+        let trace = &options.trace;
         let mut pass = 0;
         let mut compactions = 0;
         loop {
@@ -129,26 +141,40 @@ impl Simulation {
                 );
             }
             options.progress.pass(pass);
-            self.schedule = Schedule::with_padding(
-                &self.events,
-                options.seconds_per_day,
-                options.max_idle_seconds,
-                |i| schedule::padding_at(padding, self.offset + i),
-            );
-            let complete_schedule = Schedule::with_padding(
-                events,
-                options.seconds_per_day,
-                options.max_idle_seconds,
-                |i| schedule::padding_at(padding, self.offset + i),
-            );
-            Self::check_schedule(
-                all_events,
-                options,
-                repositories,
-                &complete_schedule,
-            )?;
-            self.update_window_clock(history, departures, endings, options);
-            self.restart();
+            let complete_schedule = {
+                let _phase = trace.phase(Phase::ScheduleRebuild);
+                trace.count_rebuild(self.events.len(), padding.len());
+                trace.count_rebuild(events.len(), padding.len());
+                self.schedule = Schedule::with_padding(
+                    &self.events,
+                    options.seconds_per_day,
+                    options.max_idle_seconds,
+                    |i| schedule::padding_at(padding, self.offset + i),
+                );
+                Schedule::with_padding(
+                    events,
+                    options.seconds_per_day,
+                    options.max_idle_seconds,
+                    |i| schedule::padding_at(padding, self.offset + i),
+                )
+            };
+            {
+                let _phase = trace.phase(Phase::CheckSchedule);
+                Self::check_schedule(
+                    all_events,
+                    options,
+                    repositories,
+                    &complete_schedule,
+                )?;
+            }
+            {
+                let _phase = trace.phase(Phase::WindowClock);
+                self.update_window_clock(history, departures, endings, options);
+            }
+            {
+                let _phase = trace.phase(Phase::Restart);
+                self.restart();
+            }
             self.plan_avatar_envelopes(None);
             self.plan_travel(options, padding);
             let adjusted = self.adjust_travel_padding(options, padding);
@@ -170,7 +196,7 @@ impl Simulation {
             }
             break;
         }
-        Ok(())
+        Ok(pass)
     }
 
     pub(super) fn run_windows(
@@ -199,14 +225,13 @@ impl Simulation {
             services: Vec::new(),
             captured: Vec::new(),
         });
-        #[cfg(test)]
         let mut window_index = 0;
         loop {
             let started = std::time::Instant::now();
             let limit = self.window.as_ref().expect("planning window").end;
             let count = history.starts.partition_point(|&start| start < limit);
             self.events = events.prefix(count);
-            self.settle_window(
+            let passes = self.settle_window(
                 all_events,
                 options,
                 repositories,
@@ -215,11 +240,8 @@ impl Simulation {
                 &mut padding,
             )?;
             #[cfg(test)]
-            {
-                if let Some(hook) = &options.window_hook {
-                    hook(window_index, &mut self);
-                }
-                window_index += 1;
+            if let Some(hook) = &options.window_hook {
+                hook(window_index, &mut self);
             }
             if options.travel_cap == TravelCap::None {
                 anyhow::ensure!(
@@ -229,10 +251,20 @@ impl Simulation {
                 );
             }
             let boundary = self.finish_window(end)?;
-            eprintln!(
-                "window_plan_seconds={} history_window_seconds={seconds}",
-                started.elapsed().as_secs_f64()
+            let elapsed = started.elapsed();
+            if options.trace.on() {
+                eprintln!(
+                    "window_plan_seconds={} history_window_seconds={seconds}",
+                    elapsed.as_secs_f64()
+                );
+            }
+            options.trace.report(
+                Scope::Window(window_index),
+                self.events.len(),
+                passes,
+                elapsed,
             );
+            window_index += 1;
             if let Some(publish) = &mut publish {
                 let frame =
                     self.window_packet(events.clone(), boundary, end >= duration);
@@ -303,6 +335,7 @@ impl Simulation {
             visual_updates: self.visual_updates,
             title_plan: self.title_plan.clone(),
             progress: crate::progress::Progress::default(),
+            trace: super::Trace::default(),
             window: None,
             boundaries: Vec::new(),
             windowed: true,
@@ -345,6 +378,7 @@ impl Simulation {
 
 #[cfg(test)]
 mod tests {
+    use super::super::trace::{Counter, Report};
     use super::*;
 
     #[test]
@@ -390,6 +424,82 @@ mod tests {
         assert_eq!(checkpoints, sim.boundaries.len());
         assert!(checkpoints > 1);
         verify_boundaries(&mut sim);
+    }
+
+    fn traced(window: Option<f32>) -> (Simulation, Vec<Report>) {
+        let trace = super::super::Trace::enabled();
+        let (events, labels) = super::super::tests::short_repository_history(2);
+        let sim = Simulation::with_repositories(
+            events,
+            &Options {
+                eager_windows: window.is_some(),
+                travel_window_seconds: window,
+                trace: trace.clone(),
+                ..Options::default()
+            },
+            &crate::theme::Theme::neon(),
+            &crate::contributors::Mappings::default(),
+            &labels,
+        );
+        (sim, trace.reports())
+    }
+
+    #[test]
+    fn trace_counts_repeat_and_match_every_window() {
+        let (sim, reports) = traced(Some(1.0));
+        let counts = |reports: &[Report]| -> Vec<_> {
+            reports.iter().map(Report::counts).collect()
+        };
+        assert_eq!(counts(&reports), counts(&traced(Some(1.0)).1));
+        assert_eq!(reports[0].calls(&[Phase::Build]), 1);
+        assert_eq!(
+            reports[0].calls(&[Phase::Build, Phase::PlanRepositories]),
+            1
+        );
+        let windows = &reports[1..];
+        assert_eq!(windows.len(), sim.boundaries.len());
+        assert!(windows.len() > 1);
+        let mut replayed = 0;
+        for window in windows {
+            assert!(window.nests(), "{window}");
+            let passes = u64::from(window.passes());
+            for phase in [
+                Phase::ScheduleRebuild,
+                Phase::CheckSchedule,
+                Phase::WindowClock,
+                Phase::Restart,
+                Phase::AvatarEnvelopes,
+                Phase::PlanTravel,
+                Phase::AdjustPadding,
+            ] {
+                assert_eq!(window.calls(&[phase]), passes, "{window}");
+            }
+            assert_eq!(
+                window.counter(&[Phase::ScheduleRebuild], Counter::Rebuilds),
+                2 * passes
+            );
+            assert_eq!(window.calls(&[Phase::PlanTravel, Phase::Capture]), passes);
+            assert_eq!(window.calls(&[Phase::PlanTitles]), 1);
+            replayed +=
+                window.counter(&[Phase::CheckpointReplay], Counter::TicksReplayed);
+        }
+        assert_eq!(replayed, sim.boundaries.last().unwrap().tick);
+    }
+
+    #[test]
+    fn whole_timeline_trace_times_every_pass() {
+        let (_, reports) = traced(None);
+        let [report] = &reports[..] else {
+            panic!("one global report, found {}", reports.len());
+        };
+        assert!(report.nests(), "{report}");
+        let passes = u64::from(report.passes());
+        assert!(passes > 0);
+        assert_eq!(report.calls(&[Phase::Build]), 1);
+        assert_eq!(report.calls(&[Phase::TravelPadding]), 1);
+        assert_eq!(report.calls(&[Phase::Pass]), passes);
+        assert_eq!(report.calls(&[Phase::Pass, Phase::PlanTravel]), passes);
+        assert_eq!(report.calls(&[Phase::PlanTitles]), 1);
     }
 
     #[test]

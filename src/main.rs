@@ -300,6 +300,9 @@ struct Source {
     #[arg(skip)]
     #[serde(skip)]
     window_override: Option<WindowOverride>,
+    #[arg(skip = model::Trace::from_env())]
+    #[serde(skip)]
+    trace: model::Trace,
     /// Bot travel policy: fade across or walk the shortest gutter route.
     #[arg(long, value_enum, default_value = "fade")]
     bot_travel: model::BotTravel,
@@ -398,7 +401,7 @@ impl Source {
 
     fn load(&self, progress: &Progress) -> anyhow::Result<(model::Simulation, String)> {
         #[cfg(not(test))]
-        let available_memory = model::available_memory()?;
+        let available_memory = model::available_memory(&self.trace)?;
         #[cfg(test)]
         let available_memory = model::Options::default().available_memory;
         self.load_with_memory(progress, available_memory)
@@ -464,6 +467,7 @@ impl Source {
             avatar_size: self.avatar_scale,
             gutter: self.gutter,
             progress: progress.clone(),
+            trace: self.trace.clone(),
         };
         let history_duration = options.choose_window(&events);
         #[cfg(test)]
