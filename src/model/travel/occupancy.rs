@@ -146,6 +146,7 @@ impl Simulation {
             pairs += compared;
         }
         self.trace.count(Counter::PairComparisons, pairs);
+        self.trace.add_ticks(&mut self.tick_times);
         self.restart();
         self.visual_updates = visual;
         anticipate_service_reservations(
@@ -186,6 +187,20 @@ fn reserve_other(
     }
 }
 impl super::Plan {
+    /// Everything a refinement round leaves for the next, with floats printed exactly.
+    pub(in crate::model) fn round_state(
+        &self,
+        window: Option<&crate::model::windows::Planning>,
+    ) -> String {
+        format!(
+            "{:?}{:?}{:?}{:?}",
+            self.trips,
+            self.docks,
+            self.occupancy,
+            window.map(|window| &window.captured)
+        )
+    }
+
     pub(in crate::model) fn reserved(
         &self,
         commit: usize,
@@ -218,6 +233,7 @@ impl Simulation {
         padding: &[(usize, u32)],
     ) -> Vec<(usize, u32)> {
         let _phase = self.trace.phase(Phase::RefineServiceSlots);
+        let mut previous = None;
         for _ in 0..8 {
             if !self.reserve_service_slots() {
                 break;
@@ -227,6 +243,16 @@ impl Simulation {
             if adjusted != padding {
                 return adjusted;
             }
+            let round = self.travel.round_state(self.window.as_ref());
+            // A round that ends where it began repeats unchanged until the cap.
+            if !options.replay_everything
+                && previous.as_ref() == Some(&round)
+                && !round.contains("NaN")
+            {
+                self.trace.count(Counter::SettledRefinements, 1);
+                break;
+            }
+            previous = Some(round);
         }
         padding.to_vec()
     }

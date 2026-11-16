@@ -462,6 +462,7 @@ impl Source {
             eager_windows: false,
             #[cfg(test)]
             window_hook: None,
+            replay_everything: false,
             bot_travel: self.bot_travel,
             avatar_max_speed: self.avatar_max_speed,
             avatar_size: self.avatar_scale,

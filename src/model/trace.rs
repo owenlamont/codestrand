@@ -28,7 +28,23 @@ pub(crate) enum Phase {
     Caption,
     PlanTitles,
     CheckpointReplay,
+    TickLayout,
+    TickSlots,
+    TickAvatars,
+    TickTitles,
+    TickLabels,
+    TickNames,
 }
+
+/// The sections of one playback tick, in the order the tick runs them.
+const TICK_PHASES: [Phase; 6] = [
+    Phase::TickLayout,
+    Phase::TickSlots,
+    Phase::TickAvatars,
+    Phase::TickTitles,
+    Phase::TickLabels,
+    Phase::TickNames,
+];
 
 impl Phase {
     fn name(self) -> &'static str {
@@ -53,6 +69,12 @@ impl Phase {
             Self::Caption => "caption",
             Self::PlanTitles => "plan_titles",
             Self::CheckpointReplay => "checkpoint_replay",
+            Self::TickLayout => "tick_layout",
+            Self::TickSlots => "tick_slots",
+            Self::TickAvatars => "tick_avatars",
+            Self::TickTitles => "tick_titles",
+            Self::TickLabels => "tick_labels",
+            Self::TickNames => "tick_names",
         }
     }
 }
@@ -70,6 +92,14 @@ pub(crate) enum Counter {
     /// comparisons are fewer.
     PaddingComparisonsBound,
     TitleCorners,
+    /// Envelope replays skipped because the pass began with unchanged padding.
+    EnvelopeReuses,
+    /// Refinement loops stopped because a round ended in the state it began in.
+    SettledRefinements,
+    Files,
+    Directories,
+    Avatars,
+    Trips,
 }
 
 impl Counter {
@@ -83,6 +113,12 @@ impl Counter {
             Self::Events => "events",
             Self::PaddingComparisonsBound => "padding_comparisons_bound",
             Self::TitleCorners => "title_corners",
+            Self::EnvelopeReuses => "envelope_reuses",
+            Self::SettledRefinements => "settled_refinements",
+            Self::Files => "files",
+            Self::Directories => "directories",
+            Self::Avatars => "avatars",
+            Self::Trips => "trips",
         }
     }
 }
@@ -291,6 +327,24 @@ impl Trace {
         self.count(Counter::PaddingComparisonsBound, events * padding);
     }
 
+    /// Moves the tick sections timed since the last call under the open phase.
+    pub(crate) fn add_ticks(&self, times: &mut TickTimes) {
+        let Some(totals) = &self.0 else { return };
+        let mut totals = lock(totals);
+        for (phase, time) in TICK_PHASES
+            .into_iter()
+            .zip(std::mem::take(&mut times.totals))
+        {
+            if let Some(time) = time {
+                let mut path = totals.open.clone();
+                path.push(phase);
+                let (total, calls) = totals.phases.entry(path).or_default();
+                *total += time;
+                *calls += 1;
+            }
+        }
+    }
+
     /// Prints the totals since the last report as one stderr line, then resets them.
     pub(crate) fn report(
         &self,
@@ -319,6 +373,32 @@ impl Trace {
         self.0
             .as_ref()
             .map_or_else(Vec::new, |totals| lock(totals).reports.clone())
+    }
+}
+
+/// Time per section of a tick, kept without a lock and moved to the trace per replay.
+#[derive(Clone, Default)]
+pub(crate) struct TickTimes {
+    last: Option<Instant>,
+    totals: [Option<Duration>; TICK_PHASES.len()],
+}
+
+impl TickTimes {
+    pub(crate) fn begin(&mut self, trace: &Trace) {
+        self.last = trace.on().then(Instant::now);
+    }
+
+    /// Charges the time since the previous section ended to `phase`.
+    pub(crate) fn end(&mut self, phase: Phase) {
+        if let Some(last) = &mut self.last {
+            let now = Instant::now();
+            let index = TICK_PHASES
+                .iter()
+                .position(|&tick| tick == phase)
+                .expect("a tick phase");
+            *self.totals[index].get_or_insert_default() += now - *last;
+            *last = now;
+        }
     }
 }
 
@@ -366,6 +446,28 @@ mod tests {
         assert_eq!(
             reports[1].counts(),
             "planning_trace window=1 commits=0 passes=0"
+        );
+    }
+
+    #[test]
+    fn tick_sections_join_the_open_phase_once_per_replay() {
+        let trace = Trace::enabled();
+        let mut times = TickTimes::default();
+        {
+            let _capture = trace.phase(Phase::Capture);
+            for _ in 0..2 {
+                times.begin(&trace);
+                times.end(Phase::TickLayout);
+                times.end(Phase::TickSlots);
+            }
+            trace.add_ticks(&mut times);
+        }
+        trace.add_ticks(&mut times);
+        trace.report(Scope::Window(0), 1, 1, Duration::from_secs(1));
+        assert_eq!(
+            trace.reports()[0].counts(),
+            "planning_trace window=0 commits=1 passes=1 capture_calls=1 \
+             capture.tick_layout_calls=1 capture.tick_slots_calls=1"
         );
     }
 

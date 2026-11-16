@@ -1,6 +1,6 @@
 use super::{
     Options, Schedule, Simulation, State, Time, TravelCap, caption, schedule,
-    trace::{Phase, Scope},
+    trace::{Counter, Phase, Scope},
     travel,
 };
 
@@ -69,6 +69,7 @@ impl Simulation {
                 );
                 self.advance_to(frame, 60);
             }
+            self.trace.add_ticks(&mut self.tick_times);
         }
         self.boundaries.push(self.state.0.clone());
         if self.trace.on() {
@@ -131,6 +132,7 @@ impl Simulation {
         let trace = &options.trace;
         let mut pass = 0;
         let mut compactions = 0;
+        let mut planned: Option<Vec<(usize, u32)>> = None;
         loop {
             pass += 1;
             if pass > 32 {
@@ -175,7 +177,12 @@ impl Simulation {
                 let _phase = trace.phase(Phase::Restart);
                 self.restart();
             }
-            self.plan_avatar_envelopes(None);
+            if !options.replay_everything && planned.as_ref() == Some(padding) {
+                trace.count(Counter::EnvelopeReuses, 1);
+            } else {
+                self.plan_avatar_envelopes(None);
+                planned = Some(padding.clone());
+            }
             self.plan_travel(options, padding);
             let adjusted = self.adjust_travel_padding(options, padding);
             if adjusted != *padding
@@ -258,6 +265,7 @@ impl Simulation {
                     elapsed.as_secs_f64()
                 );
             }
+            self.count_sizes();
             options.trace.report(
                 Scope::Window(window_index),
                 self.events.len(),
@@ -305,6 +313,16 @@ impl Simulation {
 }
 
 impl Simulation {
+    fn count_sizes(&self) {
+        if self.trace.on() {
+            let layout = self.layout();
+            self.trace.count(Counter::Files, layout.files().count());
+            self.trace.count(Counter::Directories, layout.dir_count());
+            self.trace.count(Counter::Avatars, self.state.avatars.len());
+            self.trace.count(Counter::Trips, self.travel.trip_count());
+        }
+    }
+
     fn window_packet(&self, events: Events, boundary: u64, complete: bool) -> Self {
         let initial = self.window.as_ref().expect("planning window").state.clone();
         Self {
@@ -336,6 +354,7 @@ impl Simulation {
             title_plan: self.title_plan.clone(),
             progress: crate::progress::Progress::default(),
             trace: super::Trace::default(),
+            tick_times: super::trace::TickTimes::default(),
             window: None,
             boundaries: Vec::new(),
             windowed: true,
@@ -378,7 +397,7 @@ impl Simulation {
 
 #[cfg(test)]
 mod tests {
-    use super::super::trace::{Counter, Report};
+    use super::super::trace::Report;
     use super::*;
 
     #[test]
@@ -468,22 +487,126 @@ mod tests {
                 Phase::CheckSchedule,
                 Phase::WindowClock,
                 Phase::Restart,
-                Phase::AvatarEnvelopes,
                 Phase::PlanTravel,
                 Phase::AdjustPadding,
             ] {
                 assert_eq!(window.calls(&[phase]), passes, "{window}");
             }
             assert_eq!(
+                window.calls(&[Phase::AvatarEnvelopes])
+                    + window.counter(&[], Counter::EnvelopeReuses),
+                passes
+            );
+            assert_eq!(
                 window.counter(&[Phase::ScheduleRebuild], Counter::Rebuilds),
                 2 * passes
             );
             assert_eq!(window.calls(&[Phase::PlanTravel, Phase::Capture]), passes);
             assert_eq!(window.calls(&[Phase::PlanTitles]), 1);
+            assert_eq!(
+                window.calls(&[Phase::CheckpointReplay, Phase::TickNames]),
+                1
+            );
+            assert!(window.counter(&[], Counter::Files) > 0);
             replayed +=
                 window.counter(&[Phase::CheckpointReplay], Counter::TicksReplayed);
         }
         assert_eq!(replayed, sim.boundaries.last().unwrap().tick);
+    }
+
+    /// One history planned with replay reuse and again with every replay run.
+    fn reused_and_replayed(
+        commits: Option<usize>,
+        window: f32,
+        travel_cap: TravelCap,
+    ) -> [(Simulation, Vec<Report>); 2] {
+        [false, true].map(|replay_everything| {
+            let trace = super::super::Trace::enabled();
+            let (events, labels) = super::super::tests::short_repository_history(6);
+            let sim = Simulation::with_repositories(
+                events,
+                &Options {
+                    eager_windows: true,
+                    travel_window_seconds: Some(window),
+                    commits,
+                    travel_cap,
+                    replay_everything,
+                    trace: trace.clone(),
+                    ..Options::default()
+                },
+                &crate::theme::Theme::neon(),
+                &crate::contributors::Mappings::default(),
+                &labels,
+            );
+            (sim, trace.reports())
+        })
+    }
+
+    fn total(reports: &[Report], path: &[Phase], counter: Counter) -> u64 {
+        reports.iter().map(|r| r.counter(path, counter)).sum()
+    }
+
+    fn assert_same_playback(a: &mut Simulation, b: &mut Simulation) {
+        assert_eq!(a.travel.round_state(None), b.travel.round_state(None));
+        assert_eq!(a.travel.report(), b.travel.report());
+        assert_eq!(a.boundaries.len(), b.boundaries.len());
+        for (left, right) in a.boundaries.clone().into_iter().zip(b.boundaries.clone())
+        {
+            a.state = super::super::SharedState(left);
+            b.state = super::super::SharedState(right);
+            assert_eq!(
+                super::super::streaming::tests::visible(a),
+                super::super::streaming::tests::visible(b),
+                "boundary at tick {}",
+                a.state.tick
+            );
+        }
+        a.restart();
+        b.restart();
+        for frame in 0..=super::super::frames_for(a.duration(), 60).unwrap() {
+            a.advance_to(frame, 60);
+            b.advance_to(frame, 60);
+            assert_eq!(
+                super::super::streaming::tests::visible(a),
+                super::super::streaming::tests::visible(b),
+                "tick {frame}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unchanged_padding_pass_reuses_envelopes_without_changing_playback() {
+        let [(mut reused, fast), (mut replayed, slow)] =
+            reused_and_replayed(Some(6), 1.0, TravelCap::Seconds(0.4));
+        let replays = |reports: &[Report]| {
+            total(reports, &[Phase::AvatarEnvelopes], Counter::Replays)
+        };
+        let skipped = total(&fast, &[], Counter::EnvelopeReuses);
+        assert!(skipped > 0);
+        assert_eq!(replays(&fast) + skipped, replays(&slow));
+        assert_same_playback(&mut reused, &mut replayed);
+    }
+
+    #[test]
+    fn a_settled_refinement_stops_without_changing_playback() {
+        let [(mut reused, fast), (mut replayed, slow)] =
+            reused_and_replayed(Some(12), 3.0, TravelCap::None);
+        let rounds = |reports: &[Report]| {
+            total(
+                reports,
+                &[Phase::RefineServiceSlots, Phase::Reserve],
+                Counter::Replays,
+            )
+        };
+        assert!(
+            total(
+                &fast,
+                &[Phase::RefineServiceSlots],
+                Counter::SettledRefinements
+            ) > 0
+        );
+        assert!(rounds(&fast) < rounds(&slow));
+        assert_same_playback(&mut reused, &mut replayed);
     }
 
     #[test]

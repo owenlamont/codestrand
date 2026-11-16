@@ -99,6 +99,8 @@ pub(super) struct Options {
     pub eager_windows: bool,
     #[cfg(test)]
     pub window_hook: Option<streaming::WindowHook>,
+    /// Runs every replay even where its result is already held; tests compare against it.
+    pub replay_everything: bool,
     pub bot_travel: BotTravel,
     pub avatar_max_speed: f32,
     pub avatar_size: f32,
@@ -183,6 +185,7 @@ impl Default for Options {
             eager_windows: false,
             #[cfg(test)]
             window_hook: None,
+            replay_everything: false,
             bot_travel: BotTravel::Fade,
             avatar_max_speed: 480.0,
             avatar_size: 2.0,
@@ -458,6 +461,7 @@ pub(super) struct Simulation {
     title_plan: Vec<Vec<u8>>,
     progress: Progress,
     trace: Trace,
+    tick_times: trace::TickTimes,
     window: Option<windows::Planning>,
     boundaries: Vec<std::sync::Arc<State>>,
     windowed: bool,
@@ -914,6 +918,7 @@ impl Simulation {
             title_plan: Vec::new(),
             progress: options.progress.clone(),
             trace: options.trace.clone(),
+            tick_times: trace::TickTimes::default(),
             window: None,
             boundaries: Vec::new(),
             windowed: options.travel_window_seconds.is_some(),
@@ -1200,7 +1205,9 @@ impl Simulation {
     }
 
     fn tick(&mut self) {
+        self.tick_times.begin(&self.trace);
         self.tick_layout();
+        self.tick_times.end(Phase::TickLayout);
         let state = &mut *self.state;
         let now = tick_time(state.tick);
         if self.windowed {
@@ -1226,6 +1233,7 @@ impl Simulation {
         );
         state.avatar_scale += (scale - state.avatar_scale) * (1.0 - (-dt / 0.6).exp());
         state.place_slots_planned(&self.envelopes, now, &self.travel);
+        self.tick_times.end(Phase::TickSlots);
         let targets: Vec<_> = state
             .avatars
             .iter()
@@ -1259,8 +1267,10 @@ impl Simulation {
                 avatar.presence = avatar.presence.min(opacity);
             }
         }
+        self.tick_times.end(Phase::TickAvatars);
         if self.visual_updates {
             self.place_titles();
+            self.tick_times.end(Phase::TickTitles);
             let texts: Vec<_> = self
                 .labels_for_detail(|_| true)
                 .iter()
@@ -1268,7 +1278,9 @@ impl Simulation {
                 .map(|l| titles::label_bounds(self, l))
                 .chain(caption::frame_text_rects())
                 .collect();
+            self.tick_times.end(Phase::TickLabels);
             self.state.place_names(dt, &self.travel, &texts);
+            self.tick_times.end(Phase::TickNames);
         }
     }
 

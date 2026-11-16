@@ -44,7 +44,7 @@ pub(super) struct Pose {
     dock: slots::Dock,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(super) struct Service {
     pub(super) commit: usize,
     pub(super) author: usize,
@@ -245,6 +245,9 @@ impl Plan {
         let trip = self.trips.last_mut().expect("fixture has a trip");
         trip.fade = true;
         trip.commit
+    }
+    pub(super) fn trip_count(&self) -> usize {
+        self.trips.len()
     }
     pub(super) fn first_unresolved(&self) -> Option<usize> {
         self.trips.iter().find(|t| t.fade).map(|t| t.commit)
@@ -477,6 +480,7 @@ fn replay(simulation: &mut Simulation, frames: u32) -> Capture {
     simulation.visual_updates = visual_updates;
     simulation.travel.docks = docks;
     simulation.travel.replanning = false;
+    simulation.trace.add_ticks(&mut simulation.tick_times);
     capture
 }
 

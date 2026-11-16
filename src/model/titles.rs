@@ -309,6 +309,7 @@ impl Simulation {
                     .collect()
             })
             .collect();
+        self.trace.add_ticks(&mut self.tick_times);
         self.restart();
     }
     pub(super) fn place_titles(&mut self) {
