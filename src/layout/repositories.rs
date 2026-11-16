@@ -62,6 +62,12 @@ pub(crate) struct RegionSample {
 }
 
 impl RegionSample {
+    /// Bytes one sample holds for a layout of this many directories and files.
+    pub(crate) fn bytes(directories: usize, files: usize) -> usize {
+        directories * std::mem::size_of::<DirPoint>()
+            + files * std::mem::size_of::<FilePoint>()
+    }
+
     pub(crate) fn regions(
         &self,
         labels: &[String],

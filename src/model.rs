@@ -67,6 +67,7 @@ const ARRIVAL_SCALE: f32 = 1.15;
 const BEAM_LIMIT: usize = 24;
 const FRAGMENT_TARGETS: usize = 24;
 const SETTLE_TICKS: u32 = 1200;
+/// Ticks of the global replay whose region samples are held before they become inputs.
 const REGION_BATCH: usize = 512;
 const DIR_LABELS: usize = 20;
 
