@@ -532,6 +532,32 @@ mod tests {
         assert_eq!(replayed, sim.boundaries.last().unwrap().tick);
     }
 
+    fn planned(
+        commits: Option<usize>,
+        window: f32,
+        travel_cap: TravelCap,
+        replay_everything: bool,
+    ) -> (Simulation, Vec<Report>) {
+        let trace = super::super::Trace::enabled();
+        let (events, labels) = super::super::tests::short_repository_history(6);
+        let sim = Simulation::with_repositories(
+            events,
+            &Options {
+                eager_windows: true,
+                travel_window_seconds: Some(window),
+                commits,
+                travel_cap,
+                replay_everything,
+                trace: trace.clone(),
+                ..Options::default()
+            },
+            &crate::theme::Theme::neon(),
+            &crate::contributors::Mappings::default(),
+            &labels,
+        );
+        (sim, trace.reports())
+    }
+
     /// One history planned with replay reuse and again with every replay run.
     fn reused_and_replayed(
         commits: Option<usize>,
@@ -539,24 +565,7 @@ mod tests {
         travel_cap: TravelCap,
     ) -> [(Simulation, Vec<Report>); 2] {
         [false, true].map(|replay_everything| {
-            let trace = super::super::Trace::enabled();
-            let (events, labels) = super::super::tests::short_repository_history(6);
-            let sim = Simulation::with_repositories(
-                events,
-                &Options {
-                    eager_windows: true,
-                    travel_window_seconds: Some(window),
-                    commits,
-                    travel_cap,
-                    replay_everything,
-                    trace: trace.clone(),
-                    ..Options::default()
-                },
-                &crate::theme::Theme::neon(),
-                &crate::contributors::Mappings::default(),
-                &labels,
-            );
-            (sim, trace.reports())
+            planned(commits, window, travel_cap, replay_everything)
         })
     }
 
@@ -589,6 +598,32 @@ mod tests {
                 super::super::streaming::tests::visible(b),
                 "tick {frame}"
             );
+            assert_eq!(
+                a.layout().exact_state(),
+                b.layout().exact_state(),
+                "layout at tick {frame}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "prints digests for comparing playback between two commits"]
+    fn playback_digests() {
+        use std::hash::Hasher as _;
+        let plans = vec![
+            traced(Some(1.0)).0,
+            traced(None).0,
+            planned(Some(12), 3.0, TravelCap::None, false).0,
+        ];
+        for (index, mut sim) in plans.into_iter().enumerate() {
+            let mut hash = std::hash::DefaultHasher::new();
+            hash.write(sim.travel.round_state(None).as_bytes());
+            for frame in 0..=super::super::frames_for(sim.duration(), 60).unwrap() {
+                sim.advance_to(frame, 60);
+                hash.write(sim.layout().exact_state().as_bytes());
+                hash.write(super::super::streaming::tests::visible(&sim).as_bytes());
+            }
+            eprintln!("PLAYBACK_DIGEST {index} {:016x}", hash.finish());
         }
     }
 

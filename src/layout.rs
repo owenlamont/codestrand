@@ -397,6 +397,12 @@ impl Layout {
         id
     }
 
+    /// Every directory, file and region with floats printed exactly, in a stable order.
+    #[cfg(test)]
+    pub(crate) fn exact_state(&self) -> String {
+        format!("{:?}{:?}{:?}", self.dirs, self.files, self.repositories)
+    }
+
     pub(super) fn step(&mut self, dt: f32) {
         self.step_observed(dt, None, |_| ());
     }
