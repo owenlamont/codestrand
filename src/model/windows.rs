@@ -320,6 +320,9 @@ impl Simulation {
             self.trace.count(Counter::Directories, layout.dir_count());
             self.trace.count(Counter::Avatars, self.state.avatars.len());
             self.trace.count(Counter::Trips, self.travel.trip_count());
+            let (tiled, reused) = self.packing.take_tiling_counts();
+            self.trace.count(Counter::Tilings, tiled);
+            self.trace.count(Counter::TilingReuses, reused);
         }
     }
 
@@ -636,6 +639,8 @@ mod tests {
         };
         let skipped = total(&fast, &[], Counter::EnvelopeReuses);
         assert!(skipped > 0);
+        assert!(total(&fast, &[], Counter::TilingReuses) > 0);
+        assert_eq!(total(&slow, &[], Counter::TilingReuses), 0);
         assert_eq!(replays(&fast) + skipped, replays(&slow));
         assert_same_playback(&mut reused, &mut replayed);
     }

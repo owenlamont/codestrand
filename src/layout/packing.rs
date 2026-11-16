@@ -332,6 +332,49 @@ fn allocate(
     }
 }
 
+/// Recomputes only the weights of feasibility states, as [`update`] would.
+fn reweigh(
+    nodes: &[Node],
+    index: usize,
+    weights: &[f32],
+    presence: &[f32],
+    result: &mut [Feasible],
+) {
+    result[index].weight = match nodes[index] {
+        Node::Repository(i) => weights[i] * presence[i],
+        Node::Split { first, second, .. } => {
+            reweigh(nodes, first, weights, presence, result);
+            reweigh(nodes, second, weights, presence, result);
+            result[first].weight + result[second].weight
+        }
+    };
+}
+
+/// The feasibility states of the last presence vector tiled, and how often they were reused.
+#[derive(Default)]
+struct Tiling {
+    presence: Vec<u32>,
+    states: Vec<Feasible>,
+    samples: usize,
+    reuses: usize,
+}
+
+/// Feasibility polygons depend on presence alone, so one presence vector's are kept.
+#[derive(Default)]
+struct TilingCache(std::sync::Mutex<Tiling>);
+
+impl Clone for TilingCache {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+impl std::fmt::Debug for TilingCache {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("TilingCache")
+    }
+}
+
 fn tiles(
     nodes: &[Node],
     weights: &[f32],
@@ -526,6 +569,9 @@ pub(crate) struct Packing {
     rotated: Vec<bool>,
     zoom: Arc<[Vec<f32>]>,
     visible_until: Arc<[crate::model::Time]>,
+    tiling: TilingCache,
+    /// Tiles every sample from scratch; tests compare against it.
+    fresh_tiling: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -796,6 +842,8 @@ impl Packing {
             rotated,
             zoom: Arc::default(),
             visible_until: Arc::default(),
+            tiling: TilingCache::default(),
+            fresh_tiling: false,
         }
         .plan_zoom())
     }
@@ -937,6 +985,56 @@ impl Packing {
         Some((regions, origins, scales))
     }
 
+    /// [`tiles`] for this packing, reusing the polygons while presence repeats bit for bit.
+    fn tiles(&self, weights: &[f32], presence: &[f32]) -> Option<Vec<Option<Tile>>> {
+        let gap = Vec2::splat(self.gutter_scale);
+        if self.fresh_tiling {
+            return tiles(&self.nodes, weights, presence, gap);
+        }
+        let mut tiling = self
+            .tiling
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tiling = &mut *tiling;
+        tiling.samples += 1;
+        if tiling.states.len() == self.nodes.len()
+            && tiling
+                .presence
+                .iter()
+                .copied()
+                .eq(presence.iter().map(|p| p.to_bits()))
+        {
+            tiling.reuses += 1;
+            reweigh(&self.nodes, 0, weights, presence, &mut tiling.states);
+        } else {
+            tiling.presence = presence.iter().map(|p| p.to_bits()).collect();
+            tiling.states = vec![Feasible::default(); self.nodes.len()];
+            feasibility(&self.nodes, 0, weights, presence, gap, &mut tiling.states);
+        }
+        allocated(&self.nodes, weights.len(), &tiling.states)
+    }
+
+    /// Samples tiled and samples that reused the previous polygons, since the last call.
+    pub(crate) fn take_tiling_counts(&self) -> (usize, usize) {
+        let mut tiling = self
+            .tiling
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (
+            std::mem::take(&mut tiling.samples),
+            std::mem::take(&mut tiling.reuses),
+        )
+    }
+
+    pub(crate) fn tile_fresh(&mut self, fresh: bool) {
+        self.fresh_tiling = fresh;
+        if fresh {
+            self.tiling = TilingCache::default();
+        }
+    }
+
     fn fit(&self, tick: usize, presence: Option<&[f32]>) -> Vec<Placement> {
         self.fit_rows(tick, tick, None, presence)
     }
@@ -976,13 +1074,9 @@ impl Packing {
                     .clamp(0.0, 1.0)
             })
             .collect();
-        let placement = tiles(
-            &self.nodes,
-            &weights,
-            &presence,
-            Vec2::splat(self.gutter_scale),
-        )
-        .expect("presence-scaled tiles remain feasible");
+        let placement = self
+            .tiles(&weights, &presence)
+            .expect("presence-scaled tiles remain feasible");
         self.inputs[tick]
             .iter()
             .enumerate()
@@ -1124,6 +1218,52 @@ mod tests {
         let waiting = Packing::with_gutter(&rows, 2.0, Some(&activation)).unwrap();
         assert!(normal.sample(35).unwrap().0[3].tile.is_none());
         assert!(waiting.sample(35).unwrap().0[3].tile.is_some());
+    }
+
+    #[test]
+    fn kept_polygons_tile_like_fresh_ones_across_seeks_and_presence_changes() {
+        let kept = Packing::before_service(&fixture());
+        let mut fresh = kept.clone();
+        fresh.tile_fresh(true);
+        kept.take_tiling_counts();
+        let hidden: [f32; 30] = std::array::from_fn(|i| [0.5, 1.0, 0.25][i % 3]);
+        let samples = [
+            (1300, None),
+            (1301, None),
+            (1420, None),
+            (700, None),
+            (701, None),
+            (701, Some(&hidden[..])),
+            (702, Some(&hidden[..])),
+            (1599, None),
+            (1300, None),
+        ];
+        for (tick, presence) in samples {
+            assert_eq!(
+                format!("{:?}", kept.sample_with_presence(tick, presence)),
+                format!("{:?}", fresh.sample_with_presence(tick, presence)),
+                "tick {tick}"
+            );
+        }
+        let (tiled, reused) = kept.take_tiling_counts();
+        assert_eq!(tiled, samples.len());
+        assert!(0 < reused && reused < tiled, "{reused} of {tiled}");
+        assert_eq!(fresh.take_tiling_counts(), (0, 0));
+
+        let weights: Vec<f32> = (0..30_u8).map(|i| 1.0 + f32::from(i)).collect();
+        let states = |weights: &[f32]| {
+            let mut states = vec![Feasible::default(); kept.nodes.len()];
+            feasibility(&kept.nodes, 0, weights, &hidden, Vec2::ONE, &mut states);
+            states
+        };
+        let mut reweighed = states(&[1.0; 30]);
+        reweigh(&kept.nodes, 0, &weights, &hidden, &mut reweighed);
+        assert!(
+            reweighed
+                .iter()
+                .zip(states(&weights))
+                .all(|(a, b)| a.weight.to_bits() == b.weight.to_bits())
+        );
     }
 
     #[test]

@@ -626,6 +626,7 @@ impl Simulation {
             repositories,
             &mut layout_cache,
         )?;
+        simulation.packing.tile_fresh(options.replay_everything);
         if let Some(seconds) = options.travel_window_seconds {
             let elapsed = global_started.elapsed();
             if trace.on() {

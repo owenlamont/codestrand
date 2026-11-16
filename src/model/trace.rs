@@ -124,6 +124,9 @@ pub(crate) enum Counter {
     Directories,
     Avatars,
     Trips,
+    /// Region tilings sampled, and those that kept the previous feasibility polygons.
+    Tilings,
+    TilingReuses,
     FileTicks,
     SteadyFileTicks,
     RestingFileTicks,
@@ -149,6 +152,8 @@ impl Counter {
             Self::Directories => "directories",
             Self::Avatars => "avatars",
             Self::Trips => "trips",
+            Self::Tilings => "tilings",
+            Self::TilingReuses => "tiling_reuses",
             Self::FileTicks => "file_ticks",
             Self::SteadyFileTicks => "steady_file_ticks",
             Self::RestingFileTicks => "resting_file_ticks",
