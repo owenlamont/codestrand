@@ -145,6 +145,9 @@ def test_smoke_matrix_covers_all_wheels_natively() -> None:
     assert {entry["target"] for entry in builds} == {entry["target"] for entry in smoke}
     (arm,) = (entry for entry in smoke if entry["target"] == "aarch64-pc-windows-msvc")
     assert arm["os"] == "windows-11-arm"
+    rendered = {entry["target"] for entry in smoke if entry["render"]}
+    targets = {entry["target"] for entry in builds}
+    assert rendered == targets - {"aarch64-pc-windows-msvc"}
 
 
 @pytest.mark.parametrize(
@@ -165,7 +168,7 @@ def test_wheel_render_requires_both_frames(
         for step in _JOBS["smoke-wheels"]["steps"]
         if step.get("name") == "Render installed wheel"
     )
-    assert "if" not in step
+    assert step["if"] == "matrix.render"
     stub = r"""
 uv() {
   mkdir smoke-render

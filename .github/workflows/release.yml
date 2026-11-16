@@ -208,14 +208,20 @@ jobs:
         include:
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
+            render: true
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
+            render: true
           - os: macos-15
             target: aarch64-apple-darwin
+            render: true
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+            render: true
           - os: windows-11-arm
             target: aarch64-pc-windows-msvc
+            # The runner's software driver crashes in its own threads on Windows ARM, 0.1.1 included.
+            render: false
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
@@ -253,6 +259,7 @@ jobs:
           done
           exit 1
       - name: Render installed wheel
+        if: matrix.render
         timeout-minutes: 3
         shell: bash
         run: |
