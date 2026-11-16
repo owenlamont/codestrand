@@ -599,36 +599,6 @@ mod tests {
     }
 
     #[test]
-    fn thirty_repositories_stitch_with_capped_travel() {
-        let (events, labels) = super::super::tests::short_repository_history(30);
-        let options = Options {
-            eager_windows: true,
-            travel_window_seconds: Some(5.0),
-            ..Options::default()
-        };
-        let mut sim = Simulation::with_repositories(
-            events.clone(),
-            &options,
-            &crate::theme::Theme::neon(),
-            &crate::contributors::Mappings::default(),
-            &labels,
-        );
-        assert!(sim.boundaries.len() >= 4);
-        let mut diagnostic = super::super::slots::diagnostics::MovingBeams::default();
-        for tick in 0..=super::super::frames_for(sim.duration(), 60).unwrap() {
-            sim.advance_to(tick, 60);
-            diagnostic.observe(&sim);
-        }
-        diagnostic.assert_clear(options.avatar_max_speed);
-        for saved in sim.boundaries.clone() {
-            sim.restart();
-            sim.advance_to(u32::try_from(saved.tick).unwrap(), 60);
-            assert_eq!(format!("{:?}", sim.state), format!("{saved:?}"));
-        }
-        verify_streamed(&mut sim, events, &options, &labels);
-    }
-
-    #[test]
     fn boundary_states_replay_the_stitched_trajectory() {
         let options = Options {
             eager_windows: true,

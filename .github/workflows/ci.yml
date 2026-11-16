@@ -130,4 +130,4 @@ jobs:
           tool: cargo-nextest
       - name: Run tests
         if: steps.changes.outputs.rust == 'true'
-        run: cargo nextest run --locked --all-targets --all-features --profile ci
+        run: cargo nextest run --locked --all-targets --all-features

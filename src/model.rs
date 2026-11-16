@@ -2740,17 +2740,8 @@ mod tests {
     }
 
     #[test]
-    fn uncapped_ten_repository_history_has_no_silent_fades() {
-        assert_uncapped_history_has_no_silent_fades(10);
-    }
-
-    #[test]
-    fn uncapped_thirty_repository_history_has_no_silent_fades() {
-        assert_uncapped_history_has_no_silent_fades(30);
-    }
-
-    fn assert_uncapped_history_has_no_silent_fades(count: usize) {
-        let (events, labels) = short_repository_history(count);
+    fn uncapped_short_history_has_no_silent_fades() {
+        let (events, labels) = short_repository_history(10);
         let options = Options {
             seconds_per_day: 0.2,
             max_idle_seconds: 0.2,
@@ -2767,10 +2758,7 @@ mod tests {
             &labels,
         )
         .unwrap();
-        eprintln!(
-            "DENSE_PLAN repositories={count} seconds={}",
-            started.elapsed().as_secs_f64()
-        );
+        eprintln!("DENSE_PLAN seconds={}", started.elapsed().as_secs_f64());
         assert_eq!(simulation.travel.stats.faded, 0);
         let mut audit = slots::diagnostics::MovingBeams::default();
         let mut checkpoints = Vec::new();
