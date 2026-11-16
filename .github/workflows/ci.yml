@@ -123,6 +123,77 @@ jobs:
       - name: Check Clippy warnings
         if: steps.changes.outputs.rust == 'true'
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - name: Install cargo-nextest
+        if: steps.changes.outputs.rust == 'true'
+        uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2
+        with:
+          tool: cargo-nextest
       - name: Run tests
         if: steps.changes.outputs.rust == 'true'
-        run: cargo test --locked --all-targets --all-features
+        run: cargo nextest run --locked --all-targets --all-features
+
+  test-profile:
+    name: Test profile (${{ matrix.arm }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arm: opt-0
+            profile: ''
+          - arm: crate-opt-1
+            profile: >-
+              --config profile.test.opt-level=1
+              --config profile.test.package."*".opt-level=0
+          - arm: crate-opt-2
+            profile: >-
+              --config profile.test.opt-level=2
+              --config profile.test.package."*".opt-level=0
+          - arm: crate-opt-3
+            profile: >-
+              --config profile.test.opt-level=3
+              --config profile.test.package."*".opt-level=0
+          - arm: all-opt-1
+            profile: --config profile.test.opt-level=1
+    env:
+      CODESTRAND_REQUIRE_SYSTEM_FONTS: 1
+      CARGO_TERM_COLOR: never
+      PROFILE: ${{ matrix.profile }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust toolchain
+        run: rustup show
+      - name: Install Linux build dependencies and script fonts
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y fonts-noto-core fonts-noto-cjk \
+            libwayland-dev libxkbcommon-dev
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2
+        with:
+          tool: cargo-nextest
+      - name: Build tests from cold
+        shell: bash
+        run: |
+          read -r -a profile <<< "$PROFILE"
+          cargo nextest run --locked --all-targets --all-features --no-run "${profile[@]}"
+      - name: Run tests
+        shell: bash
+        run: |
+          read -r -a profile <<< "$PROFILE"
+          cargo nextest run --locked --all-targets --all-features "${profile[@]}" 2>&1 \
+            | tee nextest.log
+      - name: Report slowest tests
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '```text'
+            grep -E '^ +Summary \[' nextest.log
+            grep -E '^ +PASS \[' nextest.log | sed -E 's/^ +PASS //' | sort -t'[' -k2 -rn | head -20
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
