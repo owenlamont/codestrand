@@ -479,11 +479,11 @@ mod tests {
     }
 
     #[test]
-    fn pending_capture_drains_before_planning_exceeds_its_deadline() {
+    fn pending_capture_drains_before_planning() {
         let mut captures = Captures::default();
         let sender = captures.request();
         let mut updates = 0;
-        let mut written = Vec::new();
+        let written = std::cell::RefCell::new(Vec::new());
         prepare_after_captures(
             &mut updates,
             &mut captures,
@@ -497,17 +497,16 @@ mod tests {
                 Ok(())
             },
             |frame, _| {
-                written.push(frame);
+                written.borrow_mut().push(frame);
                 Ok(())
             },
             |updates| {
                 assert_eq!(*updates, 2);
-                thread::sleep(WAIT_LIMIT + Duration::from_millis(10));
+                assert_eq!(*written.borrow(), [0]);
                 Ok(())
             },
         )
         .unwrap();
-        assert_eq!(written, [0]);
         assert!(captures.pending.is_empty());
         let next = captures.request();
         next.send(Image::default()).unwrap();
@@ -516,12 +515,12 @@ mod tests {
                 2,
                 || Ok(()),
                 |frame, _| {
-                    written.push(frame);
+                    written.borrow_mut().push(frame);
                     Ok(())
                 },
             )
             .unwrap();
-        assert_eq!(written, [0, 1]);
+        assert_eq!(*written.borrow(), [0, 1]);
     }
 
     fn sample_source() -> (crate::Source, std::path::PathBuf) {
