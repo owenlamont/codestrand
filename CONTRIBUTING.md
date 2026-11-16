@@ -28,6 +28,8 @@ cargo test --locked --test render_export -- --ignored
 
 CI runs the CPU tests on Linux, macOS and Windows, and a separate Ubuntu job runs the
 ignored `render_export` tests on Mesa's lavapipe software Vulkan adapter.
+A coverage job comments the `cargo llvm-cov` summary on each pull request; no coverage
+threshold gates a merge.
 The multilingual export regression also needs Devanagari and CJK fonts. On Ubuntu,
 install `fonts-noto-core` and `fonts-noto-cjk`; the CI jobs install both packages.
 
