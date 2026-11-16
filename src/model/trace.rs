@@ -29,7 +29,6 @@ pub(crate) enum Phase {
     PlanTitles,
     CheckpointReplay,
     TickPacking,
-    TickOffsets,
     TickHeat,
     TickEvents,
     TickFade,
@@ -46,9 +45,8 @@ pub(crate) enum Phase {
 }
 
 /// The sections of one playback tick, in the order the tick runs them.
-const TICK_PHASES: [Phase; 15] = [
+const TICK_PHASES: [Phase; 14] = [
     Phase::TickPacking,
-    Phase::TickOffsets,
     Phase::TickHeat,
     Phase::TickEvents,
     Phase::TickFade,
@@ -88,7 +86,6 @@ impl Phase {
             Self::PlanTitles => "plan_titles",
             Self::CheckpointReplay => "checkpoint_replay",
             Self::TickPacking => "tick_packing",
-            Self::TickOffsets => "tick_offsets",
             Self::TickHeat => "tick_heat",
             Self::TickEvents => "tick_events",
             Self::TickFade => "tick_fade",

@@ -1175,8 +1175,6 @@ impl Simulation {
     fn tick_local_layout(&mut self) {
         self.tick_times.laps.begin(&self.trace);
         let canonical = self.state.tick + 1;
-        self.state.layout.remove_offsets();
-        self.tick_times.laps.end(Phase::TickOffsets);
         let plan_time = self
             .clock
             .history
@@ -1184,7 +1182,7 @@ impl Simulation {
         let state = &mut *self.state;
         state.tick = canonical;
 
-        state.layout.cool_heat(tick_seconds(), self.heat_half_life);
+        state.layout.begin_tick(tick_seconds(), self.heat_half_life);
         self.tick_times.laps.end(Phase::TickHeat);
         while let Some(event) = self.events.get(state.next_event) {
             let Some(start) = self.schedule.start(state.next_event, canonical) else {
@@ -3029,7 +3027,7 @@ mod tests {
         let id = apply(&mut layout, &change, 0);
         let heat = layout.file(id).unwrap().heat;
         assert_eq!(layout.file(id).unwrap().activity, 1.0);
-        layout.cool_heat(6.0, 86400.0);
+        layout.begin_tick(6.0, 86400.0);
         assert!(layout.file(id).unwrap().activity < 0.03);
         assert!(layout.file(id).unwrap().heat > heat * 0.99);
         change.kind = Kind::Deleted;
@@ -3037,7 +3035,7 @@ mod tests {
         apply(&mut layout, &change, 0);
         assert_eq!(layout.file(id).unwrap().heat, before);
         assert_eq!(layout.file(id).unwrap().activity, 1.0);
-        layout.cool_heat(1.0, 0.01);
+        layout.begin_tick(1.0, 0.01);
         assert_eq!(layout.file(id).unwrap().heat, 0.0);
         assert!(layout.file(id).unwrap().activity > 0.5);
         layout.settle(0, 0.0);

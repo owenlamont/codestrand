@@ -230,6 +230,28 @@ mod tests {
     }
 
     #[test]
+    fn starting_a_tick_restores_local_positions_as_remove_offsets_does() {
+        let mut simulation = Simulation::with_repositories(
+            crate::repositories::merge((0..2).map(history).collect()),
+            &Options::default(),
+            &Theme::neon(),
+            &crate::contributors::Mappings::default(),
+            &["First".to_owned(), "Second".to_owned()],
+        );
+        simulation.advance_to(90, 60);
+        let placed = simulation.layout().clone();
+        assert!(placed.placed);
+        let mut fused = placed.clone();
+        fused.begin_tick(crate::model::tick_seconds(), 3.0);
+        let mut separate = placed.clone();
+        separate.remove_offsets();
+        assert_ne!(separate.exact_state(), placed.exact_state());
+        separate.begin_tick(crate::model::tick_seconds(), 3.0);
+        assert_eq!(fused.exact_state(), separate.exact_state());
+        assert!(!fused.placed);
+    }
+
+    #[test]
     fn regions_remain_separate_and_one_contributor_moves_between_them() {
         let events = crate::repositories::merge((0..5).map(history).collect());
         let config = tempfile::tempdir().unwrap();

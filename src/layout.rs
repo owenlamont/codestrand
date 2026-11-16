@@ -445,12 +445,21 @@ impl Layout {
         file.heat = (file.heat + amount).min(1.0);
     }
 
-    pub(super) fn cool_heat(&mut self, dt: f32, half_life: f32) {
+    /// Undoes region placement, if any, and cools heat, visiting each file once.
+    pub(super) fn begin_tick(&mut self, dt: f32, half_life: f32) {
+        let placed = std::mem::take(&mut self.placed);
         for dir in &mut self.dirs {
+            if placed {
+                dir.position = dir.local_position;
+                dir.scale = 1.0;
+            }
             dir.touch_age += dt;
         }
         let decay = (-dt / half_life).exp2();
         for file in self.files.values_mut() {
+            if placed {
+                file.position = file.local_position;
+            }
             file.heat *= decay;
             if file.heat < 0.001 {
                 file.heat = 0.0;
