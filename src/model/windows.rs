@@ -535,20 +535,40 @@ mod tests {
         assert_eq!(replayed, sim.boundaries.last().unwrap().tick);
     }
 
+    /// Commits a few seconds apart from more authors than repositories, two per repository in turn.
+    fn crowded_history(
+        repositories: usize,
+        commits: usize,
+        authors: usize,
+        gap: i64,
+    ) -> (Vec<crate::timeline::Event>, Vec<String>) {
+        let events = (0..commits)
+            .map(|index| {
+                let mut row = vec![crate::timeline::synthetic().remove(index % 3)];
+                row[0].seconds = i64::try_from(index).unwrap() * gap;
+                row[0].author.name = format!("person{}", index % authors).into_bytes();
+                row[0].author.email =
+                    format!("p{}@test.invalid", index % authors).into_bytes();
+                crate::repositories::namespace(&mut row, (index / 2) % repositories);
+                row.remove(0)
+            })
+            .collect();
+        let labels = (0..repositories).map(|i| format!("repo{i}")).collect();
+        (events, labels)
+    }
+
     fn planned(
-        commits: Option<usize>,
+        (events, labels): (Vec<crate::timeline::Event>, Vec<String>),
         window: f32,
         travel_cap: TravelCap,
         replay_everything: bool,
     ) -> (Simulation, Vec<Report>) {
         let trace = super::super::Trace::enabled();
-        let (events, labels) = super::super::tests::short_repository_history(6);
         let sim = Simulation::with_repositories(
             events,
             &Options {
                 eager_windows: true,
                 travel_window_seconds: Some(window),
-                commits,
                 travel_cap,
                 replay_everything,
                 trace: trace.clone(),
@@ -563,12 +583,12 @@ mod tests {
 
     /// One history planned with replay reuse and again with every replay run.
     fn reused_and_replayed(
-        commits: Option<usize>,
+        history: &(Vec<crate::timeline::Event>, Vec<String>),
         window: f32,
         travel_cap: TravelCap,
     ) -> [(Simulation, Vec<Report>); 2] {
         [false, true].map(|replay_everything| {
-            planned(commits, window, travel_cap, replay_everything)
+            planned(history.clone(), window, travel_cap, replay_everything)
         })
     }
 
@@ -616,7 +636,13 @@ mod tests {
         let plans = vec![
             traced(Some(1.0)).0,
             traced(None).0,
-            planned(Some(12), 3.0, TravelCap::None, false).0,
+            planned(
+                crowded_history(4, 12, 5, 20_000),
+                5.0,
+                TravelCap::None,
+                false,
+            )
+            .0,
         ];
         for (index, mut sim) in plans.into_iter().enumerate() {
             let mut hash = std::hash::DefaultHasher::new();
@@ -632,8 +658,10 @@ mod tests {
 
     #[test]
     fn an_unchanged_padding_pass_reuses_envelopes_without_changing_playback() {
+        let (mut events, labels) = super::super::tests::short_repository_history(6);
+        events.truncate(6);
         let [(mut reused, fast), (mut replayed, slow)] =
-            reused_and_replayed(Some(6), 1.0, TravelCap::Seconds(0.4));
+            reused_and_replayed(&(events, labels), 1.0, TravelCap::Seconds(0.4));
         let replays = |reports: &[Report]| {
             total(reports, &[Phase::AvatarEnvelopes], Counter::Replays)
         };
@@ -647,8 +675,10 @@ mod tests {
 
     #[test]
     fn a_settled_refinement_stops_without_changing_playback() {
+        let (mut events, labels) = super::super::tests::short_repository_history(6);
+        events.truncate(12);
         let [(mut reused, fast), (mut replayed, slow)] =
-            reused_and_replayed(Some(12), 3.0, TravelCap::None);
+            reused_and_replayed(&(events, labels), 3.0, TravelCap::None);
         let rounds = |reports: &[Report]| {
             total(
                 reports,
@@ -664,6 +694,39 @@ mod tests {
             ) > 0
         );
         assert!(rounds(&fast) < rounds(&slow));
+        assert_same_playback(&mut reused, &mut replayed);
+    }
+
+    #[test]
+    fn envelopes_are_replanned_when_padding_changes_between_passes() {
+        let [(mut reused, fast), (mut replayed, slow)] = reused_and_replayed(
+            &crowded_history(4, 12, 5, 20_000),
+            5.0,
+            TravelCap::None,
+        );
+        let replays = [Phase::AvatarEnvelopes];
+        assert_eq!(
+            total(&fast, &replays, Counter::Replays)
+                + total(&fast, &[], Counter::EnvelopeReuses),
+            total(&slow, &replays, Counter::Replays)
+        );
+        assert_same_playback(&mut reused, &mut replayed);
+    }
+
+    #[test]
+    fn refinement_whose_rounds_keep_changing_runs_every_round() {
+        let [(mut reused, fast), (mut replayed, slow)] = reused_and_replayed(
+            &crowded_history(2, 24, 9, 3_000),
+            20.0,
+            TravelCap::None,
+        );
+        let settled = [Phase::RefineServiceSlots];
+        assert_eq!(total(&fast, &settled, Counter::SettledRefinements), 0);
+        let rounds = [Phase::RefineServiceSlots, Phase::Reserve];
+        assert_eq!(
+            total(&fast, &rounds, Counter::Replays),
+            total(&slow, &rounds, Counter::Replays)
+        );
         assert_same_playback(&mut reused, &mut replayed);
     }
 
