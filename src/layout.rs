@@ -7,6 +7,7 @@ pub(crate) mod outline;
 pub(crate) mod packing;
 mod planner;
 mod repositories;
+pub(crate) use repositories::{RegionSample, in_order};
 
 #[derive(Clone, Debug)]
 pub(super) struct RepositoryRegion {
@@ -78,10 +79,13 @@ impl File {
     }
 
     pub(super) fn visible_presence(&self, dir: &Dir) -> f32 {
-        let clearance = dir.radius() - self.position.distance(dir.position);
-        self.presence
-            .min((clearance / (0.27 * dir.scale).max(f32::EPSILON)).clamp(0.0, 1.0))
-            * dir.scale
+        visible_presence(
+            self.presence,
+            self.position,
+            dir.radius(),
+            dir.position,
+            dir.scale,
+        )
     }
 
     pub(super) fn name(&self) -> &str {
@@ -150,6 +154,18 @@ pub(super) struct Layout {
     plan: Plan,
     pub repositories: Vec<RepositoryRegion>,
     placed: bool,
+}
+
+/// How much of a file shows, from its presence and how far inside its directory disc it sits.
+fn visible_presence(
+    presence: f32,
+    position: Vec2,
+    radius: f32,
+    centre: Vec2,
+    scale: f32,
+) -> f32 {
+    let clearance = radius - position.distance(centre);
+    presence.min((clearance / (0.27 * scale).max(f32::EPSILON)).clamp(0.0, 1.0)) * scale
 }
 
 /// The parts of [`Layout::step_observed`], in the order it runs them.

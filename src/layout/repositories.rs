@@ -3,6 +3,128 @@ use bevy::math::Vec2;
 use super::{Layout, RepositoryRegion};
 use crate::timeline::Event;
 
+/// Maps fixed-size chunks of `items` on up to `threads` scoped threads at a time and
+/// returns the results in item order; zero threads takes the machine's parallelism.
+pub(crate) fn in_order<T: Sync, R: Send>(
+    items: &[T],
+    chunk: usize,
+    threads: usize,
+    map: impl Fn(&[T]) -> Vec<R> + Sync,
+) -> Vec<R> {
+    let threads = match threads {
+        0 => std::thread::available_parallelism().map_or(1, usize::from),
+        forced => forced,
+    };
+    let chunks: Vec<_> = items.chunks(chunk).collect();
+    if threads == 1 || chunks.len() <= 1 {
+        return chunks.into_iter().flat_map(&map).collect();
+    }
+    let map = &map;
+    let mut results = Vec::with_capacity(items.len());
+    for batch in chunks.chunks(threads) {
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = batch
+                .iter()
+                .map(|&part| scope.spawn(move || map(part)))
+                .collect();
+            for handle in handles {
+                results.extend(
+                    handle
+                        .join()
+                        .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+                );
+            }
+        });
+    }
+    results
+}
+
+struct DirPoint {
+    repository: usize,
+    position: Vec2,
+    radius: f32,
+    scale: f32,
+    live: bool,
+}
+
+struct FilePoint {
+    dir: usize,
+    position: Vec2,
+    presence: f32,
+    counted: bool,
+}
+
+/// What one tick's repository regions are computed from, copied out of the layout.
+pub(crate) struct RegionSample {
+    live: Vec<bool>,
+    dirs: Vec<DirPoint>,
+    files: Vec<FilePoint>,
+}
+
+impl RegionSample {
+    pub(crate) fn regions(
+        &self,
+        labels: &[String],
+        geometry: crate::theme::Geometry,
+    ) -> Vec<RepositoryRegion> {
+        let mut supports = vec![[f32::NEG_INFINITY; 8]; labels.len()];
+        let mut counts = vec![0_u32; labels.len()];
+        for dir in self.dirs.iter().filter(|dir| dir.live) {
+            super::outline::include(
+                &mut supports[dir.repository],
+                dir.position,
+                dir.radius,
+            );
+        }
+        let corners = super::outline::rectangle(
+            Vec2::new(geometry.file_min.x, geometry.file_min.z),
+            Vec2::new(geometry.file_max.x, geometry.file_max.z),
+        );
+        for file in &self.files {
+            let dir = &self.dirs[file.dir];
+            if file.counted {
+                counts[dir.repository] = counts[dir.repository].saturating_add(1);
+            }
+            let presence = super::visible_presence(
+                file.presence,
+                file.position,
+                dir.radius,
+                dir.position,
+                dir.scale,
+            );
+            if presence > 0.0 {
+                for &point in &corners {
+                    super::outline::include(
+                        &mut supports[dir.repository],
+                        file.position + point * presence,
+                        0.0,
+                    );
+                }
+            }
+        }
+        labels
+            .iter()
+            .enumerate()
+            .map(|(repository, label)| {
+                let outline = super::outline::from_supports(supports[repository]);
+                let (low, high) = super::outline::bounds(&outline);
+                RepositoryRegion {
+                    label: label.clone(),
+                    low,
+                    high,
+                    live: self.live[repository],
+                    files: crate::model::count_u32(counts[repository]),
+                    tile: None,
+                    gutter: None,
+                    outline,
+                    height: geometry.file_max.y,
+                    rotated: false,
+                }
+            })
+            .collect()
+    }
+}
+
 impl Layout {
     pub(crate) fn scheduled_repositories(
         events: &[Event],
@@ -100,60 +222,35 @@ impl Layout {
         Self::scheduled(&local, &times)
     }
 
-    pub(crate) fn local_regions(
-        &self,
-        active: &[bool],
-        geometry: crate::theme::Geometry,
-    ) -> Vec<RepositoryRegion> {
-        let mut supports = vec![[f32::NEG_INFINITY; 8]; self.repositories.len()];
-        let mut files = vec![0_u32; self.repositories.len()];
-        for (_, dir) in self.dirs() {
-            super::outline::include(
-                &mut supports[dir.repository],
-                dir.position,
-                dir.radius(),
-            );
+    pub(crate) fn region_labels(&self) -> Vec<String> {
+        self.repositories.iter().map(|r| r.label.clone()).collect()
+    }
+
+    /// Copies out what this tick's regions are computed from.
+    pub(crate) fn region_sample(&self, active: &[bool]) -> RegionSample {
+        RegionSample {
+            live: active.to_vec(),
+            dirs: self
+                .dirs
+                .iter()
+                .map(|dir| DirPoint {
+                    repository: dir.repository,
+                    position: dir.position,
+                    radius: dir.radius(),
+                    scale: dir.scale,
+                    live: dir.live,
+                })
+                .collect(),
+            files: self
+                .files()
+                .map(|(_, file)| FilePoint {
+                    dir: file.dir,
+                    position: file.position,
+                    presence: file.presence,
+                    counted: file.state != super::Presence::Leaving,
+                })
+                .collect(),
         }
-        let corners = super::outline::rectangle(
-            Vec2::new(geometry.file_min.x, geometry.file_min.z),
-            Vec2::new(geometry.file_max.x, geometry.file_max.z),
-        );
-        for (_, file) in self.files() {
-            let dir = self.dir(file.dir);
-            if file.state != super::Presence::Leaving {
-                files[dir.repository] = files[dir.repository].saturating_add(1);
-            }
-            let presence = file.visible_presence(dir);
-            if presence > 0.0 {
-                for &point in &corners {
-                    super::outline::include(
-                        &mut supports[dir.repository],
-                        file.position + point * presence,
-                        0.0,
-                    );
-                }
-            }
-        }
-        self.repositories
-            .iter()
-            .enumerate()
-            .map(|(repository, region)| {
-                let outline = super::outline::from_supports(supports[repository]);
-                let (low, high) = super::outline::bounds(&outline);
-                RepositoryRegion {
-                    label: region.label.clone(),
-                    low,
-                    high,
-                    live: active[repository],
-                    files: crate::model::count_u32(files[repository]),
-                    tile: None,
-                    gutter: None,
-                    outline,
-                    height: geometry.file_max.y,
-                    rotated: false,
-                }
-            })
-            .collect()
     }
 
     pub(crate) fn remove_offsets(&mut self) {
@@ -227,6 +324,31 @@ mod tests {
             .files()
             .map(|(id, file)| (id, file.path.clone(), file.position))
             .collect()
+    }
+
+    #[test]
+    fn chunks_finishing_in_reverse_come_back_in_item_order() {
+        let finished = std::sync::Mutex::new(Vec::new());
+        let turn = std::sync::Condvar::new();
+        let items: Vec<usize> = (0..4).collect();
+        let doubled = in_order(&items, 1, 4, |chunk| {
+            let mut done = finished.lock().unwrap();
+            while done.len() != items.len() - 1 - chunk[0] {
+                let (guard, wait) = turn
+                    .wait_timeout(done, std::time::Duration::from_secs(10))
+                    .unwrap();
+                assert!(!wait.timed_out(), "chunks did not run together");
+                done = guard;
+            }
+            done.push(chunk[0]);
+            turn.notify_all();
+            vec![chunk[0] * 2]
+        });
+        assert_eq!(*finished.lock().unwrap(), [3, 2, 1, 0]);
+        assert_eq!(doubled, [0, 2, 4, 6]);
+        for (chunk, threads) in [(1, 2), (3, 2), (2, 0), (9, 4), (1, 1)] {
+            assert_eq!(in_order(&items, chunk, threads, <[usize]>::to_vec), items);
+        }
     }
 
     #[test]

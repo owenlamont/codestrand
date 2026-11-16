@@ -11,6 +11,8 @@ mod zoom;
 const BOUND: f32 = 2.5;
 pub(crate) const MINIMUM: Vec2 = Vec2::new(144.0, 64.0);
 pub(crate) const BIRTH_TICKS: u32 = 45;
+/// Ticks whose zoom is fitted together; fixed so counts do not depend on the thread count.
+const ZOOM_CHUNK: usize = 256;
 const ALLOCATION_TOLERANCE_PX: f32 = 0.25;
 
 #[derive(Debug, thiserror::Error)]
@@ -363,6 +365,14 @@ struct Tiling {
 #[derive(Default)]
 struct TilingCache(std::sync::Mutex<Tiling>);
 
+impl TilingCache {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Tiling> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
 impl Clone for TilingCache {
     fn clone(&self) -> Self {
         Self::default()
@@ -572,6 +582,8 @@ pub(crate) struct Packing {
     tiling: TilingCache,
     /// Tiles every sample from scratch; tests compare against it.
     fresh_tiling: bool,
+    /// Threads for zoom planning; zero takes the machine's parallelism.
+    threads: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -741,13 +753,47 @@ impl Packing {
         for row in regions {
             inputs.push(row.clone());
         }
-        Self::from_inputs(inputs, gutter_scale, activation)
+        Self::from_inputs(inputs, gutter_scale, activation, 0)
+    }
+
+    /// Inputs, samples, zoom and tree with floats printed exactly, without the thread count.
+    #[cfg(test)]
+    pub(crate) fn exact_state(&self) -> String {
+        format!(
+            "{:?}{:?}{:?}{:?}{:?}",
+            self.nodes, self.inputs, self.samples, self.rotated, self.zoom
+        )
+    }
+
+    /// The fitted scale of every repository visible on `tick`, zero for the others.
+    fn visible_scales(&self, tick: usize, tiling: &mut Tiling) -> Vec<f32> {
+        self.fit_rows(tick, tick, None, None, Some(tiling))
+            .iter()
+            .zip(&self.inputs[tick])
+            .enumerate()
+            .map(|(i, (p, r))| {
+                if r.live
+                    && crate::model::tick_time(
+                        u64::try_from(tick).expect("bounded packing tick"),
+                    ) < self
+                        .visible_until
+                        .get(i)
+                        .copied()
+                        .unwrap_or(crate::model::Time::INFINITY)
+                {
+                    p.scale
+                } else {
+                    0.0
+                }
+            })
+            .collect()
     }
 
     pub(crate) fn from_inputs(
         inputs: Inputs,
         gutter_scale: f32,
         activation: Option<&[u32]>,
+        threads: usize,
     ) -> Result<Self, CapacityError> {
         let started = std::time::Instant::now();
         let Inputs {
@@ -844,36 +890,25 @@ impl Packing {
             visible_until: Arc::default(),
             tiling: TilingCache::default(),
             fresh_tiling: false,
+            threads,
         }
         .plan_zoom())
     }
 
     fn plan_zoom(mut self) -> Self {
         self.zoom = Arc::default();
-        let mut scales: Vec<Vec<_>> = (0..self.inputs.len())
-            .map(|tick| {
-                self.fit(tick, None)
-                    .iter()
-                    .zip(&self.inputs[tick])
-                    .enumerate()
-                    .map(|(i, (p, r))| {
-                        if r.live
-                            && crate::model::tick_time(
-                                u64::try_from(tick).expect("bounded packing tick"),
-                            ) < self
-                                .visible_until
-                                .get(i)
-                                .copied()
-                                .unwrap_or(crate::model::Time::INFINITY)
-                        {
-                            p.scale
-                        } else {
-                            0.0
-                        }
-                    })
-                    .collect()
-            })
-            .collect();
+        let ticks: Vec<_> = (0..self.inputs.len()).collect();
+        let mut scales = super::in_order(&ticks, ZOOM_CHUNK, self.threads, |chunk| {
+            let mut tiling = Tiling::default();
+            let rows = chunk
+                .iter()
+                .map(|&tick| self.visible_scales(tick, &mut tiling))
+                .collect();
+            let mut shared = self.tiling.lock();
+            shared.samples += tiling.samples;
+            shared.reuses += tiling.reuses;
+            rows
+        });
         zoom::plan(&mut scales);
         self.zoom = scales.into();
         self
@@ -939,7 +974,7 @@ impl Packing {
             .unwrap_or(usize::MAX)
             .min(self.samples.len() - 1);
         let sample = &self.samples[tiles];
-        let placement = self.fit_rows(tiles, tick, transition, presence);
+        let placement = self.fit_rows(tiles, tick, transition, presence, None);
         let mut regions: Vec<_> = self.inputs[tick]
             .iter()
             .zip(self.labels.iter())
@@ -991,12 +1026,17 @@ impl Packing {
         if self.fresh_tiling {
             return tiles(&self.nodes, weights, presence, gap);
         }
-        let mut tiling = self
-            .tiling
-            .0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let tiling = &mut *tiling;
+        self.tiles_in(&mut self.tiling.lock(), weights, presence)
+    }
+
+    /// [`Self::tiles`] against a caller's own kept polygons, for use off the shared ones.
+    fn tiles_in(
+        &self,
+        tiling: &mut Tiling,
+        weights: &[f32],
+        presence: &[f32],
+    ) -> Option<Vec<Option<Tile>>> {
+        let gap = Vec2::splat(self.gutter_scale);
         tiling.samples += 1;
         if tiling.states.len() == self.nodes.len()
             && tiling
@@ -1017,11 +1057,7 @@ impl Packing {
 
     /// Samples tiled and samples that reused the previous polygons, since the last call.
     pub(crate) fn take_tiling_counts(&self) -> (usize, usize) {
-        let mut tiling = self
-            .tiling
-            .0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut tiling = self.tiling.lock();
         (
             std::mem::take(&mut tiling.samples),
             std::mem::take(&mut tiling.reuses),
@@ -1035,16 +1071,13 @@ impl Packing {
         }
     }
 
-    fn fit(&self, tick: usize, presence: Option<&[f32]>) -> Vec<Placement> {
-        self.fit_rows(tick, tick, None, presence)
-    }
-
     fn fit_rows(
         &self,
         tile_tick: usize,
         tick: usize,
         transition: Option<(u64, f32)>,
         presence: Option<&[f32]>,
+        tiling: Option<&mut Tiling>,
     ) -> Vec<Placement> {
         let sample = &self.samples[tile_tick];
         let mut weights = sample.weights.clone();
@@ -1074,9 +1107,13 @@ impl Packing {
                     .clamp(0.0, 1.0)
             })
             .collect();
-        let placement = self
-            .tiles(&weights, &presence)
-            .expect("presence-scaled tiles remain feasible");
+        let placement = match tiling {
+            Some(tiling) if !self.fresh_tiling => {
+                self.tiles_in(tiling, &weights, &presence)
+            }
+            _ => self.tiles(&weights, &presence),
+        }
+        .expect("presence-scaled tiles remain feasible");
         self.inputs[tick]
             .iter()
             .enumerate()

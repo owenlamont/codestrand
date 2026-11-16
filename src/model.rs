@@ -67,6 +67,7 @@ const ARRIVAL_SCALE: f32 = 1.15;
 const BEAM_LIMIT: usize = 24;
 const FRAGMENT_TARGETS: usize = 24;
 const SETTLE_TICKS: u32 = 1200;
+const REGION_BATCH: usize = 512;
 const DIR_LABELS: usize = 20;
 
 fn check_travel_pass(pass: u32) -> anyhow::Result<()> {
@@ -101,6 +102,8 @@ pub(super) struct Options {
     pub window_hook: Option<streaming::WindowHook>,
     /// Runs every replay even where its result is already held; tests compare against it.
     pub replay_everything: bool,
+    /// Threads that turn sampled ticks into regions; zero takes the machine's parallelism.
+    pub region_threads: usize,
     pub bot_travel: BotTravel,
     pub avatar_max_speed: f32,
     pub avatar_size: f32,
@@ -186,6 +189,7 @@ impl Default for Options {
             #[cfg(test)]
             window_hook: None,
             replay_everything: false,
+            region_threads: 0,
             bot_travel: BotTravel::Fade,
             avatar_max_speed: 480.0,
             avatar_size: 2.0,
@@ -928,19 +932,42 @@ impl Simulation {
             ready_end: None,
             title_start: 0,
         };
-        let snapshots = simulation
-            .plan_repositories(prior_active, options.travel_cap == TravelCap::None)?;
+        let snapshots = simulation.plan_repositories(prior_active, options)?;
         if options.travel_window_seconds.is_none() {
             simulation.plan_avatar_envelopes(snapshots);
         }
         Ok(simulation)
     }
 
+    /// Turns a batch of sampled ticks into packing inputs, in tick order, on scoped threads.
+    fn push_regions(
+        &self,
+        samples: &mut crate::layout::packing::Inputs,
+        pending: &mut Vec<crate::layout::RegionSample>,
+        labels: &[String],
+        threads: usize,
+    ) {
+        let _phase = self.trace.phase(Phase::Regions);
+        let geometry = self.state.geometry;
+        let regions = crate::layout::in_order(pending, 32, threads, |chunk| {
+            chunk
+                .iter()
+                .map(|sample| sample.regions(labels, geometry))
+                .collect()
+        });
+        for regions in regions {
+            samples.push(regions);
+        }
+        pending.clear();
+    }
+
     fn plan_repositories(
         &mut self,
         mut active: Vec<bool>,
-        uncapped: bool,
+        options: &Options,
     ) -> anyhow::Result<Option<slots::Snapshots>> {
+        let uncapped = options.travel_cap == TravelCap::None;
+        let threads = options.region_threads;
         #[cfg(test)]
         tests::LAYOUT_COUNTS
             .with(|counts| counts.set((counts.get().0, counts.get().1 + 1)));
@@ -972,7 +999,6 @@ impl Simulation {
         {
             active[event.repository] = true;
         }
-        let geometry = self.state.geometry;
         let mut sampled_events = 0;
         let ticks = frames_for(self.duration(), 60)
             .expect("multi-repository playback fits the supported frame range");
@@ -980,7 +1006,8 @@ impl Simulation {
         let mut samples = crate::layout::packing::Inputs::new(
             usize::try_from(ticks).expect("bounded packing ticks") + 1,
         );
-        samples.push(self.layout().local_regions(&active, geometry));
+        let labels = self.layout().region_labels();
+        let mut pending = vec![self.layout().region_sample(&active)];
         for tick in 0..ticks {
             self.progress
                 .report(Stage::Layout, tick.into(), ticks.into());
@@ -989,11 +1016,15 @@ impl Simulation {
                 active[event.repository] = true;
             }
             sampled_events = self.state.next_event;
-            samples.push(self.layout().local_regions(&active, geometry));
+            pending.push(self.layout().region_sample(&active));
+            if pending.len() >= REGION_BATCH {
+                self.push_regions(&mut samples, &mut pending, &labels, threads);
+            }
             if let Some(snapshots) = &mut snapshots {
                 snapshots.capture(&self.state);
             }
         }
+        self.push_regions(&mut samples, &mut pending, &labels, threads);
         if uncapped {
             for (index, event) in self.events.iter().enumerate() {
                 let arrival = usize::try_from(
@@ -1013,6 +1044,7 @@ impl Simulation {
             samples,
             self.state.gutter,
             uncapped.then_some(activation.as_slice()),
+            threads,
         )?
         .with_endings(
             &self.repository_ends,

@@ -737,6 +737,45 @@ mod tests {
     }
 
     #[test]
+    fn thread_count_changes_neither_the_packing_nor_the_trace_counts() {
+        let built = |region_threads: usize| {
+            let (mut events, labels) = super::super::tests::short_repository_history(6);
+            let mappings = crate::contributors::Mappings::default();
+            mappings.apply(&mut events);
+            let trace = super::super::Trace::enabled();
+            let options = Options {
+                region_threads,
+                trace: trace.clone(),
+                ..Options::default()
+            };
+            let theme = crate::theme::Theme::neon();
+            let sim = Simulation::build(
+                events,
+                &options,
+                &theme,
+                &mappings,
+                &[],
+                &labels,
+                &mut None,
+            )
+            .unwrap();
+            sim.report_global(0, std::time::Duration::ZERO);
+            (sim.packing.exact_state(), trace.reports()[0].counts())
+        };
+        let single = built(1);
+        assert!(
+            single
+                .1
+                .contains("build.plan_repositories.regions_calls=2 "),
+            "{}",
+            single.1
+        );
+        for threads in [2, 0, 8, 8, 8, 8, 8, 8, 8, 8] {
+            assert!(built(threads) == single, "{threads} threads");
+        }
+    }
+
+    #[test]
     fn whole_timeline_trace_times_every_pass() {
         let (_, reports) = traced(None);
         let [report] = &reports[..] else {
