@@ -380,6 +380,7 @@ impl Simulation {
                 envelopes[pulse.commit].include_service(&mut points, touched, tile);
             }
         }
+        self.trace.add_ticks(&mut self.tick_times);
         self.envelopes = envelopes;
         self.plan_ray_runs();
         self.envelopes[..frozen.len()].clone_from_slice(&frozen);

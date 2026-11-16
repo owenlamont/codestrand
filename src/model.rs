@@ -8,7 +8,7 @@ use bevy::math::{Vec2, Vec3};
 
 use crate::{
     contributors::{Contributor, Key, Mappings},
-    layout::Layout,
+    layout::{Layout, StepPart},
     progress::{Progress, Stage},
     theme::{BeamStyle, Geometry, Theme},
     timeline::{Event, Kind},
@@ -1006,6 +1006,7 @@ impl Simulation {
                 samples.anticipate_files(event.repository, begin, arrival);
             }
         }
+        self.trace.add_ticks(&mut self.tick_times);
         self.packing = crate::layout::packing::Packing::from_inputs(
             samples,
             self.state.gutter,
@@ -1161,16 +1162,21 @@ impl Simulation {
     }
 
     pub(crate) fn tick_layout(&mut self) {
+        self.tick_times.laps.begin(&self.trace);
         let placement = self.packing_sample(self.state.tick + 1, None);
+        self.tick_times.laps.end(Phase::TickPacking);
         self.tick_local_layout();
         if let Some((regions, offsets, scales)) = placement {
             self.state.layout.place_regions(regions, &offsets, &scales);
         }
+        self.tick_times.laps.end(Phase::TickPlace);
     }
 
     fn tick_local_layout(&mut self) {
+        self.tick_times.laps.begin(&self.trace);
         let canonical = self.state.tick + 1;
         self.state.layout.remove_offsets();
+        self.tick_times.laps.end(Phase::TickOffsets);
         let plan_time = self
             .clock
             .history
@@ -1179,6 +1185,7 @@ impl Simulation {
         state.tick = canonical;
 
         state.layout.cool_heat(tick_seconds(), self.heat_half_life);
+        self.tick_times.laps.end(Phase::TickHeat);
         while let Some(event) = self.events.get(state.next_event) {
             let Some(start) = self.schedule.start(state.next_event, canonical) else {
                 break;
@@ -1199,15 +1206,27 @@ impl Simulation {
             }
             state.next_event += 1;
         }
+        self.tick_times.laps.end(Phase::TickEvents);
         let dt = tick_seconds();
         state.layout.sample_plan(plan_time, dt);
-        state.layout.step(dt);
+        let laps = &mut self.tick_times.laps;
+        state.layout.step_observed(
+            dt,
+            self.trace.on().then_some(&mut self.tick_times.counts),
+            |part| {
+                laps.end(match part {
+                    StepPart::Fade => Phase::TickFade,
+                    StepPart::Compact => Phase::TickCompact,
+                    StepPart::Prune => Phase::TickPrune,
+                    StepPart::Relax => Phase::TickRelax,
+                    StepPart::Files => Phase::TickFiles,
+                });
+            },
+        );
     }
 
     fn tick(&mut self) {
-        self.tick_times.begin(&self.trace);
         self.tick_layout();
-        self.tick_times.end(Phase::TickLayout);
         let state = &mut *self.state;
         let now = tick_time(state.tick);
         if self.windowed {
@@ -1233,7 +1252,7 @@ impl Simulation {
         );
         state.avatar_scale += (scale - state.avatar_scale) * (1.0 - (-dt / 0.6).exp());
         state.place_slots_planned(&self.envelopes, now, &self.travel);
-        self.tick_times.end(Phase::TickSlots);
+        self.tick_times.laps.end(Phase::TickSlots);
         let targets: Vec<_> = state
             .avatars
             .iter()
@@ -1267,10 +1286,10 @@ impl Simulation {
                 avatar.presence = avatar.presence.min(opacity);
             }
         }
-        self.tick_times.end(Phase::TickAvatars);
+        self.tick_times.laps.end(Phase::TickAvatars);
         if self.visual_updates {
             self.place_titles();
-            self.tick_times.end(Phase::TickTitles);
+            self.tick_times.laps.end(Phase::TickTitles);
             let texts: Vec<_> = self
                 .labels_for_detail(|_| true)
                 .iter()
@@ -1278,9 +1297,9 @@ impl Simulation {
                 .map(|l| titles::label_bounds(self, l))
                 .chain(caption::frame_text_rects())
                 .collect();
-            self.tick_times.end(Phase::TickLabels);
+            self.tick_times.laps.end(Phase::TickLabels);
             self.state.place_names(dt, &self.travel, &texts);
-            self.tick_times.end(Phase::TickNames);
+            self.tick_times.laps.end(Phase::TickNames);
         }
     }
 

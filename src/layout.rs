@@ -152,6 +152,54 @@ pub(super) struct Layout {
     placed: bool,
 }
 
+/// The parts of [`Layout::step_observed`], in the order it runs them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StepPart {
+    Fade,
+    Compact,
+    Prune,
+    Relax,
+    Files,
+}
+
+/// File and directory visits by layout steps, and how many of them could change nothing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct StepCounts {
+    pub(crate) files: usize,
+    /// Files with no delay or fade pending.
+    pub(crate) steady_files: usize,
+    /// Files at their slot with no velocity before the move.
+    pub(crate) resting_files: usize,
+    /// Files whose heat is already zero.
+    pub(crate) cold_files: usize,
+    pub(crate) directories: usize,
+    /// Directories whose position and reserve the relax left unchanged.
+    pub(crate) still_directories: usize,
+}
+
+impl StepCounts {
+    fn count(&mut self, layout: &Layout, before: &[(Vec2, f32)]) {
+        self.directories += layout.dirs.len();
+        self.still_directories += layout
+            .dirs
+            .iter()
+            .zip(before)
+            .filter(|(dir, before)| (dir.position, dir.reserve) == **before)
+            .count();
+        for file in layout.files.values() {
+            self.files += 1;
+            self.steady_files +=
+                usize::from(file.state == Presence::Present && file.delay <= 0.0);
+            self.resting_files += usize::from(
+                file.velocity == Vec2::ZERO
+                    && file.position
+                        == layout.dirs[file.dir].position + file.slot_offset,
+            );
+            self.cold_files += usize::from(file.heat == 0.0);
+        }
+    }
+}
+
 impl Layout {
     #[cfg(test)]
     pub(crate) fn planned_time(&self) -> crate::model::Time {
@@ -350,11 +398,31 @@ impl Layout {
     }
 
     pub(super) fn step(&mut self, dt: f32) {
+        self.step_observed(dt, None, |_| ());
+    }
+
+    /// One step, calling `done` after each part and counting idle work into `counts`.
+    pub(super) fn step_observed(
+        &mut self,
+        dt: f32,
+        mut counts: Option<&mut StepCounts>,
+        mut done: impl FnMut(StepPart),
+    ) {
         self.revision += 1;
         self.fade_files(dt);
+        done(StepPart::Fade);
         self.compact_slots();
+        done(StepPart::Compact);
         self.prune_empty();
+        done(StepPart::Prune);
+        let before: Option<Vec<_>> = counts
+            .is_some()
+            .then(|| self.dirs.iter().map(|d| (d.position, d.reserve)).collect());
         self.relax(dt);
+        if let (Some(counts), Some(before)) = (&mut counts, before) {
+            counts.count(self, &before);
+        }
+        done(StepPart::Relax);
         for file in self.files.values_mut() {
             let target = self.dirs[file.dir].position + file.slot_offset;
             let desired =
@@ -363,6 +431,7 @@ impl Layout {
                 (desired - file.velocity).clamp_length_max(MAX_ACCELERATION * dt);
             file.position += file.velocity * dt;
         }
+        done(StepPart::Files);
     }
 
     pub(super) fn heat(&mut self, id: u64, amount: f32) {

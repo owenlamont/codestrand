@@ -508,6 +508,24 @@ mod tests {
                 1
             );
             assert!(window.counter(&[], Counter::Files) > 0);
+            let capture = [Phase::PlanTravel, Phase::Capture];
+            assert_eq!(
+                window.calls(&[Phase::PlanTravel, Phase::Capture, Phase::TickRelax]),
+                passes
+            );
+            assert_eq!(
+                window.counter(&capture, Counter::DirectoryTicks),
+                window.counter(&[], Counter::Directories)
+                    * window.counter(&capture, Counter::TicksReplayed)
+            );
+            assert!(
+                window.counter(&capture, Counter::StillDirectoryTicks)
+                    <= window.counter(&capture, Counter::DirectoryTicks)
+            );
+            assert!(
+                window.counter(&capture, Counter::SteadyFileTicks)
+                    <= window.counter(&capture, Counter::FileTicks)
+            );
             replayed +=
                 window.counter(&[Phase::CheckpointReplay], Counter::TicksReplayed);
         }

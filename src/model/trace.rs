@@ -28,7 +28,16 @@ pub(crate) enum Phase {
     Caption,
     PlanTitles,
     CheckpointReplay,
-    TickLayout,
+    TickPacking,
+    TickOffsets,
+    TickHeat,
+    TickEvents,
+    TickFade,
+    TickCompact,
+    TickPrune,
+    TickRelax,
+    TickFiles,
+    TickPlace,
     TickSlots,
     TickAvatars,
     TickTitles,
@@ -37,8 +46,17 @@ pub(crate) enum Phase {
 }
 
 /// The sections of one playback tick, in the order the tick runs them.
-const TICK_PHASES: [Phase; 6] = [
-    Phase::TickLayout,
+const TICK_PHASES: [Phase; 15] = [
+    Phase::TickPacking,
+    Phase::TickOffsets,
+    Phase::TickHeat,
+    Phase::TickEvents,
+    Phase::TickFade,
+    Phase::TickCompact,
+    Phase::TickPrune,
+    Phase::TickRelax,
+    Phase::TickFiles,
+    Phase::TickPlace,
     Phase::TickSlots,
     Phase::TickAvatars,
     Phase::TickTitles,
@@ -69,7 +87,16 @@ impl Phase {
             Self::Caption => "caption",
             Self::PlanTitles => "plan_titles",
             Self::CheckpointReplay => "checkpoint_replay",
-            Self::TickLayout => "tick_layout",
+            Self::TickPacking => "tick_packing",
+            Self::TickOffsets => "tick_offsets",
+            Self::TickHeat => "tick_heat",
+            Self::TickEvents => "tick_events",
+            Self::TickFade => "tick_fade",
+            Self::TickCompact => "tick_compact",
+            Self::TickPrune => "tick_prune",
+            Self::TickRelax => "tick_relax",
+            Self::TickFiles => "tick_files",
+            Self::TickPlace => "tick_place",
             Self::TickSlots => "tick_slots",
             Self::TickAvatars => "tick_avatars",
             Self::TickTitles => "tick_titles",
@@ -100,6 +127,12 @@ pub(crate) enum Counter {
     Directories,
     Avatars,
     Trips,
+    FileTicks,
+    SteadyFileTicks,
+    RestingFileTicks,
+    ColdFileTicks,
+    DirectoryTicks,
+    StillDirectoryTicks,
 }
 
 impl Counter {
@@ -119,6 +152,12 @@ impl Counter {
             Self::Directories => "directories",
             Self::Avatars => "avatars",
             Self::Trips => "trips",
+            Self::FileTicks => "file_ticks",
+            Self::SteadyFileTicks => "steady_file_ticks",
+            Self::RestingFileTicks => "resting_file_ticks",
+            Self::ColdFileTicks => "cold_file_ticks",
+            Self::DirectoryTicks => "directory_ticks",
+            Self::StillDirectoryTicks => "still_directory_ticks",
         }
     }
 }
@@ -327,9 +366,23 @@ impl Trace {
         self.count(Counter::PaddingComparisonsBound, events * padding);
     }
 
-    /// Moves the tick sections timed since the last call under the open phase.
+    /// Moves the tick sections and layout counts since the last call under the open phase.
     pub(crate) fn add_ticks(&self, times: &mut TickTimes) {
         let Some(totals) = &self.0 else { return };
+        let counts = std::mem::take(&mut times.counts);
+        for (counter, amount) in [
+            (Counter::FileTicks, counts.files),
+            (Counter::SteadyFileTicks, counts.steady_files),
+            (Counter::RestingFileTicks, counts.resting_files),
+            (Counter::ColdFileTicks, counts.cold_files),
+            (Counter::DirectoryTicks, counts.directories),
+            (Counter::StillDirectoryTicks, counts.still_directories),
+        ] {
+            if amount > 0 {
+                self.count(counter, amount);
+            }
+        }
+        let times = &mut times.laps;
         let mut totals = lock(totals);
         for (phase, time) in TICK_PHASES
             .into_iter()
@@ -379,11 +432,17 @@ impl Trace {
 /// Time per section of a tick, kept without a lock and moved to the trace per replay.
 #[derive(Clone, Default)]
 pub(crate) struct TickTimes {
+    pub(crate) laps: Laps,
+    pub(crate) counts: crate::layout::StepCounts,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct Laps {
     last: Option<Instant>,
     totals: [Option<Duration>; TICK_PHASES.len()],
 }
 
-impl TickTimes {
+impl Laps {
     pub(crate) fn begin(&mut self, trace: &Trace) {
         self.last = trace.on().then(Instant::now);
     }
@@ -456,9 +515,9 @@ mod tests {
         {
             let _capture = trace.phase(Phase::Capture);
             for _ in 0..2 {
-                times.begin(&trace);
-                times.end(Phase::TickLayout);
-                times.end(Phase::TickSlots);
+                times.laps.begin(&trace);
+                times.laps.end(Phase::TickPacking);
+                times.laps.end(Phase::TickSlots);
             }
             trace.add_ticks(&mut times);
         }
@@ -467,7 +526,7 @@ mod tests {
         assert_eq!(
             trace.reports()[0].counts(),
             "planning_trace window=0 commits=1 passes=1 capture_calls=1 \
-             capture.tick_layout_calls=1 capture.tick_slots_calls=1"
+             capture.tick_packing_calls=1 capture.tick_slots_calls=1"
         );
     }
 
