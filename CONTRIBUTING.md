@@ -19,6 +19,9 @@ prek run --all-files
 cargo nextest run --locked --all-targets
 ```
 
+The default nextest profile skips the four thirty-repository planning tests listed in
+`.config/nextest.toml`; CI runs them with `--profile ci`.
+
 CPU tests do not create a renderer. Rendering changes also need a local graphics
 export and visual inspection:
 

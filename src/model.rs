@@ -2740,67 +2740,74 @@ mod tests {
     }
 
     #[test]
-    fn uncapped_short_history_has_no_silent_fades() {
-        for count in [10, 30] {
-            let (events, labels) = short_repository_history(count);
-            let options = Options {
-                seconds_per_day: 0.2,
-                max_idle_seconds: 0.2,
-                travel_cap: TravelCap::None,
-                bot_travel: BotTravel::Walk,
-                ..Options::default()
-            };
-            let started = std::time::Instant::now();
-            let mut simulation = Simulation::try_with_repositories(
-                events,
-                &options,
-                &Theme::neon(),
-                &Mappings::default(),
-                &labels,
-            )
-            .unwrap();
-            eprintln!(
-                "DENSE_PLAN repositories={count} seconds={}",
-                started.elapsed().as_secs_f64()
-            );
-            assert_eq!(simulation.travel.stats.faded, 0);
-            let mut audit = slots::diagnostics::MovingBeams::default();
-            let mut checkpoints = Vec::new();
-            let frames = frames_for(simulation.duration(), 60).unwrap();
-            let mut previous_tiles = 0;
-            let mut last_birth = 0;
-            for tick in 0..=frames {
-                simulation.advance_to(tick, 60);
-                audit.observe(&simulation);
-                if tick % 60 == 0 {
-                    checkpoints
-                        .push((tick / 2, format!("{:?}", simulation.state.avatars)));
-                }
-                let live_tiles = simulation
-                    .state
-                    .layout
-                    .repositories
-                    .iter()
-                    .filter(|r| r.tile.is_some())
-                    .count();
-                let born = live_tiles > previous_tiles;
-                if born {
-                    last_birth = tick;
-                }
-                previous_tiles = live_tiles;
-                if born || tick == last_birth + 15 || tick == frames {
-                    travel::assert_edge_connectivity(&simulation);
-                }
+    fn uncapped_ten_repository_history_has_no_silent_fades() {
+        assert_uncapped_history_has_no_silent_fades(10);
+    }
+
+    #[test]
+    fn uncapped_thirty_repository_history_has_no_silent_fades() {
+        assert_uncapped_history_has_no_silent_fades(30);
+    }
+
+    fn assert_uncapped_history_has_no_silent_fades(count: usize) {
+        let (events, labels) = short_repository_history(count);
+        let options = Options {
+            seconds_per_day: 0.2,
+            max_idle_seconds: 0.2,
+            travel_cap: TravelCap::None,
+            bot_travel: BotTravel::Walk,
+            ..Options::default()
+        };
+        let started = std::time::Instant::now();
+        let mut simulation = Simulation::try_with_repositories(
+            events,
+            &options,
+            &Theme::neon(),
+            &Mappings::default(),
+            &labels,
+        )
+        .unwrap();
+        eprintln!(
+            "DENSE_PLAN repositories={count} seconds={}",
+            started.elapsed().as_secs_f64()
+        );
+        assert_eq!(simulation.travel.stats.faded, 0);
+        let mut audit = slots::diagnostics::MovingBeams::default();
+        let mut checkpoints = Vec::new();
+        let frames = frames_for(simulation.duration(), 60).unwrap();
+        let mut previous_tiles = 0;
+        let mut last_birth = 0;
+        for tick in 0..=frames {
+            simulation.advance_to(tick, 60);
+            audit.observe(&simulation);
+            if tick % 60 == 0 {
+                checkpoints.push((tick / 2, format!("{:?}", simulation.state.avatars)));
             }
-            eprintln!("DENSE_AUDIT {}", serde_json::to_string(&audit).unwrap());
-            audit.assert_clear(options.avatar_max_speed);
-            simulation.advance_to(0, 30);
-            for (frame, avatars) in checkpoints {
-                simulation.advance_to(frame, 30);
-                assert_eq!(format!("{:?}", simulation.state.avatars), avatars);
+            let live_tiles = simulation
+                .state
+                .layout
+                .repositories
+                .iter()
+                .filter(|r| r.tile.is_some())
+                .count();
+            let born = live_tiles > previous_tiles;
+            if born {
+                last_birth = tick;
+            }
+            previous_tiles = live_tiles;
+            if born || tick == last_birth + 15 || tick == frames {
+                travel::assert_edge_connectivity(&simulation);
             }
         }
+        eprintln!("DENSE_AUDIT {}", serde_json::to_string(&audit).unwrap());
+        audit.assert_clear(options.avatar_max_speed);
+        simulation.advance_to(0, 30);
+        for (frame, avatars) in checkpoints {
+            simulation.advance_to(frame, 30);
+            assert_eq!(format!("{:?}", simulation.state.avatars), avatars);
+        }
     }
+
     #[test]
     fn uncapped_bots_fade_between_repositories_unless_told_to_walk() {
         let events: Vec<_> = (0..4)

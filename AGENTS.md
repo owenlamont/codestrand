@@ -35,6 +35,8 @@ cargo nextest run --locked --all-targets
 cargo run --locked -- --help
 ```
 
+The default nextest profile skips the thirty-repository planning tests named in
+`.config/nextest.toml`; add `--profile ci` to run them when changing the planner.
 Rust 1.99.1 is pinned with rustfmt and Clippy. Hook commands are shared with CI;
 Cargo configuration and toolchain changes must trigger the Rust checks too.
 Markdown prose wraps at 88 characters. CPU tests run without a GPU; changes to the
