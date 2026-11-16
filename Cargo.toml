@@ -71,7 +71,7 @@ fontique = { version = "0.11", default-features = false }
 [profile.dev]
 debug = 0
 
-# Planning tests dominate the suite; optimising this crate alone cut the run from 280 s to 49 s in CI.
+# Planning tests dominate the suite; optimising this crate alone cut the CI test run to about a fifth.
 [profile.test]
 opt-level = 3
 
