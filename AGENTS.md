@@ -31,7 +31,7 @@ Keep fixtures small and readable; build inline instead of committing recorded hi
 ```sh
 prek install --install-hooks --overwrite
 prek run --all-files
-cargo test --locked --all-targets
+cargo nextest run --locked --all-targets
 cargo run --locked -- --help
 ```
 

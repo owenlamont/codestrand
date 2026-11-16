@@ -8,14 +8,15 @@ reports belong on issues; `docs/` holds user-facing documentation.
 
 Install [rustup](https://rustup.rs/),
 [uv](https://docs.astral.sh/uv/getting-started/installation/),
-[prek](https://prek.j178.dev/) and [pixi](https://pixi.sh/).
+[prek](https://prek.j178.dev/), [pixi](https://pixi.sh/) and
+[cargo-nextest](https://nexte.st/).
 Rust 1.99.1, rustfmt and Clippy are pinned in `rust-toolchain.toml`.
 
 ```sh
 prek install --install-hooks --overwrite
 cargo run --locked -- --help
 prek run --all-files
-cargo test --locked --all-targets
+cargo nextest run --locked --all-targets
 ```
 
 CPU tests do not create a renderer. Rendering changes also need a local graphics
