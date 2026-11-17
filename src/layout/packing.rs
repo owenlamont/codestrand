@@ -44,7 +44,8 @@ impl Space {
     }
 }
 
-/// The split tree inserting repositories in birth `order`, at the largest detail that fits.
+/// The split tree inserting repositories in birth `order`, at the first detail that fits
+/// when shrinking from full size, or from the area bound when that is smaller.
 fn plan_tree(
     regions: &[Vec<Input>],
     files: &[Vec<f32>],
