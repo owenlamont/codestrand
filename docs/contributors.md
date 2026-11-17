@@ -55,9 +55,8 @@ Contributors stay above the file plane and move between repository service lanes
 `--avatar-scale` controls disc diameter relative to the original size: default `2`,
 range `0.5`–`2`, inclusive. The default doubles portraits in both single- and
 multi-repository playback; single-repository pixels therefore change too. Use
-`--avatar-scale 1` for the original small-group disc diameter. Above five repositories
-a smoothstep taper
-reduces the selected size to half at thirty repositories. Name fonts retain their
+`--avatar-scale 1` for the original small-group disc diameter. Avatars shrink only with
+the packing detail scale described in [Playback](playback.md). Name fonts retain their
 existing readability policy. `--gutter` independently controls visible tile spacing
 (default `4` reference pixels, `0` allowed); the outer margin is 24 pixels.
 Visible avatars keep their names, including during travel and idle fade-out.

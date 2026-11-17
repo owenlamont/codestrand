@@ -199,9 +199,10 @@ Paths in the TOML file resolve relative to the file. Labels default to the repos
 directory name. Repeated flags and a file can be combined; flag entries come first.
 Paths resolving to the same location are rejected as duplicate repositories. Labels for
 distinct repositories must be unique. There is no fixed repository-count limit.
-Packing refuses an insertion when the minimum tile size, aspect range and selected
-gutter cannot fit the field; the error names those geometric limits and asks for
-fewer repositories.
+When minimum tiles and gutters cannot fit the field, tiles, gutters, avatars and titles
+shrink by one detail scale chosen before playback, as if the camera pulled back.
+Tile packing time grows steeply with repository count: about 2.5 seconds for 128
+repositories visible together and 28 for 300.
 
 `archived = true` ends a repository after the final commit in the selected revision,
 once the commit's activity finishes. `ended = "YYYY-MM-DD"` supplies an explicit UTC
@@ -264,18 +265,19 @@ Content zoom anticipates growth with a precomputed safe-fit envelope and half-se
 easing. The log-scale limit is 0.12 per second when zooming out and 0.08 when zooming in
 (about 11.3% shrink or 8.3% growth). A larger future contraction can start the
 adjustment earlier; the chosen scale never exceeds the tile's current safe fit.
-The usable content area leaves an eight-pixel edge inset; corner titles retain their
-existing placement rules. Invisible archived content cannot constrain earlier zoom.
+The usable content area leaves an eight-pixel edge inset. Corner titles share one
+character size, end in an ellipsis when wider than their tile, and are omitted from
+tiles too short for them. Invisible archived content cannot constrain earlier zoom.
 
 A newcomer splits one existing tile or subtree. Other repositories retain their
 relative order. Splits clamp to a ground-aspect range of 1:2.5 to 2.5:1, inclusive,
-and a 144-by-64 reference-pixel floor. Births ease for up to 0.75 playback seconds
-before their first commit; births near the lead-in use the available lead-in time.
-Aspect and size clamps scale with presence during the transition. Tiles and shared
-gutters partition the whole inset field. `--gutter` sets the visible spacing in
-1280×720 reference pixels: default `4`, range `0`–`20`, inclusive, including touching
-tiles at `0`. Avatars remain doubled through five repositories, then taper with a smoothstep
-curve to the original diameter at thirty. Crowd scaling also remains active.
+and a 144-by-64 reference-pixel floor at full detail. Births ease for up to 0.75
+playback seconds before their first commit; births near the lead-in use the available
+lead-in time. Aspect and size clamps scale with presence during the transition.
+Tiles and shared gutters partition the whole inset field. `--gutter` sets the visible
+spacing in 1280×720 reference pixels: default `4`, range `0`–`20`, inclusive,
+including touching tiles at `0`. Crowd scaling shrinks avatars and names when many are
+active.
 Names prefer clear content rectangles, including repository labels
 and a small margin, but may overlap content near tile edges when space is tight.
 Different content shapes can leave space inside a uniformly fitted tile.
@@ -379,7 +381,7 @@ Rendering and video encoding need additional memory beyond the planning estimate
 The check is an estimate made before planning, not a guarantee that the process will
 fit in memory. It can be conservative on some inputs and too low on others.
 Packing reserves tiles before applying repository endings, so sequential repositories
-can reach the same geometric limit as repositories visible together.
+share the detail scale of repositories visible together.
 Route searches stop at 10,000 nodes; capped playback can fade across when a search
 exceeds that bound, while uncapped walking reports an error.
 

@@ -1602,12 +1602,7 @@ mod tests {
             }
             assert!(
                 (6.5 * scale + 1.0) * 2.0
-                    < crate::layout::packing::gutters(if scale < 1.0 {
-                        30.0
-                    } else {
-                        5.0
-                    })
-                    .x * scale.max(1.0)
+                    < crate::layout::packing::AVATAR_GUTTER * scale.max(1.0)
             );
         }
     }

@@ -68,6 +68,7 @@ const CHANGE_COST: f64 = 20_000.0;
 
 #[derive(Clone, Debug)]
 pub(super) struct Title {
+    pub text: String,
     pub point: Vec2,
     pub size: Vec2,
     pub scale: f32,
@@ -103,21 +104,27 @@ impl Title {
         })
     }
 }
+/// A title at one `scale` for every tile, elided to the tile width; `None` when too short.
 fn title(
     tile: crate::layout::packing::Tile,
     label: &str,
     height: f32,
     corner: u8,
+    scale: f32,
 ) -> Option<Title> {
-    let tile = Rect::from_corners(tile.low * HALF, tile.high * HALF).inflate(-INSET);
-    if tile.size().min_element() <= 8.0 {
+    let tile =
+        Rect::from_corners(tile.low * HALF, tile.high * HALF).inflate(-INSET * scale);
+    let fits = ((tile.width() - 8.0) / (8.6 * scale)).floor();
+    if fits < 1.0 || tile.height() < height * scale + 4.0 {
         return None;
     }
-    let full = super::names::rect(Vec2::ZERO, label, 1.0, height).size();
-    let scale = ((tile.width() - 8.0) / (full.x - 8.0).max(1.0))
-        .min((tile.height() - 4.0) / (full.y - 4.0).max(1.0))
-        .clamp(0.0, 1.0);
-    let size = super::names::rect(Vec2::ZERO, label, scale, height).size();
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a positive whole character count bounded by the tile width"
+    )]
+    let text = super::names::elide(label, fits as usize);
+    let size = super::names::rect(Vec2::ZERO, &text, scale, height).size();
     let point = Vec2::new(
         if corner & 1 == 0 {
             tile.min.x
@@ -131,6 +138,7 @@ fn title(
         },
     );
     Some(Title {
+        text,
         point,
         size,
         scale,
@@ -192,6 +200,7 @@ impl Simulation {
                 &region.label,
                 self.state.geometry.label_height,
                 corner,
+                self.state.detail,
             )
         }) else {
             return 0.0;
@@ -322,9 +331,13 @@ impl Simulation {
                     .unwrap_or(0)
             };
             let corner = at(sample);
-            let Some(mut current) =
-                title(tile, &region.label, state.geometry.label_height, corner)
-            else {
+            let Some(mut current) = title(
+                tile,
+                &region.label,
+                state.geometry.label_height,
+                corner,
+                state.detail,
+            ) else {
                 continue;
             };
             if let Some(change) =
@@ -338,6 +351,7 @@ impl Simulation {
                         &region.label,
                         state.geometry.label_height,
                         at(change - 1),
+                        state.detail,
                     )
                     .map(|t| t.point);
                     current.opacity = super::ticks_duration(age) / 0.3;
@@ -380,8 +394,14 @@ mod tests {
     }
     #[test]
     fn title_height_does_not_move_its_world_anchor() {
-        let title =
-            title(crate::layout::packing::Tile::viewport(), "repo", 20.0, 0).unwrap();
+        let title = title(
+            crate::layout::packing::Tile::viewport(),
+            "repo",
+            20.0,
+            0,
+            1.0,
+        )
+        .unwrap();
         let low = title.positions(1.6).next().unwrap().0;
         let high = title.positions(3.2).next().unwrap().0;
         assert_eq!(low.with_y(0.0), high.with_y(0.0));
@@ -424,13 +444,28 @@ mod tests {
         assert_eq!(result.windows(2).filter(|p| p[0] != p[1]).count(), 1);
     }
     #[test]
+    fn titles_share_one_size_and_elide_to_fit_narrow_tiles() {
+        let tile = |width: f32| crate::layout::packing::Tile {
+            low: Vec2::new(-width, -0.5),
+            high: Vec2::new(width, 0.5),
+        };
+        let label = "a-long-repository-name";
+        let wide = title(tile(0.9), label, 20.0, 0, 1.0).unwrap();
+        let narrow = title(tile(0.2), label, 20.0, 0, 1.0).unwrap();
+        assert_eq!(wide.text, label);
+        assert!(narrow.text.ends_with('…'));
+        assert_eq!(wide.size.y, narrow.size.y);
+        assert!(narrow.rect().max.x <= tile(0.2).high.x * HALF.x - INSET);
+    }
+
+    #[test]
     fn corners_leave_an_avatar_diameter_between_the_gutter_and_the_title() {
         let tile = crate::layout::packing::Tile {
             low: Vec2::splat(-0.5),
             high: Vec2::splat(0.5),
         };
         for corner in 0..4 {
-            let t = title(tile, "repository", 24.0, corner).unwrap();
+            let t = title(tile, "repository", 24.0, corner, 1.0).unwrap();
             assert!(
                 t.rect()
                     .min
