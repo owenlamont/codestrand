@@ -154,6 +154,7 @@ pub(super) struct Layout {
     plan: Plan,
     pub repositories: Vec<RepositoryRegion>,
     placed: bool,
+    reserve_fixed_points: Vec<Option<u32>>,
 }
 
 /// How much of a file shows, from its presence and how far inside its directory disc it sits.
@@ -233,6 +234,7 @@ impl Layout {
             plan: Plan::default(),
             repositories: Vec::new(),
             placed: false,
+            reserve_fixed_points: Vec::new(),
         }
     }
 
@@ -624,6 +626,9 @@ impl Layout {
                 let dir = &mut self.dirs[index];
                 dir.live = true;
                 dir.position = position;
+                if let Some(rested) = self.reserve_fixed_points.get_mut(index) {
+                    *rested = None;
+                }
             }
             return index;
         }
