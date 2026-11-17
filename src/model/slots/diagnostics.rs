@@ -96,6 +96,7 @@ impl MovingBeams {
                 * state.scale()
                 * state.avatar_scale
                 * state.avatar_size
+                * state.detail
                 * avatar.projection_scale
                 * avatar.lifecycle_scale
                 * avatar.presence;

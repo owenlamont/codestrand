@@ -201,8 +201,7 @@ Paths resolving to the same location are rejected as duplicate repositories. Lab
 distinct repositories must be unique. There is no fixed repository-count limit.
 When minimum tiles and gutters cannot fit the field, tiles, gutters, avatars and titles
 shrink by one detail scale chosen before playback, as if the camera pulled back.
-Tile packing time grows steeply with repository count: about 2.5 seconds for 128
-repositories visible together and 28 for 300.
+Tile packing time grows steeply with repository count.
 
 `archived = true` ends a repository after the final commit in the selected revision,
 once the commit's activity finishes. `ended = "YYYY-MM-DD"` supplies an explicit UTC

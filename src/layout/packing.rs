@@ -918,7 +918,7 @@ impl Packing {
             .collect();
         let rotated = rotations(&nodes, &regions, &samples, space);
         eprintln!(
-            "treemap_plan_seconds={:.6} samples={} repositories={}",
+            "treemap_plan_seconds={:.6} samples={} repositories={} detail={detail}",
             started.elapsed().as_secs_f64(),
             regions.len(),
             first.len()

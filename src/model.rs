@@ -1066,7 +1066,6 @@ impl Simulation {
         self.state = SharedState(self.initial.clone());
         self.state.region_depth = framing::depth_bound();
         self.state.detail = self.packing.detail();
-        self.state.avatar_size *= self.state.detail;
         if let Some((regions, offsets, scales)) = self.packing.sample(0) {
             self.state.layout.place_regions(regions, &offsets, &scales);
         }
@@ -1423,7 +1422,7 @@ impl Simulation {
     }
 
     pub(super) fn avatar_disc_scale(&self) -> f32 {
-        self.state.avatar_scale * self.state.avatar_size
+        self.state.avatar_scale * self.state.avatar_size * self.state.detail
     }
 
     pub(super) fn commit(&self) -> usize {
@@ -1754,7 +1753,7 @@ impl State {
     }
 
     fn avatar_radius(&self) -> f32 {
-        6.5 * self.avatar_scale * self.avatar_size * ARRIVAL_SCALE + 1.0
+        6.5 * self.avatar_scale * self.avatar_size * self.detail * ARRIVAL_SCALE + 1.0
     }
 
     fn author(&mut self, contributor: &Contributor, now: Time) -> usize {
@@ -2716,38 +2715,33 @@ mod tests {
     }
 
     #[test]
-    fn ended_sequential_repositories_beyond_the_reference_field_still_plan() {
-        let count = 128;
-        let mut events = Vec::new();
-        let mut endings = Vec::new();
-        for repository in 0..count {
-            let mut event = crate::timeline::synthetic().remove(0);
-            event.seconds = i64::try_from(repository).unwrap() * 2 * 86_400;
-            endings.push(Some(event.seconds + 86_400));
-            crate::repositories::namespace(
-                std::slice::from_mut(&mut event),
-                repository,
-            );
-            events.push(event);
-        }
-        for (ending, next) in endings.iter().zip(events.iter().skip(1)) {
-            assert!(ending.unwrap() < next.seconds);
-        }
+    fn repositories_beyond_full_detail_play_with_scaled_avatars() {
+        let (events, labels) = short_repository_history(56);
         let options = Options {
-            start: events.len(),
-            repository_ends: endings,
+            seconds_per_day: 0.05,
+            max_idle_seconds: 0.05,
+            gutter: 20.0,
             ..Options::default()
         };
-        let labels: Vec<_> = (0..count).map(|i| format!("Repository {i}")).collect();
-        let simulation = Simulation::try_with_repositories(
+        let mut simulation = Simulation::build(
             events,
             &options,
             &Theme::neon(),
             &Mappings::default(),
+            &[],
             &labels,
+            &mut None,
         )
         .unwrap();
-        assert!(simulation.packing.detail() < 1.0);
+        let detail = simulation.packing.detail();
+        assert!(detail < 1.0);
+        for frame in 0..=frames_for(simulation.duration(), 60).unwrap() {
+            simulation.advance_to(frame, 60);
+            assert_eq!(
+                simulation.avatar_disc_scale(),
+                simulation.state.avatar_scale * options.avatar_size * detail
+            );
+        }
     }
 
     #[test]

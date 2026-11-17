@@ -444,7 +444,7 @@ impl State {
         now: super::Time,
         plan: &super::travel::Plan,
     ) {
-        let gap = Vec2::splat(self.gutter);
+        let gap = Vec2::splat(self.gutter * self.detail);
         let beams = tile_obstacles(self);
         let cells = super::travel::network(
             self.layout.repositories.iter().filter_map(|r| r.gutter),

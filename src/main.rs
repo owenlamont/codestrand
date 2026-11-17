@@ -312,7 +312,7 @@ struct Source {
     /// Avatar disc diameter relative to the original size, in both playback modes (0.5–2).
     #[arg(long, default_value_t = 2.0, value_parser = avatar_size)]
     avatar_scale: f32,
-    /// Visible spacing between repository tiles in reference pixels (0–20).
+    /// Visible spacing between repository tiles in reference pixels at full detail (0–20).
     #[arg(long, default_value_t = 4.0, value_parser = gutter_pixels)]
     gutter: f32,
     /// File heat half-life in canonical playback seconds.

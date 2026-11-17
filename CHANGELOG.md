@@ -13,11 +13,14 @@ All notable changes to Codestrand are documented here, following
 - Repository titles choose their corner from contributor discs, beams and tiles, no
   longer from contributor names, so some titles sit in a different corner and switch
   less often. ([#176](https://github.com/owenlamont/codestrand/pull/176))
-- Any number of repositories plays: tiles, gutters, avatars and titles shrink together
-  instead of packing refusing with "use fewer repositories".
+- Repository sets too large for full-size tiles play with tiles, gutters, avatars and
+  titles shrunk together, instead of packing refusing with "use fewer repositories".
+  ([#180](https://github.com/owenlamont/codestrand/pull/180))
 - Avatars no longer shrink as repository count rises, so many-repository playback
   shows them up to four times larger.
+  ([#180](https://github.com/owenlamont/codestrand/pull/180))
 - Repository titles share one size across tiles and end in an ellipsis when too wide.
+  ([#180](https://github.com/owenlamont/codestrand/pull/180))
 
 ## v0.2.0 - 2026-11-16
 
