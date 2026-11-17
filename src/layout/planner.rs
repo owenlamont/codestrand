@@ -572,13 +572,24 @@ impl Layout {
         self.plan.time += dt;
 
         self.plan.place(self.plan.time, &mut self.dirs);
+        let coefficient = 1.0 - (-dt / 0.2).exp();
+        self.reserve_fixed_points.resize(self.dirs.len(), None);
         for (index, dir) in self.dirs.iter_mut().enumerate() {
+            let rested = &mut self.reserve_fixed_points[index];
+            if !dir.live && index != 0 && *rested == Some(coefficient.to_bits()) {
+                continue;
+            }
+            *rested = None;
             let target = if index != 0 && dir.files == 0 && dir.children == 0 {
                 0.0
             } else {
                 dir.radius()
             };
-            dir.reserve += (target - dir.reserve) * (1.0 - (-dt / 0.2).exp());
+            let before = dir.reserve.to_bits();
+            dir.reserve += (target - dir.reserve) * coefficient;
+            if !dir.live && index != 0 && dir.reserve.to_bits() == before {
+                *rested = Some(coefficient.to_bits());
+            }
         }
     }
 }
@@ -592,6 +603,71 @@ mod tests {
         theme::Theme,
         timeline::{FileChange, Identity, Kind},
     };
+
+    fn full_relax(layout: &mut Layout, dt: f32) {
+        layout.plan.time += dt;
+        layout.plan.place(layout.plan.time, &mut layout.dirs);
+        for (index, dir) in layout.dirs.iter_mut().enumerate() {
+            let target = if index != 0 && dir.files == 0 && dir.children == 0 {
+                0.0
+            } else {
+                dir.radius()
+            };
+            dir.reserve += (target - dir.reserve) * (1.0 - (-dt / 0.2).exp());
+        }
+    }
+
+    #[test]
+    fn inactive_reserves_match_full_relax_after_reactivation() {
+        let mut layout = Layout::planned_paths(&["src/a.rs"], 0);
+        layout.add("src/a.rs", 0.0, 0);
+        layout.remove("src/a.rs", 0.0, 0);
+        layout.fade_files(2.0);
+        let mut full = layout.clone();
+        for _ in 0..1500 {
+            layout.prune_empty();
+            full.prune_empty();
+            layout.relax(1.0 / 60.0);
+            full_relax(&mut full, 1.0 / 60.0);
+            assert_eq!(layout.exact_state(), full.exact_state());
+        }
+        let index = layout.dir_index["src"];
+        assert!(!layout.dirs[index].live);
+        assert!(layout.reserve_fixed_points[index].is_some());
+        layout.add("src/a.rs", 0.0, 0);
+        full.add("src/a.rs", 0.0, 0);
+        assert_eq!(layout.reserve_fixed_points[index], None);
+        for _ in 0..3 {
+            layout.relax(1.0 / 60.0);
+            full_relax(&mut full, 1.0 / 60.0);
+            assert_eq!(layout.exact_state(), full.exact_state());
+        }
+    }
+
+    #[test]
+    fn reserve_fixed_points_require_exact_bits_and_the_same_coefficient() {
+        let mut layout = Layout::planned_paths(&["src/a.rs"], 0);
+        let index = layout.dir_index["src"];
+        let mut full = layout.clone();
+        layout.relax(0.0);
+        full_relax(&mut full, 0.0);
+        assert!(layout.reserve_fixed_points[index].is_some());
+        for _ in 0..1500 {
+            layout.relax(1.0 / 60.0);
+            full_relax(&mut full, 1.0 / 60.0);
+            assert_eq!(layout.exact_state(), full.exact_state());
+        }
+        let reserve = layout.dirs[index].reserve.to_bits();
+        assert!(reserve > 0);
+        assert!(layout.reserve_fixed_points[index].is_some());
+        layout.relax(1.0 / 60.0);
+        full_relax(&mut full, 1.0 / 60.0);
+        assert_eq!(layout.dirs[index].reserve.to_bits(), reserve);
+        layout.relax(0.2);
+        full_relax(&mut full, 0.2);
+        assert_ne!(layout.dirs[index].reserve.to_bits(), reserve);
+        assert_eq!(layout.exact_state(), full.exact_state());
+    }
 
     #[test]
     fn batched_splines_match_individual_directory_samples_exactly() {
