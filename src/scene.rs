@@ -1095,9 +1095,8 @@ fn raster_glyphs(theme: &Theme) -> RasterGlyphs {
     let indices = theme
         .glyphs
         .iter()
-        .enumerate()
-        .map(|(kind, glyph)| {
-            let svg = theme.glyph_svg(glyph.svg, kind);
+        .map(|glyph| {
+            let svg = theme.glyph_svg(glyph.svg);
             *shared.entry(svg).or_insert_with_key(|svg| {
                 let index = images.len();
                 images.push(themed_glyph_image(svg, theme));
@@ -4422,6 +4421,29 @@ mod tests {
                 .any(|pixel| pixel[0] > pixel[1]
                     && pixel[1] > pixel[2]
                     && pixel[3] == 255)
+        );
+    }
+
+    #[test]
+    fn every_theme_shows_the_file_type_and_forge_cuts_it_through_the_plate() {
+        let glyph = |theme: &Theme, file| {
+            let svg = theme.glyph_svg(theme.glyphs[theme.glyph_kind(file)].svg);
+            themed_glyph_image(&svg, theme).data.expect("glyph pixels")
+        };
+        for name in crate::theme::ThemeName::ALL {
+            let theme = name.build();
+            assert_ne!(
+                glyph(&theme, "main.rs"),
+                glyph(&theme, "main.py"),
+                "{name:?}"
+            );
+        }
+        let forge = crate::theme::ThemeName::Forge.build();
+        let alpha =
+            |pixels: Vec<u8>| pixels.into_iter().skip(3).step_by(4).collect::<Vec<_>>();
+        assert_ne!(
+            alpha(glyph(&forge, "main.rs")),
+            alpha(glyph(&forge, "main.py"))
         );
     }
 

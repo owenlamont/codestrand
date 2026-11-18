@@ -440,7 +440,7 @@ mod tests {
         for name in ThemeName::ALL.into_iter().skip(2) {
             let theme = name.build();
             assert!(theme.textured_ground);
-            let glyph = theme.glyph_svg(theme.glyphs[0].svg, 0);
+            let glyph = theme.glyph_svg(theme.glyphs[0].svg);
             let ground = theme.ground_svg();
             for svg in [&glyph, &ground] {
                 assert!(
@@ -451,8 +451,6 @@ mod tests {
             assert!(glyphs.insert(glyph));
             assert!(grounds.insert(ground));
         }
-        let desktop = ThemeName::RetroDesktop.build();
-        assert_ne!(desktop.glyph_svg("", 1), desktop.glyph_svg("", 2));
     }
 
     #[test]
