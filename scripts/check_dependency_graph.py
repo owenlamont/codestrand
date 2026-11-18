@@ -2,7 +2,6 @@
 # requires-python = ">=3.15"
 # dependencies = []
 # ///
-"""Fail when the resolved dependency graph gains a second network path."""
 
 import json
 import subprocess

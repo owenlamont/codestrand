@@ -5,7 +5,7 @@
 
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 import pytest
 
@@ -16,6 +16,7 @@ from check_dependency_graph import problems
 
 def _metadata(
     edges: dict[str, list[str]],
+    *,
     features: dict[str, list[str]] | None = None,
     dev: tuple[str, str] | None = None,
 ) -> dict[str, Any]:
@@ -40,7 +41,7 @@ def _metadata(
     }
 
 
-_ALLOWED = {
+_ALLOWED: Final = {
     "codestrand": ["ureq", "bevy_asset", "gix-transport"],
     "ureq": ["rustls-platform-verifier", "rustls"],
     "rustls-platform-verifier": ["rustls"],
@@ -71,13 +72,13 @@ def test_dev_only_rustls_passes() -> None:
 @pytest.mark.parametrize(
     ("package", "feature"),
     [
-        ("bevy_asset", "https"),
-        ("bevy_asset", "web_asset_cache"),
-        ("gix-transport", "http-client"),
+        pytest.param("bevy_asset", "https", id="bevy asset https"),
+        pytest.param("bevy_asset", "web_asset_cache", id="bevy asset web cache"),
+        pytest.param("gix-transport", "http-client", id="gix transport http client"),
     ],
 )
 def test_http_features_fail(package: str, feature: str) -> None:
-    found = problems(_metadata(_ALLOWED, {package: ["std", feature]}))
+    found = problems(_metadata(_ALLOWED, features={package: ["std", feature]}))
     assert found == [f"{package} enables HTTP feature {feature}"]
 
 

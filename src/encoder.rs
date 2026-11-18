@@ -84,7 +84,6 @@ impl Options {
         }
     }
 
-    /// Starts the encode that [`Self::check`] has already exercised.
     pub(super) fn start(
         &self,
         fps: u16,

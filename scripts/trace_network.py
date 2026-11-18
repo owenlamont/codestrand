@@ -33,19 +33,28 @@ with socket.socket(socket.AF_UNIX) as probe:
 """
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class Trace:
     executed: bool
     calls: int
-    violations: list[str]
+    violations: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class Run:
+    exit_status: int
+    trace: Trace
 
 
 def parse(log: str, allowed: frozenset[str] = ALLOWED_UNIX_PATHS) -> Trace:
-    """Classify strace lines; split `<unfinished ...>` calls carry their arguments
-    on the first half, so resumed halves are ignored."""
+    """Classify strace output lines.
+
+    A call split by `<unfinished ...>` carries its arguments on the first half, so
+    resumed halves are ignored.
+    """
     executed = False
     calls = 0
-    violations = []
+    violations: list[str] = []
     for line in log.splitlines():
         call = _CALL.match(line)
         if call is None:
@@ -59,13 +68,13 @@ def parse(log: str, allowed: frozenset[str] = ALLOWED_UNIX_PATHS) -> Trace:
         elif name == "connect" and (path := _UNIX_PATH.search(args)):
             if path["path"].replace('"', "") not in allowed:
                 violations.append(f"Unix connect outside the allow-list: {line}")
-    return Trace(executed, calls, violations)
+    return Trace(executed=executed, calls=calls, violations=tuple(violations))
 
 
-def trace(command: list[str]) -> tuple[int, Trace]:
+def trace(command: list[str]) -> Run:
     with tempfile.TemporaryDirectory() as scratch:
         log = Path(scratch) / "strace.log"
-        status = subprocess.run(
+        exit_status = subprocess.run(
             [
                 *("unshare", "--map-root-user", "--net"),
                 *("strace", "--follow-forks", "--seccomp-bpf", "-qq", "-s", "4096"),
@@ -74,21 +83,24 @@ def trace(command: list[str]) -> tuple[int, Trace]:
             ],
             check=False,
         ).returncode
-        return status, parse(log.read_text(encoding="utf-8", errors="replace"))
+        return Run(
+            exit_status, parse(log.read_text(encoding="utf-8", errors="replace"))
+        )
 
 
 def require_caught(source: str, expected: str) -> None:
-    status, result = trace([sys.executable, "-c", source])
-    if status != 0 or not result.executed:
-        raise SystemExit(f"tracer control did not run cleanly (exit {status})")
-    if len(result.violations) != 1 or expected not in result.violations[0]:
-        raise SystemExit(f"tracer missed {expected}: {result.violations}")
+    run = trace([sys.executable, "-c", source])
+    if run.exit_status != 0 or not run.trace.executed:
+        raise SystemExit(f"tracer control did not run cleanly (exit {run.exit_status})")
+    if len(run.trace.violations) != 1 or expected not in run.trace.violations[0]:
+        raise SystemExit(f"tracer missed {expected}: {run.trace.violations}")
 
 
 def main(command: list[str]) -> int:
     require_caught(_IP_PROBE, "AF_INET")
     require_caught(_UNIX_PROBE, _PROBE_PATH)
-    status, result = trace(command)
+    run = trace(command)
+    status, result = run.exit_status, run.trace
     print(
         f"controls caught an IP socket and an off-list Unix connect; command made "
         f"{result.calls} socket and connect calls",
