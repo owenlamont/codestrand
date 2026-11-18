@@ -72,12 +72,15 @@ fn collapsing_option_defaults_on_and_accepts_only_on_or_off() {
             let mut args = vec!["codestrand"];
             args.extend(command.clone());
             args.extend(flags);
+            args.extend(["--test-input", "synthetic"]);
             let cli = crate::Cli::try_parse_from(args).unwrap();
             let (crate::Command::Preview { source, .. }
             | crate::Command::Export { source, .. }) = cli.command.unwrap()
             else {
                 panic!("playback command")
             };
+            let (sim, _) = source.load(&crate::progress::Progress::default()).unwrap();
+            assert_eq!(sim.collapse_directories, expected);
             assert_eq!(
                 serde_json::to_value(source).unwrap()["collapse_directories"],
                 expected
