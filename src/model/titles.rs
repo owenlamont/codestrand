@@ -63,8 +63,8 @@ pub(super) fn obstacles(sim: &Simulation) -> Vec<(usize, Rect)> {
 }
 
 const INSET: f32 = 34.0;
-/// Title text scale at the 12 pixel floor contributor names keep, against 14 pixels.
-pub(super) const MIN_SCALE: f32 = 12.0 / 14.0;
+/// Title text scale at a 6 pixel floor, against 14 pixels.
+pub(super) const MIN_SCALE: f32 = 6.0 / 14.0;
 const EDGE_INSET: f32 = 4.0;
 const STEP: u32 = 15;
 const CHANGE_COST: f64 = 20_000.0;
@@ -113,14 +113,15 @@ impl Title {
 /// A title at one size for every tile, elided to the tile width; `None` when too short.
 ///
 /// `detail` scales the corner inset with the avatars, falling back to [`EDGE_INSET`] on
-/// tiles too small to keep an avatar diameter clear; the text never shrinks below
-/// [`MIN_SCALE`].
+/// tiles too small to keep an avatar diameter clear; `lettering` scales the text, never
+/// below [`MIN_SCALE`].
 fn title(
     tile: crate::layout::packing::Tile,
     label: &str,
     height: f32,
     corner: u8,
     detail: f32,
+    lettering: f32,
 ) -> Option<Title> {
     let bounds = Rect::from_corners(tile.low * HALF, tile.high * HALF);
     inset_title(
@@ -128,9 +129,17 @@ fn title(
         label,
         height,
         corner,
-        detail,
+        lettering,
     )
-    .or_else(|| inset_title(bounds.inflate(-EDGE_INSET), label, height, corner, detail))
+    .or_else(|| {
+        inset_title(
+            bounds.inflate(-EDGE_INSET),
+            label,
+            height,
+            corner,
+            lettering,
+        )
+    })
 }
 
 fn inset_title(
@@ -138,9 +147,9 @@ fn inset_title(
     label: &str,
     height: f32,
     corner: u8,
-    detail: f32,
+    lettering: f32,
 ) -> Option<Title> {
-    let scale = detail.max(MIN_SCALE);
+    let scale = lettering.max(MIN_SCALE);
     let fits = ((tile.width() - 8.0) / (8.6 * scale)).floor();
     if fits < 1.0 || tile.height() < height * scale + 4.0 {
         return None;
@@ -228,6 +237,7 @@ impl Simulation {
                 self.state.geometry.label_height,
                 corner,
                 self.state.detail,
+                self.state.lettering,
             )
         }) else {
             return 0.0;
@@ -364,6 +374,7 @@ impl Simulation {
                 state.geometry.label_height,
                 corner,
                 state.detail,
+                state.lettering,
             ) else {
                 continue;
             };
@@ -379,6 +390,7 @@ impl Simulation {
                         state.geometry.label_height,
                         at(change - 1),
                         state.detail,
+                        state.lettering,
                     )
                     .map(|t| t.point);
                     current.opacity = super::ticks_duration(age) / 0.3;
@@ -426,6 +438,7 @@ mod tests {
             "repo",
             20.0,
             0,
+            1.0,
             1.0,
         )
         .unwrap();
@@ -482,8 +495,8 @@ mod tests {
             high: Vec2::new(width, 0.5),
         };
         let label = "a-long-repository-name";
-        let wide = title(tile(0.9), label, 20.0, 0, 1.0).unwrap();
-        let narrow = title(tile(0.2), label, 20.0, 0, 1.0).unwrap();
+        let wide = title(tile(0.9), label, 20.0, 0, 1.0, 1.0).unwrap();
+        let narrow = title(tile(0.2), label, 20.0, 0, 1.0, 1.0).unwrap();
         assert_eq!(wide.text, label);
         assert!(narrow.text.ends_with('…'));
         assert_eq!(wide.size.y, narrow.size.y);
@@ -496,7 +509,7 @@ mod tests {
             low: Vec2::new(-0.2, -0.05),
             high: Vec2::new(0.2, 0.05),
         };
-        let edge = title(tile, "repository", 20.0, 0, 1.0).unwrap();
+        let edge = title(tile, "repository", 20.0, 0, 1.0, 1.0).unwrap();
         assert!(edge.rect().min.cmpge(tile.low * HALF + EDGE_INSET).all());
         assert!(edge.rect().max.cmple(tile.high * HALF - EDGE_INSET).all());
     }
@@ -508,7 +521,8 @@ mod tests {
             "repo",
             20.0,
             0,
-            0.5,
+            1.0,
+            0.3,
         );
         assert_eq!(low.unwrap().scale, MIN_SCALE);
     }
@@ -568,7 +582,7 @@ mod tests {
             high: Vec2::splat(0.5),
         };
         for corner in 0..4 {
-            let t = title(tile, "repository", 24.0, corner, 1.0).unwrap();
+            let t = title(tile, "repository", 24.0, corner, 1.0, 1.0).unwrap();
             assert!(
                 t.rect()
                     .min

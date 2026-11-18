@@ -82,12 +82,7 @@ fn plan_tree(
         }
         Some(nodes)
     };
-    // Start from the detail at which every minimum tile and its gutters cover the field.
-    let needed = MINIMUM + Vec2::splat(gutter);
-    let mut detail = (Tile::viewport().pixels().element_product()
-        / (needed.element_product() * crate::model::count(order.len())))
-    .sqrt()
-    .min(1.0);
+    let mut detail = area_detail(order.len(), gutter).min(1.0);
     for _ in 0..DETAIL_ATTEMPTS {
         if let Some(nodes) = place(Space::new(detail, gutter)) {
             return Ok((nodes, detail));
@@ -98,6 +93,14 @@ fn plan_tree(
         repositories: order.len(),
         detail,
     })
+}
+
+/// The detail at which every minimum tile and its gutters would exactly cover the field.
+fn area_detail(repositories: usize, gutter: f32) -> f32 {
+    let needed = MINIMUM + Vec2::splat(gutter);
+    (Tile::viewport().pixels().element_product()
+        / (needed.element_product() * crate::model::count(repositories)))
+    .sqrt()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -693,6 +696,8 @@ pub(crate) struct Packing {
     gutter_scale: f32,
     /// Scale of fixed sizes against the reference viewport; zero before planning.
     detail: f32,
+    /// Repository title scale; zero before planning.
+    lettering: f32,
     nodes: Vec<Node>,
     labels: Arc<[String]>,
     inputs: Arc<[Vec<Input>]>,
@@ -927,6 +932,7 @@ impl Packing {
         order.sort_by_key(|&i| (births[i], i));
         let (nodes, detail) =
             plan_tree(&regions, &files, &births, &order, gutter_scale, threads)?;
+        let lettering = detail.min(0.5 * area_detail(first.len(), gutter_scale));
         let space = Space::new(detail, gutter_scale);
         let alpha = 1.0 - (-crate::model::tick_seconds() / 0.25).exp();
         let mut weights = vec![1.0; first.len()];
@@ -989,6 +995,7 @@ impl Packing {
         Ok(Self {
             gutter_scale,
             detail,
+            lettering,
             nodes,
             labels: labels.into(),
             inputs: regions.into(),
@@ -1201,6 +1208,16 @@ impl Packing {
         if self.detail > 0.0 { self.detail } else { 1.0 }
     }
 
+    /// Repository title scale: full size while each repository's share of the field
+    /// holds four minimum tiles, then half that share's side, and never above [`Self::detail`].
+    pub(crate) fn lettering(&self) -> f32 {
+        if self.lettering > 0.0 {
+            self.lettering
+        } else {
+            1.0
+        }
+    }
+
     /// Samples tiled and samples that reused the previous polygons, since the last call.
     pub(crate) fn take_tiling_counts(&self) -> (usize, usize) {
         let mut tiling = self.tiling.lock();
@@ -1361,6 +1378,14 @@ mod tests {
     #[test]
     fn a_set_that_fits_at_full_size_keeps_full_detail() {
         assert_eq!(Packing::before_service(&fixture()).detail(), 1.0);
+    }
+
+    #[test]
+    fn titles_shrink_while_seventy_two_tiles_still_fit_at_full_size() {
+        let packing = Packing::with_gutter(&[capacity_fixture()], 4.0, None).unwrap();
+        assert!(packing.lettering() < packing.detail());
+        assert!(area_detail(72, 4.0) > 1.0);
+        assert!(0.5 * area_detail(72, 4.0) < 0.6);
     }
 
     #[test]

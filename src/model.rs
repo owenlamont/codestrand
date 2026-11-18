@@ -400,6 +400,8 @@ struct State {
     region_depth: f32,
     /// Packing detail scale: fixed sizes shrink with it as if the camera pulled back.
     detail: f32,
+    /// Repository title scale, shared by every tile.
+    lettering: f32,
     tick: u64,
     layout: Layout,
     avatars: Vec<Avatar>,
@@ -862,6 +864,7 @@ impl Simulation {
         let mut state = State {
             region_depth: 0.0,
             detail: 1.0,
+            lettering: 1.0,
             tick: 0,
             layout: {
                 let _phase = options.trace.phase(Phase::ScheduledLayout);
@@ -1068,6 +1071,7 @@ impl Simulation {
         self.state = SharedState(self.initial.clone());
         self.state.region_depth = framing::depth_bound();
         self.state.detail = self.packing.detail();
+        self.state.lettering = self.packing.lettering();
         if let Some((regions, offsets, scales)) = self.packing.sample(0) {
             self.state.layout.place_regions(regions, &offsets, &scales);
         }
