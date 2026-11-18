@@ -28,6 +28,26 @@ const MAX_PENDING_CAPTURES: usize = 4;
 
 mod png;
 
+pub(super) fn check(directory: &Path) -> anyhow::Result<()> {
+    if fs::symlink_metadata(directory).is_ok() {
+        anyhow::bail!(
+            "export directory already exists: {} (choose a new directory)",
+            directory.display()
+        );
+    }
+    let parent = directory
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    if !parent.is_dir() {
+        anyhow::bail!(
+            "export directory parent is not a directory: {}",
+            parent.display()
+        );
+    }
+    Ok(())
+}
+
 pub(super) fn prepare(directory: &Path) -> anyhow::Result<()> {
     fs::create_dir(directory)
         .with_context(|| format!("create new export directory {}", directory.display()))

@@ -70,7 +70,8 @@ pub(super) struct CameraPath {
 }
 
 impl CameraPath {
-    pub(super) fn load(path: &Path, simulation: &Simulation) -> Result<Self, Error> {
+    /// Reads and checks everything that does not need planned history.
+    pub(super) fn read(path: &Path) -> Result<Self, Error> {
         let name = path.display().to_string();
         let text = crate::small_file::read(path).map_err(|source| Error::Read {
             path: name.clone(),
@@ -113,7 +114,7 @@ impl CameraPath {
                 up = next_up;
                 previous = Some(key.frame);
                 key.up = Some(up.to_array());
-                key.bind(simulation)?;
+                key.check()?;
             }
             Ok(())
         };
@@ -122,6 +123,17 @@ impl CameraPath {
             reason,
         })?;
         Ok(Self { name, document })
+    }
+
+    /// Resolves named targets against the planned history.
+    pub(super) fn bind(mut self, simulation: &Simulation) -> Result<Self, Error> {
+        for key in &mut self.document.key {
+            key.bind(simulation).map_err(|reason| Error::Invalid {
+                path: self.name.clone(),
+                reason,
+            })?;
+        }
+        Ok(self)
     }
 
     pub(super) fn pose(
@@ -210,6 +222,15 @@ impl CameraPath {
 }
 
 impl Keyframe {
+    fn check(&self) -> Result<(), String> {
+        for (channel, anchor) in [("eye", &self.eye), ("focus", &self.focus)] {
+            anchor.check().map_err(|reason| {
+                format!("frame {} {channel}: {reason}", self.frame)
+            })?;
+        }
+        Ok(())
+    }
+
     fn bind(&mut self, simulation: &Simulation) -> Result<(), String> {
         for (channel, anchor) in [("eye", &mut self.eye), ("focus", &mut self.focus)] {
             anchor.bind(simulation).map_err(|reason| {
@@ -221,7 +242,7 @@ impl Keyframe {
 }
 
 impl Anchor {
-    fn bind(&mut self, simulation: &Simulation) -> Result<(), String> {
+    fn check(&self) -> Result<(), String> {
         if !Vec3::from_array(self.offset).is_finite()
             || self
                 .point
@@ -240,6 +261,10 @@ impl Anchor {
         {
             return Err("repository requires a file or directory".into());
         }
+        Ok(())
+    }
+
+    fn bind(&mut self, simulation: &Simulation) -> Result<(), String> {
         if let Some(name) = &self.avatar {
             let mut matches = Vec::new();
             for contributor in simulation

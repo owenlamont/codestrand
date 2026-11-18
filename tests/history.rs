@@ -586,6 +586,87 @@ fn attributes_and_commands_cannot_change_raw_blob_results() {
 }
 
 #[test]
+fn filter_and_textconv_drivers_never_run() {
+    let scratch = tempfile::tempdir().unwrap();
+    let path = scratch.path();
+    fixture(path);
+    fs::write(
+        path.join(".gitattributes"),
+        b"* filter=probe diff=probe
+",
+    )
+    .unwrap();
+    commit(path, "drivers");
+    fs::write(
+        path.join("renamed.txt"),
+        b"changed under drivers
+",
+    )
+    .unwrap();
+    commit(path, "driven");
+    let sentinels = tempfile::tempdir().unwrap();
+    let sentinel = |driver: &str| sentinels.path().join(driver);
+    let record = |driver: &str| {
+        let target = sentinel(driver).to_string_lossy().replace('\\', "/");
+        format!("echo ran >> '{target}'; cat")
+    };
+    // Each control proves Git itself runs the driver; process replaces clean and smudge.
+    git(
+        path,
+        &["config", "diff.probe.textconv", &record("textconv")],
+    );
+    git(path, &["config", "filter.probe.clean", &record("clean")]);
+    git(path, &["config", "filter.probe.smudge", &record("smudge")]);
+    let controls: [(&str, &[&str]); 3] = [
+        ("textconv", &["show", "--textconv", "HEAD:renamed.txt"]),
+        ("clean", &["add", "--renormalize", "renamed.txt"]),
+        ("smudge", &["checkout", "HEAD~1", "--", "renamed.txt"]),
+    ];
+    for (driver, arguments) in controls {
+        git(path, arguments);
+        assert!(sentinel(driver).exists(), "Git did not run {driver}");
+    }
+    git(
+        path,
+        &["config", "filter.probe.process", &record("process")],
+    );
+    fs::write(
+        path.join("renamed.txt"),
+        b"process control
+",
+    )
+    .unwrap();
+    let _ = Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(["add", "renamed.txt"])
+        .output()
+        .unwrap();
+    assert!(sentinel("process").exists(), "Git did not run process");
+    for entry in fs::read_dir(sentinels.path()).unwrap() {
+        fs::remove_file(entry.unwrap().path()).unwrap();
+    }
+
+    inspect(path, "HEAD");
+    let quality = scratch.path().join("quality.jsonl");
+    let output = Command::new(env!("CARGO_BIN_EXE_codestrand"))
+        .arg("layout-quality")
+        .arg(&quality)
+        .arg("--repository")
+        .arg(path)
+        .arg("--no-cache")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let ran: Vec<_> = fs::read_dir(sentinels.path()).unwrap().collect();
+    assert!(ran.is_empty(), "{ran:?}");
+}
+
+#[test]
 fn shallow_history_fails_instead_of_inventing_a_root() {
     let scratch = tempfile::tempdir().unwrap();
     let path = scratch.path();

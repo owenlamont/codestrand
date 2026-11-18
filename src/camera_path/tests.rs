@@ -45,7 +45,9 @@ eye={point=[0,12,0]}
 focus={point=[-8.660254,12,-5]}
 ",
     );
-    let path = CameraPath::load(&file, &sim).unwrap();
+    let path = CameraPath::read(&file)
+        .and_then(|path| path.bind(&sim))
+        .unwrap();
     let previous = path.pose(&sim, 0, 1).unwrap();
     sim.advance_to(1, 1);
     let current = path.pose(&sim, 1, 1).unwrap();
@@ -66,7 +68,9 @@ focus={point=[0,12,2]}
 ",
     )
     .unwrap();
-    let path = CameraPath::load(&file, &sim).unwrap();
+    let path = CameraPath::read(&file)
+        .and_then(|path| path.bind(&sim))
+        .unwrap();
     let previous = path.pose(&sim, 0, 30).unwrap();
     let current = path.pose(&sim, 1, 30).unwrap();
     let error = path
@@ -105,7 +109,11 @@ fn review_renamed_file_keeps_identity_for_old_and_new_names() {
     let mut paths = Vec::new();
     for name in ["source/old.rs", "destination/new.rs"] {
         fs::write(&file, format!("fps=30\n[[key]]\nframe=0\neye={{file='{name}',offset=[0,8,0]}}\nfocus={{point=[0,0,0]}}")).unwrap();
-        paths.push(CameraPath::load(&file, &sim).unwrap());
+        paths.push(
+            CameraPath::read(&file)
+                .and_then(|path| path.bind(&sim))
+                .unwrap(),
+        );
     }
     for frame in [180, 45, 180] {
         sim.advance_to(frame, 60);
@@ -150,7 +158,8 @@ fn review_history_only_directory_is_not_found_instead_of_panicking() {
             .all(|index| sim.layout().dir(index).path != "0/ghost")
     );
     fs::write(&file, "fps=30\n[[key]]\nframe=0\neye={directory='ghost',offset=[0,8,0]}\nfocus={point=[0,0,0]}").unwrap();
-    let error = CameraPath::load(&file, &sim)
+    let error = CameraPath::read(&file)
+        .and_then(|path| path.bind(&sim))
         .err()
         .expect("history-only directory is rejected");
     assert!(error.to_string().contains("path \"ghost\" not found"));
@@ -161,7 +170,9 @@ fn review_missing_avatar_errors_and_seek_has_no_camera_state() {
     let (file, mut sim) = fixture(
         "fps=30\n[[key]]\nframe=0\neye={avatar='Ada',offset=[0,8,0]}\nfocus={point=[0,0,0]}",
     );
-    let path = CameraPath::load(&file, &sim).unwrap();
+    let path = CameraPath::read(&file)
+        .and_then(|path| path.bind(&sim))
+        .unwrap();
     let error = path.pose(&sim, 0, 60).unwrap_err().to_string();
     assert!(
         error.contains("output frame 0")
@@ -182,7 +193,9 @@ fn frame_keys_ease_and_clamp_with_file_fps() {
     let (file, sim) = fixture(&format!(
         "fps=24\n[[key]]\nframe=24\n{POINT}[[key]]\nframe=72\neye={{point=[8.0,12.0,0.0]}}\nfocus={{point=[8.0,0.0,0.0]}}"
     ));
-    let path = CameraPath::load(&file, &sim).unwrap();
+    let path = CameraPath::read(&file)
+        .and_then(|path| path.bind(&sim))
+        .unwrap();
     for (frame, x) in [
         (0, 0.0),
         (30, 0.0),
@@ -199,7 +212,9 @@ fn frame_keys_ease_and_clamp_with_file_fps() {
 fn example_tracks_live_targets_and_replays_identically() {
     let text = fs::read_to_string("tests/fixtures/camera-targets.toml").unwrap();
     let (file, mut sim) = fixture(&text);
-    let path = CameraPath::load(&file, &sim).unwrap();
+    let path = CameraPath::read(&file)
+        .and_then(|path| path.bind(&sim))
+        .unwrap();
     let mut poses = Vec::new();
     for frame in 0..=240 {
         sim.advance_to(frame, 30);
@@ -237,7 +252,9 @@ fn example_tracks_live_targets_and_replays_identically() {
 fn targets_require_positions_and_report_ambiguous_repositories() {
     let text = "fps=30\n[[key]]\nframe=0\neye={file='src/main.rs',offset=[0,6,8]}\nfocus={point=[0,0,0]}";
     let (file, sim) = fixture(text);
-    let path = CameraPath::load(&file, &sim).unwrap();
+    let path = CameraPath::read(&file)
+        .and_then(|path| path.bind(&sim))
+        .unwrap();
     assert!(
         path.pose(&sim, 0, 30)
             .unwrap_err()
@@ -257,7 +274,11 @@ fn targets_require_positions_and_report_ambiguous_repositories() {
         &crate::contributors::Mappings::default(),
         &["One".into(), "Two".into()],
     );
-    let error = CameraPath::load(&file, &sim).err().unwrap().to_string();
+    let error = CameraPath::read(&file)
+        .and_then(|path| path.bind(&sim))
+        .err()
+        .unwrap()
+        .to_string();
     assert!(
         error.contains("qualify repository: \"One\", \"Two\""),
         "{error}"
@@ -267,7 +288,9 @@ fn targets_require_positions_and_report_ambiguous_repositories() {
         text.replace("file='src/main.rs'", "file='src/main.rs',repository='Two'"),
     )
     .unwrap();
-    let path = CameraPath::load(&file, &sim).unwrap();
+    let path = CameraPath::read(&file)
+        .and_then(|path| path.bind(&sim))
+        .unwrap();
     sim.advance_to(600, 30);
     let (id, target) = sim
         .layout()
@@ -311,8 +334,9 @@ fn malformed_paths_and_orientation_fail_with_specific_diagnostics() {
     ];
     for (text, expected) in cases {
         let (file, sim) = fixture(text);
-        let result =
-            CameraPath::load(&file, &sim).and_then(|path| path.pose(&sim, 0, 30));
+        let result = CameraPath::read(&file)
+            .and_then(|path| path.bind(&sim))
+            .and_then(|path| path.pose(&sim, 0, 30));
         let error = anyhow::Error::from(result.unwrap_err());
         assert!(format!("{error:#}").contains(expected), "{error:#}");
     }
@@ -321,7 +345,8 @@ fn malformed_paths_and_orientation_fail_with_specific_diagnostics() {
             "fps=30\n[[key]]\nframe=1\n{POINT}[[key]]\nframe={frame}\n{POINT}"
         ));
         assert!(
-            CameraPath::load(&file, &sim)
+            CameraPath::read(&file)
+                .and_then(|path| path.bind(&sim))
                 .err()
                 .unwrap()
                 .to_string()
@@ -332,7 +357,8 @@ fn malformed_paths_and_orientation_fail_with_specific_diagnostics() {
         "fps=30\n[[key]]\nframe=0\n{POINT}[[key]]\nframe=30\n{POINT}up=[0,0,1]"
     ));
     assert!(
-        CameraPath::load(&file, &sim)
+        CameraPath::read(&file)
+            .and_then(|path| path.bind(&sim))
             .err()
             .unwrap()
             .to_string()
@@ -345,7 +371,12 @@ fn camera_path_over_one_mib_is_refused_before_parsing() {
     let (file, sim) = fixture(&format!("fps=30\n#{}", "x".repeat(1024 * 1024)));
     let error = format!(
         "{:#}",
-        anyhow::Error::from(CameraPath::load(&file, &sim).err().unwrap())
+        anyhow::Error::from(
+            CameraPath::read(&file)
+                .and_then(|path| path.bind(&sim))
+                .err()
+                .unwrap()
+        )
     );
     assert!(error.ends_with(": exceeds 1 MiB"), "{error}");
 }

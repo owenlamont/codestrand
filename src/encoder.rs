@@ -35,6 +35,56 @@ fn executable(explicit: Option<&Path>, environment: Option<OsString>) -> PathBuf
 }
 
 impl Options {
+    fn executable(&self) -> PathBuf {
+        executable(
+            self.ffmpeg.as_deref(),
+            std::env::var_os("CODESTRAND_FFMPEG"),
+        )
+    }
+
+    /// Encodes one blank frame with the selected options before planning starts.
+    pub(super) fn check(
+        &self,
+        fps: u16,
+        resolution: crate::resolution::Resolution,
+    ) -> anyhow::Result<()> {
+        let Some(output) = &self.video else {
+            return Ok(());
+        };
+        if output.exists() {
+            bail!(
+                "video output already exists: {} (choose a new filename)",
+                output.display()
+            );
+        }
+        let path = self.executable();
+        let mut version = command(&path);
+        version.arg("-version");
+        Encoder::spawn(&mut version)
+            .and_then(|mut process| process.finish())
+            .with_context(|| {
+                format!("cannot run FFmpeg at {}; {INSTALL}", path.display())
+            })?;
+        let scratch = tempfile::tempdir().context("create FFmpeg probe directory")?;
+        let mut probe = command(&path);
+        probe.args(input_args(fps, &resolution.to_string()));
+        probe.args(output_args(&self.ffmpeg_arg));
+        probe.arg(scratch.path().join(output.file_name().unwrap_or_default()));
+        let mut encoder = Encoder::spawn(&mut probe)?;
+        let frame = usize::from(resolution.width) * usize::from(resolution.height) * 3;
+        let result = encoder
+            .write(vec![0; frame])
+            .and_then(|()| encoder.finish());
+        if self.ffmpeg_arg.is_empty() {
+            result.with_context(|| format!("FFmpeg could not encode a {resolution} frame with libx264; install a libx264-enabled build or select another encoder with repeated --ffmpeg-arg options"))
+        } else {
+            result.with_context(|| {
+                format!("FFmpeg could not encode a {resolution} frame with the --ffmpeg-arg options")
+            })
+        }
+    }
+
+    /// Starts the encode that [`Self::check`] has already exercised.
     pub(super) fn start(
         &self,
         fps: u16,
@@ -43,32 +93,7 @@ impl Options {
         let Some(output) = &self.video else {
             return Ok(None);
         };
-        if output.exists() {
-            bail!(
-                "video output already exists: {} (choose a new filename)",
-                output.display()
-            );
-        }
-        let path = executable(
-            self.ffmpeg.as_deref(),
-            std::env::var_os("CODESTRAND_FFMPEG"),
-        );
-        let mut version = command(&path);
-        version.arg("-version");
-        Encoder::spawn(&mut version)
-            .and_then(|mut process| process.finish())
-            .with_context(|| {
-                format!("cannot run FFmpeg at {}; {INSTALL}", path.display())
-            })?;
-        if self.ffmpeg_arg.is_empty() {
-            let mut probe = command(&path);
-            probe.args(input_args(30, "2x2"));
-            probe.args(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-f", "null", "-"]);
-            let mut encoder = Encoder::spawn(&mut probe)?;
-            let result = encoder.write(vec![0; 12]).and_then(|()| encoder.finish());
-            result.context("FFmpeg could not encode with libx264; install a libx264-enabled build or select another encoder with repeated --ffmpeg-arg options")?;
-        }
-        let mut encode = command(&path);
+        let mut encode = command(&self.executable());
         encode.args(input_args(fps, &resolution.to_string()));
         encode.args(output_args(&self.ffmpeg_arg));
         encode.arg(output);
@@ -409,7 +434,7 @@ fn main() {
         assert_eq!(std::fs::read(&output).unwrap(), [1, 2, 3, 4]);
         assert!(
             options
-                .start(30, crate::resolution::Resolution::default())
+                .check(30, crate::resolution::Resolution::default())
                 .err()
                 .unwrap()
                 .to_string()
@@ -435,10 +460,12 @@ fn main() {
             ffmpeg_arg: Vec::new(),
         };
         let error = options
-            .start(30, crate::resolution::Resolution::default())
-            .err()
-            .unwrap();
+            .check(30, crate::resolution::Resolution::default())
+            .unwrap_err();
         assert!(format!("{error:#}").contains("PNG export still works"));
+        Options::default()
+            .check(30, crate::resolution::Resolution::default())
+            .unwrap();
         assert!(
             Options::default()
                 .start(30, crate::resolution::Resolution::default())
@@ -448,13 +475,17 @@ fn main() {
     }
 
     #[test]
-    fn default_encoder_is_checked_before_rendering() {
+    fn selected_encoder_is_checked_before_planning() {
         let (scratch, binary) = fake_ffmpeg();
         let mut options = Options {
             video: Some(scratch.path().join("default.mp4")),
             ffmpeg: Some(binary.clone()),
             ffmpeg_arg: Vec::new(),
         };
+        options
+            .check(30, crate::resolution::Resolution::default())
+            .unwrap();
+        assert!(!scratch.path().join("default.mp4").exists());
         let mut encoder = options
             .start(30, crate::resolution::Resolution::default())
             .unwrap()
@@ -464,17 +495,25 @@ fn main() {
         let no_x264 = scratch
             .path()
             .join(format!("no-x264{}", std::env::consts::EXE_SUFFIX));
-        std::fs::copy(binary, &no_x264).unwrap();
+        std::fs::copy(&binary, &no_x264).unwrap();
         let output = scratch.path().join("unavailable.mp4");
         options.video = Some(output.clone());
         options.ffmpeg = Some(no_x264);
         let error = options
-            .start(30, crate::resolution::Resolution::default())
-            .err()
-            .unwrap();
+            .check(30, crate::resolution::Resolution::default())
+            .unwrap_err();
         let message = format!("{error:#}");
         assert!(message.contains("Unknown encoder 'libx264'"));
         assert!(message.contains("--ffmpeg-arg"));
+        assert!(!output.exists());
+        options.ffmpeg = Some(binary);
+        options.ffmpeg_arg = vec!["fail".into()];
+        let error = options
+            .check(30, crate::resolution::Resolution::default())
+            .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("1280x720 frame with the --ffmpeg-arg options"));
+        assert!(message.contains("deliberate encoder failure"));
         assert!(!output.exists());
     }
 
