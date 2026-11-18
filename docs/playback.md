@@ -136,8 +136,7 @@ the default is `neon`. Switching themes in preview changes styling:
 layout, playback position and camera stay put.
 
 The seven themes are `neon`, `phosphor`, `outrun`, `blueprint`,
-`retro-desktop`, `atlas` and `forge`. Choose one for preview or export;
-`bevelled-desktop`, Retro Desktop's name in 0.2.0, still selects it:
+`retro-desktop`, `atlas` and `forge`. Choose one for preview or export:
 
 ```sh
 codestrand preview --theme outrun

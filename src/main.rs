@@ -1251,7 +1251,6 @@ mod tests {
             ("outrun", ThemeName::Outrun),
             ("blueprint", ThemeName::Blueprint),
             ("retro-desktop", ThemeName::RetroDesktop),
-            ("bevelled-desktop", ThemeName::RetroDesktop),
             ("atlas", ThemeName::Atlas),
             ("forge", ThemeName::Forge),
         ] {

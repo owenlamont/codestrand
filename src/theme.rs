@@ -21,8 +21,6 @@ pub(super) enum ThemeName {
     Phosphor,
     Outrun,
     Blueprint,
-    // Keeps 0.2.0 command lines and config files working.
-    #[value(alias = "bevelled-desktop")]
     RetroDesktop,
     Atlas,
     Forge,
