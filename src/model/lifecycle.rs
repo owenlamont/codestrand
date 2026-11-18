@@ -14,22 +14,19 @@ pub(super) fn duration(schedule: &Schedule, endings: &[Time]) -> Time {
         })
 }
 
-pub(super) fn arrivals(
-    events: &[Event],
-    selected: std::ops::Range<usize>,
-) -> Vec<bool> {
+/// For each selected event, bit `rank` is set when its participant at that rank (the
+/// author first, then co-authors) appears for the first time in the whole history.
+pub(super) fn arrivals(events: &[Event], selected: std::ops::Range<usize>) -> Vec<u16> {
     let mut seen = std::collections::HashSet::new();
     events
         .iter()
         .map(|event| {
-            seen.insert(
-                event
-                    .contributor
-                    .as_ref()
-                    .expect("resolved contributor")
-                    .key
-                    .clone(),
-            )
+            assert!(event.contributor.is_some(), "resolved contributor");
+            event
+                .participants()
+                .enumerate()
+                .filter(|(_, contributor)| seen.insert(contributor.key.clone()))
+                .fold(0, |bits, (rank, _)| bits | 1 << rank)
         })
         .skip(selected.start)
         .take(selected.len())
@@ -288,8 +285,8 @@ mod tests {
             ends[0],
             schedule.starts[0] + (schedule.starts[1] - schedule.starts[0]) * 0.5
         );
-        assert_eq!(arrivals(&events, 0..2), [true, false]);
-        assert_eq!(arrivals(&events, 1..2), [false]);
+        assert_eq!(arrivals(&events, 0..2), [1, 0]);
+        assert_eq!(arrivals(&events, 1..2), [0]);
         let archived = super::super::Options {
             repository_ends: vec![None],
             repository_archived: vec![true],

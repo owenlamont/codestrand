@@ -983,7 +983,7 @@ mod tests {
                     boundary.titles,
                     boundary.pulses,
                     &sim.schedule.starts[..count],
-                    &sim.travel.docks[..count],
+                    sim.travel.docks.range(..(count, 0)).collect::<Vec<_>>(),
                     trips,
                     titles,
                     caption::frozen(&sim.caption_plan, boundary.tick)

@@ -346,7 +346,9 @@ pub(super) fn now() -> u64 {
 
 fn priority(contributor: &Contributor) -> u8 {
     let accounts = &contributor.accounts;
-    if accounts.github.is_some() || accounts.gitlab.is_some() || accounts.avatar.is_some()
+    if accounts.github.is_some()
+        || accounts.gitlab.is_some()
+        || accounts.avatar.is_some()
     {
         0
     } else if noreply(&String::from_utf8_lossy(&contributor.email)).is_some() {
@@ -1341,8 +1343,14 @@ mod tests {
         let mut avatar = event("avatar@example.invalid", None);
         avatar.contributor.as_mut().unwrap().accounts.avatar =
             Some(Avatar::Remote("https://example.invalid/a.png".to_owned()));
-        assert!(priority(gitlab.contributor.as_ref().unwrap()) < priority(inferred.contributor.as_ref().unwrap()));
-        assert!(priority(avatar.contributor.as_ref().unwrap()) < priority(inferred.contributor.as_ref().unwrap()));
+        assert!(
+            priority(gitlab.contributor.as_ref().unwrap())
+                < priority(inferred.contributor.as_ref().unwrap())
+        );
+        assert!(
+            priority(avatar.contributor.as_ref().unwrap())
+                < priority(inferred.contributor.as_ref().unwrap())
+        );
     }
 
     #[test]

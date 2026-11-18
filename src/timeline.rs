@@ -7,6 +7,8 @@ pub(super) const CACHE_VERSION: u32 = 7;
 
 /// Co-authors read from one commit; later `Co-authored-by:` trailers are ignored.
 pub(super) const MAX_CO_AUTHORS: usize = 8;
+// The author and co-authors of one event fit a `u16` bit set of first arrivals.
+const _: () = assert!(MAX_CO_AUTHORS < 16);
 /// Name or email bytes beyond which a co-author trailer is ignored.
 pub(super) const MAX_IDENTITY_BYTES: usize = 4096;
 /// Trailers are parsed from at most this many final message bytes.

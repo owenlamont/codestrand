@@ -350,7 +350,13 @@ impl Simulation {
             let (regions, origins, scales) = self
                 .packing_sample(self.state.tick, Some(&needed))
                 .expect("planned repository samples");
+            // Co-authors' pulses repeat the author's targets, so one per commit is enough.
+            let mut sampled = Vec::new();
             for pulse in &self.state.pulses {
+                if sampled.contains(&pulse.commit) {
+                    continue;
+                }
+                sampled.push(pulse.commit);
                 let Some(tile) = regions[pulse.repository].tile else {
                     continue;
                 };
@@ -496,6 +502,7 @@ impl State {
             let choosing = avatar.slot.as_ref().is_none_or(|s| s.commit != commit);
             let future = plan.reserved(
                 commit,
+                index,
                 self.layout.repositories[avatar.repository].gutter,
                 choosing,
             );
@@ -524,7 +531,7 @@ impl State {
                         .map_or(point, |t| dock.on_network(t))
                 }),
                 commit,
-                plan.docks.get(commit).copied().flatten(),
+                plan.docks.get(&(commit, index)).copied(),
                 !plan.replanning || commit < plan.frozen,
             );
             chosen.commit = commit;

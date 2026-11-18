@@ -443,7 +443,7 @@ impl std::fmt::Debug for SharedState {
 #[derive(Clone)]
 pub(super) struct Simulation {
     file_ids: HashMap<String, FileIdentity>,
-    first_arrivals: Vec<bool>,
+    first_arrivals: Vec<u16>,
     departures: Vec<Time>,
     repository_ends: Vec<Time>,
     pub caption_style: caption::Style,
@@ -1241,13 +1241,12 @@ impl Simulation {
                 break;
             };
             state.begin(event, start, &mut self.file_ids);
-            if let Some(&author) = event
-                .contributor
-                .as_ref()
-                .and_then(|c| state.authors.get(&c.key))
-            {
+            for (rank, contributor) in event.participants().enumerate() {
+                let Some(&author) = state.authors.get(&contributor.key) else {
+                    continue;
+                };
                 state.avatars[author].expires = self.departures[state.next_event];
-                if !self.first_arrivals[state.next_event]
+                if self.first_arrivals[state.next_event] & (1 << rank) == 0
                     && state.avatars[author].arrived >= start
                 {
                     state.avatars[author].arrived = Time::NEG_INFINITY;
@@ -1770,13 +1769,7 @@ fn file_identities(state: &State) -> HashMap<String, FileIdentity> {
 impl State {
     fn apply_history(&mut self, events: &[Event]) {
         for event in events {
-            let author = self.author(
-                event
-                    .contributor
-                    .as_ref()
-                    .expect("contributors are resolved"),
-                Time::ZERO,
-            );
+            let author = self.participants(event, Time::ZERO)[0];
             for change in &event.changes {
                 apply(&mut self.layout, change, author);
             }
@@ -1818,19 +1811,25 @@ impl State {
         index
     }
 
+    /// Avatar indices of the event's author, then its co-authors.
+    fn participants(&mut self, event: &Event, now: Time) -> Vec<usize> {
+        assert!(event.contributor.is_some(), "contributors are resolved");
+        event
+            .participants()
+            .map(|contributor| self.author(contributor, now))
+            .collect()
+    }
+
+    /// Applies the event's changes for its author, and gives every participant a pulse
+    /// beaming to the same files; diff text flies from the author's alone.
     fn begin(
         &mut self,
         event: &Event,
         start: Time,
         file_ids: &mut HashMap<String, FileIdentity>,
     ) {
-        let author = self.author(
-            event
-                .contributor
-                .as_ref()
-                .expect("contributors are resolved"),
-            start,
-        );
+        let participants = self.participants(event, start);
+        let author = participants[0];
         let mut touched = BTreeMap::new();
         let mut samples = Vec::new();
         for change in &event.changes {
@@ -1865,46 +1864,49 @@ impl State {
             .iter()
             .filter_map(|&(target, ..)| self.destination(target))
             .fold((Vec2::ZERO, 0.0), |(sum, n), point| (sum + point, n + 1.0));
-
-        let avatar = &mut self.avatars[author];
-        if avatar.repository != event.repository {
-            avatar.slot_origin = avatar
-                .slot
-                .take()
-                .map(|s| (avatar.repository, s.dock, s.point));
-        }
-        avatar.repository = event.repository;
-        avatar.commit = self.next_event;
-        avatar.touched = touched.into_keys().collect();
-        if centroid.1 > 0.0 {
-            avatar.target = ground(centroid.0 / centroid.1);
-        }
-        if avatar.presence <= 0.0 {
-            avatar.position = avatar.target + Vec3::Y * MIN_AVATAR_HEIGHT;
-        }
-        avatar.last_active = start;
-        avatar.activity = (avatar.activity + 1.0).min(1000.0);
-        let previous = self.pulses.iter().rposition(|pulse| pulse.author == author);
-        let mut index = 0;
-        self.pulses.retain_mut(|pulse| {
-            let keep = pulse.author != author || Some(index) == previous;
-            if pulse.author == author {
-                pulse.end = pulse.end.min(start + FRAGMENT_FLIGHT + 0.3);
+        let touched: Vec<u64> = touched.into_keys().collect();
+        let mut samples = Some(samples);
+        for author in participants {
+            let avatar = &mut self.avatars[author];
+            if avatar.repository != event.repository {
+                avatar.slot_origin = avatar
+                    .slot
+                    .take()
+                    .map(|s| (avatar.repository, s.dock, s.point));
             }
-            index += 1;
-            keep
-        });
-        self.pulses.push_back(Pulse {
-            commit: self.next_event,
-            repository: event.repository,
-            touched: self.avatars[author].touched.clone(),
-            start,
-            end: pulse_end(start),
-            author,
-            targets,
-            aggregated,
-            samples,
-        });
+            avatar.repository = event.repository;
+            avatar.commit = self.next_event;
+            avatar.touched.clone_from(&touched);
+            if centroid.1 > 0.0 {
+                avatar.target = ground(centroid.0 / centroid.1);
+            }
+            if avatar.presence <= 0.0 {
+                avatar.position = avatar.target + Vec3::Y * MIN_AVATAR_HEIGHT;
+            }
+            avatar.last_active = start;
+            avatar.activity = (avatar.activity + 1.0).min(1000.0);
+            let previous = self.pulses.iter().rposition(|pulse| pulse.author == author);
+            let mut index = 0;
+            self.pulses.retain_mut(|pulse| {
+                let keep = pulse.author != author || Some(index) == previous;
+                if pulse.author == author {
+                    pulse.end = pulse.end.min(start + FRAGMENT_FLIGHT + 0.3);
+                }
+                index += 1;
+                keep
+            });
+            self.pulses.push_back(Pulse {
+                commit: self.next_event,
+                repository: event.repository,
+                touched: touched.clone(),
+                start,
+                end: pulse_end(start),
+                author,
+                targets: targets.clone(),
+                aggregated,
+                samples: samples.take().unwrap_or_default(),
+            });
+        }
     }
 
     fn aggregate(

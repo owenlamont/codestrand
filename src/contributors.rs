@@ -280,17 +280,18 @@ impl Mappings {
             .collect();
         let resolve = |identity: &crate::timeline::Identity| {
             let email = identity.email.to_ascii_lowercase();
-            let mut contributor = self.emails.get(&email).cloned().unwrap_or_else(|| {
-                let key = unlisted_key(identity);
-                Contributor {
-                    bot: None,
-                    name: names[&key].clone(),
-                    email: Vec::new(),
-                    accounts: Accounts::default(),
-                    portrait: None,
-                    key,
-                }
-            });
+            let mut contributor =
+                self.emails.get(&email).cloned().unwrap_or_else(|| {
+                    let key = unlisted_key(identity);
+                    Contributor {
+                        bot: None,
+                        name: names[&key].clone(),
+                        email: Vec::new(),
+                        accounts: Accounts::default(),
+                        portrait: None,
+                        key,
+                    }
+                });
             contributor.email.clone_from(&identity.email);
             contributor
         };
@@ -324,6 +325,14 @@ mod tests {
 
     use super::*;
 
+    /// The author's contributor apart from the email it was matched by.
+    fn identity(event: &Event) -> Contributor {
+        Contributor {
+            email: Vec::new(),
+            ..event.contributor.clone().expect("resolved contributor")
+        }
+    }
+
     #[test]
     fn bot_overrides_precede_noreply_and_suffix_without_substring_matches() {
         let mut history = events(&[
@@ -348,21 +357,10 @@ mod tests {
             let mappings = Mappings::parse(&format!("[[contributor]]\nname='Renamed'\nemails=['42+dependabot[bot]@users.noreply.github.com']\nbot={value}"), Path::new("contributors.toml")).unwrap();
             mappings.apply(&mut history);
             assert_eq!(
-                history[0]
-                    .contributor
-                    .as_ref()
-                    .unwrap()
-                    .bot_rule(),
+                history[0].contributor.as_ref().unwrap().bot_rule(),
                 expected
             );
-            assert_eq!(
-                history[0]
-                    .contributor
-                    .as_ref()
-                    .unwrap()
-                    .is_bot(),
-                value
-            );
+            assert_eq!(history[0].contributor.as_ref().unwrap().is_bot(), value);
         }
     }
 
@@ -523,7 +521,7 @@ gravatar = "avatar@example.invalid"
             contributor.accounts.gravatar.as_deref(),
             Some("avatar@example.invalid")
         );
-        assert_eq!(events[0].contributor, events[1].contributor);
+        assert_eq!(identity(&events[0]), identity(&events[1]));
     }
 
     #[test]
@@ -602,7 +600,7 @@ emails = ["personal@example.invalid", "work@example.invalid"]
         ]);
         let raw = events.clone();
         mappings.apply(&mut events);
-        assert_eq!(events[0].contributor, events[1].contributor);
+        assert_eq!(identity(&events[0]), identity(&events[1]));
         assert_eq!(events[0].author, raw[0].author);
         assert_eq!(events[1].author, raw[1].author);
         assert_eq!(names(&events, &mappings), ["Owen Lamont", "Unknown"]);
