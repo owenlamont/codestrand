@@ -457,6 +457,9 @@ impl<N: Network> Resolver<N> {
                 .trim()
                 .to_ascii_lowercase();
             let accounts = &contributor.accounts;
+            // Without a commit no account lookup runs, so the result is cached as if
+            // there were no remote, apart from a later authored commit's lookup.
+            let remote = remote.filter(|_| !commit.is_empty());
             let key = if let Some(Avatar::Remote(url)) = &accounts.avatar {
                 format!("override\n{url}")
             } else if accounts.gitlab.is_none()
@@ -1088,6 +1091,25 @@ mod tests {
         assert_eq!(urls[0], "https://github.com/lead.png?size=128");
         assert!(urls[1].starts_with("https://www.gravatar.com/avatar/"));
         assert_eq!(urls.len(), 2);
+    }
+
+    #[test]
+    fn a_cached_co_author_miss_leaves_their_later_commit_lookup() {
+        let root = crate::cache::test_directory().unwrap();
+        let cached = || {
+            resolver(
+                Some(root.path().to_owned()),
+                true,
+                (0..4).map(|_| Response::Missing).collect(),
+            )
+        };
+        let mut lead = event("lead@example.invalid", Some("lead"));
+        let pair = event("pair@example.invalid", None);
+        lead.co_contributors = vec![pair.contributor.clone().unwrap()];
+        cached().resolve(&mut [lead], Some("owner/repo"));
+        let mut later = cached();
+        later.resolve(&mut [pair], Some("owner/repo"));
+        assert!(later.network.calls[0].0.contains("/commits?sha="));
     }
 
     #[test]
