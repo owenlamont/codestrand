@@ -169,6 +169,8 @@ fn progress_line(
     elapsed: Duration,
     eta: Option<Duration>,
 ) -> String {
+    // Playback runs past the last commit for repository exits and the tail.
+    let history = history.min(total);
     let history = format!(
         "history {:.1}/{:.1}s",
         history.lossy_secs_f32(),
@@ -250,6 +252,18 @@ mod tests {
             line(Length::Planned(5400)),
             "Exported 900 frames; history 20.0/80.0s (25.0%); video 0:30 of 3:00 \
              (5400 frames); 1:15 elapsed, ETA 1:02:05"
+        );
+        assert_eq!(
+            progress_line(
+                90,
+                Length::Planned(90),
+                (Time::seconds(4.0), Time::seconds(3.0)),
+                30,
+                Duration::ZERO,
+                None
+            ),
+            "Exported 90 frames; history 3.0/3.0s (100.0%); video 0:03 of 0:03 (90 frames); \
+             0:00 elapsed, ETA unknown"
         );
         assert_eq!(
             line(Length::Requested(1000)),
