@@ -444,6 +444,19 @@ mod tests {
                 "{pointer}"
             );
         }
+        let identity = |name: usize, email: usize| serde_json::json!({"name": vec![b'n'; name], "email": vec![b'e'; email]});
+        for (co_authors, valid) in [
+            (vec![identity(1, 1); timeline::MAX_CO_AUTHORS], true),
+            (vec![identity(1, 1); timeline::MAX_CO_AUTHORS + 1], false),
+            (vec![identity(1, 0)], false),
+            (vec![identity(timeline::MAX_IDENTITY_BYTES + 1, 1)], false),
+            (vec![identity(1, timeline::MAX_IDENTITY_BYTES + 1)], false),
+        ] {
+            let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            value["events"][0]["co_authors"] = co_authors.into();
+            let snapshot = serde_json::from_value(value).unwrap();
+            assert_eq!(valid_snapshot(&snapshot, &tip), valid);
+        }
     }
 
     fn git(path: &Path, args: &[&str]) -> String {

@@ -496,6 +496,62 @@ mod tests {
     }
 
     #[test]
+    fn co_authors_share_identity_with_their_own_commits_and_aliases() {
+        let mappings = Mappings::parse(
+            "[[contributor]]\nname='Owen'\nemails=['one@example.invalid', 'two@example.invalid']",
+            Path::new("contributors.toml"),
+        )
+        .unwrap();
+        let mut history = events(&[
+            ("Grace Hopper", "grace@example.invalid"),
+            ("Owen", "one@example.invalid"),
+        ]);
+        history[1].co_authors = [
+            ("Grace H", "GRACE@example.invalid"),
+            ("Owen Again", "two@example.invalid"),
+            ("Codex", "codex@example.invalid"),
+        ]
+        .map(|(name, email)| Identity {
+            name: name.into(),
+            email: email.into(),
+        })
+        .to_vec();
+        mappings.apply(&mut history);
+        let co: Vec<_> = history[1]
+            .co_contributors
+            .iter()
+            .map(|c| (c.name.as_str(), c.email.as_slice()))
+            .collect();
+        assert_eq!(
+            co,
+            [
+                ("Grace Hopper", &b"GRACE@example.invalid"[..]),
+                ("Codex", b"codex@example.invalid"),
+            ]
+        );
+        assert_eq!(
+            history[1].co_contributors[0].key,
+            history[0].contributor.as_ref().unwrap().key
+        );
+        assert_eq!(
+            names(&history, &mappings),
+            ["Grace Hopper", "Owen", "Codex"]
+        );
+    }
+
+    #[test]
+    fn a_bot_co_author_is_a_bot_beside_a_human_author() {
+        let mut history = events(&[("Human", "human@example.invalid")]);
+        history[0].co_authors = vec![Identity {
+            name: b"dependabot[bot]".to_vec(),
+            email: b"49699333+dependabot[bot]@users.noreply.github.com".to_vec(),
+        }];
+        Mappings::default().apply(&mut history);
+        assert!(!history[0].contributor.as_ref().unwrap().is_bot());
+        assert_eq!(history[0].co_contributors[0].bot_rule(), "github_noreply");
+    }
+
+    #[test]
     fn optional_platform_accounts_parse_and_follow_email_aliases() {
         let mappings = Mappings::parse(
             r#"

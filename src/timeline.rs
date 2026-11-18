@@ -1,5 +1,7 @@
 use std::{collections::HashMap, fmt::Write};
 
+use gix::objs::commit::message::BodyRef;
+
 use crate::history::{BlobDiff, ChangeKind, Commit, History};
 
 // Bump when the snapshot format, history import policies or timeline conversion change.
@@ -110,18 +112,18 @@ pub(super) fn from_history(history: &History) -> Vec<Event> {
 /// repeated identities, up to [`MAX_CO_AUTHORS`].
 fn co_authors(message: &[u8], author_email: &[u8]) -> Vec<Identity> {
     let cut = message.len().saturating_sub(TRAILER_BYTES);
-    let tail = if cut == 0 {
-        message
+    let body = if cut == 0 {
+        gix::objs::commit::MessageRef::from_bytes(message).body()
     } else {
-        // Start on a line boundary so a cut line is not misread as a trailer.
+        // Start on a line boundary, past the title, so a cut line is not misread.
         message[cut..]
             .iter()
             .position(|&byte| byte == b'\n')
-            .map_or(&[][..], |newline| &message[cut + newline + 1..])
+            .map(|newline| BodyRef::from_bytes(&message[cut + newline + 1..]))
     };
     let mut seen = vec![author_email.to_ascii_lowercase()];
     let mut found = Vec::new();
-    let Some(body) = gix::objs::commit::MessageRef::from_bytes(tail).body() else {
+    let Some(body) = body else {
         return found;
     };
     for trailer in body.trailers().co_authored_by() {
@@ -395,6 +397,76 @@ mod tests {
             .map(|change| change.path)
             .collect();
         assert_eq!(paths, ["kept.txt"]);
+    }
+
+    #[test]
+    fn co_author_trailers_skip_malformed_repeated_and_oversized_identities() {
+        let long = "x".repeat(MAX_IDENTITY_BYTES + 1);
+        let message = format!(
+            "Pair on parsing\n\nCo-authored-by: Not trailing <early@example.com>\n\n\
+             Co-authored-by: Grace <grace@example.com>\n\
+             co-authored-by: Grace Again <GRACE@example.com>\n\
+             Co-authored-by: Ada Author <ADA@example.com>\n\
+             Co-authored-by: No Email <>\n\
+             Co-authored-by: Unclosed <unclosed@example.com\n\
+             Co-authored-by: Trailing <trailing@example.com> extra\n\
+             Co-authored-by: Long <{long}@example.com>\n\
+             Signed-off-by: Reviewer <reviewer@example.com>\n\
+             CO-AUTHORED-BY:   Codex   <codex@example.com>  \n"
+        );
+        let names: Vec<_> = co_authors(message.as_bytes(), b"ada@example.com")
+            .into_iter()
+            .map(|identity| String::from_utf8(identity.name).unwrap())
+            .collect();
+        assert_eq!(names, ["Grace", "Codex"]);
+    }
+
+    #[test]
+    fn co_authors_stop_at_the_cap_and_after_the_final_trailer_bytes() {
+        let mut trailers = String::new();
+        for index in 0..=MAX_CO_AUTHORS {
+            writeln!(trailers, "Co-authored-by: P{index} <p{index}@example.com>")
+                .unwrap();
+        }
+        let capped = co_authors(format!("Title\n\n{trailers}").as_bytes(), b"");
+        assert_eq!(capped.len(), MAX_CO_AUTHORS);
+        assert_eq!(capped[0].email, b"p0@example.com");
+        let padded = format!("Title\n\n{}\n\n{trailers}", "x".repeat(TRAILER_BYTES));
+        assert_eq!(co_authors(padded.as_bytes(), b"").len(), MAX_CO_AUTHORS);
+        let buried = format!("Title\n\n{trailers}{}", "y\n".repeat(TRAILER_BYTES));
+        assert_eq!(co_authors(buried.as_bytes(), b""), []);
+    }
+
+    #[test]
+    fn imported_commits_carry_their_co_authors() {
+        let scratch = tempfile::tempdir().expect("temporary directory is available");
+        let path = scratch.path();
+        git(path, &["init", "--initial-branch=main"]);
+        fs::write(path.join("pair.txt"), "pair\n").expect("fixture is writable");
+        git(path, &["add", "-A"]);
+        git(
+            path,
+            &[
+                "commit",
+                "-m",
+                "pair\n\nCo-authored-by: Grace <grace@example.invalid>",
+            ],
+        );
+        let (repo, tip) = crate::history::resolve(path, "HEAD").expect("fixture opens");
+        let history = crate::history::import_with_options(
+            &repo,
+            tip,
+            crate::history::Options::default(),
+        )
+        .expect("fixture imports");
+        let events = from_history(&history);
+        assert_eq!(
+            events[0].co_authors,
+            [Identity {
+                name: b"Grace".to_vec(),
+                email: b"grace@example.invalid".to_vec(),
+            }]
+        );
     }
 
     #[test]

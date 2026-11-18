@@ -1069,6 +1069,26 @@ mod tests {
     }
 
     #[test]
+    fn co_authors_get_portraits_without_borrowing_the_commit_account() {
+        let mut source = event("lead@example.invalid", Some("lead"));
+        let co_author = event("pair@example.invalid", None).contributor.unwrap();
+        source.co_contributors = vec![co_author];
+        let mut events = [source];
+        let mut resolver = resolver(
+            None,
+            true,
+            vec![Response::Found(png()), Response::Found(png())],
+        );
+        resolver.resolve(&mut events, Some("owner/repo"));
+        assert!(visible(&events[0]));
+        assert!(events[0].co_contributors[0].portrait.is_some());
+        let urls: Vec<_> = resolver.network.calls.iter().map(|(url, _)| url).collect();
+        assert_eq!(urls[0], "https://github.com/lead.png?size=128");
+        assert!(urls[1].starts_with("https://www.gravatar.com/avatar/"));
+        assert_eq!(urls.len(), 2);
+    }
+
+    #[test]
     fn gitlab_username_precedes_inferred_github_and_reuses_cache() {
         let root = crate::cache::test_directory().unwrap();
         let mut source =

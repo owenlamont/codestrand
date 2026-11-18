@@ -2049,6 +2049,74 @@ mod tests {
     }
 
     #[test]
+    fn co_authors_beam_from_their_own_separate_docks() {
+        let co_author = |name: &str| crate::timeline::Identity {
+            name: name.as_bytes().to_vec(),
+            email: format!("{name}@example.invalid").into_bytes(),
+        };
+        let histories = (0..2)
+            .map(|repository| {
+                let mut events = crate::timeline::synthetic();
+                for (index, event) in events.iter_mut().enumerate() {
+                    event.seconds += i64::try_from(repository).unwrap() * 86_400 * 3;
+                    if index % 3 == 1 {
+                        event.co_authors = vec![co_author("Pair"), co_author("Codex")];
+                    }
+                }
+                crate::repositories::namespace(&mut events, repository);
+                events
+            })
+            .collect();
+        let mut sim = Simulation::with_repositories(
+            crate::repositories::merge(histories),
+            &Options {
+                seconds_per_day: 0.02,
+                max_idle_seconds: 0.05,
+                ..Default::default()
+            },
+            &Theme::neon(),
+            &Mappings::default(),
+            &["a".into(), "b".into()],
+        );
+        let shared: Vec<_> = (0..sim.events.len())
+            .filter(|&commit| sim.events[commit].co_contributors.len() == 2)
+            .collect();
+        assert_eq!(shared.len(), 8);
+        let mut beaming = std::collections::BTreeSet::new();
+        let frames = crate::model::frames_for(sim.duration(), 60).unwrap();
+        for frame in 0..=frames {
+            sim.advance_to(frame, 60);
+            let state = &sim.state;
+            let mut serving = Vec::new();
+            for pulse in state.pulses.iter().filter(|p| sim.pulse_beams_visible(p)) {
+                if super::super::tick_time(state.tick) >= pulse.start {
+                    beaming.insert((pulse.commit, pulse.author));
+                    serving.push(pulse.author);
+                }
+            }
+            serving.sort_unstable();
+            serving.dedup();
+            let points: Vec<_> = serving
+                .iter()
+                .map(|&a| crate::model::titles::screen(&sim, state.avatars[a].position))
+                .collect();
+            for (index, a) in points.iter().enumerate() {
+                for b in &points[index + 1..] {
+                    assert!(
+                        a.distance(*b) >= 2.0 * state.avatar_radius() - 0.01,
+                        "avatars beam on top of each other at frame {frame}"
+                    );
+                }
+            }
+        }
+        for commit in shared {
+            let beams = beaming.range((commit, 0)..(commit + 1, 0)).count();
+            assert_eq!(beams, 3, "commit {commit} beams from every participant");
+        }
+        validate(&mut sim);
+    }
+
+    #[test]
     fn realistic_thirty_repository_slots_sample_every_commit_and_replay() {
         let mut sim = thirty();
         assert!(sim.travel.stats.temporary_capture_bytes <= 32 * 1024 * 1024);
