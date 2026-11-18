@@ -43,11 +43,12 @@ contributor portraits. It can send:
   `--gitlab-email-avatars` is also given;
 - a request to any HTTPS image URL GitLab returns or the contributors file sets.
 
-It never sends source paths, contents or diffs. Do not add `--fetch-avatars` unless the
-user asked for portraits; for a private or work repository, ask first. The history
-cache in the user cache directory holds author names, emails, paths and sampled source
-lines in plain text; `--no-cache` skips reading and writing it. Video export starts the
-local FFmpeg executable.
+Codestrand adds no source paths, contents or diffs to these requests; a configured URL
+carries whatever its author put in it. Do not add `--fetch-avatars` unless the user
+asked for portraits; for a private or work repository, ask first. The history cache in
+the user cache directory holds author names, emails, paths and sampled source lines in
+plain text; `--no-cache` skips reading and writing it. Video export starts the local
+FFmpeg executable.
 
 ## Inspect
 
