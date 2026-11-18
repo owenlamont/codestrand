@@ -407,6 +407,21 @@ impl Source {
         }
     }
 
+    /// The `--repository` paths, or the repository holding the current directory when
+    /// no repository, manifest or test input is named.
+    fn repositories(&self) -> anyhow::Result<Vec<PathBuf>> {
+        Ok(
+            if self.repository.is_empty()
+                && self.repositories_file.is_none()
+                && self.test_input.is_none()
+            {
+                vec![repositories::discover(&std::env::current_dir()?)?]
+            } else {
+                self.repository.clone()
+            },
+        )
+    }
+
     fn load(&self, progress: &Progress) -> anyhow::Result<(model::Simulation, String)> {
         #[cfg(not(test))]
         let available_memory = model::available_memory(&self.trace)?;
@@ -420,14 +435,7 @@ impl Source {
         progress: &Progress,
         available_memory: u64,
     ) -> anyhow::Result<(model::Simulation, String)> {
-        let paths = if self.repository.is_empty()
-            && self.repositories_file.is_none()
-            && self.test_input.is_none()
-        {
-            vec![repositories::discover(&std::env::current_dir()?)?]
-        } else {
-            self.repository.clone()
-        };
+        let paths = self.repositories()?;
         let file = self.repositories_file.as_deref();
         let repositories = if self.config.is_some()
             && self.config == self.repositories_file
@@ -794,7 +802,9 @@ fn termination(result: anyhow::Result<()>) -> std::process::ExitCode {
 }
 
 /// Opens the preview window while a worker thread loads and plans `source`.
-fn preview(source: Source, theme: theme::ThemeName) -> anyhow::Result<()> {
+fn preview(mut source: Source, theme: theme::ThemeName) -> anyhow::Result<()> {
+    // Outside a repository, fail before a window opens.
+    source.repository = source.repositories()?;
     let (progress, updates) = Progress::channel(std::time::Duration::from_millis(50));
     let theme = theme.build();
     let worker = std::thread::spawn(move || {
