@@ -18,7 +18,7 @@ import posixpath
 import re
 import tomllib
 from pathlib import Path
-from typing import Annotated, Final
+from typing import Annotated, Any, Final
 
 import typer
 
@@ -30,6 +30,8 @@ ZENSICAL: Final = ROOT / "zensical.toml"
 DOCS: Final = ROOT / "docs"
 OUTPUT: Final = DOCS / "llms.txt"
 OUTPUT_FULL: Final = DOCS / "llms-full.txt"
+
+type Nav = list[dict[str, str | list[dict[str, str]]]]
 
 # Block prefixes that end the lead paragraph (heading, fence, list, quote, table).
 BLOCK_PREFIXES: Final = ("#", "```", "-", "*", ">", "|")
@@ -120,7 +122,7 @@ def page_link(label: str, rel_path: str, site_url: str) -> str:
     return f"{item}: {desc}" if desc else item
 
 
-def nav_pages(nav: list) -> list[str]:
+def nav_pages(nav: Nav) -> list[str]:
     """Return docs page paths in nav order, excluding the landing page.
 
     Returns:
@@ -136,7 +138,7 @@ def nav_pages(nav: list) -> list[str]:
     return pages
 
 
-def all_doc_pages(nav: list) -> list[str]:
+def all_doc_pages(nav: Nav) -> list[str]:
     """All docs page paths for the full feed: nav order first, then remaining pages.
 
     Pages not listed in the nav are appended in sorted order so ``llms-full.txt`` is
@@ -155,7 +157,7 @@ def all_doc_pages(nav: list) -> list[str]:
     return ordered + extra
 
 
-def render(config: dict) -> str:
+def render(config: dict[str, Any]) -> str:
     """Render the ``llms.txt`` index from the parsed Zensical config.
 
     Returns:
@@ -172,14 +174,13 @@ def render(config: dict) -> str:
             lines += [page_link(*next(iter(sub.items())), site_url) for sub in value]
             lines.append("")
         elif value != "index.md":
-            # The landing page is a navigational card grid, not useful doc-index prose.
             loose.append(page_link(label, value, site_url))
     if loose:
         lines += ["## Guides", "", *loose, ""]
     return "\n".join(lines).rstrip() + "\n"
 
 
-def render_full(config: dict) -> str:
+def render_full(config: dict[str, Any]) -> str:
     """Render the self-contained ``llms-full.txt`` from the parsed Zensical config.
 
     Returns:
