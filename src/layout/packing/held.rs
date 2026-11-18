@@ -4,7 +4,7 @@ use crate::model::{TICK_RATE, count};
 
 /// When the held weights may drift from the live counts before a reflow, and how it eases.
 #[derive(Clone, Copy, Debug)]
-pub(super) struct Policy {
+struct Policy {
     /// Field share, as total variation over present tiles, on the wrong tiles.
     drift: f32,
     /// Ratio between one tile's live and held share, so small tiles also follow.
@@ -70,13 +70,13 @@ impl Weights {
             self.from = self.at(tick);
             self.to = targets;
             self.start = tick;
-            self.next = tick + ticks(self.policy.reflow + self.policy.hold);
+            self.next = tick + span(self.policy.reflow + self.policy.hold);
         }
         self.at(tick)
     }
 
     fn at(&self, tick: usize) -> Vec<f32> {
-        let reflow = ticks(self.policy.reflow).max(1);
+        let reflow = span(self.policy.reflow).max(1);
         let u = count((tick - self.start).min(reflow)) / count(reflow);
         let eased = u * u * (3.0 - 2.0 * u);
         self.from
@@ -105,7 +105,7 @@ impl Weights {
     }
 }
 
-fn ticks(ticks: u32) -> usize {
+fn span(ticks: u32) -> usize {
     usize::try_from(ticks).expect("tick spans fit usize")
 }
 
@@ -128,14 +128,14 @@ mod tests {
     fn a_drift_eases_once_to_the_new_counts_then_holds() {
         let mut weights = Weights::new(2);
         weights.step(0, &[100.0, 100.0], &BOTH);
-        let reflow = ticks(POLICY.reflow);
+        let reflow = span(POLICY.reflow);
         let path: Vec<_> = (1..=reflow + 1)
             .map(|tick| weights.step(tick, &[100.0, 300.0], &BOTH)[1])
             .collect();
         assert!(path.windows(2).all(|pair| pair[0] <= pair[1]));
         assert!(path[0] < 101.0);
         assert_eq!(path[reflow], 300.0);
-        let late = ticks(POLICY.reflow + POLICY.hold);
+        let late = span(POLICY.reflow + POLICY.hold);
         assert_eq!(weights.step(late, &[100.0, 900.0], &BOTH)[1], 300.0);
         assert_eq!(weights.step(late + 1, &[100.0, 900.0], &BOTH)[1], 300.0);
         assert!(weights.step(late + 2, &[100.0, 900.0], &BOTH)[1] > 300.0);
@@ -149,7 +149,7 @@ mod tests {
         };
         let mut weights = Weights::with_policy(2, policy);
         weights.step(0, &[1000.0, 10.0], &BOTH);
-        let reflow = ticks(POLICY.reflow);
+        let reflow = span(POLICY.reflow);
         assert_eq!(weights.step(reflow + 1, &[1000.0, 100.0], &BOTH)[1], 10.0);
         assert_eq!(
             weights.step(2 * reflow + 1, &[1000.0, 100.0], &BOTH)[1],
