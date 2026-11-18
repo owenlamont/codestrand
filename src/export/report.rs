@@ -197,7 +197,14 @@ fn progress_line(
     };
     let eta = eta.map_or_else(
         || "ETA unknown".to_owned(),
-        |eta| format!("ETA {}", clock(eta)),
+        |eta| {
+            let approximate = if matches!(length, Length::Projected(_)) {
+                "~"
+            } else {
+                ""
+            };
+            format!("ETA {approximate}{}", clock(eta))
+        },
     );
     format!("Exported {progress}; {} elapsed, {eta}", clock(elapsed))
 }
@@ -246,7 +253,7 @@ mod tests {
         assert_eq!(
             line(Length::Projected(5400)),
             "Exported 900 frames; history 20.0/80.0s (25.0%); video 0:30 of ~3:00 \
-             (~5400 frames); 1:15 elapsed, ETA 1:02:05"
+             (~5400 frames); 1:15 elapsed, ETA ~1:02:05"
         );
         assert_eq!(
             line(Length::Planned(5400)),
