@@ -142,13 +142,13 @@ def all_doc_pages(nav: Nav) -> list[str]:
     """All docs page paths for the full feed: nav order first, then remaining pages.
 
     Pages not listed in the nav are appended in sorted order so ``llms-full.txt`` is
-    complete; ``index.md`` is excluded.
+    complete.
 
     Returns:
-        Flattened ``rel_path`` strings covering every ``docs/*.md`` except ``index.md``.
+        Flattened ``rel_path`` strings covering every ``docs/*.md``, ``index.md`` first.
     """
-    ordered = nav_pages(nav)
-    seen = {*ordered, "index.md"}
+    ordered = ["index.md", *nav_pages(nav)]
+    seen = set(ordered)
     extra = sorted(
         rel
         for path in DOCS.rglob("*.md")

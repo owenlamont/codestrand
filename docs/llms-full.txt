@@ -4,6 +4,46 @@
 
 ---
 
+Source: https://codestrand.pages.dev/
+
+# Codestrand
+
+![Codestrand logo](assets/codestrand.svg)
+
+Watch a Git repository take shape over time. Files keep persistent positions while
+contributors glide above the directory graph. Each commit connects a contributor to
+all affected files; diff fragments show additions and removals.
+
+![Codestrand playing Git histories in seven themes: repositories appear, grow and are archived, contributors send beams to changed files, and the camera flies in behind an avatar](assets/montage.webp)
+
+Watch the [feature tour on YouTube](https://youtu.be/gmueXAHnvAE).
+
+Codestrand has seven steady themes, labels, contributor
+portraits and a mostly planar scene. Preview and export share a repeatable
+simulation, including playback of multiple repositories. Export writes PNG frames or
+streams video to your installed FFmpeg.
+
+## Start here
+
+1. [Install Codestrand](https://codestrand.pages.dev/getting-started/installation/).
+2. [Play your repository](https://codestrand.pages.dev/getting-started/quickstart/).
+3. Adjust [playback and camera controls](https://codestrand.pages.dev/playback/).
+4. [Export frames](https://codestrand.pages.dev/export/) or set up [contributors and avatars](https://codestrand.pages.dev/contributors/).
+
+Use [Git history import](https://codestrand.pages.dev/history/) for revisions and cache behaviour, and
+[troubleshooting](https://codestrand.pages.dev/troubleshooting/) for platform and configuration problems.
+
+## Acknowledgements
+
+Codestrand is licensed MIT OR Apache-2.0. Thanks to
+[Material Icon Theme](https://github.com/material-extensions/vscode-material-icon-theme)
+for file icons (MIT), [Bevy](https://bevy.org/) for rendering,
+[resvg](https://github.com/linebender/resvg) for SVG rasterisation,
+[gix](https://github.com/GitoxideLabs/gitoxide) for Git access and
+[Gource](https://gource.io/) for inspiration.
+
+---
+
 Source: https://codestrand.pages.dev/getting-started/installation/
 
 # Installation

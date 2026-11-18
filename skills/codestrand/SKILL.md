@@ -37,10 +37,11 @@ contributor portraits. It can send:
 
 - the repository's GitHub owner and name and a commit hash to `api.github.com`,
   authenticated with `GH_TOKEN` or `GITHUB_TOKEN` when set;
+- GitHub account names or numeric IDs to GitHub's avatar servers;
 - a SHA-256 hash of a contributor's email address to Gravatar;
 - configured GitLab usernames to GitLab, and raw email addresses only when
   `--gitlab-email-avatars` is also given;
-- a request to any HTTPS avatar URL set in the contributors file.
+- a request to any HTTPS image URL GitLab returns or the contributors file sets.
 
 It never sends source paths, contents or diffs. Do not add `--fetch-avatars` unless the
 user asked for portraits; for a private or work repository, ask first. The history
@@ -65,9 +66,8 @@ codestrand preview --repository /path/to/first --repository /path/to/second --th
 ```
 
 Preview loops until the window closes (Escape). Both date bounds are UTC and inclusive:
-`--end-date` includes the whole named day. `--seconds-per-day` (default `0.5`) and
-`--max-idle-seconds` (default `1`) set pacing. Themes: `neon` (default), `phosphor`,
-`outrun`, `blueprint`, `retro-desktop`, `atlas`, `forge`.
+`--end-date` includes the whole named day. `--seconds-per-day` and `--max-idle-seconds`
+set pacing. `codestrand preview --help` lists the themes and every default.
 
 ## Export
 
@@ -79,7 +79,7 @@ codestrand export clip --repository /path/to/repository --video history.mp4 --fr
 
 - The first argument is a new output directory; an existing directory is refused.
 - PNG export writes `frame-00000.png` onwards. Without `--frames` the whole playback is
-  exported. `--frames` takes 2 or more; `--fps` takes 1 to 240, inclusive.
+  exported.
 - `--video PATH` streams to an installed FFmpeg instead of writing PNGs. The video path
   is relative to the current directory and must not exist. FFmpeg comes from `PATH`,
   `CODESTRAND_FFMPEG` or `--ffmpeg`; the default encoder is libx264, so an odd

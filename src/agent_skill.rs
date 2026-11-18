@@ -83,6 +83,12 @@ fn skill_flags_are_in_visible_help() {
 }
 
 #[test]
+fn skill_shows_the_export_manifest_header() {
+    let Some(skill) = skill() else { return };
+    assert!(skill.contains(crate::export::MANIFEST_HEADER));
+}
+
+#[test]
 fn skill_commands_parse_and_name_their_repositories() {
     let Some(skill) = skill() else { return };
     let commands = commands(&skill);

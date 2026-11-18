@@ -25,6 +25,8 @@ use crate::{encoder::Encoder, scene};
 
 const WAIT_LIMIT: Duration = Duration::from_secs(30);
 const MAX_PENDING_CAPTURES: usize = 4;
+pub(crate) const MANIFEST_HEADER: &str =
+    "frame,seconds,commit,files,avatars,beams,glyphs,missing_glyphs";
 
 mod png;
 
@@ -43,10 +45,7 @@ pub(super) fn render(
     camera_path: Option<&crate::camera_path::CameraPath>,
 ) -> anyhow::Result<()> {
     let mut manifest = BufWriter::new(File::create(directory.join("frames.csv"))?);
-    writeln!(
-        manifest,
-        "frame,seconds,commit,files,avatars,beams,glyphs,missing_glyphs"
-    )?;
+    writeln!(manifest, "{MANIFEST_HEADER}")?;
     initialize(&mut app, &target)?;
     let mut png = encoder.is_none().then(png::Writer::new).transpose()?;
     let started = Instant::now();
