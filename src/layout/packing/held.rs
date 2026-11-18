@@ -57,25 +57,22 @@ impl Weights {
         presence: &[f32],
     ) -> Vec<f32> {
         let targets: Vec<_> = items.iter().map(|&count| count.max(1.0)).collect();
-        let (mut held, mut live) = (0.0, 0.0);
-        for ((&to, &target), (&was, &p)) in self
-            .to
-            .iter()
-            .zip(&targets)
-            .zip(self.present.iter().zip(presence))
-        {
-            if was && p > 0.0 {
-                held += to;
-                live += target;
+        let (mut from, mut to, mut live) = (0.0, 0.0, 0.0);
+        for (i, &p) in presence.iter().enumerate() {
+            if self.present[i] && p > 0.0 {
+                from += self.from[i];
+                to += self.to[i];
+                live += targets[i];
             }
         }
-        let scale = if live > 0.0 { held / live } else { 1.0 };
+        let scale = |held: f32| if live > 0.0 { held / live } else { 1.0 };
+        let (from, to) = (scale(from), scale(to));
         for (i, &p) in presence.iter().enumerate() {
             // An arriving tile grows from nothing through its presence, so it takes its
-            // count at once, in the scale the present tiles are held at.
+            // count at once, at both ends of the scale an ease in flight moves across.
             if p > 0.0 && !self.present[i] {
-                self.from[i] = targets[i] * scale;
-                self.to[i] = targets[i] * scale;
+                self.from[i] = targets[i] * from;
+                self.to[i] = targets[i] * to;
             }
             self.present[i] = p > 0.0;
         }
@@ -176,6 +173,17 @@ mod tests {
         weights.step(0, &[10.0, 10.0, 0.0], &[1.0, 1.0, 0.0]);
         let joined = weights.step(1, &[1000.0, 1000.0, 100.0], &[1.0, 1.0, 0.5]);
         assert_eq!(joined, [10.0, 10.0, 1.0]);
+    }
+
+    #[test]
+    fn a_tile_arriving_during_a_reflow_keeps_its_share_through_the_ease() {
+        let mut weights = Weights::new(3);
+        weights.step(0, &[100.0, 100.0, 0.0], &[1.0, 1.0, 0.0]);
+        weights.step(1, &[100.0, 300.0, 0.0], &[1.0, 1.0, 0.0]);
+        for tick in 2..=span(POLICY.reflow) {
+            let row = weights.step(tick, &[1.0, 3.0, 2.0], &[1.0, 1.0, 1.0]);
+            assert!((row[2] / (row[0] + row[1]) - 0.5).abs() < 1e-5, "{row:?}");
+        }
     }
 
     #[test]
