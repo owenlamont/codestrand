@@ -270,8 +270,9 @@ than four minimum tiles, reaching about half size at 72 repositories and never b
 6 pixels. They end in an ellipsis when wider than their tile and sit 4 pixels from the
 tile edge, instead of one avatar diameter, on tiles too small for that clearance; they
 are omitted only from tiles too short for the text.
-Directory and touched-file labels shrink with their tile's files to no less than
-8 pixels and end in an ellipsis when wider than their tile. Invisible archived
+Directory and touched-file labels shrink with their tile's files, are never larger than
+the corner titles, stop at the same 6 pixel floor, and end in an ellipsis when wider than
+their tile. Invisible archived
 content cannot constrain earlier zoom.
 
 A newcomer splits one existing tile or subtree. Other repositories retain their

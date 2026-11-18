@@ -565,10 +565,8 @@ mod tests {
             let tile = sim.state.layout.repositories[dir.repository].tile.unwrap();
             let width =
                 super::super::names::rect(Vec2::ZERO, &text, scale, 20.0).width();
-            assert_eq!(
-                scale,
-                dir.scale.clamp(super::super::MIN_TILE_LABEL_SCALE, 1.0)
-            );
+            assert!(scale <= dir.scale.max(MIN_SCALE));
+            assert!(scale <= sim.state.lettering.max(MIN_SCALE));
             assert!(width <= (tile.high.x - tile.low.x) * HALF.x, "{text}");
             shrunk |= scale < 1.0;
         }
