@@ -1073,6 +1073,7 @@ impl Simulation {
             }
         }
         self.trace.add_ticks(&mut self.tick_times);
+        samples.fade_from(&self.repository_ends, lifecycle::REPOSITORY_EXIT);
         self.packing = crate::layout::packing::Packing::from_inputs(
             samples,
             self.state.gutter,

@@ -738,6 +738,8 @@ pub(crate) struct Inputs {
     labels: Vec<String>,
     rows: Vec<Vec<Input>>,
     items: Vec<Vec<f32>>,
+    /// When each repository starts fading out, after which its count no longer moves tiles.
+    fading: Vec<crate::model::Time>,
 }
 
 impl Inputs {
@@ -746,7 +748,13 @@ impl Inputs {
             labels: Vec::new(),
             rows: Vec::with_capacity(ticks),
             items: Vec::with_capacity(ticks),
+            fading: Vec::new(),
         }
+    }
+
+    /// Stops counting each repository `exit` seconds after its end, when it starts fading.
+    pub(crate) fn fade_from(&mut self, ends: &[crate::model::Time], exit: f32) {
+        self.fading = ends.iter().map(|&end| end + exit).collect();
     }
 
     pub(crate) fn push(&mut self, regions: Vec<RepositoryRegion>) {
@@ -921,6 +929,7 @@ impl Packing {
             labels,
             rows: regions,
             items,
+            fading,
         } = inputs;
         let Some(first) = regions.first().filter(|r| !r.is_empty()) else {
             return Ok(Self::default());
@@ -974,8 +983,22 @@ impl Packing {
                 if presence.iter().all(|&p| p == 0.0) {
                     presence[order[0]] = 1.0;
                 }
+                let now = crate::model::tick_time(
+                    u64::try_from(tick).expect("bounded packing tick"),
+                );
+                let shown: Vec<_> = presence
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &p)| {
+                        if fading.get(i).is_some_and(|&fade| now >= fade) {
+                            0.0
+                        } else {
+                            p
+                        }
+                    })
+                    .collect();
                 Sample {
-                    weights: held.step(tick, &items[tick], &presence),
+                    weights: held.step(tick, &items[tick], &shown),
                     presence,
                 }
             })

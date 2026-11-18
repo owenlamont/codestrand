@@ -57,12 +57,25 @@ impl Weights {
         presence: &[f32],
     ) -> Vec<f32> {
         let targets: Vec<_> = items.iter().map(|&count| count.max(1.0)).collect();
+        let (mut held, mut live) = (0.0, 0.0);
+        for ((&to, &target), (&was, &p)) in self
+            .to
+            .iter()
+            .zip(&targets)
+            .zip(self.present.iter().zip(presence))
+        {
+            if was && p > 0.0 {
+                held += to;
+                live += target;
+            }
+        }
+        let scale = if live > 0.0 { held / live } else { 1.0 };
         for (i, &p) in presence.iter().enumerate() {
             // An arriving tile grows from nothing through its presence, so it takes its
-            // count at once instead of waiting for the next reflow.
+            // count at once, in the scale the present tiles are held at.
             if p > 0.0 && !self.present[i] {
-                self.from[i] = targets[i];
-                self.to[i] = targets[i];
+                self.from[i] = targets[i] * scale;
+                self.to[i] = targets[i] * scale;
             }
             self.present[i] = p > 0.0;
         }
@@ -155,6 +168,14 @@ mod tests {
             weights.step(2 * reflow + 1, &[1000.0, 100.0], &BOTH)[1],
             100.0
         );
+    }
+
+    #[test]
+    fn an_arriving_tile_joins_at_the_scale_the_others_are_held_at() {
+        let mut weights = Weights::new(3);
+        weights.step(0, &[10.0, 10.0, 0.0], &[1.0, 1.0, 0.0]);
+        let joined = weights.step(1, &[1000.0, 1000.0, 100.0], &[1.0, 1.0, 0.5]);
+        assert_eq!(joined, [10.0, 10.0, 1.0]);
     }
 
     #[test]
