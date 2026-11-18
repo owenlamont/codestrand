@@ -7,7 +7,7 @@ pub(crate) enum GlyphStyle {
     #[default]
     Language,
     Outline,
-    Hatched,
+    Plate,
     Page,
     Iron,
 }
@@ -96,7 +96,7 @@ pub(super) fn build(name: ThemeName) -> Theme {
             )
         }
         ThemeName::Blueprint => {
-            t.glyph_style = GlyphStyle::Hatched;
+            t.glyph_style = GlyphStyle::Plate;
             t.beam_style = BeamStyle::Construction;
             t.avatar_style = AvatarStyle::Reticle;
             t.font = FontStyle::Tech;
@@ -316,7 +316,7 @@ impl Theme {
                 r##"<rect x="3" y="3" width="26" height="26" rx="2" fill="#310b39" stroke="#ff3fa4" stroke-width="2"/>{icon}"##,
                 r#"x="6" y="6" width="20" height="20""#,
             ),
-            GlyphStyle::Hatched => (
+            GlyphStyle::Plate => (
                 r##"<rect x="3" y="3" width="26" height="26" fill="#0d3a73" stroke="white" stroke-width="1.5"/>{icon}"##,
                 r#"x="6" y="6" width="20" height="20""#,
             ),

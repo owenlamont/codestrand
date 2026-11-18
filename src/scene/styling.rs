@@ -220,7 +220,7 @@ pub(super) fn ring_mesh(theme: &Theme, radii: Vec2) -> Mesh {
     if !matches!(
         theme.glyph_style,
         crate::theme::GlyphStyle::Outline
-            | crate::theme::GlyphStyle::Hatched
+            | crate::theme::GlyphStyle::Plate
             | crate::theme::GlyphStyle::Page
             | crate::theme::GlyphStyle::Iron
     ) {
