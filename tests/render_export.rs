@@ -245,7 +245,7 @@ focus={point=[0.0,12.0,2.0]}
 
 #[cfg(target_os = "linux")]
 #[test]
-#[ignore = "requires a graphics adapter"]
+#[ignore = "needs fontique 0.11.2 (linebender/parley#717 backport) and a graphics adapter"]
 fn export_without_system_fonts_labels_with_compiled_in_fonts() {
     let scratch = tempfile::tempdir().unwrap();
     let fontconfig = scratch.path().join("fonts.conf");

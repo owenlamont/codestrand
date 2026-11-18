@@ -61,7 +61,9 @@ jobs:
           export XDG_RUNTIME_DIR="$RUNNER_TEMP/xdg-runtime"
           mkdir -m 700 "$XDG_RUNTIME_DIR"
           vulkaninfo --summary
-          cargo test --locked --test render_export -- --ignored
+          # Drop the skip once fontique 0.11.2 carries linebender/parley#717.
+          cargo test --locked --test render_export -- --ignored \
+            --skip export_without_system_fonts_labels_with_compiled_in_fonts
 
   coverage:
     name: Coverage
