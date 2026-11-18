@@ -217,14 +217,13 @@ pub(super) fn root() -> Option<PathBuf> {
 }
 
 #[cfg(test)]
-pub(super) fn load_with_options(
+pub(super) fn load_whole(
     path: &Path,
     revision: &str,
     cache_root: Option<&Path>,
-    options: history::Options,
 ) -> Result<Vec<timeline::Event>, history::Error> {
     let (repo, tip) = history::resolve(path, revision)?;
-    load_range(&repo, tip, None, cache_root, options)
+    load_range(&repo, tip, None, cache_root)
 }
 
 /// Loads the events from `start`'s link onwards, led by a boundary event when it skips
@@ -234,7 +233,6 @@ pub(super) fn load_range(
     tip: gix::ObjectId,
     start: Option<(&[history::Link], usize)>,
     cache_root: Option<&Path>,
-    options: history::Options,
 ) -> Result<Vec<timeline::Event>, history::Error> {
     let skip = start.map_or(0, |(_, skip)| skip);
     let entry = cache_root
@@ -254,14 +252,14 @@ pub(super) fn load_range(
         scanned = history::links(repo, tip)?;
         &scanned
     };
-    let history = history::import_with_options(repo, tip, links, skip, options)?;
+    let history = history::import(repo, tip, links, skip)?;
     let snapshot = Snapshot {
         version: timeline::CACHE_VERSION,
         tip: tip_text,
         skip,
         events: timeline::from_history(&history),
     };
-    if let Some(path) = entry.filter(|_| !history.truncated) {
+    if let Some(path) = entry {
         let _ = store(&path, &snapshot);
     }
     Ok(snapshot.events)
@@ -321,7 +319,7 @@ mod tests {
         revision: &str,
         cache_root: Option<&Path>,
     ) -> Result<Vec<timeline::Event>, history::Error> {
-        load_with_options(path, revision, cache_root, history::Options::default())
+        load_whole(path, revision, cache_root)
     }
 
     pub(crate) fn directory_link(target: &Path, link: &Path) {
@@ -834,8 +832,7 @@ emails = ["author@example.invalid"]
         let output = PathBuf::from(std::env::var("CODESTRAND_MEASURE_OUTPUT").unwrap());
         let (repo, tip) =
             history::resolve(Path::new(&repository), "origin/main").unwrap();
-        let history =
-            history::import_all(&repo, tip, history::Options::default()).unwrap();
+        let history = history::import_all(&repo, tip).unwrap();
         let snapshot = Snapshot {
             version: timeline::CACHE_VERSION,
             tip: history.tip.clone(),

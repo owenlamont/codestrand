@@ -166,8 +166,6 @@ enum Command {
         repository: PathBuf,
         #[arg(long, default_value = "HEAD")]
         revision: String,
-        #[command(flatten)]
-        history: history::Options,
     },
     /// Play history in a loop as planning progresses; [ halves and ] doubles live speed (0.125x–8x).
     #[command(
@@ -232,9 +230,6 @@ impl ContributorTravel {
     reason = "each bool is an independent clap switch"
 )]
 struct Source {
-    #[command(flatten)]
-    #[serde(flatten)]
-    history: history::Options,
     /// Assume departure after this many calendar days; default 60 marks two quiet months.
     #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u32).range(1..=36500))]
     contributor_inactivity_days: u32,
@@ -284,7 +279,7 @@ struct Source {
     #[arg(skip)]
     #[serde(skip)]
     start: usize,
-    /// Begin at the first commit on or after this UTC date, inclusive; settle earlier commits.
+    /// Begin at the first commit on or after this UTC date, inclusive, from the tree before it.
     #[arg(long, value_name = "YYYY-MM-DD", value_parser = start_date)]
     start_date: Option<i64>,
     /// End at the last commit on or before this UTC date, inclusive of the whole day.
@@ -372,7 +367,6 @@ impl Source {
                     .get(index)
                     .map(|links| (links.as_slice(), skips[index])),
                 cache_root.filter(|_| !self.no_cache),
-                self.history,
             )?;
             eprintln!(
                 "repository={} import_seconds={:.6} events={}",
@@ -916,10 +910,9 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
         Some(Command::Inspect {
             repository,
             revision,
-            history: options,
         }) => {
             let (repo, tip) = history::resolve(&repository, &revision)?;
-            let history = history::import_all(&repo, tip, options)?;
+            let history = history::import_all(&repo, tip)?;
             serde_json::to_writer_pretty(std::io::stdout().lock(), &history)?;
         }
         Some(Command::Preview { source, theme }) => preview(source, theme)?,

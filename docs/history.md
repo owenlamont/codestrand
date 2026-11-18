@@ -38,18 +38,15 @@ during diff setup. Import uses no wall-clock deadline.
 
 ## Analysis limits
 
-Import stops at fixed safety limits and refuses incomplete history by default.
-`--allow-truncated-history` accepts completed commits and prints the exhausted budget
-and the inclusive last complete first-parent commit, when known. Inspection sets
-`truncated` in JSON. Playback uses that first-parent prefix, which can be empty;
-commits with no file changes are not shown. Partial imports are never cached;
-later runs retry analysis.
+Import refuses a history that exceeds a fixed safety limit, naming the budget and
+the commit that exceeded it. Import reads the range newest first, so the refusal also
+names a later `--start-date` whose range fits, or says that none does.
 
 Blob size, diff input and per-diff comparison limits skip line detail only. Inspection
 records the path, change kind and rename with diff kind `skipped`, without line counts
 or samples. Playback retains the file event with zero line counts and no samples;
 touch heat still applies. Skipped blobs still consume global work units. Once the
-aggregate byte or line allowance is spent, later diffs also omit line detail.
+aggregate byte or line allowance is spent, older diffs also omit line detail.
 
 | Budget | Limit |
 | --- | --- |
