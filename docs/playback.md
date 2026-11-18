@@ -496,6 +496,18 @@ blending and the theme's monospace font, with IBM Plex Mono for Atlas code besid
 serif labels.
 Theme switching restyles active snippets without restarting their motion or fade.
 
+`--fragment-speed` scales how fast fragments cross their beams in preview and export
+(default `1`, about 0.9 playback seconds per crossing; accepted range `0.25` through
+`2`, inclusive). `0.5` doubles the crossing time, giving snippets longer to read.
+A walking contributor stays until its last fragment lands before leaving for its
+next repository, and a slower setting also delays a calendar departure until then.
+Commits keep their timeline spacing unless a walking trip needs the extra wait;
+`--contributor-travel auto` may still fade a contributor across mid-flight.
+
+```sh
+codestrand export frames --fragment-speed 0.5 --frames 90 --fps 30
+```
+
 Snippet text keeps the font's natural proportions with equal X and Y scaling.
 Lines are cut at 88 characters. Samples are hidden at 6 projected beam-diameter
 pixels or less and fully visible at 14 or more, with a smooth transition between.
