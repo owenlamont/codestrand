@@ -264,8 +264,8 @@ mod tests {
             crate::timeline::synthetic(),
             &super::super::Options::default(),
         );
-        let clearance = super::super::framing::MARGIN
-            - crate::layout::packing::gutters(5.0).x * 0.5;
+        let clearance =
+            super::super::framing::MARGIN - crate::layout::packing::AVATAR_GUTTER * 0.5;
         assert!(sim.state.avatar_radius() <= clearance);
     }
 

@@ -444,7 +444,7 @@ impl State {
         now: super::Time,
         plan: &super::travel::Plan,
     ) {
-        let gap = Vec2::splat(self.gutter);
+        let gap = Vec2::splat(self.gutter * self.detail);
         let beams = tile_obstacles(self);
         let cells = super::travel::network(
             self.layout.repositories.iter().filter_map(|r| r.gutter),
@@ -777,7 +777,12 @@ impl State {
             let body = bodies[index].expect("projected visible avatar");
             let size = self.name_size(&displayed[index]);
             let distance = self.avatar_radius() + 4.0 / 3.0;
-            let previous = self.avatars[index].name_visibility.placement.as_ref();
+            // A body that jumps further than its name's width has no on-screen motion to follow.
+            let previous = self.avatars[index]
+                .name_visibility
+                .placement
+                .as_ref()
+                .filter(|placement| placement.body.distance(body) <= size.x);
             let (angle, angular_velocity, motion) = previous.map_or_else(
                 || {
                     (
@@ -1602,12 +1607,7 @@ mod tests {
             }
             assert!(
                 (6.5 * scale + 1.0) * 2.0
-                    < crate::layout::packing::gutters(if scale < 1.0 {
-                        30.0
-                    } else {
-                        5.0
-                    })
-                    .x * scale.max(1.0)
+                    < crate::layout::packing::AVATAR_GUTTER * scale.max(1.0)
             );
         }
     }

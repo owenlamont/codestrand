@@ -63,11 +63,15 @@ pub(super) fn obstacles(sim: &Simulation) -> Vec<(usize, Rect)> {
 }
 
 const INSET: f32 = 34.0;
+/// Title text scale at a 6 pixel floor, against 14 pixels.
+pub(super) const MIN_SCALE: f32 = 6.0 / 14.0;
+const EDGE_INSET: f32 = 4.0;
 const STEP: u32 = 15;
 const CHANGE_COST: f64 = 20_000.0;
 
 #[derive(Clone, Debug)]
 pub(super) struct Title {
+    pub text: String,
     pub point: Vec2,
     pub size: Vec2,
     pub scale: f32,
@@ -97,27 +101,66 @@ impl Title {
         .filter(|(_, opacity)| *opacity > 0.0)
         .map(move |(point, opacity)| {
             (
-                ground(super::framing::field_to_world(point / HALF)) + Vec3::Y * height,
+                ground(
+                    super::framing::field_to_world(point / HALF)
+                        * (1.0 - height / super::framing::DISTANCE),
+                ) + Vec3::Y * height,
                 opacity,
             )
         })
     }
 }
+/// A title at one size for every tile, elided to the tile width; `None` when too short.
+///
+/// `detail` scales the corner inset with the avatars, falling back to [`EDGE_INSET`] on
+/// tiles too small to keep an avatar diameter clear; `lettering` scales the text, never
+/// below [`MIN_SCALE`].
 fn title(
     tile: crate::layout::packing::Tile,
     label: &str,
     height: f32,
     corner: u8,
+    detail: f32,
+    lettering: f32,
 ) -> Option<Title> {
-    let tile = Rect::from_corners(tile.low * HALF, tile.high * HALF).inflate(-INSET);
-    if tile.size().min_element() <= 8.0 {
+    let bounds = Rect::from_corners(tile.low * HALF, tile.high * HALF);
+    inset_title(
+        bounds.inflate(-INSET * detail),
+        label,
+        height,
+        corner,
+        lettering,
+    )
+    .or_else(|| {
+        inset_title(
+            bounds.inflate(-EDGE_INSET),
+            label,
+            height,
+            corner,
+            lettering,
+        )
+    })
+}
+
+fn inset_title(
+    tile: Rect,
+    label: &str,
+    height: f32,
+    corner: u8,
+    lettering: f32,
+) -> Option<Title> {
+    let scale = lettering.max(MIN_SCALE);
+    let fits = ((tile.width() - 8.0) / (8.6 * scale)).floor();
+    if fits < 1.0 || tile.height() < height * scale + 4.0 {
         return None;
     }
-    let full = super::names::rect(Vec2::ZERO, label, 1.0, height).size();
-    let scale = ((tile.width() - 8.0) / (full.x - 8.0).max(1.0))
-        .min((tile.height() - 4.0) / (full.y - 4.0).max(1.0))
-        .clamp(0.0, 1.0);
-    let size = super::names::rect(Vec2::ZERO, label, scale, height).size();
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a positive whole character count bounded by the tile width"
+    )]
+    let text = super::names::elide(label, fits as usize);
+    let size = super::names::rect(Vec2::ZERO, &text, scale, height).size();
     let point = Vec2::new(
         if corner & 1 == 0 {
             tile.min.x
@@ -131,6 +174,7 @@ fn title(
         },
     );
     Some(Title {
+        text,
         point,
         size,
         scale,
@@ -192,6 +236,8 @@ impl Simulation {
                 &region.label,
                 self.state.geometry.label_height,
                 corner,
+                self.state.detail,
+                self.state.lettering,
             )
         }) else {
             return 0.0;
@@ -322,9 +368,14 @@ impl Simulation {
                     .unwrap_or(0)
             };
             let corner = at(sample);
-            let Some(mut current) =
-                title(tile, &region.label, state.geometry.label_height, corner)
-            else {
+            let Some(mut current) = title(
+                tile,
+                &region.label,
+                state.geometry.label_height,
+                corner,
+                state.detail,
+                state.lettering,
+            ) else {
                 continue;
             };
             if let Some(change) =
@@ -338,6 +389,8 @@ impl Simulation {
                         &region.label,
                         state.geometry.label_height,
                         at(change - 1),
+                        state.detail,
+                        state.lettering,
                     )
                     .map(|t| t.point);
                     current.opacity = super::ticks_duration(age) / 0.3;
@@ -379,12 +432,22 @@ mod tests {
         sim.assert_stitched_travel_rules();
     }
     #[test]
-    fn title_height_does_not_move_its_world_anchor() {
-        let title =
-            title(crate::layout::packing::Tile::viewport(), "repo", 20.0, 0).unwrap();
-        let low = title.positions(1.6).next().unwrap().0;
-        let high = title.positions(3.2).next().unwrap().0;
-        assert_eq!(low.with_y(0.0), high.with_y(0.0));
+    fn raised_titles_project_onto_their_ground_point_in_the_default_view() {
+        let title = title(
+            crate::layout::packing::Tile::viewport(),
+            "repo",
+            20.0,
+            0,
+            1.0,
+            1.0,
+        )
+        .unwrap();
+        let screen = |height: f32| {
+            let point = title.positions(height).next().unwrap().0;
+            super::super::framing::project_at(Vec2::new(point.x, point.z), height)
+        };
+        assert!(screen(0.0).distance(screen(1.6)) < 1e-5);
+        assert!(screen(0.0).distance(screen(3.2)) < 1e-5);
     }
 
     #[test]
@@ -406,7 +469,9 @@ mod tests {
         for (low, high) in files.iter().zip(&raised) {
             assert_eq!(low.y.to_bits(), 0.15_f32.to_bits());
             assert_eq!(high.y.to_bits(), crate::model::framing::LABEL_Y.to_bits());
-            assert_eq!(low.with_y(0.0), high.with_y(0.0));
+            let screen =
+                |p: &Vec3| crate::model::framing::project_at(Vec2::new(p.x, p.z), p.y);
+            assert!(screen(low).distance(screen(high)) < 1e-5);
         }
     }
 
@@ -424,13 +489,100 @@ mod tests {
         assert_eq!(result.windows(2).filter(|p| p[0] != p[1]).count(), 1);
     }
     #[test]
+    fn titles_share_one_size_and_elide_to_fit_narrow_tiles() {
+        let tile = |width: f32| crate::layout::packing::Tile {
+            low: Vec2::new(-width, -0.5),
+            high: Vec2::new(width, 0.5),
+        };
+        let label = "a-long-repository-name";
+        let wide = title(tile(0.9), label, 20.0, 0, 1.0, 1.0).unwrap();
+        let narrow = title(tile(0.2), label, 20.0, 0, 1.0, 1.0).unwrap();
+        assert_eq!(wide.text, label);
+        assert!(narrow.text.ends_with('…'));
+        assert_eq!(wide.size.y, narrow.size.y);
+        assert!(narrow.rect().max.x <= tile(0.2).high.x * HALF.x - INSET);
+    }
+
+    #[test]
+    fn tiles_too_small_for_the_avatar_inset_keep_an_edge_title() {
+        let tile = crate::layout::packing::Tile {
+            low: Vec2::new(-0.2, -0.05),
+            high: Vec2::new(0.2, 0.05),
+        };
+        let edge = title(tile, "repository", 20.0, 0, 1.0, 1.0).unwrap();
+        assert!(edge.rect().min.cmpge(tile.low * HALF + EDGE_INSET).all());
+        assert!(edge.rect().max.cmple(tile.high * HALF - EDGE_INSET).all());
+    }
+
+    #[test]
+    fn titles_stop_shrinking_at_the_name_floor() {
+        let low = title(
+            crate::layout::packing::Tile::viewport(),
+            "repo",
+            20.0,
+            0,
+            1.0,
+            0.3,
+        );
+        assert_eq!(low.unwrap().scale, MIN_SCALE);
+    }
+
+    #[test]
+    fn directory_and_file_labels_shrink_with_their_tile_and_fit_its_width() {
+        let count = 16;
+        let mut events: Vec<_> = (0..count)
+            .flat_map(|index| {
+                let mut history = crate::timeline::synthetic();
+                crate::repositories::namespace(&mut history, index);
+                for event in &mut history {
+                    event.seconds += i64::try_from(index).unwrap() * 86_400;
+                }
+                history
+            })
+            .collect();
+        events.sort_by_key(|event| event.seconds);
+        let labels: Vec<_> = (0..count).map(|index| format!("repo{index}")).collect();
+        let options = crate::model::Options {
+            seconds_per_day: 0.05,
+            max_idle_seconds: 0.05,
+            ..crate::model::Options::default()
+        };
+        let mut sim = crate::model::Simulation::build(
+            events,
+            &options,
+            &crate::theme::Theme::neon(),
+            &crate::contributors::Mappings::default(),
+            &[],
+            &labels,
+            &mut None,
+        )
+        .unwrap();
+        sim.advance_to(crate::model::frames_for(sim.duration(), 60).unwrap(), 60);
+        let long = "a-very-long-directory-name/".repeat(8);
+        let mut shrunk = false;
+        for (index, dir) in sim.state.layout.dirs() {
+            let (text, scale) = sim.tile_label(index, long.clone());
+            let tile = sim.state.layout.repositories[dir.repository].tile.unwrap();
+            let width =
+                super::super::names::rect(Vec2::ZERO, &text, scale, 20.0).width();
+            assert_eq!(
+                scale,
+                dir.scale.clamp(super::super::MIN_TILE_LABEL_SCALE, 1.0)
+            );
+            assert!(width <= (tile.high.x - tile.low.x) * HALF.x, "{text}");
+            shrunk |= scale < 1.0;
+        }
+        assert!(shrunk);
+    }
+
+    #[test]
     fn corners_leave_an_avatar_diameter_between_the_gutter_and_the_title() {
         let tile = crate::layout::packing::Tile {
             low: Vec2::splat(-0.5),
             high: Vec2::splat(0.5),
         };
         for corner in 0..4 {
-            let t = title(tile, "repository", 24.0, corner).unwrap();
+            let t = title(tile, "repository", 24.0, corner, 1.0, 1.0).unwrap();
             assert!(
                 t.rect()
                     .min

@@ -15,18 +15,92 @@ pub(crate) const BIRTH_TICKS: u32 = 45;
 const ZOOM_CHUNK: usize = 256;
 const ALLOCATION_TOLERANCE_PX: f32 = 0.25;
 
+/// Detail shrink per failed packing attempt, and the attempts allowed before giving up.
+const DETAIL_SHRINK: f32 = 1.125;
+const DETAIL_ATTEMPTS: u32 = 64;
+/// Bisection steps towards full presence for a sample whose easing tiles conflict.
+const FIRMING_STEPS: u32 = 8;
+/// Insertion candidates each scoring thread takes at least, so small trees stay serial.
+const PARALLEL_SPLITS: usize = 32;
+
 #[derive(Debug, thiserror::Error)]
 #[error(
-    "repository tile packing cannot insert repository {repository}: minimum tile size {minimum_width} by {minimum_height} reference pixels, aspect ratio 1:{aspect} to {aspect}:1 and gutter {gutter} pixels do not fit the {width} by {height} pixel field; use fewer repositories"
+    "repository tile packing cannot place {repositories} repositories at {detail} times the reference tile size"
 )]
 pub(crate) struct CapacityError {
-    repository: usize,
-    minimum_width: f32,
-    minimum_height: f32,
-    aspect: f32,
+    repositories: usize,
+    detail: f32,
+}
+
+/// The smallest tile and the gutters between tiles, in reference pixels.
+#[derive(Clone, Copy, Debug)]
+struct Space {
+    minimum: Vec2,
+    gap: Vec2,
+}
+
+impl Space {
+    fn new(detail: f32, gutter: f32) -> Self {
+        Self {
+            minimum: MINIMUM * detail,
+            gap: Vec2::splat(gutter * detail),
+        }
+    }
+}
+
+/// The split tree inserting repositories in birth `order`, at the first detail that fits
+/// when shrinking from full size, or from the area bound when that is smaller.
+fn plan_tree(
+    regions: &[Vec<Input>],
+    files: &[Vec<f32>],
+    births: &[usize],
+    order: &[usize],
     gutter: f32,
-    width: f32,
-    height: f32,
+    threads: usize,
+) -> Result<(Vec<Node>, f32), CapacityError> {
+    let windows: Vec<_> = order
+        .iter()
+        .enumerate()
+        .map(|(position, &i)| {
+            let begin = births[i].min(regions.len() - 1);
+            let end = order
+                .get(position + 1)
+                .map_or(regions.len(), |&j| births[j].min(regions.len()))
+                .max(begin + 1);
+            (begin, end)
+        })
+        .collect();
+    let place = |space: Space| {
+        let mut nodes = Vec::new();
+        let mut born = vec![false; order.len()];
+        for (&i, &(begin, end)) in order.iter().zip(&windows) {
+            born[i] = true;
+            let (weights, aspects) = birth_weights(regions, files, &born, begin, end);
+            if !insert(&mut nodes, i, &weights, &aspects, space, threads) {
+                return None;
+            }
+        }
+        Some(nodes)
+    };
+    let mut detail = area_detail(order.len(), gutter).min(1.0);
+    for _ in 0..DETAIL_ATTEMPTS {
+        if let Some(nodes) = place(Space::new(detail, gutter)) {
+            return Ok((nodes, detail));
+        }
+        detail /= DETAIL_SHRINK;
+    }
+    Err(CapacityError {
+        repositories: order.len(),
+        detail,
+    })
+}
+
+/// The detail at which every minimum tile and its gutters would exactly cover the field.
+fn area_detail(repositories: usize, gutter: f32) -> f32 {
+    let needed = MINIMUM + Vec2::splat(gutter);
+    (Tile::viewport().pixels().element_product()
+        / (needed.element_product() * crate::model::count(repositories)))
+    .sqrt()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -91,10 +165,9 @@ impl Tile {
     }
 }
 
-pub(crate) fn gutters(count: f32) -> Vec2 {
-    let shrink = ((count - 12.0) / 18.0).clamp(0.0, 1.0);
-    Vec2::new(16.0, 32.0).lerp(Vec2::new(12.0, 16.0), shrink)
-}
+#[cfg(test)]
+/// Width of the gutter avatars travel along, in reference pixels.
+pub(crate) const AVATAR_GUTTER: f32 = 16.0;
 
 #[derive(Clone, Debug)]
 enum Node {
@@ -115,25 +188,64 @@ struct Feasible {
 }
 
 fn interval(points: &[Vec2], axis: usize, cross: f32) -> Option<(f32, f32)> {
-    let mut low = f32::INFINITY;
-    let mut high = f32::NEG_INFINITY;
+    let mut span = (f32::INFINITY, f32::NEG_INFINITY);
     let mut before = *points.last()?;
     for &point in points {
-        let delta = point[1 - axis] - before[1 - axis];
-        if delta.abs() > 1e-5 {
-            let t = (cross - before[1 - axis]) / delta;
-            if (-1e-5..=1.00001).contains(&t) {
-                let value = before[axis].lerp(point[axis], t.clamp(0.0, 1.0));
-                low = low.min(value);
-                high = high.max(value);
-            }
-        } else if (cross - point[1 - axis]).abs() < 0.001 {
-            low = low.min(point[axis]).min(before[axis]);
-            high = high.max(point[axis]).max(before[axis]);
-        }
+        widen(&mut span, before, point, axis, cross);
         before = point;
     }
-    (low <= high).then_some((low, high))
+    (span.0 <= span.1).then_some(span)
+}
+
+/// Widens `span` by where the edge from `before` to `point` meets `cross`.
+fn widen(span: &mut (f32, f32), before: Vec2, point: Vec2, axis: usize, cross: f32) {
+    let delta = point[1 - axis] - before[1 - axis];
+    if delta.abs() > 1e-5 {
+        let t = (cross - before[1 - axis]) / delta;
+        if (-1e-5..=1.00001).contains(&t) {
+            let value = before[axis].lerp(point[axis], t.clamp(0.0, 1.0));
+            span.0 = span.0.min(value);
+            span.1 = span.1.max(value);
+        }
+    } else if (cross - point[1 - axis]).abs() < 0.001 {
+        span.0 = span.0.min(point[axis]).min(before[axis]);
+        span.1 = span.1.max(point[axis]).max(before[axis]);
+    }
+}
+
+/// [`interval`] at each ascending `crosses` value, sweeping only the edges whose padded
+/// cross range can meet it.
+fn intervals(points: &[Vec2], axis: usize, crosses: &[f32]) -> Vec<Option<(f32, f32)>> {
+    let Some(&last) = points.last() else {
+        return vec![None; crosses.len()];
+    };
+    let mut edges: Vec<_> = std::iter::once(last)
+        .chain(points.iter().copied())
+        .zip(points.iter().copied())
+        .map(|(before, point)| {
+            let (low, high) = (before[1 - axis], point[1 - axis]);
+            let pad = 0.001 + 1e-4 * (high - low).abs();
+            (low.min(high) - pad, low.max(high) + pad, before, point)
+        })
+        .collect();
+    edges.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut next = 0;
+    let mut active = Vec::new();
+    crosses
+        .iter()
+        .map(|&cross| {
+            while next < edges.len() && edges[next].0 <= cross {
+                active.push(edges[next]);
+                next += 1;
+            }
+            active.retain(|edge| edge.1 >= cross);
+            let mut span = (f32::INFINITY, f32::NEG_INFINITY);
+            for &(_, _, before, point) in &active {
+                widen(&mut span, before, point, axis, cross);
+            }
+            (span.0 <= span.1).then_some(span)
+        })
+        .collect()
 }
 
 // Feasible size polygons keep the children's aspect intervals while accounting for
@@ -144,10 +256,13 @@ fn combine(a: &[Vec2], b: &[Vec2], axis: usize, gap: f32) -> Vec<Vec2> {
     coordinates.dedup_by(|a, b| (*a - *b).abs() < 0.001);
     let mut low = Vec::new();
     let mut high = Vec::new();
-    for cross in coordinates {
-        if let Some(((a0, a1), (b0, b1))) =
-            interval(a, axis, cross).zip(interval(b, axis, cross))
-        {
+    let spans = intervals(a, axis, &coordinates).into_iter().zip(intervals(
+        b,
+        axis,
+        &coordinates,
+    ));
+    for (cross, (a_span, b_span)) in coordinates.iter().copied().zip(spans) {
+        if let Some(((a0, a1), (b0, b1))) = a_span.zip(b_span) {
             let mut p = Vec2::splat(cross);
             p[axis] = a0 + b0 + gap;
             low.push(p);
@@ -183,14 +298,14 @@ fn feasibility(
     index: usize,
     weights: &[f32],
     presence: &[f32],
-    gap: Vec2,
+    space: Space,
     result: &mut [Feasible],
 ) {
     if let Node::Split { first, second, .. } = nodes[index] {
-        feasibility(nodes, first, weights, presence, gap, result);
-        feasibility(nodes, second, weights, presence, gap, result);
+        feasibility(nodes, first, weights, presence, space, result);
+        feasibility(nodes, second, weights, presence, space, result);
     }
-    update(nodes, index, weights, presence, gap, result);
+    update(nodes, index, weights, presence, space, result);
 }
 
 fn update(
@@ -198,14 +313,14 @@ fn update(
     index: usize,
     weights: &[f32],
     presence: &[f32],
-    gap: Vec2,
+    space: Space,
     result: &mut [Feasible],
 ) {
     let limit = Tile::viewport().pixels();
     let state = match nodes[index] {
         Node::Repository(i) => {
             let p = presence[i];
-            let mut sizes = outline::rectangle(MINIMUM, limit);
+            let mut sizes = outline::rectangle(space.minimum, limit);
             for normal in [Vec2::new(-1.0, 1.0 / BOUND), Vec2::new(1.0, -BOUND)] {
                 sizes = outline::clip(&sizes, normal, 0.0);
             }
@@ -224,7 +339,8 @@ fn update(
             let a = &result[first];
             let b = &result[second];
             let presence = a.presence.max(b.presence);
-            let gutter = gap[axis] * a.presence.min(b.presence) / presence.max(1e-9);
+            let gutter =
+                space.gap[axis] * a.presence.min(b.presence) / presence.max(1e-9);
             let sizes = if a.presence == 0.0 {
                 b.sizes.clone()
             } else if b.presence == 0.0 {
@@ -261,9 +377,9 @@ fn allocate(
     states: &[Feasible],
     stretch: Vec2,
     tiles: &mut [Option<Tile>],
-) {
+) -> Option<()> {
     if states[index].presence == 0.0 {
-        return;
+        return Some(());
     }
     match nodes[index] {
         Node::Repository(i) => tiles[i] = Some(tile),
@@ -275,12 +391,10 @@ fn allocate(
             let a = &states[first];
             let b = &states[second];
             if a.presence == 0.0 {
-                allocate(nodes, second, tile, states, stretch, tiles);
-                return;
+                return allocate(nodes, second, tile, states, stretch, tiles);
             }
             if b.presence == 0.0 {
-                allocate(nodes, first, tile, states, stretch, tiles);
-                return;
+                return allocate(nodes, first, tile, states, stretch, tiles);
             }
             let size = tile.pixels() / stretch;
             let pa = a.presence / states[index].presence;
@@ -290,25 +404,22 @@ fn allocate(
                 let (low, high) = outline::bounds(&child.sizes);
                 let clamped = cross.clamp(low[1 - axis], high[1 - axis]);
                 // Inverting a subpixel birth sliver amplifies cancellation in its tile edges.
-                assert!(
-                    (cross - clamped).abs() * stretch[1 - axis]
-                        < ALLOCATION_TOLERANCE_PX,
-                    "feasible child cross-section: cross={cross} clamped={clamped} stretch={stretch:?} delta_px={}",
-                    (cross - clamped).abs() * stretch[1 - axis]
-                );
+                if (cross - clamped).abs() * stretch[1 - axis]
+                    >= ALLOCATION_TOLERANCE_PX
+                {
+                    return None;
+                }
                 interval(&child.sizes, axis, clamped)
-                    .expect("feasible child cross-section")
             };
-            let (a0, a1) = child_interval(a);
-            let (b0, b1) = child_interval(b);
+            let (a0, a1) = child_interval(a)?;
+            let (b0, b1) = child_interval(b)?;
             let (a0, a1, b0, b1) = (a0 * pa, a1 * pa, b0 * pb, b1 * pb);
             let available = size[axis] - states[index].gap;
             let low = a0.max(available - b1);
             let high = a1.min(available - b0);
-            assert!(
-                (low - high) * stretch[axis] <= ALLOCATION_TOLERANCE_PX,
-                "infeasible split: {low} > {high}; node={index} axis={axis} size={size:?} stretch={stretch:?} pa={pa} pb={pb} a={a0},{a1} b={b0},{b1}"
-            );
+            if (low - high) * stretch[axis] > ALLOCATION_TOLERANCE_PX {
+                return None;
+            }
             let share = available * a.weight / (a.weight + b.weight).max(1e-9);
             // Tile-edge cancellation during births is bounded in reference pixels, not unstretched coordinates.
             let extent = if low > high {
@@ -328,10 +439,11 @@ fn allocate(
             let mut sb = stretch;
             sa[axis] *= pa;
             sb[axis] *= pb;
-            allocate(nodes, first, near, states, sa, tiles);
-            allocate(nodes, second, far, states, sb, tiles);
+            allocate(nodes, first, near, states, sa, tiles)?;
+            allocate(nodes, second, far, states, sb, tiles)?;
         }
     }
+    Some(())
 }
 
 /// Recomputes only the weights of feasibility states, as [`update`] would.
@@ -389,10 +501,10 @@ fn tiles(
     nodes: &[Node],
     weights: &[f32],
     presence: &[f32],
-    gap: Vec2,
+    space: Space,
 ) -> Option<Vec<Option<Tile>>> {
     let mut states = vec![Feasible::default(); nodes.len()];
-    feasibility(nodes, 0, weights, presence, gap, &mut states);
+    feasibility(nodes, 0, weights, presence, space, &mut states);
     allocated(nodes, weights.len(), &states)
 }
 
@@ -408,7 +520,7 @@ fn allocated(
         return None;
     }
     let mut output = vec![None; repositories];
-    allocate(nodes, 0, Tile::viewport(), states, Vec2::ONE, &mut output);
+    allocate(nodes, 0, Tile::viewport(), states, Vec2::ONE, &mut output)?;
     Some(output)
 }
 
@@ -417,24 +529,23 @@ fn insert(
     repository: usize,
     weights: &[f32],
     aspects: &[f32],
-    gutter_scale: f32,
-) -> Result<(), CapacityError> {
+    space: Space,
+    threads: usize,
+) -> bool {
     if nodes.is_empty() {
         nodes.push(Node::Repository(repository));
-        return Ok(());
+        return true;
     }
-    let mut best = None;
     let presence: Vec<_> = weights.iter().map(|&w| f32::from(w > 0.0)).collect();
-    let gap = Vec2::splat(gutter_scale);
     let mut cached = vec![Feasible::default(); nodes.len()];
-    feasibility(nodes, 0, weights, &presence, gap, &mut cached);
+    feasibility(nodes, 0, weights, &presence, space, &mut cached);
     let mut leaf = vec![Feasible::default()];
     update(
         &[Node::Repository(repository)],
         0,
         weights,
         &presence,
-        gap,
+        space,
         &mut leaf,
     );
     let mut parents = vec![None; nodes.len()];
@@ -444,30 +555,32 @@ fn insert(
             parents[*second] = Some(index);
         }
     }
-    for host in 0..nodes.len() {
-        for axis in 0..2 {
-            let mut candidate = nodes.clone();
-            let first = candidate.len();
-            candidate.push(candidate[host].clone());
-            candidate.push(Node::Repository(repository));
-            candidate[host] = Node::Split {
-                axis,
-                first,
-                second: first + 1,
-            };
-            let mut states = cached.clone();
-            states.push(cached[host].clone());
-            states.push(leaf[0].clone());
-            let mut ancestor = Some(host);
-            while let Some(index) = ancestor {
-                update(&candidate, index, weights, &presence, gap, &mut states);
-                ancestor = parents[index];
-            }
-            let Some(placement) = allocated(&candidate, weights.len(), &states) else {
-                continue;
-            };
-            let total: f32 = weights.iter().sum();
-            let score: f32 = placement
+    let split = |host: usize, axis: usize| {
+        let mut candidate = nodes.clone();
+        let first = candidate.len();
+        candidate.push(candidate[host].clone());
+        candidate.push(Node::Repository(repository));
+        candidate[host] = Node::Split {
+            axis,
+            first,
+            second: first + 1,
+        };
+        candidate
+    };
+    let score = |&(host, axis): &(usize, usize)| {
+        let candidate = split(host, axis);
+        let mut states = cached.clone();
+        states.push(cached[host].clone());
+        states.push(leaf[0].clone());
+        let mut ancestor = Some(host);
+        while let Some(index) = ancestor {
+            update(&candidate, index, weights, &presence, space, &mut states);
+            ancestor = parents[index];
+        }
+        let placement = allocated(&candidate, weights.len(), &states)?;
+        let total: f32 = weights.iter().sum();
+        Some(
+            placement
                 .iter()
                 .enumerate()
                 .filter_map(|(i, t)| {
@@ -480,24 +593,33 @@ fn insert(
                                 + (t.ground_aspect() / aspects[i]).ln().abs())
                     })
                 })
-                .sum();
-            if best.as_ref().is_none_or(|(cost, _)| score < *cost - 1e-5) {
-                best = Some((score, candidate));
-            }
+                .sum::<f32>(),
+        )
+    };
+    let splits: Vec<_> = (0..nodes.len())
+        .flat_map(|host| [(host, 0), (host, 1)])
+        .collect();
+    let workers = match threads {
+        0 => std::thread::available_parallelism().map_or(1, usize::from),
+        forced => forced,
+    };
+    let chunk = splits.len().div_ceil(workers).max(PARALLEL_SPLITS);
+    let scores = super::in_order(&splits, chunk, workers, |chunk| {
+        chunk.iter().map(score).collect()
+    });
+    let mut best: Option<(f32, (usize, usize))> = None;
+    for (&split, score) in splits.iter().zip(scores) {
+        if let Some(score) = score
+            && best.is_none_or(|(cost, _)| score < cost - 1e-5)
+        {
+            best = Some((score, split));
         }
     }
-    *nodes = best
-        .ok_or_else(|| CapacityError {
-            repository,
-            minimum_width: MINIMUM.x,
-            minimum_height: MINIMUM.y,
-            aspect: BOUND,
-            gutter: gutter_scale,
-            width: Tile::viewport().pixels().x,
-            height: Tile::viewport().pixels().y,
-        })?
-        .1;
-    Ok(())
+    let Some((_, (host, axis))) = best else {
+        return false;
+    };
+    *nodes = split(host, axis);
+    true
 }
 
 #[derive(Clone, Debug)]
@@ -572,6 +694,10 @@ fn gutter_cells(nodes: &[Node], placement: &[Placement]) -> Vec<Option<Tile>> {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Packing {
     gutter_scale: f32,
+    /// Scale of fixed sizes against the reference viewport; zero before planning.
+    detail: f32,
+    /// Repository title scale; zero before planning.
+    lettering: f32,
     nodes: Vec<Node>,
     labels: Arc<[String]>,
     inputs: Arc<[Vec<Input>]>,
@@ -670,18 +796,13 @@ fn rotations(
     nodes: &[Node],
     regions: &[Vec<Input>],
     samples: &[Sample],
-    gutter_scale: f32,
+    space: Space,
 ) -> Vec<bool> {
     let mut scores = vec![[0.0; 2]; regions[0].len()];
     for tick in (0..regions.len()).step_by((regions.len() / 16).max(1)) {
         let sample = &samples[tick];
-        let placement = tiles(
-            nodes,
-            &sample.weights,
-            &sample.presence,
-            Vec2::splat(gutter_scale),
-        )
-        .expect("planned tiles remain feasible");
+        let placement = tiles(nodes, &sample.weights, &sample.presence, space)
+            .expect("planned tiles remain feasible");
         for (i, tile) in placement
             .iter()
             .enumerate()
@@ -809,18 +930,10 @@ impl Packing {
             .collect();
         let mut order: Vec<_> = (0..first.len()).collect();
         order.sort_by_key(|&i| (births[i], i));
-        let mut nodes = Vec::new();
-        let mut born = vec![false; first.len()];
-        for (position, &i) in order.iter().enumerate() {
-            born[i] = true;
-            let begin = births[i].min(regions.len() - 1);
-            let end = order
-                .get(position + 1)
-                .map_or(regions.len(), |&j| births[j].min(regions.len()))
-                .max(begin + 1);
-            let (weights, aspects) = birth_weights(&regions, &files, &born, begin, end);
-            insert(&mut nodes, i, &weights, &aspects, gutter_scale)?;
-        }
+        let (nodes, detail) =
+            plan_tree(&regions, &files, &births, &order, gutter_scale, threads)?;
+        let lettering = detail.min(0.5 * area_detail(first.len(), gutter_scale));
+        let space = Space::new(detail, gutter_scale);
         let alpha = 1.0 - (-crate::model::tick_seconds() / 0.25).exp();
         let mut weights = vec![1.0; first.len()];
         let earliest = births.iter().copied().min().unwrap_or(0);
@@ -871,9 +984,9 @@ impl Packing {
                 }
             })
             .collect();
-        let rotated = rotations(&nodes, &regions, &samples, gutter_scale);
+        let rotated = rotations(&nodes, &regions, &samples, space);
         eprintln!(
-            "treemap_plan_seconds={:.6} samples={} repositories={}",
+            "treemap_plan_seconds={:.6} samples={} repositories={} detail={detail}",
             started.elapsed().as_secs_f64(),
             regions.len(),
             first.len()
@@ -881,6 +994,8 @@ impl Packing {
         drop(files);
         Ok(Self {
             gutter_scale,
+            detail,
+            lettering,
             nodes,
             labels: labels.into(),
             inputs: regions.into(),
@@ -1022,9 +1137,8 @@ impl Packing {
 
     /// [`tiles`] for this packing, reusing the polygons while presence repeats bit for bit.
     fn tiles(&self, weights: &[f32], presence: &[f32]) -> Option<Vec<Option<Tile>>> {
-        let gap = Vec2::splat(self.gutter_scale);
         if self.fresh_tiling {
-            return tiles(&self.nodes, weights, presence, gap);
+            return tiles(&self.nodes, weights, presence, self.space());
         }
         self.tiles_in(&mut self.tiling.lock(), weights, presence)
     }
@@ -1036,7 +1150,7 @@ impl Packing {
         weights: &[f32],
         presence: &[f32],
     ) -> Option<Vec<Option<Tile>>> {
-        let gap = Vec2::splat(self.gutter_scale);
+        let space = self.space();
         tiling.samples += 1;
         if tiling.states.len() == self.nodes.len()
             && tiling
@@ -1050,9 +1164,58 @@ impl Packing {
         } else {
             tiling.presence = presence.iter().map(|p| p.to_bits()).collect();
             tiling.states = vec![Feasible::default(); self.nodes.len()];
-            feasibility(&self.nodes, 0, weights, presence, gap, &mut tiling.states);
+            feasibility(&self.nodes, 0, weights, presence, space, &mut tiling.states);
         }
         allocated(&self.nodes, weights.len(), &tiling.states)
+    }
+
+    /// Tiles with every easing repository moved towards full presence by the least
+    /// bisected fraction that fits, since fractional slivers can conflict where the
+    /// planned full-presence arrangement does not.
+    fn firmer_tiles(
+        &self,
+        weights: &[f32],
+        presence: &[f32],
+    ) -> Option<Vec<Option<Tile>>> {
+        let at = |firmness: f32| {
+            let firm: Vec<_> = presence
+                .iter()
+                .map(|&p| if p > 0.0 { p.lerp(1.0, firmness) } else { 0.0 })
+                .collect();
+            tiles(&self.nodes, weights, &firm, self.space())
+        };
+        let mut best = at(1.0)?;
+        let (mut loose, mut firm) = (0.0_f32, 1.0_f32);
+        for _ in 0..FIRMING_STEPS {
+            let middle = loose.midpoint(firm);
+            if let Some(placement) = at(middle) {
+                best = placement;
+                firm = middle;
+            } else {
+                loose = middle;
+            }
+        }
+        Some(best)
+    }
+
+    fn space(&self) -> Space {
+        Space::new(self.detail(), self.gutter_scale)
+    }
+
+    /// Scale of tiles, gutters and avatars against their reference sizes: one while
+    /// every repository fits at full size, smaller as more must share the field.
+    pub(crate) fn detail(&self) -> f32 {
+        if self.detail > 0.0 { self.detail } else { 1.0 }
+    }
+
+    /// Repository title scale: full size while each repository's share of the field
+    /// holds four minimum tiles, then half that share's side, and never above [`Self::detail`].
+    pub(crate) fn lettering(&self) -> f32 {
+        if self.lettering > 0.0 {
+            self.lettering
+        } else {
+            1.0
+        }
     }
 
     /// Samples tiled and samples that reused the previous polygons, since the last call.
@@ -1113,7 +1276,8 @@ impl Packing {
             }
             _ => self.tiles(&weights, &presence),
         }
-        .expect("presence-scaled tiles remain feasible");
+        .or_else(|| self.firmer_tiles(&weights, &presence))
+        .expect("tiles at full presence remain feasible");
         self.inputs[tick]
             .iter()
             .enumerate()
@@ -1189,45 +1353,39 @@ mod tests {
     }
 
     #[test]
-    fn simultaneous_repositories_report_the_geometric_limit() {
-        let error = Packing::with_gutter(&[capacity_fixture()], 4.0, None).unwrap_err();
-        assert!(error.repository > 30);
-        assert!(
-            error
-                .to_string()
-                .contains("minimum tile size 144 by 64 reference pixels")
-        );
-        assert!(error.to_string().contains("gutter 4 pixels"));
-        assert!(
-            error
-                .to_string()
-                .ends_with("pixel field; use fewer repositories")
-        );
+    fn detail_shrinks_until_every_minimum_tile_fits() {
+        let packing = Packing::with_gutter(&[capacity_fixture()], 4.0, None).unwrap();
+        let field = Tile::viewport();
+        let detail = packing.detail();
+        assert!(detail < 1.0);
+        let (regions, _, _) = packing.sample(0).unwrap();
+        let tiles: Vec<_> = regions.iter().map(|r| r.tile.unwrap()).collect();
+        for (index, tile) in tiles.iter().enumerate() {
+            assert!(
+                tile.pixels()
+                    .cmpge(MINIMUM * detail - Vec2::splat(0.01))
+                    .all()
+            );
+            assert!(tile.low.cmpge(field.low - Vec2::splat(1e-5)).all());
+            assert!(tile.high.cmple(field.high + Vec2::splat(1e-5)).all());
+            for other in &tiles[index + 1..] {
+                let overlap = tile.high.min(other.high) - tile.low.max(other.low);
+                assert!(overlap.min_element() <= 1e-5, "{tile:?} {other:?}");
+            }
+        }
     }
 
     #[test]
-    fn sequential_repositories_reserve_tiles_before_endings_are_applied() {
-        let row = capacity_fixture();
-        let rows: Vec<_> = (0..row.len())
-            .map(|tick| {
-                let mut row = row.clone();
-                for (index, region) in row.iter_mut().enumerate() {
-                    region.live = index == tick;
-                }
-                row
-            })
-            .collect();
-        assert!(
-            rows.iter()
-                .all(|row| row.iter().filter(|r| r.live).count() == 1)
-        );
-        let error = Packing::with_gutter(&rows, 4.0, None).unwrap_err();
-        assert!(error.repository > 30);
-        assert!(
-            error
-                .to_string()
-                .contains("minimum tile size 144 by 64 reference pixels")
-        );
+    fn a_set_that_fits_at_full_size_keeps_full_detail() {
+        assert_eq!(Packing::before_service(&fixture()).detail(), 1.0);
+    }
+
+    #[test]
+    fn titles_shrink_while_seventy_two_tiles_still_fit_at_full_size() {
+        let packing = Packing::with_gutter(&[capacity_fixture()], 4.0, None).unwrap();
+        assert!(packing.lettering() < packing.detail());
+        assert!(area_detail(72, 4.0) > 1.0);
+        assert!(0.5 * area_detail(72, 4.0) < 0.6);
     }
 
     #[test]
@@ -1290,7 +1448,7 @@ mod tests {
         let weights: Vec<f32> = (0..30_u8).map(|i| 1.0 + f32::from(i)).collect();
         let states = |weights: &[f32]| {
             let mut states = vec![Feasible::default(); kept.nodes.len()];
-            feasibility(&kept.nodes, 0, weights, &hidden, Vec2::ONE, &mut states);
+            feasibility(&kept.nodes, 0, weights, &hidden, kept.space(), &mut states);
             states
         };
         let mut reweighed = states(&[1.0; 30]);
@@ -1407,15 +1565,6 @@ mod tests {
     }
 
     #[test]
-    fn gutter_budget_shrinks_continuously_above_twelve_repositories() {
-        assert_eq!(gutters(5.0), Vec2::new(16.0, 32.0));
-        assert_eq!(gutters(12.0), Vec2::new(16.0, 32.0));
-        assert_eq!(gutters(21.0), Vec2::new(14.0, 24.0));
-        assert_eq!(gutters(30.0), Vec2::new(12.0, 16.0));
-        assert_eq!(gutters(31.0), gutters(30.0));
-    }
-
-    #[test]
     fn configurable_gutters_partition_five_and_thirty_repository_views() {
         for count in [5, 30] {
             let rows: Vec<_> = fixture()
@@ -1475,7 +1624,7 @@ mod tests {
                 &packing.nodes,
                 &sample.weights,
                 &sample.presence,
-                Vec2::splat(packing.gutter_scale),
+                packing.space(),
             )
             .unwrap();
             let (root, gaps) = partition(&packing.nodes, 0, &placement);

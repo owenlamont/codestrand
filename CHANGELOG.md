@@ -13,6 +13,31 @@ All notable changes to Codestrand are documented here, following
 - Repository titles choose their corner from contributor discs, beams and tiles, no
   longer from contributor names, so some titles sit in a different corner and switch
   less often. ([#176](https://github.com/owenlamont/codestrand/pull/176))
+- Tile planning for many repositories is faster with identical tiles: about 6.5 times
+  on 128 and 200 synthetic repositories with 16 threads.
+  ([#180](https://github.com/owenlamont/codestrand/pull/180))
+- Repository sets too large for full-size tiles play with tiles, gutters, avatars and
+  titles shrunk together, instead of packing refusing with "use fewer repositories".
+  ([#180](https://github.com/owenlamont/codestrand/pull/180))
+- Avatars no longer shrink as repository count rises, so many-repository playback
+  shows them up to four times larger.
+  ([#180](https://github.com/owenlamont/codestrand/pull/180))
+- Repository titles share one size across tiles, about half size by 72 repositories and
+  never below 6 pixels, end in an ellipsis when too wide, and appear on small tiles
+  that previously showed none.
+  ([#180](https://github.com/owenlamont/codestrand/pull/180))
+- Directory and touched-file labels shrink with their tile's files, to no less than 8
+  pixels, and end in an ellipsis when wider than their tile.
+  ([#180](https://github.com/owenlamont/codestrand/pull/180))
+
+### Fixed
+
+- Many repositories starting on the same day no longer stop playback with
+  "presence-scaled tiles remain feasible" while their tiles ease in.
+  ([#180](https://github.com/owenlamont/codestrand/pull/180))
+- A contributor name no longer vanishes for a moment under the top caption bar when its
+  avatar jumps to another repository without travelling.
+  ([#180](https://github.com/owenlamont/codestrand/pull/180))
 
 ## v0.2.0 - 2026-11-16
 

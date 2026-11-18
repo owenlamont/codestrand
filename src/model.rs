@@ -70,6 +70,8 @@ const SETTLE_TICKS: u32 = 1200;
 /// Ticks of the global replay whose region samples are held before they become inputs.
 const REGION_BATCH: usize = 512;
 const DIR_LABELS: usize = 20;
+/// Directory and file label scale at an 8 pixel floor, against 14 pixels.
+const MIN_TILE_LABEL_SCALE: f32 = 8.0 / 14.0;
 
 fn check_travel_pass(pass: u32) -> anyhow::Result<()> {
     anyhow::ensure!(
@@ -396,6 +398,10 @@ pub(super) struct Label {
 #[derive(Clone, Debug)]
 struct State {
     region_depth: f32,
+    /// Packing detail scale: fixed sizes shrink with it as if the camera pulled back.
+    detail: f32,
+    /// Repository title scale, shared by every tile.
+    lettering: f32,
     tick: u64,
     layout: Layout,
     avatars: Vec<Avatar>,
@@ -857,6 +863,8 @@ impl Simulation {
             Self::build_schedules(&events, options, padding);
         let mut state = State {
             region_depth: 0.0,
+            detail: 1.0,
+            lettering: 1.0,
             tick: 0,
             layout: {
                 let _phase = options.trace.phase(Phase::ScheduledLayout);
@@ -876,8 +884,7 @@ impl Simulation {
             distance: framing::DISTANCE,
             geometry: theme.geometry(),
             avatar_scale: 1.0,
-            avatar_size: options.avatar_size
-                * repository_avatar_factor(repositories.len()),
+            avatar_size: options.avatar_size,
             avatar_max_speed: options.avatar_max_speed,
             gutter: options.gutter,
             slot_records: BTreeMap::new(),
@@ -1063,6 +1070,8 @@ impl Simulation {
         );
         self.state = SharedState(self.initial.clone());
         self.state.region_depth = framing::depth_bound();
+        self.state.detail = self.packing.detail();
+        self.state.lettering = self.packing.lettering();
         if let Some((regions, offsets, scales)) = self.packing.sample(0) {
             self.state.layout.place_regions(regions, &offsets, &scales);
         }
@@ -1289,10 +1298,7 @@ impl Simulation {
             .iter()
             .filter(|avatar| now < avatar.expires)
             .count();
-        let scale = names::scale(active).min(
-            crate::layout::packing::gutters(count(state.layout.repositories.len())).y
-                / 32.0,
-        );
+        let scale = names::scale(active);
         state.avatar_scale += (scale - state.avatar_scale) * (1.0 - (-dt / 0.6).exp());
         state.place_slots_planned(&self.envelopes, now, &self.travel);
         self.tick_times.laps.end(Phase::TickSlots);
@@ -1422,7 +1428,7 @@ impl Simulation {
     }
 
     pub(super) fn avatar_disc_scale(&self) -> f32 {
-        self.state.avatar_scale * self.state.avatar_size
+        self.state.avatar_scale * self.state.avatar_size * self.state.detail
     }
 
     pub(super) fn commit(&self) -> usize {
@@ -1603,18 +1609,20 @@ impl Simulation {
                         .titles
                         .get(&index)
                         .into_iter()
-                        .flat_map(|t| t.positions(height).map(|(p, a)| (p, t.scale, a)))
+                        .flat_map(|t| {
+                            t.positions(height).map(|(p, a)| (p, &t.text, t.scale, a))
+                        })
                         .collect()
                 } else {
                     let mut point = framing::label_position(region);
                     point.y = height;
-                    vec![(point, 1.0, 1.0)]
+                    vec![(point, &region.label, 1.0, 1.0)]
                 };
                 positions
                     .into_iter()
-                    .map(move |(position, scale, opacity)| Label {
+                    .map(move |(position, text, scale, opacity)| Label {
                         position,
-                        text: region.label.clone(),
+                        text: text.clone(),
                         kind: LabelKind::Repository,
                         scale,
                         opacity: opacity * self.repository_effect(index).1,
@@ -1622,6 +1630,23 @@ impl Simulation {
                     })
             })
     }
+    /// A directory or file label scaled with its tile's files, elided to the tile width.
+    fn tile_label(&self, dir: usize, text: String) -> (String, f32) {
+        let dir = self.state.layout.dir(dir);
+        let scale = dir.scale.clamp(MIN_TILE_LABEL_SCALE, 1.0);
+        let Some(tile) = self.state.layout.repositories[dir.repository].tile else {
+            return (text, scale);
+        };
+        let width = (tile.high.x - tile.low.x) * titles::HALF.x;
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a whole character count bounded by the tile width"
+        )]
+        let fits = ((width - 8.0) / (8.6 * scale)).floor().max(1.0) as usize;
+        (names::elide(&text, fits), scale)
+    }
+
     pub(super) fn labels_for_detail(
         &self,
         visible: impl Fn(usize) -> bool,
@@ -1679,13 +1704,16 @@ impl Simulation {
         dirs.sort_by_key(|&(index, _)| std::cmp::Reverse(subtree[index]));
         let mut labels: Vec<Label> = dirs
             .into_iter()
-            .map(|(index, dir)| Label {
-                position: ground(centroids[index] / count(subtree[index].max(1))),
-                text: format!("{}/", dir.name()),
-                kind: LabelKind::Landmark,
-                scale: 1.0,
-                opacity: self.repository_effect(dir.repository).1,
-                priority: 0.0,
+            .map(|(index, dir)| {
+                let (text, scale) = self.tile_label(index, format!("{}/", dir.name()));
+                Label {
+                    position: ground(centroids[index] / count(subtree[index].max(1))),
+                    text,
+                    kind: LabelKind::Landmark,
+                    scale,
+                    opacity: self.repository_effect(dir.repository).1,
+                    priority: 0.0,
+                }
             })
             .collect();
         labels.extend(self.repository_labels());
@@ -1698,19 +1726,22 @@ impl Simulation {
                     continue;
                 }
                 let text = match target {
-                    Target::File(id) => {
-                        layout.file(id).map(|file| file.name().to_owned())
-                    }
+                    Target::File(id) => layout
+                        .file(id)
+                        .map(|file| (file.dir, file.name().to_owned())),
                     Target::Dir(index) => {
-                        Some(format!("{}/", layout.directory_label(index)))
+                        Some((index, format!("{}/", layout.directory_label(index))))
                     }
                 };
-                if let (Some(text), Some(position)) = (text, self.state.point(target)) {
+                if let (Some((dir, text)), Some(position)) =
+                    (text, self.state.point(target))
+                {
+                    let (text, scale) = self.tile_label(dir, text);
                     labels.push(Label {
                         position: position + Vec3::new(-0.2, 0.0, 0.45),
                         text,
                         kind: LabelKind::Activity,
-                        scale: 1.0,
+                        scale,
                         opacity: 1.0,
                         priority: 0.0,
                     });
@@ -1751,7 +1782,7 @@ impl State {
     }
 
     fn avatar_radius(&self) -> f32 {
-        6.5 * self.avatar_scale * self.avatar_size * ARRIVAL_SCALE + 1.0
+        6.5 * self.avatar_scale * self.avatar_size * self.detail * ARRIVAL_SCALE + 1.0
     }
 
     fn author(&mut self, contributor: &Contributor, now: Time) -> usize {
@@ -2058,7 +2089,7 @@ pub(crate) fn tick_time(tick: u64) -> Time {
     clippy::cast_precision_loss,
     reason = "commit counts beyond 2^24 only lose sub-commit timing precision"
 )]
-fn count(value: usize) -> f32 {
+pub(crate) fn count(value: usize) -> f32 {
     value as f32
 }
 
@@ -2110,11 +2141,6 @@ pub(super) fn frames_for(duration: Time, fps: u16) -> anyhow::Result<u32> {
 pub(super) fn preview_frame(elapsed: Duration, fps: u16) -> u32 {
     let frame = elapsed.as_nanos() * u128::from(fps) / 1_000_000_000;
     u32::try_from(frame).unwrap_or(u32::MAX)
-}
-
-fn repository_avatar_factor(repositories: usize) -> f32 {
-    let t = ((count(repositories) - 5.0) / 25.0).clamp(0.0, 1.0);
-    1.0 - 0.5 * t * t * (3.0 - 2.0 * t)
 }
 
 fn prior_activity(events: &[Event], count: usize) -> Vec<bool> {
@@ -2255,20 +2281,6 @@ mod tests {
         assert!(error.contains("shorten the history"));
         assert!(!error.contains("use capped travel"));
     }
-    #[test]
-    fn repository_size_taper_preserves_small_portraits_and_halves_at_thirty() {
-        assert_eq!(super::repository_avatar_factor(1), 1.0);
-        assert_eq!(super::repository_avatar_factor(5), 1.0);
-        assert_eq!(super::repository_avatar_factor(30), 0.5);
-        assert_eq!(super::repository_avatar_factor(300), 0.5);
-        for count in 5..30 {
-            assert!(
-                super::repository_avatar_factor(count)
-                    > super::repository_avatar_factor(count + 1)
-            );
-        }
-    }
-
     #[test]
     fn overlapping_commits_show_only_the_latest_samples_for_each_file() {
         let mut events = crate::timeline::synthetic();
@@ -2732,44 +2744,64 @@ mod tests {
     }
 
     #[test]
-    fn ended_sequential_repositories_report_the_packing_limit() {
-        let count = 128;
-        let mut events = Vec::new();
-        let mut endings = Vec::new();
-        for repository in 0..count {
-            let mut event = crate::timeline::synthetic().remove(0);
-            event.seconds = i64::try_from(repository).unwrap() * 2 * 86_400;
-            endings.push(Some(event.seconds + 86_400));
-            crate::repositories::namespace(
-                std::slice::from_mut(&mut event),
-                repository,
-            );
-            events.push(event);
-        }
-        for (ending, next) in endings.iter().zip(events.iter().skip(1)) {
-            assert!(ending.unwrap() < next.seconds);
-        }
+    fn forty_repositories_born_together_ease_in_without_conflicting_tiles() {
+        let count = 40;
+        let mut events: Vec<_> = (0..count)
+            .flat_map(|index| {
+                let mut history = timeline::synthetic();
+                crate::repositories::namespace(&mut history, index);
+                history
+            })
+            .collect();
+        events.sort_by_key(|event| event.seconds);
+        let labels: Vec<_> = (0..count).map(|index| format!("repo{index}")).collect();
         let options = Options {
-            start: events.len(),
-            repository_ends: endings,
+            seconds_per_day: 0.05,
+            max_idle_seconds: 0.05,
             ..Options::default()
         };
-        let labels: Vec<_> = (0..count).map(|i| format!("Repository {i}")).collect();
-        let Err(error) = Simulation::try_with_repositories(
+        let mut simulation = Simulation::build(
             events,
             &options,
             &Theme::neon(),
             &Mappings::default(),
+            &[],
             &labels,
-        ) else {
-            panic!("ended repositories still reserve their packing tree")
+            &mut None,
+        )
+        .unwrap();
+        simulation.advance_to(frames_for(simulation.duration(), 60).unwrap(), 60);
+    }
+
+    #[test]
+    fn repositories_beyond_full_detail_play_with_scaled_avatars() {
+        let (events, labels) = short_repository_history(56);
+        let options = Options {
+            seconds_per_day: 0.05,
+            max_idle_seconds: 0.05,
+            gutter: 20.0,
+            ..Options::default()
         };
-        assert!(
-            error
-                .to_string()
-                .contains("minimum tile size 144 by 64 reference pixels")
-        );
-        assert!(error.to_string().contains("gutter 4 pixels"));
+        let mut simulation = Simulation::build(
+            events,
+            &options,
+            &Theme::neon(),
+            &Mappings::default(),
+            &[],
+            &labels,
+            &mut None,
+        )
+        .unwrap();
+        let detail = simulation.packing.detail();
+        assert!(detail < 1.0);
+        for frame in 0..=frames_for(simulation.duration(), 60).unwrap() {
+            simulation.advance_to(frame, 60);
+            assert_eq!(
+                simulation.avatar_disc_scale(),
+                simulation.state.avatar_scale * options.avatar_size * detail
+            );
+        }
+        simulation.assert_stitched_travel_rules();
     }
 
     #[test]
