@@ -70,8 +70,6 @@ const SETTLE_TICKS: u32 = 1200;
 /// Ticks of the global replay whose region samples are held before they become inputs.
 const REGION_BATCH: usize = 512;
 const DIR_LABELS: usize = 20;
-/// Directory and file label scale at an 8 pixel floor, against 14 pixels.
-const MIN_TILE_LABEL_SCALE: f32 = 8.0 / 14.0;
 
 fn check_travel_pass(pass: u32) -> anyhow::Result<()> {
     anyhow::ensure!(
@@ -1630,10 +1628,14 @@ impl Simulation {
                     })
             })
     }
-    /// A directory or file label scaled with its tile's files, elided to the tile width.
+    /// A directory or file label scaled with its tile's files, never above the repository
+    /// titles, elided to the tile width.
     fn tile_label(&self, dir: usize, text: String) -> (String, f32) {
         let dir = self.state.layout.dir(dir);
-        let scale = dir.scale.clamp(MIN_TILE_LABEL_SCALE, 1.0);
+        let scale = dir
+            .scale
+            .min(self.state.lettering)
+            .clamp(titles::MIN_SCALE, 1.0);
         let Some(tile) = self.state.layout.repositories[dir.repository].tile else {
             return (text, scale);
         };
