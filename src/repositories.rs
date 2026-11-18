@@ -60,33 +60,61 @@ impl Repository {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct Document {
     repositories: Vec<Repository>,
+    #[serde(flatten)]
+    options: toml::Table,
 }
 
-fn read_document(path: &Path) -> anyhow::Result<Document> {
+/// Top-level keys a repositories file may hold besides `repositories`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Keys {
+    RepositoriesOnly,
+    /// The file is also the `--config` file, which has already validated its options.
+    AlsoOptions,
+}
+
+/// Reads a file of at most 1 MiB, refusing anything but a regular file.
+pub(super) fn read_small(path: &Path, what: &str) -> anyhow::Result<String> {
     let file = std::fs::File::open(path)?;
     let metadata = file.metadata()?;
     anyhow::ensure!(
         metadata.is_file() && metadata.len() <= MAX_MANIFEST_BYTES,
-        "repositories file exceeds 1 MiB or is not a regular file"
+        "{what} exceeds 1 MiB or is not a regular file"
     );
     let mut text = String::new();
     file.take(MAX_MANIFEST_BYTES + 1)
         .read_to_string(&mut text)?;
     anyhow::ensure!(
         u64::try_from(text.len())? <= MAX_MANIFEST_BYTES,
-        "repositories file exceeds 1 MiB"
+        "{what} exceeds 1 MiB"
     );
+    Ok(text)
+}
+
+fn read_document(path: &Path, keys: Keys) -> anyhow::Result<Document> {
+    let text = read_small(path, "repositories file")?;
     let document: Document =
         toml::from_str(&text).context("parse repositories file")?;
+    if keys == Keys::RepositoriesOnly
+        && let Some(key) = document.options.keys().next()
+    {
+        bail!("parse repositories file: unknown key `{key}`, expected `repositories`");
+    }
     Ok(document)
 }
 
 pub(super) fn inputs(
     paths: &[PathBuf],
     file: Option<&Path>,
+) -> anyhow::Result<Vec<Repository>> {
+    inputs_with(paths, file, Keys::RepositoriesOnly)
+}
+
+pub(super) fn inputs_with(
+    paths: &[PathBuf],
+    file: Option<&Path>,
+    keys: Keys,
 ) -> anyhow::Result<Vec<Repository>> {
     let mut repositories: Vec<_> = paths
         .iter()
@@ -103,7 +131,7 @@ pub(super) fn inputs(
         })
         .collect();
     if let Some(file) = file {
-        let document = read_document(file)
+        let document = read_document(file, keys)
             .with_context(|| format!("read repositories file {}", file.display()))?;
         if document.repositories.is_empty() {
             bail!("repositories file must list at least one repository");

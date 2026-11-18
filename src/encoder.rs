@@ -20,7 +20,7 @@ pub(super) struct Options {
     #[arg(long)]
     video: Option<PathBuf>,
     /// Installed `FFmpeg` executable; overrides `CODESTRAND_FFMPEG` and PATH.
-    #[arg(long, requires = "video")]
+    #[arg(long, requires = "video", value_hint = clap::ValueHint::CommandName)]
     ffmpeg: Option<PathBuf>,
     /// Replace default encoding options; repeat once per argument, e.g. --ffmpeg-arg=-crf.
     #[arg(long, requires = "video", allow_hyphen_values = true)]

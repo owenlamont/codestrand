@@ -16,6 +16,7 @@ nav = [
   { "Git history import" = "history.md" },
   { "Playback" = "playback.md" },
   { "Export" = "export.md" },
+  { "Config file" = "configuration.md" },
   { "Contributors and avatars" = "contributors.md" },
   { "Privacy and local processing" = "security.md" },
   { "Troubleshooting" = "troubleshooting.md" },
