@@ -1166,7 +1166,7 @@ mod tests {
                         .into_iter()
                         .flatten(),
                 );
-                let cli = Cli::try_fixture_from(args).unwrap();
+                let cli = Cli::try_parse_from(args).unwrap();
                 let (Command::Preview { source, .. } | Command::Export { source, .. }) =
                     cli.command.unwrap()
                 else {
