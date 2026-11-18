@@ -5,11 +5,19 @@ pub(super) const EXIT: f32 = 1.2;
 pub(super) const REPOSITORY_EXIT: f32 = 2.5;
 pub(super) const REFLOW: f32 = 4.0;
 
-pub(super) fn duration(schedule: &Schedule, endings: &[Time]) -> Time {
+pub(super) fn duration(
+    schedule: &Schedule,
+    endings: &[Time],
+    pace: FragmentPace,
+) -> Time {
+    let last_pulse = schedule
+        .starts
+        .last()
+        .map_or(Time::ZERO, |&start| pace.pulse_end(start));
     endings
         .iter()
         .filter(|end| end.is_finite())
-        .fold(schedule.duration(), |duration, &end| {
+        .fold(schedule.duration().max(last_pulse), |duration, &end| {
             duration.max(end + REPOSITORY_EXIT + REFLOW)
         })
 }
@@ -202,6 +210,16 @@ pub(super) fn progress(now: Time, start: Time, duration: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn playback_lasts_until_the_final_fragment_lands() {
+        let schedule = Schedule::new(&crate::timeline::synthetic(), 0.5, 1.0);
+        let last = *schedule.starts.last().unwrap();
+        let default = FragmentPace::new(1.0);
+        assert_eq!(duration(&schedule, &[], default), schedule.duration());
+        let slowest = FragmentPace::new(0.25);
+        assert_eq!(duration(&schedule, &[], slowest), slowest.pulse_end(last));
+    }
 
     #[test]
     fn slower_fragments_hold_a_compressed_departure_until_they_land() {

@@ -57,7 +57,7 @@ pub(super) fn check(
         options.selected_range(events.len()),
     );
     let history_frames = u128::from(frames_for(
-        super::lifecycle::duration(&history, &endings),
+        super::lifecycle::duration(&history, &endings, options.fragment_pace()),
         60,
     )?) + 1;
     let regions = history_frames * repositories.len() as u128;

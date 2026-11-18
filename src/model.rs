@@ -181,7 +181,7 @@ impl Options {
         );
         let (_, endings) =
             lifecycle::plan(events, &history, self, self.selected_range(events.len()));
-        let duration = lifecycle::duration(&history, &endings);
+        let duration = lifecycle::duration(&history, &endings, self.fragment_pace());
         self.travel_window_seconds = (duration
             > Time::seconds(WINDOW_SECONDS + windows::MARGIN))
         .then_some(WINDOW_SECONDS);
@@ -595,7 +595,7 @@ impl Simulation {
             options,
             options.selected_range(events.len()),
         );
-        let duration = lifecycle::duration(schedule, &endings);
+        let duration = lifecycle::duration(schedule, &endings, options.fragment_pace());
         planning_memory::check(events, options, repositories, schedule, duration)?;
         Ok(())
     }
@@ -1105,7 +1105,11 @@ impl Simulation {
         if let Some(window) = &self.window {
             return self.clock.present(window.end);
         }
-        lifecycle::duration(&self.schedule, &self.repository_ends)
+        lifecycle::duration(
+            &self.schedule,
+            &self.repository_ends,
+            self.state.fragment_pace,
+        )
     }
 
     pub(super) fn repository_effect(&self, repository: usize) -> (f32, f32, f32) {
