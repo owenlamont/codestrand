@@ -2,6 +2,7 @@
 //! hidden or removed option fails the build instead of misleading an agent.
 
 use std::collections::BTreeSet;
+use std::ffi::OsString;
 use std::path::Path;
 
 use clap::{CommandFactory, Parser};
@@ -34,30 +35,59 @@ fn long_flags(text: &str) -> BTreeSet<String> {
     flags
 }
 
+/// Returns the lines of every fenced block whose info string is exactly `language`.
+fn fences<'a>(skill: &'a str, language: &str) -> Vec<Vec<&'a str>> {
+    let mut blocks = Vec::new();
+    let mut open: Option<(bool, Vec<&str>)> = None;
+    for line in skill.lines() {
+        match (line.strip_prefix("```"), &mut open) {
+            (Some(info), None) => open = Some((info == language, Vec::new())),
+            (Some(_), Some(_)) => {
+                if let Some((true, block)) = open.take() {
+                    blocks.push(block);
+                }
+            }
+            (None, Some((_, block))) => block.push(line),
+            (None, None) => {}
+        }
+    }
+    blocks
+}
+
 /// Returns each `codestrand` command in the skill's `sh` fences as its words, with
 /// backslash continuations joined.
 fn commands(skill: &str) -> Vec<Vec<String>> {
     let mut commands = Vec::new();
-    let mut in_shell = false;
-    let mut pending = String::new();
-    for line in skill.lines() {
-        if line.starts_with("```") {
-            in_shell = line == "```sh";
-            continue;
-        }
-        if !in_shell {
-            continue;
-        }
-        pending.push_str(line.trim_end_matches('\\'));
-        if line.ends_with('\\') {
-            continue;
-        }
-        let command = std::mem::take(&mut pending);
-        if command.starts_with("codestrand ") {
-            commands.push(command.split_whitespace().map(str::to_owned).collect());
+    for block in fences(skill, "sh") {
+        let mut pending = String::new();
+        for line in block {
+            pending.push_str(line.trim_end_matches('\\'));
+            if line.ends_with('\\') {
+                continue;
+            }
+            let command = std::mem::take(&mut pending);
+            if command.starts_with("codestrand ") {
+                commands.push(command.split_whitespace().map(str::to_owned).collect());
+            }
         }
     }
     commands
+}
+
+/// Writes each `toml` fence to `directory` under the name its first line gives, as in
+/// `# codestrand.toml; ...`, and returns the names.
+fn write_toml_examples(skill: &str, directory: &Path) -> Vec<String> {
+    fences(skill, "toml")
+        .into_iter()
+        .map(|block| {
+            let name = block[0]
+                .strip_prefix("# ")
+                .and_then(|comment| comment.split(';').next())
+                .expect("a TOML example opens with `# NAME.toml;`");
+            std::fs::write(directory.join(name), block.join("\n")).unwrap();
+            name.to_owned()
+        })
+        .collect()
 }
 
 #[test]
@@ -89,8 +119,10 @@ fn skill_shows_the_export_manifest_header() {
 }
 
 #[test]
-fn skill_commands_parse_and_name_their_repositories() {
+fn skill_commands_parse_with_their_config_files_and_name_their_repositories() {
     let Some(skill) = skill() else { return };
+    let directory = tempfile::tempdir().unwrap();
+    let examples = write_toml_examples(&skill, directory.path());
     let commands = commands(&skill);
     assert!(
         commands.len() >= 5,
@@ -100,7 +132,22 @@ fn skill_commands_parse_and_name_their_repositories() {
     for words in commands {
         let line = words.join(" ");
         assert!(!line.contains(['"', '\'']), "quoting is not parsed: {line}");
-        if let Err(error) = Cli::try_parse_from(&words) {
+        let arguments = words
+            .iter()
+            .map(|word| {
+                if examples.contains(word) {
+                    directory.path().join(word).into_os_string()
+                } else {
+                    OsString::from(word)
+                }
+            })
+            .collect();
+        let parsed = crate::config::arguments(arguments)
+            .map_err(|error| error.to_string())
+            .and_then(|arguments| {
+                Cli::try_parse_from(arguments).map_err(|error| error.to_string())
+            });
+        if let Err(error) = parsed {
             panic!("`{line}` does not parse:\n{error}");
         }
         if words[1] != "inspect" {
@@ -122,4 +169,10 @@ fn commands_reject_an_option_missing_what_it_requires() {
     let words = commands(skill).pop().expect("one command");
     assert_eq!(words.len(), 7);
     assert!(Cli::try_parse_from(words).is_err());
+}
+
+#[test]
+fn fences_skip_blocks_in_other_languages() {
+    let skill = "```text\ncodestrand nope\n```\n```sh\ncodestrand inspect .\n```\n";
+    assert_eq!(commands(skill), [["codestrand", "inspect", "."]]);
 }
