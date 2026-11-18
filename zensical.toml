@@ -20,6 +20,7 @@ nav = [
   { "Contributors and avatars" = "contributors.md" },
   { "Privacy and local processing" = "security.md" },
   { "Troubleshooting" = "troubleshooting.md" },
+  { "AI agents" = "ai-agents.md" },
   { "Related tools" = "related-tools.md" },
 ]
 [project.theme]

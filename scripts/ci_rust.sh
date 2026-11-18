@@ -16,6 +16,7 @@ git diff --quiet --no-ext-diff --no-renames HEAD^1 HEAD -- . \
   ':(top,glob,exclude)docs/assets/**' \
   ':(top,exclude)scripts/check_docs_logo.sh' \
   ':(top,glob,exclude)docs/**/*.md' \
+  ':(top,glob,exclude)docs/llms*.txt' \
   ':(top,exclude)assets/codestrand.svg' || status=$?
 case "$status" in
   0) echo false ;;
