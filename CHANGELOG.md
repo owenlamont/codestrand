@@ -32,7 +32,7 @@ All notable changes to Codestrand are documented here, following
   [#181](https://github.com/owenlamont/codestrand/pull/181))
 - The `bevelled-desktop` theme is now `retro-desktop`, titled "Retro Desktop"; the old
   name still selects it.
-  ([#PR](https://github.com/owenlamont/codestrand/pull/PR))
+  ([#185](https://github.com/owenlamont/codestrand/pull/185))
 
 ### Fixed
 
