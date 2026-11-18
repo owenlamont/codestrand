@@ -1,19 +1,87 @@
 #![forbid(unsafe_code)]
 #![deny(clippy::all, clippy::pedantic)]
 
-use std::{fmt::Write as _, process::Command};
+use std::{fmt::Write as _, path::Path, process::Command};
+
+/// A codestrand command run in `directory` without inherited Git variables.
+fn codestrand_in(directory: &Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_codestrand"));
+    command.current_dir(directory);
+    for (key, _) in
+        std::env::vars_os().filter(|(key, _)| key.to_string_lossy().starts_with("GIT_"))
+    {
+        command.env_remove(key);
+    }
+    command
+}
 
 #[test]
 fn omitted_repository_outside_git_explains_how_to_supply_one() {
     let scratch = tempfile::tempdir().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_codestrand"))
-        .current_dir(scratch.path())
-        .args(["export", "frames"])
+    for arguments in [&["export", "frames"][..], &["preview"]] {
+        let output = codestrand_in(scratch.path())
+            .args(arguments)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        // A lone error line shows no renderer started, so no window opened.
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(stderr.lines().count(), 1, "{stderr}");
+        assert!(stderr.contains("pass --repository PATH"), "{stderr}");
+    }
+    assert!(!scratch.path().join("frames").exists());
+}
+
+#[test]
+fn omitted_repository_plays_the_repository_holding_the_current_directory() {
+    let scratch = tempfile::tempdir().unwrap();
+    let repository = scratch.path().join("played");
+    let nested = repository.join("src");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(
+        nested.join("main.rs"),
+        "fn main() {}
+",
+    )
+    .unwrap();
+    for arguments in [
+        &["init", "--quiet"][..],
+        &["add", "src/main.rs"],
+        &["commit", "--quiet", "--message", "Add main"],
+    ] {
+        let status = Command::new("git")
+            .current_dir(&repository)
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env(
+                "GIT_CONFIG_GLOBAL",
+                if cfg!(windows) { "NUL" } else { "/dev/null" },
+            )
+            .args([
+                "-c",
+                "user.name=Author",
+                "-c",
+                "user.email=author@example.invalid",
+            ])
+            .args(arguments)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {arguments:?}");
+    }
+    let output = codestrand_in(&nested)
+        .args(["layout-quality", "quality.jsonl", "--no-cache"])
         .output()
         .unwrap();
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("pass --repository PATH"));
-    assert!(!scratch.path().join("frames").exists());
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = std::fs::read_to_string(nested.join("quality.jsonl")).unwrap();
+    let header: serde_json::Value =
+        serde_json::from_str(report.lines().next().unwrap()).unwrap();
+    assert_eq!(header["history_events"], 1);
 }
 
 #[test]

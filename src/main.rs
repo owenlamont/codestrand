@@ -14,6 +14,8 @@
     reason = "Bevy's platform backends require incompatible transitive crate versions"
 )]
 
+#[cfg(test)]
+mod agent_skill;
 mod avatars;
 mod cache;
 mod camera;
@@ -324,6 +326,9 @@ struct Source {
     /// File heat half-life in canonical playback seconds.
     #[arg(long, default_value_t = 3.0, value_parser = positive_seconds)]
     heat_half_life: f32,
+    /// Diff fragment speed relative to the default; 1 crosses a beam in about 0.9 playback seconds (0.25–2, inclusive).
+    #[arg(long, default_value_t = 1.0, value_parser = fragment_speed)]
+    fragment_speed: f32,
 }
 
 impl Source {
@@ -407,6 +412,21 @@ impl Source {
         }
     }
 
+    /// The `--repository` paths, or the repository holding the current directory when
+    /// no repository, manifest or test input is named.
+    fn repositories(&self) -> anyhow::Result<Vec<PathBuf>> {
+        Ok(
+            if self.repository.is_empty()
+                && self.repositories_file.is_none()
+                && self.test_input.is_none()
+            {
+                vec![repositories::discover(&std::env::current_dir()?)?]
+            } else {
+                self.repository.clone()
+            },
+        )
+    }
+
     fn load(&self, progress: &Progress) -> anyhow::Result<(model::Simulation, String)> {
         #[cfg(not(test))]
         let available_memory = model::available_memory(&self.trace)?;
@@ -420,14 +440,7 @@ impl Source {
         progress: &Progress,
         available_memory: u64,
     ) -> anyhow::Result<(model::Simulation, String)> {
-        let paths = if self.repository.is_empty()
-            && self.repositories_file.is_none()
-            && self.test_input.is_none()
-        {
-            vec![repositories::discover(&std::env::current_dir()?)?]
-        } else {
-            self.repository.clone()
-        };
+        let paths = self.repositories()?;
         let file = self.repositories_file.as_deref();
         let repositories = if self.config.is_some()
             && self.config == self.repositories_file
@@ -482,6 +495,7 @@ impl Source {
             avatar_max_speed: self.avatar_max_speed,
             avatar_size: self.avatar_scale,
             gutter: self.gutter,
+            fragment_speed: self.fragment_speed,
             progress: progress.clone(),
             trace: self.trace.clone(),
         };
@@ -764,12 +778,17 @@ fn avatar_size(value: &str) -> Result<f32, String> {
     between(value, 0.5, 2.0, "avatar scale")
 }
 
+fn fragment_speed(value: &str) -> Result<f32, String> {
+    let speeds = model::FRAGMENT_SPEEDS;
+    between(value, *speeds.start(), *speeds.end(), "fragment speed")
+}
+
 fn between(value: &str, low: f32, high: f32, name: &str) -> Result<f32, String> {
     value
         .parse::<f32>()
         .ok()
         .filter(|parsed| (low..=high).contains(parsed))
-        .ok_or_else(|| format!("{name} must be between {low} and {high}"))
+        .ok_or_else(|| format!("{name} must be between {low} and {high}, inclusive"))
 }
 
 fn main() -> std::process::ExitCode {
@@ -792,7 +811,9 @@ fn termination(result: anyhow::Result<()>) -> std::process::ExitCode {
 }
 
 /// Opens the preview window while a worker thread loads and plans `source`.
-fn preview(source: Source, theme: theme::ThemeName) -> anyhow::Result<()> {
+fn preview(mut source: Source, theme: theme::ThemeName) -> anyhow::Result<()> {
+    // Outside a repository, fail before a window opens.
+    source.repository = source.repositories()?;
     let (progress, updates) = Progress::channel(std::time::Duration::from_millis(50));
     let theme = theme.build();
     let worker = std::thread::spawn(move || {
@@ -1188,6 +1209,37 @@ mod tests {
                 panic!("playback command")
             };
             assert_eq!(source.heat_half_life, 2.0);
+        }
+    }
+
+    #[test]
+    fn fragment_speed_is_shared_by_preview_and_export_within_inclusive_bounds() {
+        for command in [vec!["preview"], vec!["export", "frames"]] {
+            for (value, expected) in
+                [(None, 1.0), (Some("0.25"), 0.25), (Some("2"), 2.0)]
+            {
+                let mut args = vec!["codestrand"];
+                args.extend(command.clone());
+                args.extend(
+                    value
+                        .map(|value| ["--fragment-speed", value])
+                        .into_iter()
+                        .flatten(),
+                );
+                let cli = Cli::try_fixture_from(args).unwrap();
+                let (Command::Preview { source, .. } | Command::Export { source, .. }) =
+                    cli.command.unwrap()
+                else {
+                    panic!("playback command")
+                };
+                assert_eq!(source.fragment_speed, expected);
+            }
+        }
+        for value in ["0", "0.24", "2.01", "NaN", "inf"] {
+            assert_eq!(
+                fragment_speed(value).unwrap_err(),
+                "fragment speed must be between 0.25 and 2, inclusive"
+            );
         }
     }
 
