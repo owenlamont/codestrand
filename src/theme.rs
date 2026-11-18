@@ -21,7 +21,7 @@ pub(super) enum ThemeName {
     Phosphor,
     Outrun,
     Blueprint,
-    BevelledDesktop,
+    RetroDesktop,
     Atlas,
     Forge,
 }
@@ -47,7 +47,7 @@ impl ThemeName {
         Self::Phosphor,
         Self::Outrun,
         Self::Blueprint,
-        Self::BevelledDesktop,
+        Self::RetroDesktop,
         Self::Atlas,
         Self::Forge,
     ];
@@ -66,7 +66,7 @@ impl ThemeName {
             Self::Phosphor => "Phosphor",
             Self::Outrun => "Outrun",
             Self::Blueprint => "Blueprint",
-            Self::BevelledDesktop => "Bevelled Desktop",
+            Self::RetroDesktop => "Retro Desktop",
             Self::Atlas => "Atlas",
             Self::Forge => "Forge",
         }
@@ -78,7 +78,7 @@ impl ThemeName {
             Self::Phosphor => Theme::phosphor(),
             Self::Outrun
             | Self::Blueprint
-            | Self::BevelledDesktop
+            | Self::RetroDesktop
             | Self::Atlas
             | Self::Forge => candidates::build(self),
         }
@@ -424,7 +424,7 @@ mod tests {
         for name in [
             ThemeName::Blueprint,
             ThemeName::Atlas,
-            ThemeName::BevelledDesktop,
+            ThemeName::RetroDesktop,
         ] {
             let theme = name.build();
             assert_eq!(theme.heat_color(0.0), theme.heat_color(1.0));
@@ -451,7 +451,7 @@ mod tests {
             assert!(glyphs.insert(glyph));
             assert!(grounds.insert(ground));
         }
-        let desktop = ThemeName::BevelledDesktop.build();
+        let desktop = ThemeName::RetroDesktop.build();
         assert_ne!(desktop.glyph_svg("", 1), desktop.glyph_svg("", 2));
     }
 
