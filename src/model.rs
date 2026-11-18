@@ -215,6 +215,8 @@ struct Pulse {
     start: Time,
     end: Time,
     author: usize,
+    /// Whether `author` is the commit's author rather than a co-author.
+    leads: bool,
     targets: Vec<(Target, f32, u32, u32)>,
     aggregated: bool,
     samples: Vec<(u64, crate::diff_samples::Sample)>,
@@ -1533,12 +1535,14 @@ impl Simulation {
                     }
                     Target::Dir(_) => 0.0,
                 };
+                // Only the author's pulse carries text, so a co-author's must not
+                // claim the file's newest-commit slot.
                 let current = match target {
-                    Target::File(id) => {
+                    Target::File(id) if pulse.leads => {
                         *newest.entry(id).or_insert(pulse_index) == pulse_index
                             && sample_detail > 0.0
                     }
-                    Target::Dir(_) => false,
+                    Target::File(_) | Target::Dir(_) => false,
                 };
                 for (count, rising) in [(insertions, false), (removals, true)] {
                     fragments.extend(attach_samples(
@@ -1902,6 +1906,7 @@ impl State {
                 start,
                 end: pulse_end(start),
                 author,
+                leads: samples.is_some(),
                 targets: targets.clone(),
                 aggregated,
                 samples: samples.take().unwrap_or_default(),
@@ -2562,6 +2567,31 @@ mod tests {
                 .zip(positions)
                 .all(|(line, old)| line.position != old)
         );
+    }
+
+    #[test]
+    fn diff_text_flies_from_the_author_of_a_co_authored_commit() {
+        let mut events = crate::timeline::synthetic();
+        events.truncate(1);
+        events[0].changes[0].samples = vec![crate::diff_samples::Sample {
+            added: true,
+            text: "let sample = 1;".to_owned(),
+        }];
+        events[0].co_authors = vec![timeline::Identity {
+            name: b"Pair".to_vec(),
+            email: b"pair@example.invalid".to_vec(),
+        }];
+        let mut sim = super::Simulation::new(
+            events,
+            &super::Options::default(),
+            &crate::theme::Theme::neon(),
+            &crate::contributors::Mappings::default(),
+        );
+        sim.advance_to(45, 60);
+        assert_eq!(sim.diff_lines().len(), 1);
+        assert!(sim.fragments().iter().any(|fragment| {
+            fragment.sample.is_some() && fragment.beam.is_some_and(|(a, _)| a == 0)
+        }));
     }
 
     #[test]
