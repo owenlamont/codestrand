@@ -229,6 +229,83 @@ def test_write_permissions_require_publication_guard(name: str) -> None:
     )
 
 
+def test_winget_waits_for_public_release_and_uses_separate_credentials() -> None:
+    job = _JOBS["publish-winget"]
+    assert job["needs"] == ["finalize-github-release"]
+    assert job["if"] == _JOBS["finalize-github-release"]["if"]
+    assert job["environment"] == "automation"
+    assert job["permissions"] == {"contents": "read"}
+    download, sync, submit = job["steps"]
+    assert set(download["env"]) == {"WINGETCREATE_VERSION", "WINGETCREATE_SHA256"}
+    assert sync["env"]["GH_TOKEN"] == "${{ secrets.WINGET_FORK_SYNC_PAT }}"
+    assert submit["env"] == {"WINGET_CREATE_GITHUB_TOKEN": "${{ secrets.WINGET_PAT }}"}
+    assert "update owenlamont.codestrand" in submit["run"]
+    assert "codestrand-x86_64-pc-windows-msvc.zip|x64" in submit["run"]
+    assert "codestrand-aarch64-pc-windows-msvc.zip|arm64" in submit["run"]
+
+
+@pytest.fixture
+def powershell() -> str:
+    executable = shutil.which("pwsh")
+    if executable is None:
+        assert not os.environ.get("CI"), "CI must execute the PowerShell tests"
+        pytest.skip("PowerShell is not installed")
+    return executable
+
+
+@pytest.mark.parametrize(
+    ("actual_hash", "success"),
+    [
+        pytest.param("reviewed", True, id="verified download"),
+        pytest.param("tampered", False, id="checksum mismatch"),
+    ],
+)
+def test_winget_rejects_unverified_download(
+    *, tmp_path: Path, powershell: str, actual_hash: str, success: bool
+) -> None:
+    step = _JOBS["publish-winget"]["steps"][0]
+    stub = """
+function Invoke-WebRequest { param($Uri, $OutFile) }
+function Get-FileHash { param($Path, $Algorithm)
+  return @{ Hash = $env:ACTUAL_HASH }
+}
+"""
+    result = subprocess.run(
+        [powershell, "-NoProfile", "-NonInteractive", "-Command", stub + step["run"]],
+        cwd=tmp_path,
+        env=os.environ
+        | {
+            "ACTUAL_HASH": actual_hash,
+            "WINGETCREATE_SHA256": "reviewed",
+            "WINGETCREATE_VERSION": "v1.12.13.0",
+        },
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert (result.returncode == 0) is success
+
+
+@pytest.mark.parametrize(
+    "status",
+    [pytest.param(0, id="fork synced"), pytest.param(1, id="fork sync refused")],
+)
+def test_winget_fork_sync_failure_stops_job(
+    *, tmp_path: Path, powershell: str, status: int
+) -> None:
+    step = _JOBS["publish-winget"]["steps"][1]
+    stub = "function gh { $global:LASTEXITCODE = [int]$env:STATUS }\n"
+    result = subprocess.run(
+        [powershell, "-NoProfile", "-NonInteractive", "-Command", stub + step["run"]],
+        cwd=tmp_path,
+        env=os.environ | {"STATUS": str(status), "WINGET_FORK": "owner/winget-pkgs"},
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == status
+
+
 def test_notices_ship_in_each_distribution() -> None:
     cargo = tomllib.loads((_ROOT / "Cargo.toml").read_text())
     python = tomllib.loads((_ROOT / "pyproject.toml").read_text())

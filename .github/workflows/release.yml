@@ -777,3 +777,65 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: gh release edit "$RELEASE_TAG" -R "${GITHUB_REPOSITORY}" --draft=false
+
+  publish-winget:
+    name: Publish to winget
+    # Must follow finalize-github-release: wingetcreate downloads each release
+    # asset to recompute its SHA256, so the assets have to be publicly
+    # downloadable (un-drafted) first.
+    needs:
+      - finalize-github-release
+    if: >-
+      startsWith(github.ref, 'refs/tags/v') &&
+      (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish == true))
+    runs-on: windows-latest
+    environment: automation
+    permissions:
+      contents: read
+    steps:
+      - name: Download and verify wingetcreate
+        shell: pwsh
+        # Verify the download before executing with WINGET_PAT in scope.
+        # Update the version and published wingetcreate.exe.txt checksum together.
+        env:
+          WINGETCREATE_VERSION: v1.12.13.0
+          WINGETCREATE_SHA256: 24042BD37915805615E6CF969AC57C6439124C3FE85823327F5F3FB24BD9FFEA
+        run: |-
+          $ErrorActionPreference = 'Stop'
+          $url = "https://github.com/microsoft/winget-create/releases/download/${env:WINGETCREATE_VERSION}/wingetcreate.exe"
+          Invoke-WebRequest $url -OutFile wingetcreate.exe
+          $actual = (Get-FileHash wingetcreate.exe -Algorithm SHA256).Hash
+          if ($actual -ne ${env:WINGETCREATE_SHA256}) {
+            throw "wingetcreate.exe SHA256 mismatch: expected ${env:WINGETCREATE_SHA256}, got $actual"
+          }
+      # wingetcreate cannot fast-forward the fork itself, and syncing it takes Workflows
+      # write whenever upstream has changed .github/workflows, which the classic
+      # WINGET_PAT lacks (a fine-grained token cannot open the upstream PR), so this
+      # step uses a fine-grained token scoped to the fork alone.
+      - name: Sync the winget-pkgs fork with upstream
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.WINGET_FORK_SYNC_PAT }}
+          WINGET_FORK: ${{ github.repository_owner }}/winget-pkgs
+        run: |-
+          $output = gh api "repos/${env:WINGET_FORK}/merge-upstream" -f branch=master 2>&1 | Out-String
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::error::Could not sync ${env:WINGET_FORK}: $output"
+            exit 1
+          }
+          Write-Host $output
+
+      - name: Submit codestrand to winget-pkgs
+        shell: pwsh
+        env:
+          # wingetcreate reads the classic public_repo PAT from this env var (its
+          # documented CI path), keeping the token out of argv and process logs.
+          WINGET_CREATE_GITHUB_TOKEN: ${{ secrets.WINGET_PAT }}
+        run: |-
+          $ErrorActionPreference = 'Stop'
+          $version = ${env:GITHUB_REF_NAME} -replace '^v', ''
+          $base = "https://github.com/${env:GITHUB_REPOSITORY}/releases/download/${env:GITHUB_REF_NAME}"
+          .\wingetcreate.exe update owenlamont.codestrand `
+            --version $version `
+            --submit `
+            --urls "${base}/codestrand-x86_64-pc-windows-msvc.zip|x64" "${base}/codestrand-aarch64-pc-windows-msvc.zip|arm64"

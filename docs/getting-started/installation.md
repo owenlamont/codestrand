@@ -1,14 +1,7 @@
 # Installation
 
 Codestrand ships as a native binary. Choose a channel matching your tools.
-The guides describe 0.2.0. Until publication, install from `main` for these features.
-If an option in the guides is missing from `--help`, build from `main`:
-
-```sh
-cargo install --locked --git https://github.com/owenlamont/codestrand --branch main
-```
-
-This requires Rust and the native build prerequisites described below.
+The guides describe the published 0.2.0 release.
 Check `codestrand --version` and the command's `--help` after installing.
 
 ## PyPI
@@ -47,6 +40,26 @@ Download a ZIP from [GitHub releases](https://github.com/owenlamont/codestrand/r
 extract the archive and put `codestrand` (Windows: `codestrand.exe`) on your `PATH`.
 Keep the included licences and third-party notices when redistributing the binary.
 Compare the archive's SHA-256 digest with the release's `SHA256SUMS` file.
+
+## winget (pending)
+
+After the initial submission is accepted into the Windows Package Manager catalog:
+
+```powershell
+winget install --id owenlamont.codestrand --exact
+```
+
+The portable package targets x64 and ARM64. Windows ARM64 rendering is unverified;
+see [the rendering limitation](https://github.com/owenlamont/codestrand/issues/167).
+
+## conda-forge (pending)
+
+The recipe is being prepared. Until a feedstock is available, use another channel.
+Once the package is live on conda-forge:
+
+```sh
+pixi global install --channel conda-forge codestrand
+```
 
 ## Platforms
 

@@ -32,6 +32,10 @@ Also available through `cargo install --locked codestrand`,
 `npm install --global @owenlamont/codestrand` and
 [GitHub releases](https://github.com/owenlamont/codestrand/releases).
 
+After the initial winget submission is accepted, Windows users can install with
+`winget install --id owenlamont.codestrand --exact`. The conda-forge recipe is pending;
+use the channels above until the feedstock is available.
+
 ## Quick start
 
 ```sh
