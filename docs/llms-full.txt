@@ -527,8 +527,11 @@ The default 16:9 export camera stays fixed. Spacing and size floors use a fixed 
 calibrated in reference pixels; apparent ground spacing is slightly smaller to reserve
 room for elevated portraits. Preview orbit changes the projection, not the packing.
 Shared gutters separate neighbouring tiles, with no
-contributor band. Tile weights follow eased square roots of live file counts;
-empty active repositories retain weight one. Each repository keeps file identity,
+contributor band. Tile areas follow live file and directory counts, within the size
+floors and aspect limits. Tiles hold still until one tile's share differs from its count's
+by more than half again, or 5% of the field sits on the wrong tiles; they then ease over
+two seconds, at most once every six seconds. Empty active repositories weigh as one item.
+Each repository keeps file identity,
 local layout and one uniform scale, with a fixed quarter-turn chosen for its history.
 Content zoom anticipates growth with a precomputed safe-fit envelope and half-second
 easing. The log-scale limit is 0.12 per second when zooming out and 0.08 when zooming in
