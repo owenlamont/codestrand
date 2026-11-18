@@ -243,6 +243,51 @@ focus={point=[0.0,12.0,2.0]}
     assert!(!directory.join("frame-00001.png").exists());
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "needs fontique 0.11.2 (linebender/parley#717 backport) and a graphics adapter"]
+fn export_without_system_fonts_labels_with_compiled_in_fonts() {
+    let scratch = tempfile::tempdir().unwrap();
+    let fontconfig = scratch.path().join("fonts.conf");
+    fs::write(&fontconfig, "<fontconfig/>\n").unwrap();
+    let directory = scratch.path().join("frames");
+    let log_path = scratch.path().join("export.log");
+    let log = fs::File::create(&log_path).unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_codestrand"))
+        .arg("export")
+        .arg(&directory)
+        .args(["--test-input", "synthetic", "--frames", "2", "--fps", "2"])
+        .env("FONTCONFIG_FILE", &fontconfig)
+        .stdout(Stdio::from(log.try_clone().unwrap()))
+        .stderr(Stdio::from(log))
+        .spawn()
+        .unwrap();
+    assert!(
+        wait(child, &log_path).success(),
+        "{}",
+        fs::read_to_string(&log_path).unwrap()
+    );
+    let manifest = fs::read_to_string(directory.join("frames.csv")).unwrap();
+    let frames: Vec<Vec<&str>> = manifest
+        .lines()
+        .skip(1)
+        .map(|line| line.split(',').collect())
+        .collect();
+    assert_eq!(frames.len(), 2, "{manifest}");
+    for (index, row) in frames.iter().enumerate() {
+        assert!(row[6].parse::<usize>().unwrap() > 0, "{manifest}");
+        assert_eq!(row[7], "0", "{manifest}");
+        let pixels = image::open(directory.join(format!("frame-{index:05}.png")))
+            .unwrap()
+            .to_rgb8();
+        let commit_label_ink = (698..716)
+            .flat_map(|y| (395..520).map(move |x| (x, y)))
+            .filter(|&(x, y)| pixels.get_pixel(x, y).0.iter().all(|&v| v > 200))
+            .count();
+        assert!(commit_label_ink > 100, "frame {index} has no commit label");
+    }
+}
+
 fn wait(mut child: Child, log_path: &Path) -> ExitStatus {
     let started = Instant::now();
     loop {
