@@ -1,7 +1,6 @@
 use std::{
     collections::HashMap,
-    fs, io,
-    io::Read,
+    io,
     path::{Path, PathBuf},
 };
 
@@ -129,7 +128,7 @@ fn load_path(path: Option<&Path>, required: bool) -> Result<Mappings, Error> {
     let Some(path) = path else {
         return Ok(Mappings::default());
     };
-    let text = match read_config(path) {
+    let text = match crate::small_file::read(path) {
         Ok(text) => text,
         Err(source) if !required && source.kind() == io::ErrorKind::NotFound => {
             return Ok(Mappings::default());
@@ -142,25 +141,6 @@ fn load_path(path: Option<&Path>, required: bool) -> Result<Mappings, Error> {
         }
     };
     Mappings::parse(&text, path)
-}
-
-fn read_config(path: &Path) -> io::Result<String> {
-    let file = fs::File::open(path)?;
-    if !file.metadata()?.is_file() || file.metadata()?.len() > MAX_CONFIG_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "contributors file exceeds 1 MiB or is not a regular file",
-        ));
-    }
-    let mut text = String::new();
-    file.take(MAX_CONFIG_BYTES + 1).read_to_string(&mut text)?;
-    if text.len() as u64 > MAX_CONFIG_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "contributors file exceeds 1 MiB",
-        ));
-    }
-    Ok(text)
 }
 
 fn avatar_path(value: &str, config: &Path) -> Result<Avatar, &'static str> {
@@ -313,6 +293,8 @@ fn unlisted_key(event: &Event) -> Key {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
 
     #[test]

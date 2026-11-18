@@ -1,3 +1,5 @@
+use std::fs;
+
 use super::*;
 use crate::{Cli, Command};
 
@@ -336,4 +338,14 @@ fn malformed_paths_and_orientation_fail_with_specific_diagnostics() {
             .to_string()
             .contains("must not be opposite")
     );
+}
+
+#[test]
+fn camera_path_over_one_mib_is_refused_before_parsing() {
+    let (file, sim) = fixture(&format!("fps=30\n#{}", "x".repeat(1024 * 1024)));
+    let error = format!(
+        "{:#}",
+        anyhow::Error::from(CameraPath::load(&file, &sim).err().unwrap())
+    );
+    assert!(error.ends_with(": exceeds 1 MiB"), "{error}");
 }
