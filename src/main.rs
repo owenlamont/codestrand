@@ -14,6 +14,8 @@
     reason = "Bevy's platform backends require incompatible transitive crate versions"
 )]
 
+#[cfg(test)]
+mod agent_skill;
 mod avatars;
 mod cache;
 mod camera;
