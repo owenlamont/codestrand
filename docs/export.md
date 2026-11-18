@@ -49,6 +49,21 @@ options as preview. By default, the camera uses the fit-to-scene view. Explicit 
 times keep export independent of rendering speed. Each capture is confirmed
 written before export completes. Export needs a working graphics adapter.
 
+## Progress
+
+Export prints one line to stderr every 10 seconds:
+
+```text
+Exported 4510 frames; history 100.6/153.5s (65.6%); video 2:30 of ~6:09 (~11091 frames); 0:50 elapsed, ETA 1:12
+```
+
+The percentage is history rendered so far. Until planning reaches the end of history,
+`~` marks a projected video length: the waits planned so far, scaled to every commit.
+Waits grow as more contributors arrive, so the projection and ETA usually rise later.
+When rendering has waited 10 seconds or more for planning, export prints a `Waiting for
+planning` line with how long it has waited.
+Set `RUST_LOG=info` to see graphics adapter details.
+
 Diff snippets appear in close views, including scripted camera paths. Their text stays
 14–20 logical pixels high (inclusive); the twelve-sample limit and collapsed-directory
 hiding still apply. Snippets may overlap.
