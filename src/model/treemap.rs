@@ -39,7 +39,10 @@ struct Repository {
     label: String,
     tile_low: [f32; 2],
     tile_high: [f32; 2],
-    eased_files: f32,
+    eased_items: f32,
+    /// Live files, not counting those leaving, and live directories.
+    files: usize,
+    directories: usize,
     tile_area: f32,
     content_area: f32,
     content_fill: f32,
@@ -109,7 +112,9 @@ pub(crate) fn measure(layout: &Layout) -> Metrics {
         let mut current_low = low;
         let mut current_high = high;
         let mut scale = 0.0_f32;
+        let (mut files, mut directories) = (0, 0);
         for (_, dir) in layout.dirs().filter(|(_, dir)| dir.repository == index) {
+            directories += 1;
             let centre = dir.position;
             scale = dir.scale;
             low = low.min(centre - Vec2::splat(dir.radius()));
@@ -121,6 +126,7 @@ pub(crate) fn measure(layout: &Layout) -> Metrics {
             .files()
             .filter(|(_, file)| layout.dir(file.dir).repository == index)
         {
+            files += usize::from(file.state != crate::layout::Presence::Leaving);
             let point = file.position;
             scale = layout.dir(file.dir).scale;
             current_low = current_low.min(point - Vec2::splat(scale));
@@ -158,7 +164,9 @@ pub(crate) fn measure(layout: &Layout) -> Metrics {
             label: region.label.clone(),
             tile_low: tile.low.to_array(),
             tile_high: tile.high.to_array(),
-            eased_files: region.files,
+            eased_items: region.items,
+            files,
+            directories,
             tile_area,
             content_area,
             content_fill: content_area / tile_area.max(1e-12),
@@ -191,7 +199,7 @@ pub(crate) fn run(
     serde_json::to_writer(
         &mut *writer,
         &serde_json::json!({"definitions":
-        "All areas and coverage fractions use the fixed reference field, normalised to its full 1280x720 reference-unit rectangle; they are not rendered-frame fractions. Glass tiles are disjoint world rectangles represented in this field, inside a 24 reference-pixel margin plus the caption reservation below, separated by shared gutters. Largest empty rectangle is the exact maximum axis-aligned rectangle outside their union, including the margin. Content is the world-XZ AABB of current directory discs and file positions padded by their model footprint size, converted with the fixed affine field scale; not projected ground-plane area, glyph ink or opaque pixel occupancy. Content fill divides content-envelope area by tile area; overall fill is area weighted. The first repository owns the empty lead-in tile. Weights are eased square roots of live file counts; empty active repositories retain weight one until archived. Samples include every canonical 1/60 second. Content AABBs are clipped to their own tiles; actual footprints use convex outlines. Content largest-empty rectangles use fully covered cells on a 160x90 grid inside the usable tile viewport, excluding the caption reservation, with 8 reference-pixel boundary uncertainty."}),
+        "All areas and coverage fractions use the fixed reference field, normalised to its full 1280x720 reference-unit rectangle; they are not rendered-frame fractions. Glass tiles are disjoint world rectangles represented in this field, inside a 24 reference-pixel margin plus the caption reservation below, separated by shared gutters. Largest empty rectangle is the exact maximum axis-aligned rectangle outside their union, including the margin. Content is the world-XZ AABB of current directory discs and file positions padded by their model footprint size, converted with the fixed affine field scale; not projected ground-plane area, glyph ink or opaque pixel occupancy. Content fill divides content-envelope area by tile area; overall fill is area weighted. The first repository owns the empty lead-in tile. Weights are live file and directory counts, held until their shares drift and then eased over two seconds; empty active repositories weigh one until archived. Files and directories count live files not leaving and live directories. Samples include every canonical 1/60 second. Content AABBs are clipped to their own tiles; actual footprints use convex outlines. Content largest-empty rectangles use fully covered cells on a 160x90 grid inside the usable tile viewport, excluding the caption reservation, with 8 reference-pixel boundary uncertainty."}),
     )?;
     writeln!(writer)?;
     let mut frames = super::frames_for(simulation.duration(), 60)?;

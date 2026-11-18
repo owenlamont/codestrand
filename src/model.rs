@@ -1069,7 +1069,7 @@ impl Simulation {
                     usize::try_from(self.schedule.padding(index))
                         .expect("bounded padding"),
                 );
-                samples.anticipate_files(event.repository, begin, arrival);
+                samples.anticipate_items(event.repository, begin, arrival);
             }
         }
         self.trace.add_ticks(&mut self.tick_times);
