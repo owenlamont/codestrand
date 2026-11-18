@@ -266,9 +266,11 @@ easing. The log-scale limit is 0.12 per second when zooming out and 0.08 when zo
 adjustment earlier; the chosen scale never exceeds the tile's current safe fit.
 The usable content area leaves an eight-pixel edge inset. Corner titles share one
 character size, never below 12 pixels, end in an ellipsis when wider than their tile,
-and are omitted from tiles too short for them. Directory and touched-file labels shrink
-with their tile's files to no less than 8 pixels and end in an ellipsis when wider
-than their tile. Invisible archived content cannot constrain earlier zoom.
+and sit 4 pixels from the tile edge, instead of one avatar diameter, on tiles too small
+for that clearance; they are omitted only from tiles too short for the text.
+Directory and touched-file labels shrink with their tile's files to no less than
+8 pixels and end in an ellipsis when wider than their tile. Invisible archived
+content cannot constrain earlier zoom.
 
 A newcomer splits one existing tile or subtree. Other repositories retain their
 relative order. Splits clamp to a ground-aspect range of 1:2.5 to 2.5:1, inclusive,

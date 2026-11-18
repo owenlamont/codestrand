@@ -65,6 +65,7 @@ pub(super) fn obstacles(sim: &Simulation) -> Vec<(usize, Rect)> {
 const INSET: f32 = 34.0;
 /// Title text scale at the 12 pixel floor contributor names keep, against 14 pixels.
 pub(super) const MIN_SCALE: f32 = 12.0 / 14.0;
+const EDGE_INSET: f32 = 4.0;
 const STEP: u32 = 15;
 const CHANGE_COST: f64 = 20_000.0;
 
@@ -100,7 +101,10 @@ impl Title {
         .filter(|(_, opacity)| *opacity > 0.0)
         .map(move |(point, opacity)| {
             (
-                ground(super::framing::field_to_world(point / HALF)) + Vec3::Y * height,
+                ground(
+                    super::framing::field_to_world(point / HALF)
+                        * (1.0 - height / super::framing::DISTANCE),
+                ) + Vec3::Y * height,
                 opacity,
             )
         })
@@ -108,7 +112,8 @@ impl Title {
 }
 /// A title at one size for every tile, elided to the tile width; `None` when too short.
 ///
-/// `detail` scales the corner inset with the avatars; the text never shrinks below
+/// `detail` scales the corner inset with the avatars, falling back to [`EDGE_INSET`] on
+/// tiles too small to keep an avatar diameter clear; the text never shrinks below
 /// [`MIN_SCALE`].
 fn title(
     tile: crate::layout::packing::Tile,
@@ -117,8 +122,24 @@ fn title(
     corner: u8,
     detail: f32,
 ) -> Option<Title> {
-    let tile =
-        Rect::from_corners(tile.low * HALF, tile.high * HALF).inflate(-INSET * detail);
+    let bounds = Rect::from_corners(tile.low * HALF, tile.high * HALF);
+    inset_title(
+        bounds.inflate(-INSET * detail),
+        label,
+        height,
+        corner,
+        detail,
+    )
+    .or_else(|| inset_title(bounds.inflate(-EDGE_INSET), label, height, corner, detail))
+}
+
+fn inset_title(
+    tile: Rect,
+    label: &str,
+    height: f32,
+    corner: u8,
+    detail: f32,
+) -> Option<Title> {
     let scale = detail.max(MIN_SCALE);
     let fits = ((tile.width() - 8.0) / (8.6 * scale)).floor();
     if fits < 1.0 || tile.height() < height * scale + 4.0 {
@@ -399,7 +420,7 @@ mod tests {
         sim.assert_stitched_travel_rules();
     }
     #[test]
-    fn title_height_does_not_move_its_world_anchor() {
+    fn raised_titles_project_onto_their_ground_point_in_the_default_view() {
         let title = title(
             crate::layout::packing::Tile::viewport(),
             "repo",
@@ -408,9 +429,12 @@ mod tests {
             1.0,
         )
         .unwrap();
-        let low = title.positions(1.6).next().unwrap().0;
-        let high = title.positions(3.2).next().unwrap().0;
-        assert_eq!(low.with_y(0.0), high.with_y(0.0));
+        let screen = |height: f32| {
+            let point = title.positions(height).next().unwrap().0;
+            super::super::framing::project_at(Vec2::new(point.x, point.z), height)
+        };
+        assert!(screen(0.0).distance(screen(1.6)) < 1e-5);
+        assert!(screen(0.0).distance(screen(3.2)) < 1e-5);
     }
 
     #[test]
@@ -432,7 +456,9 @@ mod tests {
         for (low, high) in files.iter().zip(&raised) {
             assert_eq!(low.y.to_bits(), 0.15_f32.to_bits());
             assert_eq!(high.y.to_bits(), crate::model::framing::LABEL_Y.to_bits());
-            assert_eq!(low.with_y(0.0), high.with_y(0.0));
+            let screen =
+                |p: &Vec3| crate::model::framing::project_at(Vec2::new(p.x, p.z), p.y);
+            assert!(screen(low).distance(screen(high)) < 1e-5);
         }
     }
 
@@ -462,6 +488,17 @@ mod tests {
         assert!(narrow.text.ends_with('…'));
         assert_eq!(wide.size.y, narrow.size.y);
         assert!(narrow.rect().max.x <= tile(0.2).high.x * HALF.x - INSET);
+    }
+
+    #[test]
+    fn tiles_too_small_for_the_avatar_inset_keep_an_edge_title() {
+        let tile = crate::layout::packing::Tile {
+            low: Vec2::new(-0.2, -0.05),
+            high: Vec2::new(0.2, 0.05),
+        };
+        let edge = title(tile, "repository", 20.0, 0, 1.0).unwrap();
+        assert!(edge.rect().min.cmpge(tile.low * HALF + EDGE_INSET).all());
+        assert!(edge.rect().max.cmple(tile.high * HALF - EDGE_INSET).all());
     }
 
     #[test]
