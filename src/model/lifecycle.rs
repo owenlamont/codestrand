@@ -1,4 +1,4 @@
-use super::{Schedule, Time, tick_seconds};
+use super::{FragmentPace, Schedule, Time, tick_seconds};
 use crate::timeline::Event;
 
 pub(super) const EXIT: f32 = 1.2;
@@ -57,7 +57,12 @@ pub(super) fn plan(
     let complete = selected.end == events.len();
     let events = &events[selected];
     (
-        departures(events, schedule, options.contributor_inactivity_days),
+        departures(
+            events,
+            schedule,
+            options.contributor_inactivity_days,
+            options.fragment_pace(),
+        ),
         repository_ends(events, schedule, options, &archived, complete),
     )
 }
@@ -83,9 +88,7 @@ pub(super) fn repository_ends(
                         .iter()
                         .zip(&schedule.starts)
                         .filter(|(event, _)| event.repository == repository)
-                        .map(|(_, &start)| {
-                            start + super::PULSE_SECONDS + super::FRAGMENT_FLIGHT
-                        })
+                        .map(|(_, &start)| options.fragment_pace().pulse_end(start))
                         .next_back()
                         .unwrap_or(Time::seconds(-REPOSITORY_EXIT - REFLOW))
                 },
@@ -122,7 +125,7 @@ fn ending_time(
         .unwrap_or(Time::seconds(super::LEAD_IN))
         + (days * options.seconds_per_day)
             .min(options.max_idle_seconds)
-            .max(super::PULSE_SECONDS + super::FRAGMENT_FLIGHT)
+            .max(super::PULSE_SECONDS + options.fragment_pace().flight())
 }
 
 fn calendar_dates(events: &[Event]) -> Vec<i64> {
@@ -167,18 +170,27 @@ pub(super) fn departures(
     events: &[Event],
     schedule: &Schedule,
     days: u32,
+    pace: FragmentPace,
 ) -> Vec<Time> {
+    // Slower fragments keep their contributor until the last one lands; the default
+    // pace keeps its deadlines, which a compressed idle gap can place mid-flight.
+    let slower = pace.flight() > FragmentPace::new(1.0).flight();
     let dates = calendar_dates(events);
     dates
         .iter()
         .zip(&schedule.starts)
         .map(|(&date, &start)| {
-            mapped_time(
+            let deadline = mapped_time(
                 &dates,
                 schedule,
                 date.saturating_add(i64::from(days) * 86_400),
             )
-            .max(start + tick_seconds())
+            .max(start + tick_seconds());
+            if slower {
+                deadline.max(pace.pulse_end(start))
+            } else {
+                deadline
+            }
         })
         .collect()
 }
@@ -192,13 +204,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn slower_fragments_hold_a_compressed_departure_until_they_land() {
+        let mut events = crate::timeline::synthetic();
+        events.truncate(2);
+        events[0].seconds = 0;
+        events[1].seconds = 100 * 86_400;
+        let schedule = Schedule::new(&events, 0.5, 1.0);
+        let start = schedule.starts[0];
+        let default = FragmentPace::new(1.0);
+        assert!(
+            departures(&events, &schedule, 60, default)[0] < default.pulse_end(start)
+        );
+        let slow = FragmentPace::new(0.5);
+        assert_eq!(
+            departures(&events, &schedule, 60, slow)[0],
+            slow.pulse_end(start)
+        );
+    }
+
+    #[test]
     fn reversed_author_dates_do_not_trigger_immediate_departures() {
         let mut events = crate::timeline::synthetic();
         events.truncate(2);
         events[0].seconds = 100 * 86_400;
         events[1].seconds = 0;
         let schedule = Schedule::new(&events, 0.5, 1.0);
-        assert_eq!(departures(&events, &schedule, 60), [Time::INFINITY; 2]);
+        assert_eq!(
+            departures(&events, &schedule, 60, FragmentPace::new(1.0)),
+            [Time::INFINITY; 2]
+        );
         let mut later = events[1].clone();
         later.seconds = 200 * 86_400;
         events.push(later);
@@ -206,7 +240,7 @@ mod tests {
         let expected =
             schedule.starts[1] + (schedule.starts[2] - schedule.starts[1]) * 0.6;
         assert_eq!(
-            departures(&events, &schedule, 60),
+            departures(&events, &schedule, 60, FragmentPace::new(1.0)),
             [expected, expected, Time::INFINITY]
         );
     }
@@ -520,7 +554,7 @@ mod tests {
         events[0].seconds = 0;
         events[1].seconds = 100 * 86_400;
         let schedule = Schedule::with_padding(&events, 0.5, 1.0, |_| 60);
-        let deadlines = departures(&events, &schedule, 50);
+        let deadlines = departures(&events, &schedule, 50, FragmentPace::new(1.0));
         assert_eq!(
             deadlines[0],
             schedule.starts[0] + (schedule.starts[1] - schedule.starts[0]) * 0.5
@@ -626,25 +660,28 @@ mod tests {
 
     #[test]
     fn archived_single_repository_waits_for_activity_and_extends_the_tail() {
-        let mut events = crate::timeline::synthetic();
-        events.truncate(1);
-        let options = super::super::Options {
-            repository_ends: vec![None],
-            repository_archived: vec![true],
-            ..Default::default()
-        };
-        let mut sim = playback(events, &options);
-        let end = sim.repository_ends[0];
-        assert_eq!(
-            end,
-            sim.schedule.starts[0]
-                + super::super::PULSE_SECONDS
-                + super::super::FRAGMENT_FLIGHT
-        );
-        at(&mut sim, (end - 0.1).lossy_secs_f32());
-        assert_eq!(sim.repository_effect(0).1, 1.0);
-        at(&mut sim, (end + REPOSITORY_EXIT).lossy_secs_f32());
-        assert_eq!(sim.repository_effect(0).1, 0.0);
-        assert!(sim.duration() >= end + REPOSITORY_EXIT + REFLOW);
+        for scale in [1.0, 0.5] {
+            let mut events = crate::timeline::synthetic();
+            events.truncate(1);
+            let options = super::super::Options {
+                repository_ends: vec![None],
+                repository_archived: vec![true],
+                fragment_speed: scale,
+                ..Default::default()
+            };
+            let mut sim = playback(events, &options);
+            let end = sim.repository_ends[0];
+            assert_eq!(
+                end,
+                sim.schedule.starts[0]
+                    + super::super::PULSE_SECONDS
+                    + 1.0 / (super::super::FRAGMENT_SPEED * scale)
+            );
+            at(&mut sim, (end - 0.1).lossy_secs_f32());
+            assert_eq!(sim.repository_effect(0).1, 1.0);
+            at(&mut sim, (end + REPOSITORY_EXIT).lossy_secs_f32());
+            assert_eq!(sim.repository_effect(0).1, 0.0);
+            assert!(sim.duration() >= end + REPOSITORY_EXIT + REFLOW);
+        }
     }
 }

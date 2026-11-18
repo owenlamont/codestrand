@@ -42,7 +42,8 @@ pub(super) fn check(
     let selected = &events[options.selected_range(events.len())];
     let poses = pose_count(selected, schedule, frames)?;
     let pose_bytes = poses * size_of::<travel::Pose>() as u128 * 2;
-    let snapshot_bytes = super::slots::Snapshots::estimated_bytes(selected);
+    let snapshot_bytes =
+        super::slots::Snapshots::estimated_bytes(selected, options.fragment_pace());
     let history = Schedule::with_padding(
         selected,
         options.seconds_per_day,

@@ -240,7 +240,12 @@ mod tests {
         events[0].seconds = 0;
         events[1].seconds = 100 * 86_400;
         let history = Schedule::new(&events, 1.0, 100.0);
-        let departure = crate::model::lifecycle::departures(&events, &history, 30)[0];
+        let departure = crate::model::lifecycle::departures(
+            &events,
+            &history,
+            30,
+            crate::model::FragmentPace::new(1.0),
+        )[0];
         let padded =
             Schedule::with_padding(
                 &events,
