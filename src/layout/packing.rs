@@ -20,6 +20,8 @@ const DETAIL_SHRINK: f32 = 1.125;
 const DETAIL_ATTEMPTS: u32 = 64;
 /// Bisection steps towards full presence for a sample whose easing tiles conflict.
 const FIRMING_STEPS: u32 = 8;
+/// Insertion candidates each scoring thread takes at least, so small trees stay serial.
+const PARALLEL_SPLITS: usize = 32;
 
 #[derive(Debug, thiserror::Error)]
 #[error(
@@ -54,6 +56,7 @@ fn plan_tree(
     births: &[usize],
     order: &[usize],
     gutter: f32,
+    threads: usize,
 ) -> Result<(Vec<Node>, f32), CapacityError> {
     let windows: Vec<_> = order
         .iter()
@@ -73,7 +76,7 @@ fn plan_tree(
         for (&i, &(begin, end)) in order.iter().zip(&windows) {
             born[i] = true;
             let (weights, aspects) = birth_weights(regions, files, &born, begin, end);
-            if !insert(&mut nodes, i, &weights, &aspects, space) {
+            if !insert(&mut nodes, i, &weights, &aspects, space, threads) {
                 return None;
             }
         }
@@ -182,25 +185,64 @@ struct Feasible {
 }
 
 fn interval(points: &[Vec2], axis: usize, cross: f32) -> Option<(f32, f32)> {
-    let mut low = f32::INFINITY;
-    let mut high = f32::NEG_INFINITY;
+    let mut span = (f32::INFINITY, f32::NEG_INFINITY);
     let mut before = *points.last()?;
     for &point in points {
-        let delta = point[1 - axis] - before[1 - axis];
-        if delta.abs() > 1e-5 {
-            let t = (cross - before[1 - axis]) / delta;
-            if (-1e-5..=1.00001).contains(&t) {
-                let value = before[axis].lerp(point[axis], t.clamp(0.0, 1.0));
-                low = low.min(value);
-                high = high.max(value);
-            }
-        } else if (cross - point[1 - axis]).abs() < 0.001 {
-            low = low.min(point[axis]).min(before[axis]);
-            high = high.max(point[axis]).max(before[axis]);
-        }
+        widen(&mut span, before, point, axis, cross);
         before = point;
     }
-    (low <= high).then_some((low, high))
+    (span.0 <= span.1).then_some(span)
+}
+
+/// Widens `span` by where the edge from `before` to `point` meets `cross`.
+fn widen(span: &mut (f32, f32), before: Vec2, point: Vec2, axis: usize, cross: f32) {
+    let delta = point[1 - axis] - before[1 - axis];
+    if delta.abs() > 1e-5 {
+        let t = (cross - before[1 - axis]) / delta;
+        if (-1e-5..=1.00001).contains(&t) {
+            let value = before[axis].lerp(point[axis], t.clamp(0.0, 1.0));
+            span.0 = span.0.min(value);
+            span.1 = span.1.max(value);
+        }
+    } else if (cross - point[1 - axis]).abs() < 0.001 {
+        span.0 = span.0.min(point[axis]).min(before[axis]);
+        span.1 = span.1.max(point[axis]).max(before[axis]);
+    }
+}
+
+/// [`interval`] at each ascending `crosses` value, sweeping only the edges whose padded
+/// cross range can meet it.
+fn intervals(points: &[Vec2], axis: usize, crosses: &[f32]) -> Vec<Option<(f32, f32)>> {
+    let Some(&last) = points.last() else {
+        return vec![None; crosses.len()];
+    };
+    let mut edges: Vec<_> = std::iter::once(last)
+        .chain(points.iter().copied())
+        .zip(points.iter().copied())
+        .map(|(before, point)| {
+            let (low, high) = (before[1 - axis], point[1 - axis]);
+            let pad = 0.001 + 1e-4 * (high - low).abs();
+            (low.min(high) - pad, low.max(high) + pad, before, point)
+        })
+        .collect();
+    edges.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut next = 0;
+    let mut active = Vec::new();
+    crosses
+        .iter()
+        .map(|&cross| {
+            while next < edges.len() && edges[next].0 <= cross {
+                active.push(edges[next]);
+                next += 1;
+            }
+            active.retain(|edge| edge.1 >= cross);
+            let mut span = (f32::INFINITY, f32::NEG_INFINITY);
+            for &(_, _, before, point) in &active {
+                widen(&mut span, before, point, axis, cross);
+            }
+            (span.0 <= span.1).then_some(span)
+        })
+        .collect()
 }
 
 // Feasible size polygons keep the children's aspect intervals while accounting for
@@ -211,10 +253,13 @@ fn combine(a: &[Vec2], b: &[Vec2], axis: usize, gap: f32) -> Vec<Vec2> {
     coordinates.dedup_by(|a, b| (*a - *b).abs() < 0.001);
     let mut low = Vec::new();
     let mut high = Vec::new();
-    for cross in coordinates {
-        if let Some(((a0, a1), (b0, b1))) =
-            interval(a, axis, cross).zip(interval(b, axis, cross))
-        {
+    let spans = intervals(a, axis, &coordinates).into_iter().zip(intervals(
+        b,
+        axis,
+        &coordinates,
+    ));
+    for (cross, (a_span, b_span)) in coordinates.iter().copied().zip(spans) {
+        if let Some(((a0, a1), (b0, b1))) = a_span.zip(b_span) {
             let mut p = Vec2::splat(cross);
             p[axis] = a0 + b0 + gap;
             low.push(p);
@@ -482,12 +527,12 @@ fn insert(
     weights: &[f32],
     aspects: &[f32],
     space: Space,
+    threads: usize,
 ) -> bool {
     if nodes.is_empty() {
         nodes.push(Node::Repository(repository));
         return true;
     }
-    let mut best = None;
     let presence: Vec<_> = weights.iter().map(|&w| f32::from(w > 0.0)).collect();
     let mut cached = vec![Feasible::default(); nodes.len()];
     feasibility(nodes, 0, weights, &presence, space, &mut cached);
@@ -507,30 +552,32 @@ fn insert(
             parents[*second] = Some(index);
         }
     }
-    for host in 0..nodes.len() {
-        for axis in 0..2 {
-            let mut candidate = nodes.clone();
-            let first = candidate.len();
-            candidate.push(candidate[host].clone());
-            candidate.push(Node::Repository(repository));
-            candidate[host] = Node::Split {
-                axis,
-                first,
-                second: first + 1,
-            };
-            let mut states = cached.clone();
-            states.push(cached[host].clone());
-            states.push(leaf[0].clone());
-            let mut ancestor = Some(host);
-            while let Some(index) = ancestor {
-                update(&candidate, index, weights, &presence, space, &mut states);
-                ancestor = parents[index];
-            }
-            let Some(placement) = allocated(&candidate, weights.len(), &states) else {
-                continue;
-            };
-            let total: f32 = weights.iter().sum();
-            let score: f32 = placement
+    let split = |host: usize, axis: usize| {
+        let mut candidate = nodes.clone();
+        let first = candidate.len();
+        candidate.push(candidate[host].clone());
+        candidate.push(Node::Repository(repository));
+        candidate[host] = Node::Split {
+            axis,
+            first,
+            second: first + 1,
+        };
+        candidate
+    };
+    let score = |&(host, axis): &(usize, usize)| {
+        let candidate = split(host, axis);
+        let mut states = cached.clone();
+        states.push(cached[host].clone());
+        states.push(leaf[0].clone());
+        let mut ancestor = Some(host);
+        while let Some(index) = ancestor {
+            update(&candidate, index, weights, &presence, space, &mut states);
+            ancestor = parents[index];
+        }
+        let placement = allocated(&candidate, weights.len(), &states)?;
+        let total: f32 = weights.iter().sum();
+        Some(
+            placement
                 .iter()
                 .enumerate()
                 .filter_map(|(i, t)| {
@@ -543,16 +590,32 @@ fn insert(
                                 + (t.ground_aspect() / aspects[i]).ln().abs())
                     })
                 })
-                .sum();
-            if best.as_ref().is_none_or(|(cost, _)| score < *cost - 1e-5) {
-                best = Some((score, candidate));
-            }
+                .sum::<f32>(),
+        )
+    };
+    let splits: Vec<_> = (0..nodes.len())
+        .flat_map(|host| [(host, 0), (host, 1)])
+        .collect();
+    let workers = match threads {
+        0 => std::thread::available_parallelism().map_or(1, usize::from),
+        forced => forced,
+    };
+    let chunk = splits.len().div_ceil(workers).max(PARALLEL_SPLITS);
+    let scores = super::in_order(&splits, chunk, workers, |chunk| {
+        chunk.iter().map(score).collect()
+    });
+    let mut best: Option<(f32, (usize, usize))> = None;
+    for (&split, score) in splits.iter().zip(scores) {
+        if let Some(score) = score
+            && best.is_none_or(|(cost, _)| score < cost - 1e-5)
+        {
+            best = Some((score, split));
         }
     }
-    let Some((_, best)) = best else {
+    let Some((_, (host, axis))) = best else {
         return false;
     };
-    *nodes = best;
+    *nodes = split(host, axis);
     true
 }
 
@@ -863,7 +926,7 @@ impl Packing {
         let mut order: Vec<_> = (0..first.len()).collect();
         order.sort_by_key(|&i| (births[i], i));
         let (nodes, detail) =
-            plan_tree(&regions, &files, &births, &order, gutter_scale)?;
+            plan_tree(&regions, &files, &births, &order, gutter_scale, threads)?;
         let space = Space::new(detail, gutter_scale);
         let alpha = 1.0 - (-crate::model::tick_seconds() / 0.25).exp();
         let mut weights = vec![1.0; first.len()];

@@ -13,6 +13,9 @@ All notable changes to Codestrand are documented here, following
 - Repository titles choose their corner from contributor discs, beams and tiles, no
   longer from contributor names, so some titles sit in a different corner and switch
   less often. ([#176](https://github.com/owenlamont/codestrand/pull/176))
+- Tile planning for many repositories is faster with identical tiles: about 6.5 times
+  on 128 and 200 synthetic repositories with 16 threads.
+  ([#180](https://github.com/owenlamont/codestrand/pull/180))
 - Repository sets too large for full-size tiles play with tiles, gutters, avatars and
   titles shrunk together, instead of packing refusing with "use fewer repositories".
   ([#180](https://github.com/owenlamont/codestrand/pull/180))
