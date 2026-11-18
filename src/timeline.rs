@@ -1,9 +1,9 @@
-use std::{collections::HashMap, fmt::Write};
+use std::fmt::Write;
 
 use crate::history::{BlobDiff, ChangeKind, Commit, History};
 
 // Bump when the snapshot format, history import policies or timeline conversion change.
-pub(super) const CACHE_VERSION: u32 = 6;
+pub(super) const CACHE_VERSION: u32 = 7;
 
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(super) enum Kind {
@@ -46,36 +46,31 @@ pub(super) struct Event {
 
 /// Events along the first-parent chain, whose first-parent diffs transition each
 /// playback tree to the next; side-branch work arrives with the merge that brings it in.
+/// A boundary becomes the first event, even with an empty tree, so the range starts
+/// from its state.
 pub(super) fn from_history(history: &History) -> Vec<Event> {
-    let by_id: HashMap<&str, &Commit> = history
-        .commits
+    let event = |commit: &Commit| Event {
+        author: Identity {
+            name: commit.author.name.clone(),
+            email: commit.author.email.clone(),
+        },
+        repository: 0,
+        contributor: None,
+        commit: commit.id.clone(),
+        seconds: commit.author.seconds,
+        changes: sampled_changes(commit),
+    };
+    history
+        .boundary
         .iter()
-        .map(|commit| (commit.id.as_str(), commit))
-        .collect();
-    let mut chain = Vec::new();
-    let mut current = by_id.get(history.tip.as_str()).copied();
-    while let Some(commit) = current {
-        chain.push(commit);
-        current = commit
-            .parents
-            .first()
-            .and_then(|parent| by_id.get(parent.as_str()).copied());
-    }
-    chain
-        .into_iter()
-        .rev()
-        .filter(|commit| !commit.changes.is_empty())
-        .map(|commit| Event {
-            author: Identity {
-                name: commit.author.name.clone(),
-                email: commit.author.email.clone(),
-            },
-            repository: 0,
-            contributor: None,
-            commit: commit.id.clone(),
-            seconds: commit.author.seconds,
-            changes: sampled_changes(commit),
-        })
+        .map(event)
+        .chain(
+            history
+                .commits
+                .iter()
+                .filter(|commit| !commit.changes.is_empty())
+                .map(event),
+        )
         .collect()
 }
 
@@ -308,12 +303,9 @@ mod tests {
             &["merge", "--no-ff", "-s", "ours", "side", "-m", "discard"],
         );
         let (repo, tip) = crate::history::resolve(path, "HEAD").expect("fixture opens");
-        let history = crate::history::import_with_options(
-            &repo,
-            tip,
-            crate::history::Options::default(),
-        )
-        .expect("fixture imports");
+        let history =
+            crate::history::import_all(&repo, tip, crate::history::Options::default())
+                .expect("fixture imports");
         let paths: Vec<_> = from_history(&history)
             .into_iter()
             .flat_map(|event| event.changes)

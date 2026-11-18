@@ -397,7 +397,7 @@ remains available throughout playback. This does not bound total process memory.
 To inspect a smaller interval, use inclusive `--start-date` and `--end-date`.
 
 Playback memory and duration checks use the range selected by `--start-date` and `--end-date`;
-the layout estimate also includes the imported history needed to settle that range.
+the layout estimate also includes the files present when the range starts.
 
 To choose visual treatments, use
 `--repository-boundary none|glass` and `--repository-label-plane files|raised`.
@@ -422,8 +422,8 @@ Single-object and single-tree limits stay fixed, including 16 MiB objects, 2,000
 expanded tree entries, depth 256, 16,384-byte paths and 64 MiB of expanded path bytes.
 The 32 GiB cumulative work ceiling, 8 GiB blob-detail budget and per-diff work limits
 also stay fixed. Oversized or expensive blob diffs keep file changes but omit detail;
-exhausting the cumulative line budget also omits detail. Playback range options do not
-reduce import work: the reachable history is checked before selecting the playback range.
+exhausting the cumulative line budget also omits detail. A start date reduces import
+work: diffs before the range are not read.
 
 ```sh
 codestrand inspect /path/to/repository --allow-truncated-history
@@ -435,7 +435,7 @@ codestrand preview --repository /path/to/repository --start-date 2026-05-01 --en
 ```
 
 - `--start-date YYYY-MM-DD`: first commit in merged order authored on or after
-  00:00 UTC that day, inclusive; preceding commits are settled before playback.
+  00:00 UTC that day, inclusive; playback opens on the tree of the commit before it.
 - `--end-date YYYY-MM-DD`: last commit in merged order authored on or before that
   UTC day, inclusive of the whole day. Omitted bounds use the beginning or end of
   history. A reversed range or one containing no commits reports both bounds.

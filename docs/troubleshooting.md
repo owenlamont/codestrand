@@ -19,9 +19,8 @@ codestrand inspect /path/to/repository --revision HEAD
 ```
 
 For stale or damaged playback cache data, retry with `--no-cache`. Inspection
-always reads directly from Git. An inclusive `--start-date` / `--end-date` range
-limits playback but
-still imports the history; the first load of a large repository can take time.
+always reads directly from Git. A later inclusive `--start-date` reads less history;
+the first load of a large repository can take time.
 
 ## Graphics window or export fails
 

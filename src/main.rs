@@ -327,19 +327,50 @@ struct Source {
 }
 
 impl Source {
+    /// Imports the selected range of every repository, led by the boundary events that
+    /// settle the state before it, and returns where the selection lies.
     fn events(
         &self,
         cache_root: Option<&std::path::Path>,
         repositories: &[repositories::Repository],
         progress: &Progress,
-    ) -> anyhow::Result<Vec<timeline::Event>> {
+    ) -> anyhow::Result<(Vec<timeline::Event>, std::ops::Range<usize>)> {
+        if repositories.is_empty() {
+            let events = timeline::synthetic();
+            let range = self.resolve_range(&seconds(&events))?;
+            return Ok((events, range));
+        }
+        let opened = repositories
+            .iter()
+            .map(|repository| history::resolve(&repository.path, &self.revision))
+            .collect::<Result<Vec<_>, _>>()?;
+        let chains = if self.start_date.is_some() || self.start > 0 {
+            opened
+                .iter()
+                .map(|(repo, tip)| history::links(repo, *tip))
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            Vec::new()
+        };
+        let (skips, selected) = if chains.is_empty() {
+            (vec![0; repositories.len()], None)
+        } else {
+            let (skips, range) = self.select(&chains)?;
+            (skips, Some(range))
+        };
+        let mut boundaries = Vec::new();
         let mut histories = Vec::new();
-        for (index, repository) in repositories.iter().enumerate() {
+        for (index, (repository, (repo, tip))) in
+            repositories.iter().zip(&opened).enumerate()
+        {
             progress.report(Stage::History, index as u64, repositories.len() as u64);
             let started = std::time::Instant::now();
-            let mut events = cache::load_with_options(
-                &repository.path,
-                &self.revision,
+            let mut events = cache::load_range(
+                repo,
+                *tip,
+                chains
+                    .get(index)
+                    .map(|links| (links.as_slice(), skips[index])),
                 cache_root.filter(|_| !self.no_cache),
                 self.history,
             )?;
@@ -357,15 +388,48 @@ impl Source {
                     change.samples.clear();
                 }
             }
+            if skips[index] > 0 && !events.is_empty() {
+                boundaries.push(events.remove(0));
+            }
             histories.push(events);
         }
-        Ok(if repositories.is_empty() {
-            timeline::synthetic()
-        } else if repositories.len() == 1 {
-            histories.pop().expect("one repository")
+        let mut events = boundaries;
+        let settled = events.len();
+        if histories.len() == 1 {
+            events.append(&mut histories[0]);
         } else {
-            repositories::merge(histories)
-        })
+            events.extend(repositories::merge(histories));
+        }
+        let range = match selected {
+            Some(range) => settled..(settled + range.len()).min(events.len()),
+            None => self.resolve_range(&seconds(&events))?,
+        };
+        Ok((events, range))
+    }
+
+    /// Chooses the range from commit headers alone, the way `resolve_range` chooses it
+    /// from imported events, and counts the links each repository settles before it.
+    fn select(
+        &self,
+        chains: &[Vec<history::Link>],
+    ) -> anyhow::Result<(Vec<usize>, std::ops::Range<usize>)> {
+        let merged = repositories::merge_by(
+            chains
+                .iter()
+                .enumerate()
+                .map(|(index, links)| {
+                    links.iter().map(|link| (link.seconds, index)).collect()
+                })
+                .collect(),
+            |&(seconds, _)| seconds,
+        );
+        let seconds: Vec<_> = merged.iter().map(|&(seconds, _)| seconds).collect();
+        let range = self.resolve_range(&seconds)?;
+        let mut skips = vec![0; chains.len()];
+        for &(_, index) in &merged[..range.start] {
+            skips[index] += 1;
+        }
+        Ok((skips, range))
     }
 
     fn resolve_avatars(
@@ -435,9 +499,8 @@ impl Source {
             repositories::inputs(&paths, file)?
         };
         let mappings = contributors::load(self.contributors.as_deref())?;
-        let mut events =
+        let (mut events, range) =
             self.events(cache::root().as_deref(), &repositories, progress)?;
-        let range = self.resolve_range(&events)?;
         mappings.apply(&mut events);
         self.resolve_avatars(&mut events, &repositories, range.clone());
         let names: Vec<_> = repositories
@@ -508,10 +571,7 @@ impl Source {
         Ok((simulation, title))
     }
 
-    fn resolve_range(
-        &self,
-        events: &[timeline::Event],
-    ) -> anyhow::Result<std::ops::Range<usize>> {
+    fn resolve_range(&self, seconds: &[i64]) -> anyhow::Result<std::ops::Range<usize>> {
         let start_label = self
             .start_date
             .map_or_else(|| "beginning of history".to_owned(), model::date);
@@ -525,16 +585,14 @@ impl Source {
             "inclusive date range {start_label} through {end_label}: end precedes start"
         );
         if (self.start_date.is_some() || self.end_date.is_some())
-            && !events.iter().any(|event| {
-                self.start_date.is_none_or(|start| event.seconds >= start)
-                    && self.end_date.is_none_or(|end| event.seconds < end + 86_400)
+            && !seconds.iter().any(|&time| {
+                self.start_date.is_none_or(|start| time >= start)
+                    && self.end_date.is_none_or(|end| time < end + 86_400)
             })
         {
-            let last = events.last().map_or_else(
+            let last = seconds.last().map_or_else(
                 || "history is empty".to_owned(),
-                |event| {
-                    format!("last commit date is {} UTC", model::date(event.seconds))
-                },
+                |&time| format!("last commit date is {} UTC", model::date(time)),
             );
             anyhow::bail!(
                 "inclusive date range {start_label} through {end_label} contains no commits; {last}"
@@ -542,22 +600,22 @@ impl Source {
         }
         let start = self
             .start_date
-            .map_or(self.start.min(events.len()), |date| {
-                events
+            .map_or(self.start.min(seconds.len()), |date| {
+                seconds
                     .iter()
-                    .position(|event| event.seconds >= date)
-                    .unwrap_or(events.len())
+                    .position(|&time| time >= date)
+                    .unwrap_or(seconds.len())
             });
         let end = self.end_date.map_or_else(
             || {
-                self.commits.map_or(events.len(), |count| {
-                    start.saturating_add(count).min(events.len())
+                self.commits.map_or(seconds.len(), |count| {
+                    start.saturating_add(count).min(seconds.len())
                 })
             },
             |end| {
-                events
+                seconds
                     .iter()
-                    .rposition(|event| event.seconds < end + 86_400)
+                    .rposition(|&time| time < end + 86_400)
                     .map_or(0, |last| last + 1)
             },
         );
@@ -628,6 +686,9 @@ impl Source {
     }
 }
 
+fn seconds(events: &[timeline::Event]) -> Vec<i64> {
+    events.iter().map(|event| event.seconds).collect()
+}
 fn start_date(value: &str) -> Result<i64, String> {
     let invalid = || "expected a valid UTC date in YYYY-MM-DD format".to_owned();
     if value.len() != 10
@@ -858,7 +919,7 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
             history: options,
         }) => {
             let (repo, tip) = history::resolve(&repository, &revision)?;
-            let history = history::import_with_options(&repo, tip, options)?;
+            let history = history::import_all(&repo, tip, options)?;
             serde_json::to_writer_pretty(std::io::stdout().lock(), &history)?;
         }
         Some(Command::Preview { source, theme }) => preview(source, theme)?,
@@ -984,12 +1045,15 @@ mod tests {
                 [("2026-05-01", 0), ("2026-05-02", 1), ("2026-05-03", 2)]
             {
                 source.start_date = Some(start_date(date).unwrap());
-                assert_eq!(source.resolve_range(&events).unwrap().start, expected);
+                assert_eq!(
+                    source.resolve_range(&seconds(&events)).unwrap().start,
+                    expected
+                );
             }
             source.start_date = Some(start_date("2026-05-04").unwrap());
             assert!(
                 source
-                    .resolve_range(&events)
+                    .resolve_range(&seconds(&events))
                     .unwrap_err()
                     .to_string()
                     .contains("inclusive date range 2026-05-04 through end of history contains no commits; last commit date is 2026-05-03 UTC")
@@ -998,15 +1062,15 @@ mod tests {
         source.start_date = Some(midnight);
         assert_eq!(
             source
-                .resolve_range(&[event(midnight - 1), event(midnight + 1)])
+                .resolve_range(&seconds(&[event(midnight - 1), event(midnight + 1)]))
                 .unwrap()
                 .start,
             1
         );
         let reversed = vec![event(midnight + 1), event(midnight - 1)];
-        assert_eq!(source.resolve_range(&reversed).unwrap().start, 0);
+        assert_eq!(source.resolve_range(&seconds(&reversed)).unwrap().start, 0);
         let merged = repositories::merge(vec![reversed, vec![event(midnight - 2)]]);
-        assert_eq!(source.resolve_range(&merged).unwrap().start, 1);
+        assert_eq!(source.resolve_range(&seconds(&merged)).unwrap().start, 1);
     }
 
     #[test]
@@ -1430,7 +1494,7 @@ mod tests {
             let Some(Command::Preview { source, .. }) = cli.command else {
                 panic!("preview")
             };
-            let actual = source.resolve_range(&events);
+            let actual = source.resolve_range(&seconds(&events));
             if let Some(expected) = expected {
                 assert_eq!(actual.unwrap(), expected);
             } else {
@@ -1449,7 +1513,7 @@ mod tests {
         };
         let events = timeline::synthetic();
         assert_eq!(
-            source.resolve_range(&events).unwrap(),
+            source.resolve_range(&seconds(&events)).unwrap(),
             events.len()..events.len()
         );
     }

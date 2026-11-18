@@ -3663,6 +3663,25 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_boundary_settles_nothing() {
+        let mut events = timeline::synthetic();
+        events[0].changes.clear();
+        let options = Options {
+            start: 1,
+            commits: Some(1),
+            ..Options::default()
+        };
+        let sim = Simulation::new(
+            events,
+            &options,
+            &Theme::neon(),
+            &crate::contributors::Mappings::default(),
+        );
+        assert_eq!(sim.commit(), 1);
+        assert_eq!(sim.layout().present_files(), 0);
+    }
+
+    #[test]
     fn dates_are_utc_calendar_days() {
         assert_eq!(date(0), "1970-01-01");
         assert_eq!(date(951_782_400), "2000-02-29");

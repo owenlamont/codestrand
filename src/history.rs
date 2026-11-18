@@ -30,6 +30,10 @@ pub(super) struct History {
     merge_policy: &'static str,
     rename_policy: &'static str,
     diff_policy: &'static str,
+    /// The commit before the range, its whole tree recorded as additions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) boundary: Option<Commit>,
+    /// First-parent commits in the range, oldest first.
     pub(super) commits: Vec<Commit>,
     pub(super) truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -161,18 +165,22 @@ impl Budget {
     }
 
     fn change(&mut self, change: &TreeChange<'_, '_, '_>) -> anyhow::Result<()> {
-        self.changes += 1;
-        self.charge(1)?;
-        if self.changes > self.limits.entries {
-            return Err(exhausted("changed entries", self.limits.entries, true));
-        }
         let source_bytes = match change {
             TreeChange::Rewrite {
                 source_location, ..
             } => source_location.len(),
             _ => 0,
         };
-        self.retain((change.location().len() + source_bytes + 512) as u64)
+        self.entry(change.location().len() + source_bytes)
+    }
+
+    fn entry(&mut self, path_bytes: usize) -> anyhow::Result<()> {
+        self.changes += 1;
+        self.charge(1)?;
+        if self.changes > self.limits.entries {
+            return Err(exhausted("changed entries", self.limits.entries, true));
+        }
+        self.retain((path_bytes + 512) as u64)
     }
 
     fn object(
@@ -324,14 +332,43 @@ pub(super) fn resolve(
     Ok((repo, tip))
 }
 
+/// A first-parent commit whose tree differs from its first parent's, so playback shows
+/// it; commits that leave the tree unchanged are not links.
+pub(super) struct Link {
+    id: gix::ObjectId,
+    tree: gix::ObjectId,
+    pub(super) seconds: i64,
+}
+
+/// Reads only commit headers along the first-parent chain from `tip`, oldest first.
+pub(super) fn links(
+    repo: &gix::Repository,
+    tip: gix::ObjectId,
+) -> Result<Vec<Link>, Error> {
+    scan(repo, tip, &mut Budget::new(Limits::default()))
+        .map_err(|source| Error::History { tip, source })
+}
+
+/// Imports the links from `skip` onwards; with `skip > 0`, the tree of the last skipped
+/// link becomes the boundary, the only state read from before the range.
 pub(super) fn import_with_options(
+    repo: &gix::Repository,
+    tip: gix::ObjectId,
+    links: &[Link],
+    skip: usize,
+    options: Options,
+) -> Result<History, Error> {
+    load_with_limits(repo, tip, links, skip, Limits::default())
+        .and_then(|history| options.accept(history))
+        .map_err(|source| Error::History { tip, source })
+}
+
+pub(super) fn import_all(
     repo: &gix::Repository,
     tip: gix::ObjectId,
     options: Options,
 ) -> Result<History, Error> {
-    load_with_limits(repo, tip, Limits::default())
-        .and_then(|history| options.accept(history))
-        .map_err(|source| Error::History { tip, source })
+    import_with_options(repo, tip, &links(repo, tip)?, 0, options)
 }
 
 const MAX_REFERENCE_HOPS: usize = 64;
@@ -477,19 +514,26 @@ fn bounded_revision(
 fn load_with_limits(
     repo: &gix::Repository,
     tip: gix::ObjectId,
+    links: &[Link],
+    skip: usize,
     limits: Limits,
 ) -> anyhow::Result<History> {
     let mut budget = Budget::new(limits);
+    let boundary = skip
+        .checked_sub(1)
+        .map(|last| boundary(repo, &links[last], &mut budget))
+        .transpose()?;
     let mut history = History {
         tip: tip.to_string(),
         merge_policy: "first-parent",
         rename_policy: "exact-content-nonempty-no-copies",
         diff_policy: "raw-blobs-histogram-nul-in-first-8000-bytes",
+        boundary,
         commits: Vec::new(),
         truncated: false,
         truncation_reason: None,
     };
-    match bounded_load(repo, tip, &mut budget, &mut history.commits) {
+    match bounded_load(repo, &links[skip..], &mut budget, &mut history.commits) {
         Ok(()) => (),
         Err(error)
             if error.is::<Exhausted>()
@@ -533,23 +577,25 @@ fn load_with_limits(
     Ok(history)
 }
 
-fn reachable(
+fn scan(
     repo: &gix::Repository,
     tip: gix::ObjectId,
     budget: &mut Budget,
-) -> anyhow::Result<BTreeMap<gix::ObjectId, Vec<gix::ObjectId>>> {
-    let mut commits = BTreeMap::new();
-    let mut pending = vec![tip];
-    while let Some(id) = pending.pop() {
-        if commits.contains_key(&id) {
-            continue;
-        }
-        if commits.len() >= budget.limits.commits {
+) -> anyhow::Result<Vec<Link>> {
+    let mut links = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut child: Option<Link> = None;
+    let mut current = Some(tip);
+    while let Some(id) = current {
+        if seen.len() >= budget.limits.commits {
             return Err(exhausted(
-                "reachable commits",
+                "first-parent commits",
                 budget.limits.commits as u64,
-                true,
+                false,
             ));
+        }
+        if !seen.insert(id) {
+            bail!("commit graph contains a cycle");
         }
         budget.object(repo, id).with_context(|| {
             format!("read commit {id}; complete local history is required")
@@ -557,79 +603,95 @@ fn reachable(
         let commit = repo.find_commit(id).with_context(|| {
             format!("read commit {id}; complete local history is required")
         })?;
-        let mut parents = Vec::new();
-        for parent in commit.parent_ids() {
-            budget.charge(1)?;
-            if pending.len() + parents.len() >= budget.limits.commits {
-                return Err(exhausted(
-                    "pending parents",
-                    budget.limits.commits as u64,
-                    true,
-                ));
-            }
-            parents.push(parent.detach());
-        }
-        pending.extend(&parents);
-        budget.retain((parents.len() * 64 + 256) as u64)?;
-        commits.insert(id, parents);
+        budget.retain(128)?;
+        let tree = commit.tree_id()?.detach();
+        let author = commit.decode()?.author;
+        let seconds = gix::actor::SignatureRef::from_bytes(author)?
+            .time()?
+            .seconds;
+        links.extend(child.take().filter(|link| link.tree != tree));
+        child = Some(Link { id, tree, seconds });
+        current = commit.parent_ids().next().map(gix::Id::detach);
     }
-    Ok(commits)
+    let empty = gix::ObjectId::empty_tree(repo.object_hash());
+    links.extend(child.filter(|root| root.tree != empty));
+    links.reverse();
+    Ok(links)
 }
 
-fn first_parent_chain(
-    commits: &BTreeMap<gix::ObjectId, Vec<gix::ObjectId>>,
-    tip: gix::ObjectId,
+fn boundary(
+    repo: &gix::Repository,
+    link: &Link,
     budget: &mut Budget,
-) -> anyhow::Result<BTreeSet<gix::ObjectId>> {
-    let mut first_parents = BTreeSet::new();
-    let mut current = Some(tip);
-    while let Some(id) = current {
-        budget.charge(1)?;
-        if !first_parents.insert(id) {
-            bail!("commit graph contains a cycle");
+) -> anyhow::Result<Commit> {
+    budget.object(repo, link.id)?;
+    let commit = repo.find_commit(link.id)?;
+    budget.tree(repo, link.tree, 0)?;
+    let mut recorder = gix::traverse::tree::Recorder::default();
+    repo.find_tree(link.tree)?
+        .traverse()
+        .breadthfirst(&mut recorder)?;
+    let mut changes = Vec::new();
+    for entry in recorder.records {
+        if entry.mode.is_tree() {
+            continue;
         }
-        current = commits[&id].first().copied();
+        budget.entry(entry.filepath.len())?;
+        changes.push(Change {
+            path: entry.filepath.into(),
+            source_path: None,
+            kind: ChangeKind::Addition,
+            before: None,
+            after: Some(Entry {
+                id: entry.oid.to_string(),
+                mode: entry.mode.value(),
+            }),
+            diff: BlobDiff::Skipped,
+        });
     }
-    Ok(first_parents)
+    changes.sort_by(|a, b| a.path.cmp(&b.path));
+    record_commit(&commit, changes, budget)
+}
+
+fn record_commit(
+    commit: &gix::Commit<'_>,
+    changes: Vec<Change>,
+    budget: &mut Budget,
+) -> anyhow::Result<Commit> {
+    let decoded = commit.decode()?;
+    budget.retain(commit.data.len() as u64 * 3)?;
+    Ok(Commit {
+        id: commit.id.to_string(),
+        parents: commit.parent_ids().map(|id| id.to_string()).collect(),
+        author: identity(decoded.author)?,
+        committer: identity(decoded.committer)?,
+        message: decoded.message.to_vec(),
+        changes,
+    })
 }
 
 fn bounded_load(
     repo: &gix::Repository,
-    tip: gix::ObjectId,
+    links: &[Link],
     budget: &mut Budget,
     ordered: &mut Vec<Commit>,
 ) -> anyhow::Result<()> {
-    let commits = reachable(repo, tip, budget)?;
-    let first_parents = first_parent_chain(&commits, tip, budget)?;
-    budget.playback_total = first_parents.len();
-    let mut children: BTreeMap<_, Vec<_>> = BTreeMap::new();
-    let mut remaining = BTreeMap::new();
-    let mut ready = BTreeSet::new();
-    for (&id, parents) in &commits {
-        let unique: BTreeSet<_> = parents.iter().copied().collect();
-        remaining.insert(id, unique.len());
-        if unique.is_empty() {
-            ready.insert(id);
-        }
-        for parent in unique {
-            children.entry(parent).or_default().push(id);
-        }
-    }
+    budget.playback_total = links.len();
     let mut resources = bounded_resources(repo, budget)?;
-    while let Some(id) = ready.pop_first() {
-        budget.charge(1)?;
+    for link in links {
+        let id = link.id;
+        budget.object(repo, id)?;
         let commit = repo.find_commit(id)?;
-        let parents = &commits[&id];
-        let before = if let Some(parent) = parents.first() {
-            let before_id = repo.find_commit(*parent)?.tree_id()?.detach();
+        let before = if let Some(parent) = commit.parent_ids().next() {
+            budget.object(repo, parent.detach())?;
+            let before_id = parent.object()?.into_commit().tree_id()?.detach();
             budget.tree(repo, before_id, 0)?;
             repo.find_tree(before_id)?
         } else {
             repo.empty_tree()
         };
-        let after_id = commit.tree_id()?.detach();
-        budget.tree(repo, after_id, 0)?;
-        let after = repo.find_tree(after_id)?;
+        budget.tree(repo, link.tree, 0)?;
+        let after = repo.find_tree(link.tree)?;
         let mut changes = Vec::new();
         let mut exhaustion = None;
         before
@@ -665,32 +727,9 @@ fn bounded_load(
                     format!("diff path {:?} in commit {id}", change.path)
                 })?;
         }
-        let decoded = commit.decode()?;
-        budget.retain(commit.data.len() as u64 * 3)?;
-        ordered.push(Commit {
-            id: id.to_string(),
-            parents: parents.iter().map(ToString::to_string).collect(),
-            author: identity(decoded.author)?,
-            committer: identity(decoded.committer)?,
-            message: decoded.message.to_vec(),
-            changes,
-        });
-        if first_parents.contains(&id) {
-            budget.playback_tip = Some(id.to_string());
-            budget.playback_completed += 1;
-        }
-        for child in children.get(&id).into_iter().flatten() {
-            let count = remaining
-                .get_mut(child)
-                .context("reachable child has a parent count")?;
-            *count -= 1;
-            if *count == 0 {
-                ready.insert(*child);
-            }
-        }
-    }
-    if ordered.len() != commits.len() {
-        bail!("commit graph contains a cycle");
+        ordered.push(record_commit(&commit, changes, budget)?);
+        budget.playback_tip = Some(id.to_string());
+        budget.playback_completed += 1;
     }
     Ok(())
 }
@@ -981,7 +1020,16 @@ mod security_tests {
 
     fn import(path: &Path, revision: &str) -> Result<History, Error> {
         let (repo, tip) = resolve(path, revision)?;
-        import_with_options(&repo, tip, Options::default())
+        import_all(&repo, tip, Options::default())
+    }
+
+    fn load_all(
+        repo: &gix::Repository,
+        tip: gix::ObjectId,
+        limits: Limits,
+    ) -> anyhow::Result<History> {
+        let links = scan(repo, tip, &mut Budget::new(Limits::default()))?;
+        load_with_limits(repo, tip, &links, 0, limits)
     }
 
     #[test]
@@ -1091,14 +1139,6 @@ mod security_tests {
         for (limits, name, remedy) in [
             (
                 Limits {
-                    commits: 0,
-                    ..Limits::default()
-                },
-                "reachable commits",
-                "--allow-truncated-history",
-            ),
-            (
-                Limits {
                     entries: 0,
                     ..Limits::default()
                 },
@@ -1138,7 +1178,7 @@ mod security_tests {
                 "fixed security ceiling",
             ),
         ] {
-            let history = load_with_limits(&repo, tip, limits).unwrap();
+            let history = load_all(&repo, tip, limits).unwrap();
             let error = Options::default()
                 .accept(history)
                 .err()
@@ -1147,7 +1187,7 @@ mod security_tests {
             assert!(error.contains(name), "{error}");
             assert!(error.contains(remedy), "{error}");
             assert!(error.contains("--allow-truncated-history"), "{error}");
-            let history = load_with_limits(&repo, tip, limits).unwrap();
+            let history = load_all(&repo, tip, limits).unwrap();
             let accepted = Options {
                 allow_truncated_history: true,
             }
@@ -1160,9 +1200,7 @@ mod security_tests {
     #[test]
     fn single_tree_ceiling_is_fixed() {
         let (_root, repo, tip) = hostile_history(20, b"ok\n");
-        let error = import_with_options(&repo, tip, Options::default())
-            .err()
-            .unwrap();
+        let error = import_all(&repo, tip, Options::default()).err().unwrap();
         let message = format!("{:#}", anyhow::Error::from(error));
         assert!(
             message.contains("single-tree entries budget reached (2000000)"),
@@ -1178,44 +1216,37 @@ mod security_tests {
             (16, vec![b'x'; 1024], "single-tree path bytes"),
         ] {
             let (_root, repo, tip) = hostile_path(levels, b"ok\n", &filename);
-            let error = import_with_options(&repo, tip, Options::default())
-                .err()
-                .unwrap();
+            let error = import_all(&repo, tip, Options::default()).err().unwrap();
             let message = format!("{:#}", anyhow::Error::from(error));
             assert!(message.contains(reason), "{message}");
         }
     }
 
     #[test]
-    fn pending_parent_refusal_names_history_option() {
+    fn first_parent_scan_stops_at_its_commit_ceiling() {
         let (_root, repo, first) = hostile_history(0, b"ok\n");
         let commit = repo.find_commit(first).unwrap();
         let mut commit = commit.decode().unwrap().to_owned().unwrap();
-        commit.parents = [first, first].into_iter().collect();
+        commit.parents = [first].into_iter().collect();
         let tip = repo.write_object(&commit).unwrap().detach();
-        let history = load_with_limits(
-            &repo,
-            tip,
-            Limits {
-                commits: 1,
-                ..Limits::default()
-            },
-        )
-        .unwrap();
-        let error = Options::default()
-            .accept(history)
-            .err()
-            .unwrap()
-            .to_string();
-        assert!(error.contains("pending parents budget reached (1)"));
-        assert!(error.contains("--allow-truncated-history"));
+        let limits = Limits {
+            commits: 1,
+            ..Limits::default()
+        };
+        let error = scan(&repo, tip, &mut Budget::new(limits)).err().unwrap();
+        assert!(
+            error.to_string().contains(
+                "first-parent commits budget reached (1); fixed security ceiling"
+            ),
+            "{error}"
+        );
     }
 
     #[test]
     fn default_budget_imports_complete_small_history() {
         let (_root, repo, tip) = hostile_history(0, b"ok\n");
         assert!(
-            !import_with_options(&repo, tip, Options::default())
+            !import_all(&repo, tip, Options::default())
                 .unwrap()
                 .truncated
         );
@@ -1243,7 +1274,7 @@ mod security_tests {
             commit.parents = [parent].into_iter().collect();
             parent = repo.write_object(&commit).unwrap().detach();
         }
-        let history = load_with_limits(
+        let history = load_all(
             &repo,
             parent,
             Limits {
@@ -1347,7 +1378,7 @@ mod security_tests {
             ),
         ] {
             let (_root, repo, tip) = hostile_history(levels, &blob);
-            let history = load_with_limits(
+            let history = load_all(
                 &repo,
                 tip,
                 Limits {
@@ -1387,7 +1418,7 @@ mod security_tests {
             work: 10_000,
             ..Limits::default()
         };
-        let history = load_with_limits(&repo, tip, limits).unwrap();
+        let history = load_all(&repo, tip, limits).unwrap();
         assert_eq!(history.tip, first.to_string());
         assert_eq!(history.commits.len(), 1);
         let boundary = format!(
@@ -1409,14 +1440,14 @@ mod security_tests {
         let accepted = Options {
             allow_truncated_history: true,
         }
-        .accept(load_with_limits(&repo, tip, limits).unwrap())
+        .accept(load_all(&repo, tip, limits).unwrap())
         .unwrap();
         assert!(accepted.truncation_reason.unwrap().contains(&boundary));
-        let empty = load_with_limits(
+        let empty = load_all(
             &repo,
             tip,
             Limits {
-                commits: 0,
+                entries: 0,
                 ..limits
             },
         )
@@ -1434,10 +1465,6 @@ mod security_tests {
         let (_root, repo, tip) = hostile_history(0, b"first\nsecond\n");
         for limits in [
             Limits {
-                commits: 0,
-                ..Limits::default()
-            },
-            Limits {
                 entries: 0,
                 ..Limits::default()
             },
@@ -1450,10 +1477,10 @@ mod security_tests {
                 ..Limits::default()
             },
         ] {
-            assert!(load_with_limits(&repo, tip, limits).unwrap().truncated);
+            assert!(load_all(&repo, tip, limits).unwrap().truncated);
         }
         assert!(
-            !import_with_options(&repo, tip, Options::default())
+            !import_all(&repo, tip, Options::default())
                 .unwrap()
                 .truncated
         );
@@ -1473,7 +1500,7 @@ mod security_tests {
         commit.tree = repo.empty_tree().id;
         commit.parents = [renamed].into_iter().collect();
         let deleted = repo.write_object(&commit).unwrap().detach();
-        let history = load_with_limits(
+        let history = load_all(
             &repo,
             deleted,
             Limits {
@@ -1507,7 +1534,7 @@ mod security_tests {
     #[test]
     fn skipped_detail_remains_bounded_by_global_work() {
         let (_root, repo, tip) = hostile_history(0, b"first\nsecond\n");
-        let history = import_with_options(&repo, tip, Options::default()).unwrap();
+        let history = import_all(&repo, tip, Options::default()).unwrap();
         let change = &history.commits[0].changes[0];
         for limits in [
             Limits {
@@ -1554,7 +1581,7 @@ mod security_tests {
                 ..Limits::default()
             },
         ] {
-            let history = load_with_limits(&repo, tip, limits).unwrap();
+            let history = load_all(&repo, tip, limits).unwrap();
             assert!(!history.truncated);
             assert!(matches!(
                 history.commits[0].changes[0].diff,
@@ -1566,9 +1593,7 @@ mod security_tests {
     #[test]
     fn deep_shared_tree_stops_before_gix_expansion() {
         let (_root, repo, tip) = hostile_history(512, b"ok\n");
-        let error = import_with_options(&repo, tip, Options::default())
-            .err()
-            .unwrap();
+        let error = import_all(&repo, tip, Options::default()).err().unwrap();
         assert!(format!("{:#}", anyhow::Error::from(error)).contains("tree depth"));
     }
 
@@ -1578,7 +1603,7 @@ mod security_tests {
         std::fs::write(root.path().join(".git/HEAD"), format!("{tip}\n")).unwrap();
         let (repo, tip) = resolve(root.path(), "HEAD").unwrap();
         assert!(
-            load_with_limits(
+            load_all(
                 &repo,
                 tip,
                 Limits {
