@@ -115,11 +115,11 @@ fn co_authors(message: &[u8], author_email: &[u8]) -> Vec<Identity> {
     let body = if cut == 0 {
         gix::objs::commit::MessageRef::from_bytes(message).body()
     } else {
-        // Start on a line boundary, past the title, so a cut line is not misread.
+        // Start at a paragraph so a cut paragraph's last lines are not misread as trailers.
         message[cut..]
-            .iter()
-            .position(|&byte| byte == b'\n')
-            .map(|newline| BodyRef::from_bytes(&message[cut + newline + 1..]))
+            .windows(2)
+            .position(|pair| pair == b"\n\n")
+            .map(|blank| BodyRef::from_bytes(&message[cut + blank + 2..]))
     };
     let mut seen = vec![author_email.to_ascii_lowercase()];
     let mut found = Vec::new();
@@ -435,6 +435,8 @@ mod tests {
         assert_eq!(co_authors(padded.as_bytes(), b"").len(), MAX_CO_AUTHORS);
         let buried = format!("Title\n\n{trailers}{}", "y\n".repeat(TRAILER_BYTES));
         assert_eq!(co_authors(buried.as_bytes(), b""), []);
+        let prose = format!("Title\n\n{}\n{trailers}", "z".repeat(TRAILER_BYTES));
+        assert_eq!(co_authors(prose.as_bytes(), b""), []);
     }
 
     #[test]

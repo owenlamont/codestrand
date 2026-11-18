@@ -425,16 +425,18 @@ impl<N: Network> Resolver<N> {
         let mut seen = HashSet::new();
         // Only an author's own commit can identify their GitHub account, so a co-author
         // is looked up with no commit.
+        // Authored commits are taken first, so an email seen as a co-author before its
+        // own commit keeps that commit for the account lookup.
         let mut candidates: Vec<(&Contributor, &str)> = events
             .iter()
             .flat_map(|event| {
-                let commit = event.commit.as_str();
-                event
-                    .contributor
-                    .iter()
-                    .map(move |contributor| (contributor, commit))
-                    .chain(event.co_contributors.iter().map(|c| (c, "")))
+                event.contributor.iter().map(|c| (c, event.commit.as_str()))
             })
+            .chain(
+                events
+                    .iter()
+                    .flat_map(|event| event.co_contributors.iter().map(|c| (c, ""))),
+            )
             .filter(|(contributor, _)| {
                 seen.insert((
                     contributor.key.clone(),
@@ -1086,6 +1088,25 @@ mod tests {
         assert_eq!(urls[0], "https://github.com/lead.png?size=128");
         assert!(urls[1].starts_with("https://www.gravatar.com/avatar/"));
         assert_eq!(urls.len(), 2);
+    }
+
+    #[test]
+    fn a_co_author_who_later_commits_is_looked_up_by_their_commit() {
+        let mut first = event("lead@example.invalid", Some("lead"));
+        let pair = event("pair@example.invalid", None);
+        first.co_contributors = vec![pair.contributor.clone().unwrap()];
+        let mut events = [first, pair];
+        let mut resolver = resolver(
+            None,
+            true,
+            vec![
+                Response::Found(png()),
+                Response::Missing,
+                Response::Found(png()),
+            ],
+        );
+        resolver.resolve(&mut events, Some("owner/repo"));
+        assert!(resolver.network.calls[1].0.contains("/commits?sha="));
     }
 
     #[test]
