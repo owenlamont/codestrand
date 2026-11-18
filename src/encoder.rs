@@ -57,6 +57,7 @@ impl Options {
                 output.display()
             );
         }
+        crate::export::check_parent(output)?;
         let path = self.executable();
         let mut version = command(&path);
         version.arg("-version");
@@ -67,6 +68,7 @@ impl Options {
             })?;
         let scratch = tempfile::tempdir().context("create FFmpeg probe directory")?;
         let mut probe = command(&path);
+        probe.current_dir(scratch.path());
         probe.args(input_args(fps, &resolution.to_string()));
         probe.args(output_args(&self.ffmpeg_arg));
         probe.arg(scratch.path().join(output.file_name().unwrap_or_default()));

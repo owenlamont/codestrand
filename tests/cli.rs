@@ -205,7 +205,11 @@ focus={point=[0,0,0]}
             &[".", "--resolution", "64x64"][..],
             "export directory already exists",
         ),
-        (&["missing/frames"], "parent is not a directory"),
+        (&["missing/frames"], "parent is not a directory: missing"),
+        (
+            &["frames", "--video", "missing/out.mkv"],
+            "parent is not a directory: missing",
+        ),
         (
             &["frames", "--camera-path", "unparsed.toml"],
             "parse camera path",

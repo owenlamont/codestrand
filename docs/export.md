@@ -84,9 +84,9 @@ PNG export works without FFmpeg.
 
 The default encode uses `-c:v libx264 -pix_fmt yuv420p -crf 18 -movflags +faststart`
 for an H.264 MP4 suitable for GitHub, X, Bluesky and QuickTime. Before planning,
-Codestrand encodes one blank frame with the chosen options and resolution. Install a
-libx264-enabled build if the default encoder is unavailable, or replace the encoding
-options:
+Codestrand encodes one blank frame with the chosen options and resolution in a
+temporary directory. Install a libx264-enabled build if the default encoder is
+unavailable, or replace the encoding options:
 
 ```sh
 codestrand export lossless-state --video history.mkv --frames 60 \

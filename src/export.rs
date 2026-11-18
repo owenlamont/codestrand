@@ -35,15 +35,16 @@ pub(super) fn check(directory: &Path) -> anyhow::Result<()> {
             directory.display()
         );
     }
-    let parent = directory
+    check_parent(directory)
+}
+
+pub(super) fn check_parent(path: &Path) -> anyhow::Result<()> {
+    let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
     if !parent.is_dir() {
-        anyhow::bail!(
-            "export directory parent is not a directory: {}",
-            parent.display()
-        );
+        anyhow::bail!("parent is not a directory: {}", parent.display());
     }
     Ok(())
 }
