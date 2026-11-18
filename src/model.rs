@@ -119,7 +119,7 @@ pub(super) struct Options {
     pub seconds_per_day: f32,
     pub max_idle_seconds: f32,
     pub start: usize,
-    pub commits: Option<usize>,
+    pub commits: usize,
     pub travel_cap: TravelCap,
     pub travel_window_seconds: Option<f32>,
     #[cfg(test)]
@@ -194,10 +194,7 @@ impl Options {
 
     fn selected_range(&self, events: usize) -> Range<usize> {
         let start = self.start.min(events);
-        let end = self
-            .commits
-            .map_or(events, |count| start.saturating_add(count).min(events));
-        start..end
+        start..start.saturating_add(self.commits).min(events)
     }
 }
 
@@ -213,7 +210,7 @@ impl Default for Options {
             seconds_per_day: 0.5,
             max_idle_seconds: 1.0,
             start: 0,
-            commits: None,
+            commits: usize::MAX,
             travel_cap: TravelCap::Seconds(0.4),
             travel_window_seconds: None,
             #[cfg(test)]
@@ -2705,7 +2702,7 @@ mod tests {
             let options = Options {
                 repository_ends: vec![Some(ending), None],
                 start,
-                commits: Some(1),
+                commits: 1,
                 ..Options::default()
             };
             let result = Simulation::try_with_repositories(
@@ -3074,7 +3071,7 @@ mod tests {
             })
             .collect();
         let names = ["First".to_owned(), "Second".to_owned()];
-        for (start, commits) in [(0, Some(1)), (1, None), (2, None)] {
+        for (start, commits) in [(0, 1), (1, usize::MAX), (2, usize::MAX)] {
             let options = Options {
                 start,
                 commits,
@@ -3479,7 +3476,7 @@ mod tests {
             events,
             &Options {
                 start: 1,
-                commits: Some(1),
+                commits: 1,
                 ..Options::default()
             },
             &Theme::neon(),
@@ -3714,7 +3711,7 @@ mod tests {
     fn starting_mid_history_shows_prior_files_settled() {
         let options = Options {
             start: 8,
-            commits: Some(2),
+            commits: 2,
             ..Options::default()
         };
         let sim = Simulation::new(
