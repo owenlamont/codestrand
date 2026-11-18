@@ -72,6 +72,8 @@ def _classify(*, repository: Path, event: str) -> subprocess.CompletedProcess[st
         pytest.param("AGENTS.md", "false", id="agent guidance"),
         pytest.param("docs/guide.md", "false", id="documentation"),
         pytest.param("docs/nested/guide.md", "false", id="nested documentation"),
+        pytest.param("docs/llms-full.txt", "false", id="generated llms file"),
+        pytest.param("skills/codestrand/SKILL.md", "true", id="agent skill"),
         pytest.param("assets/codestrand.svg", "false", id="logo"),
         pytest.param("CONTRIBUTING.md", "false", id="contributing"),
         pytest.param("zensical.toml", "false", id="site config"),
