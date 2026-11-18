@@ -274,9 +274,17 @@ fn export_without_system_fonts_labels_with_compiled_in_fonts() {
         .map(|line| line.split(',').collect())
         .collect();
     assert_eq!(frames.len(), 2, "{manifest}");
-    for row in frames {
+    for (index, row) in frames.iter().enumerate() {
         assert!(row[6].parse::<usize>().unwrap() > 0, "{manifest}");
         assert_eq!(row[7], "0", "{manifest}");
+        let pixels = image::open(directory.join(format!("frame-{index:05}.png")))
+            .unwrap()
+            .to_rgb8();
+        let commit_label_ink = (698..716)
+            .flat_map(|y| (395..520).map(move |x| (x, y)))
+            .filter(|&(x, y)| pixels.get_pixel(x, y).0.iter().all(|&v| v > 200))
+            .count();
+        assert!(commit_label_ink > 100, "frame {index} has no commit label");
     }
 }
 
