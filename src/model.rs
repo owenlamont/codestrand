@@ -1722,7 +1722,8 @@ impl Simulation {
             })
             .collect();
         labels.extend(self.repository_labels());
-        for pulse in &self.state.pulses {
+        // A co-author's pulse repeats its author's targets, so it would stack labels.
+        for pulse in self.state.pulses.iter().filter(|pulse| pulse.leads) {
             if pulse.targets.len() > 8 && !pulse.aggregated {
                 continue;
             }
@@ -2570,7 +2571,7 @@ mod tests {
     }
 
     #[test]
-    fn diff_text_flies_from_the_author_of_a_co_authored_commit() {
+    fn a_co_authored_commit_shows_its_text_and_labels_once() {
         let mut events = crate::timeline::synthetic();
         events.truncate(1);
         events[0].changes[0].samples = vec![crate::diff_samples::Sample {
@@ -2592,6 +2593,15 @@ mod tests {
         assert!(sim.fragments().iter().any(|fragment| {
             fragment.sample.is_some() && fragment.beam.is_some_and(|(a, _)| a == 0)
         }));
+        let mut activity: Vec<_> = sim
+            .labels()
+            .into_iter()
+            .filter(|label| label.kind == LabelKind::Activity)
+            .map(|label| label.text)
+            .collect();
+        let labelled = activity.len();
+        activity.dedup();
+        assert_eq!((labelled, activity.len()), (3, 3));
     }
 
     #[test]
