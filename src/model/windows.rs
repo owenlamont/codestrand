@@ -274,8 +274,12 @@ impl Simulation {
             );
             window_index += 1;
             if let Some(publish) = &mut publish {
-                let frame =
-                    self.window_packet(events.clone(), boundary, end >= duration);
+                let ready = super::streaming::Ready {
+                    end: boundary,
+                    complete: end >= duration,
+                    unpadded: duration,
+                };
+                let frame = self.window_packet(events.clone(), ready);
                 if !publish(frame)? {
                     return Ok(self);
                 }
@@ -333,7 +337,7 @@ impl Simulation {
         }
     }
 
-    fn window_packet(&self, events: Events, boundary: u64, complete: bool) -> Self {
+    fn window_packet(&self, events: Events, ready: super::streaming::Ready) -> Self {
         let initial = self.window.as_ref().expect("planning window").state.clone();
         Self {
             file_ids: self.file_ids.clone(),
@@ -369,7 +373,7 @@ impl Simulation {
             boundaries: Vec::new(),
             windowed: true,
             stream: None,
-            ready_end: Some((boundary, complete)),
+            ready_end: Some(ready),
             title_start: self.title_start,
         }
     }
