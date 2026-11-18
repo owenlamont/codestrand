@@ -335,21 +335,17 @@ impl Source {
             let range = self.resolve_range(&seconds(&events))?;
             return Ok((events, range));
         }
-        let opened = repositories
-            .iter()
-            .map(|repository| history::resolve(&repository.path, &self.revision))
-            .collect::<Result<Vec<_>, _>>()?;
-        let chains = if self.start_date.is_some() || self.start > 0 {
+        let mut tips = Vec::new();
+        let mut chains = Vec::new();
+        if self.start_date.is_some() || self.start > 0 {
             let started = std::time::Instant::now();
-            let chains = opened
-                .iter()
-                .map(|(repo, tip)| history::links(repo, *tip))
-                .collect::<Result<Vec<_>, _>>()?;
+            for repository in repositories {
+                let (repo, tip) = history::resolve(&repository.path, &self.revision)?;
+                chains.push(history::links(&repo, tip)?);
+                tips.push(tip.to_string());
+            }
             eprintln!("scan_seconds={:.6}", started.elapsed().as_secs_f64());
-            chains
-        } else {
-            Vec::new()
-        };
+        }
         let (skips, selected) = if chains.is_empty() {
             (vec![0; repositories.len()], None)
         } else {
@@ -358,14 +354,14 @@ impl Source {
         };
         let mut boundaries = Vec::new();
         let mut histories = Vec::new();
-        for (index, (repository, (repo, tip))) in
-            repositories.iter().zip(&opened).enumerate()
-        {
+        for (index, repository) in repositories.iter().enumerate() {
             progress.report(Stage::History, index as u64, repositories.len() as u64);
             let started = std::time::Instant::now();
+            let revision = tips.get(index).unwrap_or(&self.revision);
+            let (repo, tip) = history::resolve(&repository.path, revision)?;
             let mut events = cache::load_range(
-                repo,
-                *tip,
+                &repo,
+                tip,
                 chains
                     .get(index)
                     .map(|links| (links.as_slice(), skips[index])),

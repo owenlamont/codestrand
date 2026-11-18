@@ -549,7 +549,8 @@ fn refusal(
 
 /// The first UTC day whose selection starts after `after` with a range and boundary
 /// that fit; `spent` holds the charges after each link, newest first. Boundary trials
-/// share one work allowance, so the search stays within the import's own work limit.
+/// share one work allowance, and each is itself capped by the import's limits, so the
+/// search costs at most twice the import's work limit.
 fn later_start(
     repo: &gix::Repository,
     links: &[Link],
