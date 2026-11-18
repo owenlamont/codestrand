@@ -60,10 +60,15 @@ impl Repository {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Document {
     repositories: Vec<Repository>,
-    #[serde(flatten)]
-    options: toml::Table,
+}
+
+/// The repository list of a `--config` file, whose other keys `config` validates.
+#[derive(Deserialize)]
+pub(super) struct ConfigDocument {
+    pub repositories: Vec<Repository>,
 }
 
 /// Top-level keys a repositories file may hold besides `repositories`.
@@ -92,16 +97,16 @@ pub(super) fn read_small(path: &Path, what: &str) -> anyhow::Result<String> {
     Ok(text)
 }
 
-fn read_document(path: &Path, keys: Keys) -> anyhow::Result<Document> {
+fn read_document(path: &Path, keys: Keys) -> anyhow::Result<Vec<Repository>> {
     let text = read_small(path, "repositories file")?;
-    let document: Document =
-        toml::from_str(&text).context("parse repositories file")?;
-    if keys == Keys::RepositoriesOnly
-        && let Some(key) = document.options.keys().next()
-    {
-        bail!("parse repositories file: unknown key `{key}`, expected `repositories`");
+    match keys {
+        Keys::RepositoriesOnly => {
+            toml::from_str::<Document>(&text).map(|document| document.repositories)
+        }
+        Keys::AlsoOptions => toml::from_str::<ConfigDocument>(&text)
+            .map(|document| document.repositories),
     }
-    Ok(document)
+    .context("parse repositories file")
 }
 
 pub(super) fn inputs(
@@ -131,13 +136,13 @@ pub(super) fn inputs_with(
         })
         .collect();
     if let Some(file) = file {
-        let document = read_document(file, keys)
+        let listed = read_document(file, keys)
             .with_context(|| format!("read repositories file {}", file.display()))?;
-        if document.repositories.is_empty() {
+        if listed.is_empty() {
             bail!("repositories file must list at least one repository");
         }
         let parent = file.parent().unwrap_or(Path::new("."));
-        repositories.extend(document.repositories.into_iter().map(|mut repository| {
+        repositories.extend(listed.into_iter().map(|mut repository| {
             let spelling = repository.path.clone();
             repository.path = parent.join(repository.path);
             (spelling, repository)

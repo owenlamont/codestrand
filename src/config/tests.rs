@@ -131,6 +131,8 @@ fn invalid_values_are_errors_that_name_the_key() {
         ("no-cache = 'yes'", "must be true or false"),
         ("gutter = [1]", "takes a single value"),
         ("start-date = '2026-02-30'", "YYYY-MM-DD"),
+        ("fps = '--'", "invalid value '--'"),
+        ("video = ''", "invalid value ''"),
     ] {
         let file = config(scratch.path(), text);
         let message = error(&["preview"], &file);
@@ -156,12 +158,26 @@ fn the_repository_list_can_live_in_the_file() {
     assert_eq!(listed.len(), 1);
     let strict = repositories::inputs(&[], Some(&file)).unwrap_err();
     assert!(
-        format!("{strict:#}").contains("unknown key `gutter`"),
+        format!("{strict:#}").contains("unknown field `gutter`"),
         "{strict:#}"
     );
 
     let source = preview(&file, &["--repository", "elsewhere"]);
     assert_eq!(source.repositories_file, None);
+
+    let file = config(scratch.path(), "repositories = false\n");
+    let arguments: Vec<OsString> = [
+        "codestrand",
+        "preview",
+        "--repository",
+        "elsewhere",
+        "--config",
+    ]
+    .map(OsString::from)
+    .into_iter()
+    .chain([file.clone().into()])
+    .collect();
+    assert!(super::arguments(arguments).is_err());
 
     let file = config(scratch.path(), "repositories-file = 'other.toml'\n");
     let source = preview(&file, &["--repository", "elsewhere"]);

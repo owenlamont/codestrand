@@ -72,6 +72,8 @@ fn flags(
             !table.contains_key("repositories-file"),
             "set `repositories` or `repositories-file`, not both"
         );
+        toml::from_str::<crate::repositories::ConfigDocument>(&text)
+            .context("parse")?;
         if !list_given {
             flags.push(flag("repositories-file", path.as_os_str()));
         }
@@ -146,6 +148,7 @@ fn setting(
             bail!("key `{key}` takes a single value")
         }
     };
+    check(arg, key, &text)?;
     // Paths resolve beside the file, as repository paths in it do; a command name
     // is looked up on PATH as it would be from the command line.
     let text = if arg.get_value_parser().type_id()
@@ -156,18 +159,17 @@ fn setting(
     } else {
         text.into()
     };
-    check(arg, key, &text)?;
     Ok(flag(key, &text))
 }
 
 /// Runs `arg`'s own value parser on `text`, naming the key on failure.
-fn check(arg: &Arg, key: &str, text: &OsStr) -> anyhow::Result<()> {
+fn check(arg: &Arg, key: &str, text: &str) -> anyhow::Result<()> {
     let probe = Command::new("config").no_binary_name(true).arg(
         Arg::new(arg.get_id().clone())
-            .allow_hyphen_values(true)
+            .long("value")
             .value_parser(arg.get_value_parser().clone()),
     );
-    let Err(error) = probe.try_get_matches_from([text]) else {
+    let Err(error) = probe.try_get_matches_from([format!("--value={text}")]) else {
         return Ok(());
     };
     let reason = std::error::Error::source(&error)
@@ -179,10 +181,7 @@ fn check(arg: &Arg, key: &str, text: &OsStr) -> anyhow::Result<()> {
             _ => None,
         })
         .unwrap_or_else(|| error.kind().to_string());
-    bail!(
-        "key `{key}`: invalid value '{}': {reason}",
-        text.to_string_lossy()
-    )
+    bail!("key `{key}`: invalid value '{text}': {reason}")
 }
 
 fn flag(key: &str, value: &OsStr) -> OsString {
