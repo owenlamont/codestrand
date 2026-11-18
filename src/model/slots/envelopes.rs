@@ -62,13 +62,7 @@ impl Snapshots {
 
     pub(in crate::model) fn capture(&mut self, state: &State) {
         let now = crate::model::tick_time(state.tick);
-        // Co-authors' pulses repeat the author's targets, so one per commit is enough.
-        let mut sampled = Vec::new();
         for pulse in state.pulses.iter().filter(|p| now < p.end) {
-            if sampled.contains(&pulse.commit) {
-                continue;
-            }
-            sampled.push(pulse.commit);
             assert!(
                 self.frames.len() < self.frames.capacity(),
                 "each commit's pulse is live for at most `pulse_ticks` ticks"

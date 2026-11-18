@@ -161,26 +161,22 @@ fn checkpoint_bytes(events: &[Event], repositories: usize) -> u128 {
         .iter()
         .map(|path| (size_of::<crate::layout::Dir>() + 128 + path.len() * 2) as u128)
         .sum::<u128>();
-    // Every participant's pulse holds the touched files; only the author's holds text.
-    let participants = |event: &Event| 1 + event.co_authors.len() as u128;
     let pulse_data = events
         .iter()
-        .flat_map(|event| event.changes.iter().map(move |change| (event, change)))
-        .map(|(event, change)| {
-            64 * participants(event)
-                + change
-                    .samples
-                    .iter()
-                    .map(|sample| {
-                        (size_of::<crate::diff_samples::Sample>() + sample.text.len())
-                            as u128
-                    })
-                    .sum::<u128>()
+        .flat_map(|event| &event.changes)
+        .map(|change| {
+            64 + change
+                .samples
+                .iter()
+                .map(|sample| {
+                    (size_of::<crate::diff_samples::Sample>() + sample.text.len())
+                        as u128
+                })
+                .sum::<u128>()
         })
         .sum::<u128>();
-    let pulses = events.iter().map(participants).sum::<u128>();
     let services = author_count(events) * (size_of::<super::Avatar>() + 512) as u128
-        + pulses * size_of::<super::Pulse>() as u128;
+        + events.len() as u128 * size_of::<super::Pulse>() as u128;
     files
         + directory_bytes
         + pulse_data

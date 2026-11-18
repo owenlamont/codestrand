@@ -134,6 +134,8 @@ pub(super) struct Placement {
     pub dock: Dock,
     pub commit: usize,
     pub point: Vec2,
+    /// From the dock's point to this avatar's disc, which is nonzero in a group.
+    pub offset: Vec2,
     pub text: String,
     pub half_plane: bool,
     pub crossings: usize,
@@ -151,6 +153,35 @@ impl Placement {
     pub fn world(&self) -> Vec3 {
         world(self.point)
     }
+}
+
+/// Space between neighbouring discs in a group, so they touch without overlapping.
+const GROUP_GAP: f32 = 0.5;
+
+/// Co-authors park in a row of touching places along their author's edge, on the
+/// gutter network that routes follow; `step` counts places from the author.
+fn row_offset(edge: u8, step: i8, radius: f32) -> Vec2 {
+    let axis = if edge.is_multiple_of(2) {
+        Vec2::X
+    } else {
+        Vec2::Y
+    };
+    axis * f32::from(step) * 2.0 * (radius + GROUP_GAP)
+}
+
+/// The step of a row offset, the inverse of [`row_offset`].
+fn row_step(edge: u8, offset: Vec2, radius: f32) -> i8 {
+    let along = if edge.is_multiple_of(2) {
+        offset.x
+    } else {
+        offset.y
+    };
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "rows hold at most 9 places"
+    )]
+    let step = (along / (2.0 * (radius + GROUP_GAP))).round() as i8;
+    step
 }
 
 pub(super) fn world(point: Vec2) -> Vec3 {
@@ -209,6 +240,15 @@ fn fan(point: Vec2, corners: &[Vec2; 4]) -> f32 {
 fn intersect(a: Rect, b: Rect) -> bool {
     !a.intersect(b).is_empty()
 }
+/// Frees an avatar's retained space while it chooses again.
+fn release(occupied: &mut Vec<Rect>, own: Option<Rect>) {
+    if let Some(own) = own
+        && let Some(position) = occupied.iter().position(|r| *r == own)
+    {
+        occupied.remove(position);
+    }
+}
+
 fn disk(point: Vec2, radius: f32) -> Rect {
     Rect::from_center_size(point, Vec2::splat(radius * 2.0))
 }
@@ -350,13 +390,7 @@ impl Simulation {
             let (regions, origins, scales) = self
                 .packing_sample(self.state.tick, Some(&needed))
                 .expect("planned repository samples");
-            // Co-authors' pulses repeat the author's targets, so one per commit is enough.
-            let mut sampled = Vec::new();
             for pulse in &self.state.pulses {
-                if sampled.contains(&pulse.commit) {
-                    continue;
-                }
-                sampled.push(pulse.commit);
                 let Some(tile) = regions[pulse.repository].tile else {
                     continue;
                 };
@@ -440,7 +474,7 @@ impl State {
                 }
                 let slot = avatar.slot.as_ref()?;
                 let tile = self.layout.repositories[avatar.repository].gutter?;
-                Some(disk(slot.dock.on_network(tile), radius))
+                Some(disk(slot.dock.on_network(tile) + slot.offset, radius))
             })
             .collect()
     }
@@ -463,39 +497,35 @@ impl State {
                 && let Some(slot) = &mut avatar.slot
             {
                 if let Some(tile) = self.layout.repositories[avatar.repository].gutter {
-                    slot.point = slot.dock.on_network(tile);
+                    slot.point = slot.dock.on_network(tile) + slot.offset;
                 }
                 if avatar.slot_presence > 0.0 || avatar.presence > 0.0 {
                     occupied.push(disk(slot.point, radius));
                 }
             }
         }
-        let mut order: Vec<_> = (0..self.avatars.len())
-            .filter(|&i| now - self.avatars[i].last_active < super::AVATAR_IDLE)
-            .collect();
         let retained = self.retained_slots(now, radius);
         occupied.extend(retained.iter().flatten().copied());
-        order.sort_by(|&a, &b| {
-            self.avatars[b]
-                .last_active
-                .total_cmp(self.avatars[a].last_active)
-                .then(a.cmp(&b))
-        });
-        for index in order {
-            if let Some(own) = retained[index]
-                && let Some(position) = occupied.iter().position(|r| *r == own)
-            {
-                occupied.remove(position);
-            }
+        for index in self.placing_order(now) {
             let avatar = &self.avatars[index];
             let commit = avatar.commit;
+            if let Some(group) = avatar.group.filter(|g| g.lead != index) {
+                self.hold_place(index, group, &mut occupied);
+                continue;
+            }
+            let followers = self.followers(index);
+            for member in std::iter::once(index).chain(followers.iter().copied()) {
+                release(&mut occupied, retained[member]);
+            }
             let envelope = envelopes[commit].clone();
             self.slot_records.entry(commit).or_default().observations += 1;
             let Some(tile) = self.layout.repositories[avatar.repository].tile else {
                 let record = self.slot_records.entry(commit).or_default();
                 record.least_bad = true;
                 record.missing_tile = true;
-                self.avatars[index].slot = None;
+                for member in std::iter::once(index).chain(followers.iter().copied()) {
+                    self.avatars[member].slot = None;
+                }
                 continue;
             };
             let text = short_name(&avatar.name, name_scale, tile.pixels().x - 24.0);
@@ -512,6 +542,7 @@ impl State {
                 gutter: self.layout.repositories[avatar.repository].gutter,
                 gap,
                 radius,
+                row: u8::try_from(followers.len()).expect("co-authors are bounded"),
                 beams: &beams,
                 peers: &peers,
                 future: &future,
@@ -535,16 +566,136 @@ impl State {
                 !plan.replanning || commit < plan.frozen,
             );
             chosen.commit = commit;
-            let record = self.slot_records.entry(commit).or_default();
-            record.fallback |= chosen.dock.edge != 0;
-            record.least_bad |= !chosen.valid();
-            record.half_plane_failures += u32::from(!chosen.half_plane);
-            record.max_crossings = record.max_crossings.max(chosen.crossings);
-            record.max_overlaps = record.max_overlaps.max(chosen.overlaps);
-            occupied.push(disk(chosen.point, radius));
-            self.avatars[index].slot = Some(chosen);
-            self.avatars[index].slot_origin = None;
+            let (steps, crowded) = self.row_steps(&choice, &chosen, &followers);
+            self.record_placement(&chosen, crowded);
+            let seats =
+                std::iter::once((index, 0)).chain(followers.into_iter().zip(steps));
+            for (member, step) in seats {
+                let offset = row_offset(chosen.dock.edge, step, radius);
+                let place = Placement {
+                    point: chosen.point + offset,
+                    offset,
+                    ..chosen.clone()
+                };
+                occupied.push(disk(place.point, radius));
+                self.avatars[member].slot = Some(place);
+                self.avatars[member].slot_origin = None;
+            }
         }
+    }
+
+    /// Active avatars, most recently active first and each author before its co-authors.
+    fn placing_order(&self, now: super::Time) -> Vec<usize> {
+        let mut order: Vec<_> = (0..self.avatars.len())
+            .filter(|&i| now - self.avatars[i].last_active < super::AVATAR_IDLE)
+            .collect();
+        let rank = |avatar: &super::Avatar| avatar.group.map_or(0, |g| g.rank);
+        order.sort_by(|&a, &b| {
+            self.avatars[b]
+                .last_active
+                .total_cmp(self.avatars[a].last_active)
+                .then(rank(&self.avatars[a]).cmp(&rank(&self.avatars[b])))
+                .then(a.cmp(&b))
+        });
+        order
+    }
+
+    fn record_placement(&mut self, chosen: &Placement, crowded: bool) {
+        let record = self.slot_records.entry(chosen.commit).or_default();
+        record.fallback |= chosen.dock.edge != 0;
+        record.least_bad |= !chosen.valid() || crowded;
+        record.half_plane_failures += u32::from(!chosen.half_plane);
+        record.max_crossings = record.max_crossings.max(chosen.crossings);
+        record.max_overlaps = record.max_overlaps.max(chosen.overlaps);
+    }
+
+    /// An author's co-authors in its current commit, in rank order.
+    fn followers(&self, author: usize) -> Vec<usize> {
+        let commit = self.avatars[author].commit;
+        let mut followers: Vec<_> = (0..self.avatars.len())
+            .filter(|&i| {
+                i != author
+                    && self.avatars[i].commit == commit
+                    && self.avatars[i].group.is_some_and(|g| g.lead == author)
+            })
+            .collect();
+        followers.sort_by_key(|&i| self.avatars[i].group.map(|g| g.rank));
+        followers
+    }
+
+    /// A co-author is placed with its author, unless the author has moved on to another
+    /// commit, when it holds its place as the tile moves.
+    fn hold_place(
+        &mut self,
+        index: usize,
+        group: super::Group,
+        occupied: &mut Vec<Rect>,
+    ) {
+        let radius = self.avatar_radius();
+        let moved_on = self.avatars[group.lead].commit != self.avatars[index].commit;
+        let avatar = &mut self.avatars[index];
+        if moved_on
+            && let (Some(tile), Some(slot)) = (
+                self.layout.repositories[avatar.repository].gutter,
+                avatar.slot.as_mut(),
+            )
+        {
+            slot.point = slot.dock.on_network(tile) + slot.offset;
+            occupied.push(disk(slot.point, radius));
+        }
+    }
+
+    /// Row places for an author's co-authors, in rank order, and whether any had to
+    /// overlap another avatar. A co-author already parked at this dock for this commit
+    /// keeps its place; a new one takes the free end of the row nearer to where it was.
+    fn row_steps(
+        &self,
+        choice: &Choice<'_>,
+        chosen: &Placement,
+        followers: &[usize],
+    ) -> (Vec<i8>, bool) {
+        let radius = choice.radius;
+        let mut taken = vec![0_i8];
+        let mut crowded = false;
+        let steps = followers
+            .iter()
+            .map(|&follower| {
+                let avatar = &self.avatars[follower];
+                let kept = avatar
+                    .slot
+                    .as_ref()
+                    .filter(|s| s.commit == chosen.commit && s.dock == chosen.dock)
+                    .map(|s| row_step(chosen.dock.edge, s.offset, radius));
+                let step = kept.unwrap_or_else(|| {
+                    let ends = [
+                        taken.iter().max().copied().unwrap_or(0) + 1,
+                        taken.iter().min().copied().unwrap_or(0) - 1,
+                    ];
+                    let towards = avatar
+                        .slot
+                        .as_ref()
+                        .filter(|_| avatar.repository == choice.repository)
+                        .map(|s| {
+                            row_step(chosen.dock.edge, s.point - chosen.point, radius)
+                        });
+                    let order = if towards.is_some_and(|step| step < 0) {
+                        [ends[1], ends[0]]
+                    } else {
+                        ends
+                    };
+                    order
+                        .into_iter()
+                        .find(|&step| choice.free_cell(chosen.dock, step))
+                        .unwrap_or_else(|| {
+                            crowded = true;
+                            order[0]
+                        })
+                });
+                taken.push(step);
+                step
+            })
+            .collect();
+        (steps, crowded)
     }
 }
 
@@ -594,9 +745,10 @@ impl State {
                     && !travel.travelling(pulse.author, self.tick)
             })
             .flat_map(|pulse| {
-                pulse.targets.iter().filter_map(|&(target, ..)| {
-                    let author = pulse.author;
-                    Some((bodies[author]?, self.screen(self.point(target)?)?))
+                let origin = bodies[pulse.author]
+                    .and_then(|_| self.screen(self.beam_origin(pulse.author)));
+                pulse.targets.iter().filter_map(move |&(target, ..)| {
+                    Some((origin?, self.screen(self.point(target)?)?))
                 })
             })
             .collect()
@@ -1070,6 +1222,8 @@ struct Choice<'a> {
     gutter: Option<Tile>,
     gap: Vec2,
     radius: f32,
+    /// Co-authors who park in a row beside this avatar.
+    row: u8,
     beams: &'a [(usize, Rect)],
     occupied: &'a [Rect],
     peers: &'a [(Vec2, u8, Vec2)],
@@ -1110,14 +1264,10 @@ impl Choice<'_> {
             }
         }
         let occupied_origin = previous
-            .filter(|s| {
-                s.commit != commit && self.avatar_cost(self.point(s.dock)) > 0.001
-            })
+            .filter(|s| s.commit != commit && self.dock_cost(s.dock) > 0.001)
             .map(|s| self.point(s.dock));
         let previous = previous
-            .filter(|s| {
-                s.commit == commit || self.avatar_cost(self.point(s.dock)) <= 0.001
-            })
+            .filter(|s| s.commit == commit || self.dock_cost(s.dock) <= 0.001)
             .map(|s| s.dock);
         origin
             .or(occupied_origin)
@@ -1152,8 +1302,8 @@ impl Choice<'_> {
                 (slot, cost)
             })
             .min_by(|a, b| {
-                self.avatar_cost(a.0.point)
-                    .total_cmp(&self.avatar_cost(b.0.point))
+                self.dock_cost(a.0.dock)
+                    .total_cmp(&self.dock_cost(b.0.dock))
                     .then(a.1.total_cmp(&b.1))
                     .then(
                         a.0.point
@@ -1166,10 +1316,43 @@ impl Choice<'_> {
     fn avatar_cost(&self, point: Vec2) -> f32 {
         self.occupied
             .iter()
-            .map(|r| (self.radius * 2.0 - point.distance(r.center())).max(0.0))
+            .map(|r| {
+                (self.radius + r.half_size().x - point.distance(r.center())).max(0.0)
+            })
             .sum::<f32>()
             + self.reserved_cost(point)
     }
+    /// The avatar cost of parking at `dock`, plus one radius for each co-author the row
+    /// beside it has no free place for.
+    fn dock_cost(&self, dock: Dock) -> f32 {
+        let (mut low, mut high, mut missing) = (0_i8, 0_i8, 0_u8);
+        for _ in 0..self.row {
+            if self.free_cell(dock, high + 1) {
+                high += 1;
+            } else if self.free_cell(dock, low - 1) {
+                low -= 1;
+            } else {
+                missing += 1;
+            }
+        }
+        self.avatar_cost(self.point(dock)) + f32::from(missing) * self.radius
+    }
+
+    /// Whether the row place `step` beside `dock` lies on the dock's edge and is clear
+    /// of other avatars.
+    fn free_cell(&self, dock: Dock, step: i8) -> bool {
+        let [start, end] = [0.0, 1.0].map(|fraction| {
+            self.point(Dock {
+                edge: dock.edge,
+                fraction,
+            })
+        });
+        let cell = self.point(dock) + row_offset(dock.edge, step, self.radius);
+        let along =
+            (cell - start).dot(end - start) / end.distance_squared(start).max(1e-6);
+        (0.0..=1.0).contains(&along) && self.avatar_cost(cell) <= 0.001
+    }
+
     fn reserved_cost(&self, point: Vec2) -> f32 {
         self.future
             .iter()
@@ -1233,6 +1416,7 @@ impl Choice<'_> {
                 dock,
                 commit: usize::MAX,
                 point,
+                offset: Vec2::ZERO,
                 text: self.text.clone(),
                 half_plane: self.envelope.samples > 0
                     && span < std::f32::consts::PI - 1e-5,
@@ -1311,8 +1495,8 @@ impl Choice<'_> {
                 (a.1.0, a.1.1, a.1.2)
                     .cmp(&(b.1.0, b.1.1, b.1.2))
                     .then(
-                        self.avatar_cost(a.0.point)
-                            .total_cmp(&self.avatar_cost(b.0.point)),
+                        self.dock_cost(a.0.dock)
+                            .total_cmp(&self.dock_cost(b.0.dock)),
                     )
                     .then(crowding(&a.0).total_cmp(&crowding(&b.0)))
                     .then(a.1.3.cmp(&b.1.3))
@@ -1627,6 +1811,7 @@ mod tests {
             },
             gap: Vec2::new(16.0, 32.0),
             radius: 7.5,
+            row: 0,
             occupied,
             peers: &[],
             future: &[],
@@ -2020,10 +2205,11 @@ mod tests {
                     let tile =
                         sim.layout().repositories[avatar.repository].tile.unwrap();
                     let corners = sim.envelopes[avatar.commit].corners(tile);
-                    assert!(fan(slot.point, &corners) < std::f32::consts::PI);
+                    let origin = slot.point - slot.offset;
+                    assert!(fan(origin, &corners) < std::f32::consts::PI);
                     assert!(!obstacles.iter().any(|(r, rect)| *r != usize::MAX
                         && *r != avatar.repository
-                        && swept_crosses(slot.point, &corners, rect.inflate(-0.02))));
+                        && swept_crosses(origin, &corners, rect.inflate(-0.02))));
                 }
             }
         }
@@ -2048,8 +2234,61 @@ mod tests {
         moving.assert_clear(sim.travel.stats.max_speed);
     }
 
+    /// The parked members of a pulse's group.
+    fn parked_group(
+        sim: &Simulation,
+        pulse: &super::super::Pulse,
+        parked: &[usize],
+    ) -> Vec<usize> {
+        parked
+            .iter()
+            .copied()
+            .filter(|&i| {
+                let avatar = &sim.state.avatars[i];
+                avatar.commit == pulse.commit
+                    && avatar.group.is_some_and(|g| g.lead == pulse.author)
+            })
+            .collect()
+    }
+
+    /// Group members park clear of every other parked avatar, and a whole group parks
+    /// as a row of touching neighbours.
+    fn assert_group_clear(
+        sim: &Simulation,
+        members: &[usize],
+        parked: &[usize],
+        frame: u32,
+    ) {
+        let state = &sim.state;
+        let radius = state.avatar_radius();
+        let point = |i: usize| state.avatars[i].slot.as_ref().unwrap().point;
+        for (&member, &other) in members
+            .iter()
+            .flat_map(|m| parked.iter().filter(move |&o| o != m).map(move |o| (m, o)))
+        {
+            let distance = point(member).distance(point(other));
+            assert!(
+                distance >= 2.0 * radius,
+                "frame {frame}: avatars {member} and {other} overlap"
+            );
+        }
+        let size = members
+            .first()
+            .and_then(|&m| state.avatars[m].group)
+            .map(|g| g.size);
+        if size != Some(u8::try_from(members.len()).unwrap()) {
+            return;
+        }
+        let mut row: Vec<_> = members.iter().map(|&i| point(i)).collect();
+        row.sort_by(|a, b| (a.x + a.y).total_cmp(&(b.x + b.y)));
+        for pair in row.windows(2) {
+            let touching = 2.0 * (radius + GROUP_GAP);
+            assert!((pair[0].distance(pair[1]) - touching).abs() < 0.01);
+        }
+    }
+
     #[test]
-    fn co_authors_beam_from_their_own_separate_docks() {
+    fn co_authors_gather_around_their_author_and_beam_once() {
         let co_author = |name: &str| crate::timeline::Identity {
             name: name.as_bytes().to_vec(),
             email: format!("{name}@example.invalid").into_bytes(),
@@ -2082,37 +2321,35 @@ mod tests {
             .filter(|&commit| sim.events[commit].co_contributors.len() == 2)
             .collect();
         assert_eq!(shared.len(), 8);
-        let mut beaming = std::collections::BTreeSet::new();
+        let mut gathered = std::collections::BTreeSet::new();
         let frames = crate::model::frames_for(sim.duration(), 60).unwrap();
         for frame in 0..=frames {
             sim.advance_to(frame, 60);
             let state = &sim.state;
-            let mut serving = Vec::new();
-            for pulse in state.pulses.iter().filter(|p| sim.pulse_beams_visible(p)) {
-                if super::super::tick_time(state.tick) >= pulse.start {
-                    beaming.insert((pulse.commit, pulse.author));
-                    serving.push(pulse.author);
-                }
-            }
-            serving.sort_unstable();
-            serving.dedup();
-            let points: Vec<_> = serving
-                .iter()
-                .map(|&a| crate::model::titles::screen(&sim, state.avatars[a].position))
+            let parked: Vec<_> = (0..state.avatars.len())
+                .filter(|&i| {
+                    let avatar = &state.avatars[i];
+                    avatar.presence > 0.0
+                        && !sim.travel.travelling(i, state.tick)
+                        && avatar
+                            .slot
+                            .as_ref()
+                            .is_some_and(|s| s.world().distance(avatar.position) < 0.01)
+                })
                 .collect();
-            for (index, a) in points.iter().enumerate() {
-                for b in &points[index + 1..] {
-                    assert!(
-                        a.distance(*b) >= 2.0 * state.avatar_radius() - 0.01,
-                        "avatars beam on top of each other at frame {frame}"
-                    );
+            for pulse in state.pulses.iter().filter(|p| sim.pulse_beams_visible(p)) {
+                let members = parked_group(&sim, pulse, &parked);
+                assert_group_clear(&sim, &members, &parked, frame);
+                if members.len() == 3 {
+                    gathered.insert(pulse.commit);
                 }
             }
+            for beam in sim.beams() {
+                let origin = sim.state.beam_origin(beam.author);
+                assert_eq!(beam.from, origin, "frame {frame}: one origin per commit");
+            }
         }
-        for commit in shared {
-            let beams = beaming.range((commit, 0)..(commit + 1, 0)).count();
-            assert_eq!(beams, 3, "commit {commit} beams from every participant");
-        }
+        assert_eq!(gathered.into_iter().collect::<Vec<_>>(), shared);
         validate(&mut sim);
     }
 

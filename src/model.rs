@@ -244,8 +244,6 @@ struct Pulse {
     start: Time,
     end: Time,
     author: usize,
-    /// Whether `author` is the commit's author rather than a co-author.
-    leads: bool,
     targets: Vec<(Target, f32, u32, u32)>,
     aggregated: bool,
     samples: Vec<(u64, crate::diff_samples::Sample)>,
@@ -356,6 +354,15 @@ pub(super) struct Avatar {
     commit: usize,
     slot: Option<slots::Placement>,
     slot_origin: Option<(usize, slots::Dock, Vec2)>,
+    group: Option<Group>,
+}
+
+/// An avatar's place among the author and co-authors of its current commit.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct Group {
+    pub lead: usize,
+    pub rank: u8,
+    pub size: u8,
 }
 
 impl Avatar {
@@ -1143,9 +1150,10 @@ impl Simulation {
     }
 
     fn arrival_position(&self, id: u64, file: &crate::layout::File, to: Vec3) -> Vec3 {
-        let Some(avatar) = self.state.avatars.get(file.author) else {
+        if self.state.avatars.get(file.author).is_none() {
             return to;
-        };
+        }
+        let from = self.state.beam_origin(file.author);
         let endpoint = self
             .state
             .pulses
@@ -1158,10 +1166,7 @@ impl Simulation {
             .and_then(|pulse| pulse.directory_target(file.dir, self.layout()))
             .and_then(|target| self.state.point(target));
         let Some(endpoint) = endpoint else {
-            return self
-                .theme
-                .beam_style
-                .point(avatar.position, to, file.presence);
+            return self.theme.beam_style.point(from, to, file.presence);
         };
         let flight = (file.presence / AGGREGATED_ARRIVAL_FLIGHT).min(1.0);
         let settle = ((file.presence - AGGREGATED_ARRIVAL_FLIGHT)
@@ -1169,7 +1174,7 @@ impl Simulation {
             .max(0.0);
         self.theme
             .beam_style
-            .point(avatar.position, endpoint, flight)
+            .point(from, endpoint, flight)
             .lerp(to, settle)
     }
 
@@ -1502,7 +1507,7 @@ impl Simulation {
             if envelope <= 0.0 {
                 continue;
             }
-            let from = self.state.avatars[pulse.author].position;
+            let from = self.state.beam_origin(pulse.author);
             for &(target, weight, ..) in &pulse.targets {
                 if let Some(to) = self.state.point(target) {
                     beams.push(Beam {
@@ -1515,6 +1520,36 @@ impl Simulation {
             }
         }
         beams
+    }
+
+    /// Each gathered group of two or more parked members: its author, the centre its
+    /// beams start from, and its members.
+    pub(super) fn groups(&self) -> Vec<(usize, Vec3, Vec<usize>)> {
+        let state = &self.state;
+        let parked = |index: usize| {
+            state.avatars[index].presence > 0.0
+                && !self.travel.travelling(index, state.tick)
+        };
+        let mut groups: Vec<(usize, Vec3, Vec<usize>)> = Vec::new();
+        for (index, avatar) in state.avatars.iter().enumerate() {
+            let Some(group) = avatar.group else {
+                continue;
+            };
+            let lead = &state.avatars[group.lead];
+            if avatar.commit != lead.commit || !parked(index) || !parked(group.lead) {
+                continue;
+            }
+            match groups.iter_mut().find(|(author, ..)| *author == group.lead) {
+                Some((.., members)) => members.push(index),
+                None => groups.push((
+                    group.lead,
+                    state.beam_origin(group.lead),
+                    vec![index],
+                )),
+            }
+        }
+        groups.retain(|(.., members)| members.len() > 1);
+        groups
     }
 
     fn pulse_beams_visible(&self, pulse: &Pulse) -> bool {
@@ -1544,7 +1579,7 @@ impl Simulation {
             if envelope <= 0.0 {
                 continue;
             }
-            let from = self.state.avatars[pulse.author].position;
+            let from = self.state.beam_origin(pulse.author);
             for &(target, _, insertions, removals) in
                 pulse.targets.iter().take(FRAGMENT_TARGETS)
             {
@@ -1557,14 +1592,12 @@ impl Simulation {
                     }
                     Target::Dir(_) => 0.0,
                 };
-                // Only the author's pulse carries text, so a co-author's must not
-                // claim the file's newest-commit slot.
                 let current = match target {
-                    Target::File(id) if pulse.leads => {
+                    Target::File(id) => {
                         *newest.entry(id).or_insert(pulse_index) == pulse_index
                             && sample_detail > 0.0
                     }
-                    Target::File(_) | Target::Dir(_) => false,
+                    Target::Dir(_) => false,
                 };
                 for (count, rising) in [(insertions, false), (removals, true)] {
                     fragments.extend(attach_samples(
@@ -1745,8 +1778,7 @@ impl Simulation {
             })
             .collect();
         labels.extend(self.repository_labels());
-        // A co-author's pulse repeats its author's targets, so it would stack labels.
-        for pulse in self.state.pulses.iter().filter(|pulse| pulse.leads) {
+        for pulse in &self.state.pulses {
             if pulse.targets.len() > 8 && !pulse.aggregated {
                 continue;
             }
@@ -1858,6 +1890,7 @@ impl State {
             commit: 0,
             slot: None,
             slot_origin: None,
+            group: None,
         });
         self.authors.insert(contributor.key.clone(), index);
         index
@@ -1872,8 +1905,8 @@ impl State {
             .collect()
     }
 
-    /// Applies the event's changes for its author, and gives every participant a pulse
-    /// beaming to the same files; diff text flies from the author's alone.
+    /// Applies the event's changes for its author and gathers every participant into
+    /// one group, whose single pulse belongs to the author.
     fn begin(
         &mut self,
         event: &Event,
@@ -1917,9 +1950,10 @@ impl State {
             .filter_map(|&(target, ..)| self.destination(target))
             .fold((Vec2::ZERO, 0.0), |(sum, n), point| (sum + point, n + 1.0));
         let touched: Vec<u64> = touched.into_keys().collect();
-        let mut samples = Some(samples);
-        for author in participants {
-            let avatar = &mut self.avatars[author];
+        let size = u8::try_from(participants.len()).expect("co-authors are bounded");
+        let flight = self.fragment_pace.flight();
+        for (rank, &member) in participants.iter().enumerate() {
+            let avatar = &mut self.avatars[member];
             if avatar.repository != event.repository {
                 avatar.slot_origin = avatar
                     .slot
@@ -1937,30 +1971,33 @@ impl State {
             }
             avatar.last_active = start;
             avatar.activity = (avatar.activity + 1.0).min(1000.0);
-            let flight = self.fragment_pace.flight();
-            let previous = self.pulses.iter().rposition(|pulse| pulse.author == author);
+            avatar.group = (size > 1).then(|| Group {
+                lead: author,
+                rank: u8::try_from(rank).expect("co-authors are bounded"),
+                size,
+            });
+            let previous = self.pulses.iter().rposition(|pulse| pulse.author == member);
             let mut index = 0;
             self.pulses.retain_mut(|pulse| {
-                let keep = pulse.author != author || Some(index) == previous;
-                if pulse.author == author {
+                let keep = pulse.author != member || Some(index) == previous;
+                if pulse.author == member {
                     pulse.end = pulse.end.min(start + flight + 0.3);
                 }
                 index += 1;
                 keep
             });
-            self.pulses.push_back(Pulse {
-                commit: self.next_event,
-                repository: event.repository,
-                touched: touched.clone(),
-                start,
-                end: self.fragment_pace.pulse_end(start),
-                author,
-                leads: samples.is_some(),
-                targets: targets.clone(),
-                aggregated,
-                samples: samples.take().unwrap_or_default(),
-            });
         }
+        self.pulses.push_back(Pulse {
+            commit: self.next_event,
+            repository: event.repository,
+            touched,
+            start,
+            end: self.fragment_pace.pulse_end(start),
+            author,
+            targets,
+            aggregated,
+            samples,
+        });
     }
 
     fn aggregate(
@@ -2009,6 +2046,30 @@ impl State {
             Target::File(id) => self.layout.target(id),
             Target::Dir(index) => Some(self.layout.dir(index).position),
         }
+    }
+
+    /// Where an author's beams start: the middle of their group's parking row, or the
+    /// author alone.
+    fn beam_origin(&self, author: usize) -> Vec3 {
+        let avatar = &self.avatars[author];
+        let (Some(slot), Some(group)) = (&avatar.slot, avatar.group) else {
+            return avatar.position;
+        };
+        if group.lead != author {
+            return avatar.position;
+        }
+        let (sum, count) = self
+            .avatars
+            .iter()
+            .filter(|member| {
+                member.commit == avatar.commit
+                    && member.group.is_some_and(|g| g.lead == author)
+            })
+            .filter_map(|member| member.slot.as_ref())
+            .fold((Vec2::ZERO, 0.0), |(sum, count), member| {
+                (sum + member.point, count + 1.0)
+            });
+        avatar.position + slots::world(sum / count) - slots::world(slot.point)
     }
 
     fn point(&self, target: Target) -> Option<Vec3> {

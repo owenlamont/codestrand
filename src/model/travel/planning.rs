@@ -296,7 +296,9 @@ pub(super) fn trips(
         if commit < capture.frozen {
             continue;
         }
-        if (prior.repository == service.repository && prior.dock == service.dock)
+        if (prior.repository == service.repository
+            && prior.dock == service.dock
+            && prior.offset == service.offset)
             || ((!keep_idle || (service.bot && bots == crate::model::BotTravel::Fade))
                 && ticks_duration(service.tick - prior.tick)
                     >= crate::model::AVATAR_IDLE + 1.2)
@@ -425,6 +427,7 @@ mod tests {
                     radius: 7.5,
                     bot: false,
                     dock: dock(if author == 0 && tick < 400 { 3 } else { 1 }, 0.5),
+                    offset: Vec2::ZERO,
                 },
             )
             .collect(),

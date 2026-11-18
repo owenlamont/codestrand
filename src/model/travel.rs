@@ -58,6 +58,8 @@ pub(super) struct Service {
     radius: f32,
     bot: bool,
     dock: slots::Dock,
+    /// The avatar's place within its group at that dock.
+    offset: Vec2,
 }
 
 #[derive(Default)]
@@ -457,7 +459,7 @@ fn replay(simulation: &mut Simulation, frames: u32) -> Capture {
                         state
                             .pulses
                             .iter()
-                            .find(|p| p.commit == event && p.author == author)
+                            .find(|p| p.commit == event)
                             .expect("new pulse")
                             .end
                             - 0.3,
@@ -473,6 +475,7 @@ fn replay(simulation: &mut Simulation, frames: u32) -> Capture {
                     radius: state.avatar_radius(),
                     bot: contributor.is_bot(),
                     dock: avatar.slot.as_ref().expect("service slot").dock,
+                    offset: avatar.slot.as_ref().expect("service slot").offset,
                 });
             }
         }

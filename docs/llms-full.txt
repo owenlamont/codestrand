@@ -1082,6 +1082,15 @@ are grouped by author name. A missing default file is fine; an explicit missing 
 unknown key or malformed TOML is an error. Edits take effect on cache hits; original
 authors and repository history remain unchanged.
 
+Each `Co-authored-by: Name <email>` trailer in a commit message's final trailer block
+makes that person a contributor of the commit, as on GitHub. Co-authors match by email
+like authors, so a co-author shares the avatar of their own commits. A commit's
+contributors gather in a row of touching avatars beside the author, each ringed in the
+author's colour, and one set of beams leaves the middle of the row. The author's colour
+marks the files and the caption names the author. Codestrand reads at most 8 co-authors
+per commit, none from a message over 64 KiB, and ignores a trailer without an email or
+with a name or email over 4,096 bytes.
+
 `bot = true` marks automation and `bot = false` marks a human, overriding automatic
 detection even after a display-name change. Without an override, a parsed GitHub noreply
 login ending in `[bot]` identifies a bot; a displayed name ending in `[bot]` is the
@@ -1143,7 +1152,9 @@ Resolution stops at the first usable portrait, in the following order:
 2. Explicit `github`, then explicit `gitlab` using the GitLab.com Users API.
 3. GitHub noreply login, then the commit author's GitHub account when a remote points
    to github.com (`origin` preferred). An explicit GitHub login replaces inferred
-   GitHub lookup. The commit API runs at most once per distinct unresolved email per run.
+   GitHub lookup. The commit API runs at most once per distinct unresolved email per run,
+   and never for someone who only co-authored, since a commit names only its author's
+   account.
 4. GitLab.com email lookup, only with **both** `--fetch-avatars` and
    `--gitlab-email-avatars`.
 5. Gravatar using `gravatar` when provided, otherwise the commit email, hashed with

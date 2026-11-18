@@ -91,8 +91,12 @@ impl Simulation {
             let low = tile.low * HALF;
             let span = (tile.high - tile.low) * HALF;
             pairs += live.len() - 1;
+            // A group parks around its author's dock, so its author makes room for it.
+            let owner = avatar.group.map_or(i, |group| group.lead);
             for &(j, other, _) in &live {
-                if i == j {
+                let teammate = state.avatars[j].commit == avatar.commit
+                    && state.avatars[j].group.is_some_and(|g| g.lead == owner);
+                if i == j || teammate {
                     continue;
                 }
                 if super::committing_overlap(
@@ -103,9 +107,9 @@ impl Simulation {
                     [true, false],
                 ) {
                     conflicts += 1;
-                    conflicted.insert((avatar.commit, i));
+                    conflicted.insert((avatar.commit, owner));
                 }
-                let row = occupied.entry((avatar.commit, i)).or_default();
+                let row = occupied.entry((avatar.commit, owner)).or_default();
                 reserve_other(row, low, span, other, radius);
             }
         }

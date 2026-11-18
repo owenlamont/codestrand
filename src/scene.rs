@@ -122,6 +122,7 @@ struct Palette {
     membership_mesh: Handle<Mesh>,
     directory_rings: Vec<Vec<Handle<Mesh>>>,
     activity_mesh: Handle<Mesh>,
+    group_ring: Handle<Mesh>,
     tile: Option<(Handle<StandardMaterial>, Transform)>,
     glyph_mesh: Handle<Mesh>,
     glyphs: Vec<Handle<StandardMaterial>>,
@@ -143,6 +144,7 @@ impl Palette {
         let ring = styling::ring_mesh(theme, theme.membership_radii);
         let membership_mesh = meshes.add(ring.clone());
         let activity_mesh = meshes.add(styling::ring_mesh(theme, theme.activity_radii));
+        let group_ring = meshes.add(Annulus::new(0.78, 1.0));
         // Export sorts opaque mesh bins, but instances within a bin retain insertion order.
         let root_cube = meshes.add(Cuboid::default());
         let [avatar_spheres, avatar_discs, segment_beams] =
@@ -223,6 +225,7 @@ impl Palette {
             membership_mesh,
             directory_rings,
             activity_mesh,
+            group_ring,
             tile,
             glyph_mesh,
             glyphs,
@@ -392,6 +395,7 @@ struct Pools {
     directories: Vec<Entity>,
     hues: DirectoryHues,
     avatars: Vec<Entity>,
+    groups: Vec<Entity>,
     grid: Vec<Entity>,
 }
 
@@ -2041,8 +2045,57 @@ fn sync_activity(
             fade(world, entity, avatar.grey, presence);
         }
     }
+    sync_groups(world, palette, pools, simulation);
     styling::beams(world, palette, pools, simulation);
     sync_fragments(world, palette, pools, simulation);
+}
+
+/// Rings every member of a gathered group in its author's colour, so the touching
+/// rings link the commit's contributors into one chain.
+fn sync_groups(
+    world: &mut World,
+    palette: &Palette,
+    pools: &mut Pools,
+    simulation: &Simulation,
+) {
+    let avatars = simulation.avatars();
+    let rings: Vec<_> = simulation
+        .groups()
+        .into_iter()
+        .flat_map(|(author, _, members)| members.into_iter().map(move |m| (author, m)))
+        .collect();
+    let disc = simulation.theme().avatar_radius
+        * simulation.scale()
+        * simulation.avatar_disc_scale();
+    while pools.groups.len() < rings.len() {
+        let entity = world
+            .spawn((
+                Mesh3d(palette.group_ring.clone()),
+                MeshMaterial3d(palette.avatars[0].clone()),
+                Transform::default(),
+                Visibility::Hidden,
+                RenderLayers::layer(AVATAR_LAYER),
+                PortraitDisc,
+            ))
+            .id();
+        pools.groups.push(entity);
+    }
+    for (&entity, &(author, member)) in pools.groups.iter().zip(&rings) {
+        let avatar = &avatars[member];
+        let material = palette.avatars[author % palette.avatars.len()].clone();
+        world.entity_mut(entity).insert(MeshMaterial3d(material));
+        if let Some(mut transform) = world.get_mut::<Transform>(entity) {
+            transform.translation = avatar.position;
+            transform.scale = Vec3::splat(
+                1.6 * disc
+                    * avatar.presence
+                    * avatar.projection_scale
+                    * avatar.lifecycle_scale.max(0.001),
+            );
+        }
+        set_visible(world, entity, true);
+    }
+    hide_rest(world, &pools.groups, rings.len());
 }
 
 fn sync_fragments(
