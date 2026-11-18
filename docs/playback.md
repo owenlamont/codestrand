@@ -499,9 +499,10 @@ Theme switching restyles active snippets without restarting their motion or fade
 `--fragment-speed` scales how fast fragments cross their beams in preview and export
 (default `1`, about 0.9 playback seconds per crossing; accepted range `0.25` through
 `2`, inclusive). `0.5` doubles the crossing time, giving snippets longer to read.
-Beams last until the last fragment lands, so a contributor leaves for its next
-repository later, and a slower setting also delays a calendar departure until then.
-Commits keep their timeline spacing unless a walking trip needs the extra wait.
+A walking contributor stays until its last fragment lands before leaving for its
+next repository, and a slower setting also delays a calendar departure until then.
+Commits keep their timeline spacing unless a walking trip needs the extra wait;
+`--contributor-travel auto` may still fade a contributor across mid-flight.
 
 ```sh
 codestrand export frames --fragment-speed 0.5 --frames 90 --fps 30
