@@ -493,27 +493,29 @@ fn load_with_limits(
                 spent.push(budget.spent);
             }
             Err(error) if is_exhausted(&error) => {
-                let advice = later_start(repo, links, index, budget, &spent)
-                    .map_or_else(
-                        || "no later --start-date fits".to_owned(),
-                        |date| {
-                            format!("--start-date {} fits", crate::model::date(date))
-                        },
-                    );
-                return Err(error.context(format!(
-                    "commit {} dated {} UTC exceeds the import budget; {advice}",
-                    link.id,
-                    crate::model::date(link.seconds)
-                )));
+                return Err(refusal(
+                    repo,
+                    links,
+                    (index, index),
+                    budget,
+                    &spent,
+                    error,
+                ));
             }
             Err(error) => return Err(error),
         }
     }
     commits.reverse();
-    let boundary = skip
-        .checked_sub(1)
-        .map(|last| boundary(repo, &links[last], &mut budget))
-        .transpose()?;
+    let boundary = match skip.checked_sub(1) {
+        None => None,
+        Some(last) => match boundary(repo, &links[last], &mut budget) {
+            Ok(boundary) => Some(boundary),
+            Err(error) if is_exhausted(&error) => {
+                return Err(refusal(repo, links, (last, skip), budget, &spent, error));
+            }
+            Err(error) => return Err(error),
+        },
+    };
     Ok(History {
         tip: tip.to_string(),
         merge_policy: "first-parent",
@@ -524,16 +526,37 @@ fn load_with_limits(
     })
 }
 
-/// The first UTC day whose selection starts after `failed`, if that range and its
+/// Names the link whose read failed and a start date whose range lies after `after`.
+fn refusal(
+    repo: &gix::Repository,
+    links: &[Link],
+    (failed, after): (usize, usize),
+    budget: Budget,
+    spent: &[Spent],
+    error: anyhow::Error,
+) -> anyhow::Error {
+    let advice = later_start(repo, links, after, budget, spent).map_or_else(
+        || "no later --start-date fits".to_owned(),
+        |date| format!("--start-date {} fits", crate::model::date(date)),
+    );
+    let link = &links[failed];
+    error.context(format!(
+        "commit {} dated {} UTC exceeds the import budget; {advice}",
+        link.id,
+        crate::model::date(link.seconds)
+    ))
+}
+
+/// The first UTC day whose selection starts after `after`, if that range and its
 /// boundary fit; `spent` holds the charges after each link, newest first.
 fn later_start(
     repo: &gix::Repository,
     links: &[Link],
-    failed: usize,
+    after: usize,
     mut budget: Budget,
     spent: &[Spent],
 ) -> Option<i64> {
-    let latest = links[..=failed].iter().map(|link| link.seconds).max()?;
+    let latest = links.get(..=after)?.iter().map(|link| link.seconds).max()?;
     let date = (latest.div_euclid(86_400) + 1) * 86_400;
     let start = links.iter().position(|link| link.seconds >= date)?;
     budget.spent = spent[links.len() - 1 - start];
@@ -1346,6 +1369,53 @@ mod security_tests {
         assert!(format!("{error:#}").contains(&expected), "{error:#}");
         let fitted = load_with_limits(&repo, tip, &links, 1, limits).unwrap();
         assert_eq!(fitted.boundary.unwrap().id, first.to_string());
+    }
+
+    #[test]
+    fn a_boundary_over_budget_names_a_later_start() {
+        let (_root, repo, root) = hostile_history(0, b"ok\n");
+        let blob = repo.write_blob(b"ok\n").unwrap().detach();
+        let mut commit = repo
+            .find_commit(root)
+            .unwrap()
+            .decode()
+            .unwrap()
+            .to_owned()
+            .unwrap();
+        let mut parent = root;
+        for (day, files) in [(0, 10), (1, 1), (2, 2)] {
+            commit.tree = repo
+                .write_object(&gix::objs::Tree {
+                    entries: (0..files)
+                        .map(|file| gix::objs::tree::Entry {
+                            mode: gix::objs::tree::EntryKind::Blob.into(),
+                            filename: format!("{file:02}").into(),
+                            oid: blob,
+                        })
+                        .collect(),
+                })
+                .unwrap()
+                .detach();
+            commit.parents = [parent].into_iter().collect();
+            commit.author.time.seconds = 1_700_000_000 + day * 86_400;
+            parent = repo.write_object(&commit).unwrap().detach();
+        }
+        let links = scan(&repo, parent, &mut Budget::new(Limits::default())).unwrap();
+        let limits = Limits {
+            entries: 12,
+            ..Limits::default()
+        };
+        let error = load_with_limits(&repo, parent, &links, 2, limits)
+            .err()
+            .unwrap();
+        assert!(
+            format!("{error:#}").contains(&format!(
+                "commit {} dated 2023-11-14 UTC exceeds the import budget; --start-date 2023-11-16 fits",
+                links[1].id
+            )),
+            "{error:#}"
+        );
+        assert!(load_with_limits(&repo, parent, &links, 3, limits).is_ok());
     }
 
     #[test]
