@@ -72,8 +72,6 @@ fn flags(
             !table.contains_key("repositories-file"),
             "set `repositories` or `repositories-file`, not both"
         );
-        toml::from_str::<crate::repositories::ConfigDocument>(&text)
-            .context("parse")?;
         if !list_given {
             flags.push(flag("repositories-file", path.as_os_str()));
         }

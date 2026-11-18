@@ -67,8 +67,8 @@ struct Document {
 
 /// The repository list of a `--config` file, whose other keys `config` validates.
 #[derive(Deserialize)]
-pub(super) struct ConfigDocument {
-    pub repositories: Vec<Repository>,
+struct ConfigDocument {
+    repositories: Vec<Repository>,
 }
 
 /// Top-level keys a repositories file may hold besides `repositories`.

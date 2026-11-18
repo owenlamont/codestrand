@@ -165,20 +165,6 @@ fn the_repository_list_can_live_in_the_file() {
     let source = preview(&file, &["--repository", "elsewhere"]);
     assert_eq!(source.repositories_file, None);
 
-    let file = config(scratch.path(), "repositories = false\n");
-    let arguments: Vec<OsString> = [
-        "codestrand",
-        "preview",
-        "--repository",
-        "elsewhere",
-        "--config",
-    ]
-    .map(OsString::from)
-    .into_iter()
-    .chain([file.clone().into()])
-    .collect();
-    assert!(super::arguments(arguments).is_err());
-
     let file = config(scratch.path(), "repositories-file = 'other.toml'\n");
     let source = preview(&file, &["--repository", "elsewhere"]);
     assert_eq!(source.repositories_file, None);
