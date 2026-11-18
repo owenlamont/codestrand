@@ -460,15 +460,26 @@ mod tests {
     }
 
     fn traced(window: Option<f32>) -> (Simulation, Vec<Report>) {
+        plan_traced(
+            super::super::tests::short_repository_history(2),
+            Options {
+                eager_windows: window.is_some(),
+                travel_window_seconds: window,
+                ..Options::default()
+            },
+        )
+    }
+
+    fn plan_traced(
+        (events, labels): (Vec<crate::timeline::Event>, Vec<String>),
+        options: Options,
+    ) -> (Simulation, Vec<Report>) {
         let trace = super::super::Trace::enabled();
-        let (events, labels) = super::super::tests::short_repository_history(2);
         let sim = Simulation::with_repositories(
             events,
             &Options {
-                eager_windows: window.is_some(),
-                travel_window_seconds: window,
                 trace: trace.clone(),
-                ..Options::default()
+                ..options
             },
             &crate::theme::Theme::neon(),
             &crate::contributors::Mappings::default(),
@@ -570,27 +581,21 @@ mod tests {
     }
 
     fn planned(
-        (events, labels): (Vec<crate::timeline::Event>, Vec<String>),
+        history: (Vec<crate::timeline::Event>, Vec<String>),
         window: f32,
         travel_cap: TravelCap,
         replay_everything: bool,
     ) -> (Simulation, Vec<Report>) {
-        let trace = super::super::Trace::enabled();
-        let sim = Simulation::with_repositories(
-            events,
-            &Options {
+        plan_traced(
+            history,
+            Options {
                 eager_windows: true,
                 travel_window_seconds: Some(window),
                 travel_cap,
                 replay_everything,
-                trace: trace.clone(),
                 ..Options::default()
             },
-            &crate::theme::Theme::neon(),
-            &crate::contributors::Mappings::default(),
-            &labels,
-        );
-        (sim, trace.reports())
+        )
     }
 
     /// One history planned with replay reuse and again with every replay run.

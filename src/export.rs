@@ -42,7 +42,6 @@ pub(super) fn render(
     (mut app, target): (App, Handle<Image>),
     frames: Option<u32>,
     fps: u16,
-    delay_ms: u16,
     mut encoder: Option<crate::encoder::Encoder>,
     camera_path: Option<&crate::camera_path::CameraPath>,
 ) -> anyhow::Result<()> {
@@ -104,7 +103,6 @@ pub(super) fn render(
                 update(&mut app)?;
                 captures.write_ready(&mut write)?;
             }
-            thread::sleep(Duration::from_millis(u64::from(delay_ms)));
             report_progress(
                 &app,
                 &mut report,
@@ -418,6 +416,7 @@ mod tests {
         timeline,
     };
     use bevy::{color::ColorToPacked, prelude::IntoScheduleConfigs};
+    use clap::Parser as _;
 
     #[test]
     fn captures_write_in_request_order_once() {
@@ -528,13 +527,10 @@ mod tests {
             "--repositories-file".into(),
             manifest_path,
         ];
-        if let Ok(commits) = std::env::var("CODESTRAND_SAMPLE_COMMITS") {
-            args.extend(["--commits".into(), commits]);
-        }
         if let Ok(extra) = std::env::var("CODESTRAND_SAMPLE_EXTRA_ARGS") {
             args.extend(serde_json::from_str::<Vec<String>>(&extra).unwrap());
         }
-        let cli = crate::Cli::try_fixture_from(args).unwrap();
+        let cli = crate::Cli::try_parse_from(args).unwrap();
         let Some(crate::Command::LayoutQuality { mut source, .. }) = cli.command else {
             panic!("fixture source");
         };
@@ -604,7 +600,7 @@ mod tests {
                 10,
                 "640x360".parse().unwrap(),
             );
-            let result = render(&output, app, None, 10, 0, None, None);
+            let result = render(&output, app, None, 10, None, None);
             if arm >= 3 {
                 let failure = result.unwrap_err();
                 let error = failure.to_string();
@@ -667,9 +663,8 @@ mod tests {
             resolution,
             encoding,
             frames,
-            frame_delay_ms,
             camera_path,
-        }) = crate::Cli::try_fixture_from(args).unwrap().command
+        }) = crate::Cli::try_parse_from(args).unwrap().command
         else {
             panic!("explicit export command required");
         };
@@ -706,15 +701,7 @@ mod tests {
                 }
             },
         );
-        let result = render(
-            &directory,
-            (app, target),
-            frames,
-            fps,
-            frame_delay_ms,
-            encoder,
-            None,
-        );
+        let result = render(&directory, (app, target), frames, fps, encoder, None);
         let audit = audit.lock().unwrap();
         fs::write(
             directory.join("diagnostics.json"),
@@ -901,7 +888,7 @@ mod tests {
             })
             .before(scene::animate),
         );
-        render(&output, (app, target), Some(70), 5, 0, None, None).unwrap();
+        render(&output, (app, target), Some(70), 5, None, None).unwrap();
         for index in 0..70 {
             let name = ThemeName::ALL[index / 10];
             let image = image::open(output.join(format!("frame-{index:05}.png")))
@@ -924,7 +911,13 @@ mod tests {
 
 #[cfg(test)]
 mod pacing_tests {
-    use std::{fs, path::Path};
+    use std::{fs, path::Path, thread, time::Duration};
+
+    use clap::Parser as _;
+
+    use super::{prepare, render};
+    use crate::scene;
+
     #[test]
     #[ignore = "requires a graphics adapter; repeats sibling-directory junction exports"]
     fn sibling_directory_exports_are_identical() {
@@ -967,15 +960,13 @@ mod pacing_tests {
                 repository.to_str().unwrap(),
                 "--camera-path",
                 camera.to_str().unwrap(),
-                "--start",
-                "1",
                 "--frames",
                 "24",
                 "--fps",
                 "30",
                 "--no-cache",
             ];
-            crate::dispatch(crate::Cli::try_fixture_from(args).unwrap()).unwrap();
+            crate::dispatch(crate::Cli::try_parse_from(args).unwrap()).unwrap();
         }
         for frame in 0..24 {
             let filename = format!("frame-{frame:05}.png");
@@ -1035,8 +1026,8 @@ mod pacing_tests {
         let scratch = tempfile::tempdir().expect("temporary directory is available");
         let fast = scratch.path().join("fast");
         let slow = scratch.path().join("slow");
-        export(&fast, "0");
-        export(&slow, "50");
+        export(&fast, Duration::ZERO);
+        export(&slow, Duration::from_millis(50));
         let expected: Vec<_> = (0..8)
             .map(|index| format!("frame-{index:05}.png"))
             .collect();
@@ -1074,24 +1065,40 @@ mod pacing_tests {
         assert_eq!(fast_manifest, slow_manifest);
     }
 
-    fn export(directory: &Path, delay: &str) {
+    /// Exports eight synthetic frames, sleeping `delay` in every app update.
+    fn export(directory: &Path, delay: Duration) {
         let camera = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/camera-targets.toml");
-        let args = vec![
-            "codestrand",
-            "export",
-            directory.to_str().unwrap(),
-            "--camera-path",
-            camera.to_str().unwrap(),
-            "--test-input",
-            "synthetic",
-            "--frames",
-            "8",
-            "--fps",
-            "2",
-            "--frame-delay-ms",
-            delay,
-        ];
-        crate::dispatch(crate::Cli::try_fixture_from(args).unwrap()).unwrap();
+        let Some(crate::Command::Export { source, theme, .. }) =
+            crate::Cli::try_parse_from([
+                "codestrand",
+                "export",
+                "unused",
+                "--test-input",
+                "synthetic",
+            ])
+            .unwrap()
+            .command
+        else {
+            panic!("export command");
+        };
+        let (mut simulation, title) =
+            source.load(&crate::progress::Progress::default()).unwrap();
+        simulation.set_theme(theme.build());
+        let camera_path =
+            crate::camera_path::CameraPath::load(&camera, &simulation).unwrap();
+        let resolution = crate::resolution::Resolution::default();
+        let (mut app, target) = scene::headless(simulation, title, 2, resolution);
+        app.add_systems(bevy::prelude::Update, move || thread::sleep(delay));
+        prepare(directory).unwrap();
+        render(
+            directory,
+            (app, target),
+            Some(8),
+            2,
+            None,
+            Some(&camera_path),
+        )
+        .unwrap();
     }
 }

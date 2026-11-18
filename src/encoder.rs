@@ -365,12 +365,18 @@ fn main() {
     }
     let mut bytes = Vec::new();
     std::io::stdin().read_to_end(&mut bytes).unwrap();
-    if args.iter().any(|arg| arg == "slow-finish") {
+    let touch = args.iter().any(|arg| arg == "touch-finish");
+    if touch || args.iter().any(|arg| arg == "slow-finish") {
         let mut output = std::fs::File::create(args.last().unwrap()).unwrap();
-        for _ in 0..12 {
-            output.write_all(b"frame").unwrap();
-            output.flush().unwrap();
+        output.write_all(b"frame").unwrap();
+        for step in 1..20 {
             std::thread::sleep(std::time::Duration::from_millis(100));
+            if touch {
+                let seconds = std::time::Duration::from_secs(step);
+                output.set_modified(std::time::UNIX_EPOCH + seconds).unwrap();
+            } else {
+                output.write_all(b"frame").unwrap();
+            }
         }
         return;
     }
@@ -478,30 +484,47 @@ fn main() {
         assert!(!output.exists());
     }
 
-    #[test]
-    fn finishing_tracks_progress_and_reaps_a_quiet_encoder() {
+    /// Finishes a fake encoder that changes its output every 100 ms for about two
+    /// seconds, so finishing succeeds only if each change resets the 1 s quiet period.
+    fn finish_slowly(mode: &str) -> Vec<u8> {
         let (scratch, binary) = fake_ffmpeg();
         let output = scratch.path().join("slow.mp4");
         let options = Options {
             video: Some(output.clone()),
-            ffmpeg: Some(binary.clone()),
-            ffmpeg_arg: vec!["slow-finish".into()],
+            ffmpeg: Some(binary),
+            ffmpeg_arg: vec![mode.into()],
         };
         let mut encoder = options
             .start(30, crate::resolution::Resolution::default())
             .unwrap()
             .unwrap();
         encoder.write(vec![0; 12]).unwrap();
-        let quiet = Duration::from_millis(500);
+        let quiet = Duration::from_secs(1);
         let start = Instant::now();
         encoder.finish_with_quiet_period(quiet).unwrap();
-        assert!(start.elapsed() > quiet * 2);
-        assert_eq!(std::fs::read(output).unwrap(), b"frame".repeat(12));
+        assert!(start.elapsed() > quiet);
+        std::fs::read(output).unwrap()
+    }
 
+    #[test]
+    fn finishing_tracks_growing_output() {
+        assert_eq!(finish_slowly("slow-finish"), b"frame".repeat(20));
+    }
+
+    #[test]
+    fn finishing_tracks_output_whose_modification_time_alone_changes() {
+        assert_eq!(finish_slowly("touch-finish"), b"frame");
+    }
+
+    #[test]
+    fn finishing_reaps_a_quiet_encoder() {
+        let (_scratch, binary) = fake_ffmpeg();
         let mut stalled = command(&binary);
         stalled.arg("stall");
         let mut encoder = Encoder::spawn(&mut stalled).unwrap();
-        let error = encoder.finish_with_quiet_period(quiet).unwrap_err();
+        let error = encoder
+            .finish_with_quiet_period(Duration::from_millis(500))
+            .unwrap_err();
         assert!(format!("{error:#}").contains("output made no progress"));
         assert!(encoder.child.try_wait().unwrap().is_some());
     }

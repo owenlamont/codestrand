@@ -304,6 +304,7 @@ pub(crate) mod tests {
     use std::time::Duration;
 
     fn diagnostic_fixture() -> Simulation {
+        use clap::Parser as _;
         let capped =
             std::env::var("CODESTRAND_AUDIT_CAP").unwrap_or_default() != "none";
         let window = std::env::var("CODESTRAND_AUDIT_WINDOW")
@@ -376,7 +377,7 @@ pub(crate) mod tests {
         let args: Vec<String> =
             serde_json::from_str(&std::env::var("CODESTRAND_AUDIT_ARGS").unwrap())
                 .unwrap();
-        let cli = crate::Cli::try_fixture_from(args).unwrap();
+        let cli = crate::Cli::try_parse_from(args).unwrap();
         let (mut source, theme) = match cli.command {
             Some(crate::Command::LayoutQuality { source, .. }) => {
                 (source, Theme::neon())
