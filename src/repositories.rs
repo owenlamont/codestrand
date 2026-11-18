@@ -1,14 +1,10 @@
-use std::{
-    io::Read,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, bail};
 use serde::Deserialize;
 
 use crate::timeline::{Event, Kind};
 
-const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 const MAX_PATH_BYTES: usize = 4096;
 
 pub(super) fn discover(directory: &Path) -> anyhow::Result<PathBuf> {
@@ -79,26 +75,8 @@ pub(super) enum Keys {
     AlsoOptions,
 }
 
-/// Reads a file of at most 1 MiB, refusing anything but a regular file.
-pub(super) fn read_small(path: &Path, what: &str) -> anyhow::Result<String> {
-    let file = std::fs::File::open(path)?;
-    let metadata = file.metadata()?;
-    anyhow::ensure!(
-        metadata.is_file() && metadata.len() <= MAX_MANIFEST_BYTES,
-        "{what} exceeds 1 MiB or is not a regular file"
-    );
-    let mut text = String::new();
-    file.take(MAX_MANIFEST_BYTES + 1)
-        .read_to_string(&mut text)?;
-    anyhow::ensure!(
-        u64::try_from(text.len())? <= MAX_MANIFEST_BYTES,
-        "{what} exceeds 1 MiB"
-    );
-    Ok(text)
-}
-
 fn read_document(path: &Path, keys: Keys) -> anyhow::Result<Vec<Repository>> {
-    let text = read_small(path, "repositories file")?;
+    let text = crate::small_file::read(path)?;
     match keys {
         Keys::RepositoriesOnly => {
             toml::from_str::<Document>(&text).map(|document| document.repositories)
