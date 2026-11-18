@@ -56,10 +56,9 @@ pub(super) fn check(
         options,
         options.selected_range(events.len()),
     );
-    let history_frames = u128::from(frames_for(
-        super::lifecycle::duration(&history, &endings, options.fragment_pace()),
-        60,
-    )?) + 1;
+    let history_duration =
+        super::lifecycle::duration(&history, &endings, options.fragment_pace());
+    let history_frames = u128::from(frames_for(history_duration, 60)?) + 1;
     let regions = history_frames * repositories.len() as u128;
     let labels = repositories
         .iter()
@@ -116,7 +115,7 @@ pub(super) fn check(
             selected,
             options,
             repositories.len(),
-            &history,
+            (&history, history_duration),
             schedule,
             (retained, global),
         );
@@ -289,7 +288,7 @@ fn check_streaming(
     selected: &[Event],
     options: &Options,
     repositories: usize,
-    history: &Schedule,
+    (history, history_duration): (&Schedule, super::Time),
     schedule: &Schedule,
     (retained, global): (u128, u128),
 ) -> anyhow::Result<()> {
@@ -301,8 +300,8 @@ fn check_streaming(
     let clock = super::schedule::Clock::new(history.clone(), schedule.clone());
     let mut begin = super::Time::ZERO;
     let mut span = 0.0_f32;
-    while begin < history.duration() {
-        let end = (begin + seconds + super::windows::MARGIN).min(history.duration());
+    while begin < history_duration {
+        let end = (begin + seconds + super::windows::MARGIN).min(history_duration);
         span = span.max(clock.present(end) - clock.present(begin));
         begin += seconds;
     }
