@@ -30,12 +30,17 @@ All notable changes to Codestrand are documented here, following
   repository titles and to no less than 6 pixels, and end in an ellipsis when wider than
   their tile. ([#180](https://github.com/owenlamont/codestrand/pull/180),
   [#181](https://github.com/owenlamont/codestrand/pull/181))
+- The `bevelled-desktop` theme is now `retro-desktop`, titled "Retro Desktop"; the old
+  name is no longer accepted. ([#185](https://github.com/owenlamont/codestrand/pull/185))
 
 ### Fixed
 
 - `codestrand preview` outside a repository exits with "pass --repository PATH"
   before opening a window.
   ([#187](https://github.com/owenlamont/codestrand/pull/187))
+- Camera path files are limited to 1 MiB like the other TOML inputs, and every TOML
+  input names a FIFO or device as not a regular file instead of waiting on it.
+  ([#184](https://github.com/owenlamont/codestrand/pull/184))
 - Many repositories starting on the same day no longer stop playback with
   "presence-scaled tiles remain feasible" while their tiles ease in.
   ([#180](https://github.com/owenlamont/codestrand/pull/180))

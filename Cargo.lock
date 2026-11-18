@@ -2000,6 +2000,7 @@ dependencies = [
  "fontique",
  "gix",
  "image",
+ "libc",
  "resvg",
  "serde",
  "serde_json",

@@ -1,4 +1,4 @@
-use std::{fs, path::Path};
+use std::path::Path;
 
 use bevy::{
     curve::{Curve, easing::SmoothStepCurve},
@@ -72,7 +72,7 @@ pub(super) struct CameraPath {
 impl CameraPath {
     pub(super) fn load(path: &Path, simulation: &Simulation) -> Result<Self, Error> {
         let name = path.display().to_string();
-        let text = fs::read_to_string(path).map_err(|source| Error::Read {
+        let text = crate::small_file::read(path).map_err(|source| Error::Read {
             path: name.clone(),
             source,
         })?;

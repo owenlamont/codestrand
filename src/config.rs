@@ -58,7 +58,7 @@ fn flags(
     given: &ArgMatches,
     path: &Path,
 ) -> anyhow::Result<Vec<OsString>> {
-    let text = crate::repositories::read_small(path, "config file")?;
+    let text = crate::small_file::read(path)?;
     let table: toml::Table = toml::from_str(&text).context("parse")?;
     let base = path.parent().unwrap_or(Path::new("."));
     let on_command_line =

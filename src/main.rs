@@ -30,6 +30,7 @@ mod progress;
 mod repositories;
 mod resolution;
 mod scene;
+mod small_file;
 mod theme;
 mod timeline;
 
@@ -1260,7 +1261,7 @@ mod tests {
             ("phosphor", ThemeName::Phosphor),
             ("outrun", ThemeName::Outrun),
             ("blueprint", ThemeName::Blueprint),
-            ("bevelled-desktop", ThemeName::BevelledDesktop),
+            ("retro-desktop", ThemeName::RetroDesktop),
             ("atlas", ThemeName::Atlas),
             ("forge", ThemeName::Forge),
         ] {
