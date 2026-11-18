@@ -340,10 +340,13 @@ impl Source {
             .map(|repository| history::resolve(&repository.path, &self.revision))
             .collect::<Result<Vec<_>, _>>()?;
         let chains = if self.start_date.is_some() || self.start > 0 {
-            opened
+            let started = std::time::Instant::now();
+            let chains = opened
                 .iter()
                 .map(|(repo, tip)| history::links(repo, *tip))
-                .collect::<Result<Vec<_>, _>>()?
+                .collect::<Result<Vec<_>, _>>()?;
+            eprintln!("scan_seconds={:.6}", started.elapsed().as_secs_f64());
+            chains
         } else {
             Vec::new()
         };
