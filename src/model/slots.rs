@@ -646,8 +646,8 @@ impl State {
     }
 
     /// Row places for an author's co-authors, in rank order, and whether any had to
-    /// overlap another avatar. A co-author already parked at this dock for this commit
-    /// keeps its place while it stays on the edge; a new one takes the free end of the
+    /// overlap another avatar. Co-authors already parked at this dock for this commit
+    /// keep their places while they stay on the edge; a new one takes the free end of the
     /// row nearer to where it was, or a crowded end on the edge, leaving the edge only
     /// when the edge has no room left at either end.
     fn row_steps(
@@ -658,22 +658,32 @@ impl State {
     ) -> (Vec<i8>, bool) {
         let radius = choice.radius;
         let mut taken = vec![0_i8];
-        let mut crowded = false;
-        let steps = followers
+        let kept: Vec<_> = followers
             .iter()
             .map(|&follower| {
-                let avatar = &self.avatars[follower];
-                let kept = avatar
+                let step = self.avatars[follower]
                     .slot
                     .as_ref()
                     .filter(|s| s.commit == chosen.commit && s.dock == chosen.dock)
                     .map(|s| row_step(chosen.dock.edge, s.offset, radius))
-                    .filter(|&step| choice.on_edge(chosen.dock, step));
-                let step = kept.unwrap_or_else(|| {
+                    .filter(|&step| {
+                        choice.on_edge(chosen.dock, step) && !taken.contains(&step)
+                    });
+                taken.extend(step);
+                step
+            })
+            .collect();
+        let mut crowded = false;
+        let steps = followers
+            .iter()
+            .zip(kept)
+            .map(|(&follower, kept)| {
+                kept.unwrap_or_else(|| {
                     let ends = [
                         taken.iter().max().copied().unwrap_or(0) + 1,
                         taken.iter().min().copied().unwrap_or(0) - 1,
                     ];
+                    let avatar = &self.avatars[follower];
                     let towards = avatar
                         .slot
                         .as_ref()
@@ -686,7 +696,7 @@ impl State {
                     } else {
                         ends
                     };
-                    order
+                    let step = order
                         .into_iter()
                         .find(|&step| choice.free_cell(chosen.dock, step))
                         .unwrap_or_else(|| {
@@ -695,10 +705,10 @@ impl State {
                                 .into_iter()
                                 .find(|&step| choice.on_edge(chosen.dock, step))
                                 .unwrap_or(order[0])
-                        })
-                });
-                taken.push(step);
-                step
+                        });
+                    taken.push(step);
+                    step
+                })
             })
             .collect();
         (steps, crowded)
@@ -751,8 +761,9 @@ impl State {
                     && !travel.travelling(pulse.author, self.tick)
             })
             .flat_map(|pulse| {
-                let origin = bodies[pulse.author]
-                    .and_then(|_| self.screen(self.beam_origin(pulse.author)));
+                let origin = bodies[pulse.author].and_then(|_| {
+                    self.screen(self.beam_origin(pulse.author, pulse.commit))
+                });
                 pulse.targets.iter().filter_map(move |&(target, ..)| {
                     Some((origin?, self.screen(self.point(target)?)?))
                 })
@@ -2377,9 +2388,17 @@ mod tests {
                     gathered.insert(pulse.commit);
                 }
             }
+            let origins: Vec<_> = sim
+                .state
+                .pulses
+                .iter()
+                .map(|p| sim.state.beam_origin(p.author, p.commit))
+                .collect();
             for beam in sim.beams() {
-                let origin = sim.state.beam_origin(beam.author);
-                assert_eq!(beam.from, origin, "frame {frame}: one origin per commit");
+                assert!(
+                    origins.contains(&beam.from),
+                    "frame {frame}: beam off its origin"
+                );
             }
         }
         assert_eq!(gathered.into_iter().collect::<Vec<_>>(), shared);

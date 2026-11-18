@@ -400,7 +400,7 @@ impl MovingBeams {
             };
             self.missing_tile_beams +=
                 u64::from(state.layout.repositories[own].tile.is_none());
-            let position = state.beam_origin(pulse.author);
+            let position = state.beam_origin(pulse.author, pulse.commit);
             let from = bevy::math::Vec2::new(position.x, position.z);
             let to = bevy::math::Vec2::new(to.x, to.z);
             let footprint = match target {

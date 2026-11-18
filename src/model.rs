@@ -1150,18 +1150,16 @@ impl Simulation {
     }
 
     fn arrival_position(&self, id: u64, file: &crate::layout::File, to: Vec3) -> Vec3 {
-        if self.state.avatars.get(file.author).is_none() {
+        let Some(avatar) = self.state.avatars.get(file.author) else {
             return to;
-        }
-        let from = self.state.beam_origin(file.author);
-        let endpoint = self
-            .state
-            .pulses
-            .iter()
-            .rev()
-            .find(|pulse| {
-                pulse.author == file.author && pulse.touched.binary_search(&id).is_ok()
-            })
+        };
+        let pulse = self.state.pulses.iter().rev().find(|pulse| {
+            pulse.author == file.author && pulse.touched.binary_search(&id).is_ok()
+        });
+        let from = pulse.map_or(avatar.position, |pulse| {
+            self.state.beam_origin(pulse.author, pulse.commit)
+        });
+        let endpoint = pulse
             .filter(|pulse| pulse.aggregated)
             .and_then(|pulse| pulse.directory_target(file.dir, self.layout()))
             .and_then(|target| self.state.point(target));
@@ -1507,7 +1505,7 @@ impl Simulation {
             if envelope <= 0.0 {
                 continue;
             }
-            let from = self.state.beam_origin(pulse.author);
+            let from = self.state.beam_origin(pulse.author, pulse.commit);
             for &(target, weight, ..) in &pulse.targets {
                 if let Some(to) = self.state.point(target) {
                     beams.push(Beam {
@@ -1543,7 +1541,7 @@ impl Simulation {
                 Some((.., members)) => members.push(index),
                 None => groups.push((
                     group.lead,
-                    state.beam_origin(group.lead),
+                    state.beam_origin(group.lead, lead.commit),
                     vec![index],
                 )),
             }
@@ -1579,7 +1577,7 @@ impl Simulation {
             if envelope <= 0.0 {
                 continue;
             }
-            let from = self.state.beam_origin(pulse.author);
+            let from = self.state.beam_origin(pulse.author, pulse.commit);
             for &(target, _, insertions, removals) in
                 pulse.targets.iter().take(FRAGMENT_TARGETS)
             {
@@ -2048,14 +2046,14 @@ impl State {
         }
     }
 
-    /// Where an author's beams start: the middle of their group's parking row, or the
-    /// author alone.
-    fn beam_origin(&self, author: usize) -> Vec3 {
+    /// Where an author's beams for `commit` start: the middle of their group's parking
+    /// row while they still serve that commit, or else the author alone.
+    fn beam_origin(&self, author: usize, commit: usize) -> Vec3 {
         let avatar = &self.avatars[author];
         let (Some(slot), Some(group)) = (&avatar.slot, avatar.group) else {
             return avatar.position;
         };
-        if group.lead != author {
+        if group.lead != author || avatar.commit != commit {
             return avatar.position;
         }
         let (sum, count) = self
