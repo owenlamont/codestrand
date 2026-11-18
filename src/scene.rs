@@ -3676,6 +3676,7 @@ mod tests {
             bot: None,
             key: crate::contributors::Key::Config(0),
             name: "Portrait".to_owned(),
+            email: Vec::new(),
             accounts: default(),
             portrait: Some(std::sync::Arc::new(crate::avatars::Portrait {
                 pixels: vec![255; 128 * 128 * 4],
@@ -4733,6 +4734,8 @@ mod tests {
                 },
                 repository: 0,
                 contributor: None,
+                co_authors: Vec::new(),
+                co_contributors: Vec::new(),
                 commit: String::new(),
                 seconds: 86_400 * i64::try_from(index).expect("small fixture"),
                 changes: vec![FileChange {
@@ -4917,6 +4920,8 @@ mod tests {
                 },
                 repository: 0,
                 contributor: None,
+                co_authors: Vec::new(),
+                co_contributors: Vec::new(),
                 commit: String::new(),
                 seconds: 0,
                 changes: vec![FileChange {
@@ -4934,6 +4939,8 @@ mod tests {
                 },
                 repository: 0,
                 contributor: None,
+                co_authors: Vec::new(),
+                co_contributors: Vec::new(),
                 commit: String::new(),
                 seconds: 86_400,
                 changes: vec![FileChange {

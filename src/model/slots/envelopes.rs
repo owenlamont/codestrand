@@ -147,6 +147,8 @@ mod tests {
                 name: b"Ada".to_vec(),
                 email: b"ada@example.invalid".to_vec(),
             },
+            co_authors: Vec::new(),
+            co_contributors: Vec::new(),
             commit: String::new(),
             contributor: None,
             seconds,

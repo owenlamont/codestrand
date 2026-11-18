@@ -719,6 +719,8 @@ mod tests {
             },
             repository: 0,
             contributor: None,
+            co_authors: Vec::new(),
+            co_contributors: Vec::new(),
             commit: String::new(),
             changes: changes
                 .iter()
@@ -1245,6 +1247,8 @@ mod rate_probe {
                 },
                 repository: 0,
                 contributor: None,
+                co_authors: Vec::new(),
+                co_contributors: Vec::new(),
                 commit: String::new(),
                 changes: paths
                     .into_iter()

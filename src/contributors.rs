@@ -25,13 +25,15 @@ pub(super) enum Key {
 pub(super) struct Contributor {
     pub key: Key,
     pub name: String,
+    /// The email this contributor was matched by in the commit at hand.
+    pub email: Vec<u8>,
     pub bot: Option<bool>,
     pub accounts: Accounts,
     pub portrait: Option<std::sync::Arc<crate::avatars::Portrait>>,
 }
 
 impl Contributor {
-    pub(super) fn bot_rule(&self, email: &[u8]) -> &'static str {
+    pub(super) fn bot_rule(&self) -> &'static str {
         if let Some(bot) = self.bot {
             return if bot {
                 "override_bot"
@@ -39,7 +41,7 @@ impl Contributor {
                 "override_human"
             };
         }
-        if crate::avatars::noreply(&String::from_utf8_lossy(email))
+        if crate::avatars::noreply(&String::from_utf8_lossy(&self.email))
             .is_some_and(|login| login.ends_with("[bot]"))
         {
             "github_noreply"
@@ -50,9 +52,9 @@ impl Contributor {
         }
     }
 
-    pub(super) fn is_bot(&self, email: &[u8]) -> bool {
+    pub(super) fn is_bot(&self) -> bool {
         matches!(
-            self.bot_rule(email),
+            self.bot_rule(),
             "override_bot" | "github_noreply" | "name_suffix"
         )
     }
@@ -238,6 +240,7 @@ impl Mappings {
                 let contributor = Contributor {
                     key: Key::Config(index),
                     name: entry.name.clone(),
+                    email: Vec::new(),
                     bot: entry.bot,
                     accounts: Accounts {
                         github: entry.github.clone(),
@@ -258,36 +261,60 @@ impl Mappings {
         Ok(Self { emails })
     }
 
+    /// Resolves each commit's author and co-authors. An unlisted person is named as in
+    /// their latest authored commit, or their latest co-author trailer if they authored
+    /// none.
     pub(super) fn apply(&self, events: &mut [Event]) {
         let mut names = HashMap::new();
         for event in events.iter() {
-            names.insert(
-                unlisted_key(event),
-                String::from_utf8_lossy(&event.author.name).into_owned(),
-            );
+            for identity in &event.co_authors {
+                names.insert(unlisted_key(identity), identity.name.as_slice());
+            }
         }
+        for event in events.iter() {
+            names.insert(unlisted_key(&event.author), event.author.name.as_slice());
+        }
+        let names: HashMap<_, _> = names
+            .into_iter()
+            .map(|(key, name)| (key, String::from_utf8_lossy(name).into_owned()))
+            .collect();
+        let resolve = |identity: &crate::timeline::Identity| {
+            let email = identity.email.to_ascii_lowercase();
+            let mut contributor = self.emails.get(&email).cloned().unwrap_or_else(|| {
+                let key = unlisted_key(identity);
+                Contributor {
+                    bot: None,
+                    name: names[&key].clone(),
+                    email: Vec::new(),
+                    accounts: Accounts::default(),
+                    portrait: None,
+                    key,
+                }
+            });
+            contributor.email.clone_from(&identity.email);
+            contributor
+        };
         for event in events {
-            let email = event.author.email.to_ascii_lowercase();
-            event.contributor =
-                Some(self.emails.get(&email).cloned().unwrap_or_else(|| {
-                    let key = unlisted_key(event);
-                    Contributor {
-                        bot: None,
-                        name: names[&key].clone(),
-                        accounts: Accounts::default(),
-                        portrait: None,
-                        key,
-                    }
-                }));
+            let author = resolve(&event.author);
+            let mut co_contributors: Vec<Contributor> = Vec::new();
+            for contributor in event.co_authors.iter().map(resolve) {
+                if contributor.key != author.key
+                    && co_contributors.iter().all(|c| c.key != contributor.key)
+                {
+                    co_contributors.push(contributor);
+                }
+            }
+            event.contributor = Some(author);
+            event.co_contributors = co_contributors;
         }
     }
 }
 
-fn unlisted_key(event: &Event) -> Key {
-    if event.author.email.is_empty() {
-        Key::Name(event.author.name.clone())
+fn unlisted_key(identity: &crate::timeline::Identity) -> Key {
+    if identity.email.is_empty() {
+        Key::Name(identity.name.clone())
     } else {
-        Key::Email(event.author.email.to_ascii_lowercase())
+        Key::Email(identity.email.to_ascii_lowercase())
     }
 }
 
@@ -314,7 +341,7 @@ mod tests {
         Mappings::default().apply(&mut history);
         let rules: Vec<_> = history
             .iter()
-            .map(|e| e.contributor.as_ref().unwrap().bot_rule(&e.author.email))
+            .map(|e| e.contributor.as_ref().unwrap().bot_rule())
             .collect();
         assert_eq!(rules, ["github_noreply", "human", "name_suffix", "human"]);
         for (value, expected) in [(false, "override_human"), (true, "override_bot")] {
@@ -325,7 +352,7 @@ mod tests {
                     .contributor
                     .as_ref()
                     .unwrap()
-                    .bot_rule(&history[0].author.email),
+                    .bot_rule(),
                 expected
             );
             assert_eq!(
@@ -333,7 +360,7 @@ mod tests {
                     .contributor
                     .as_ref()
                     .unwrap()
-                    .is_bot(&history[0].author.email),
+                    .is_bot(),
                 value
             );
         }
@@ -441,6 +468,8 @@ mod tests {
                 },
                 repository: 0,
                 contributor: None,
+                co_authors: Vec::new(),
+                co_contributors: Vec::new(),
                 commit: String::new(),
                 seconds: 0,
                 changes: vec![timeline::FileChange {

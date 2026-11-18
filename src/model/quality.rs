@@ -430,6 +430,8 @@ mod tests {
             },
             repository: 0,
             contributor: None,
+            co_authors: Vec::new(),
+            co_contributors: Vec::new(),
             commit: String::new(),
             seconds: 0,
             changes: vec![timeline::FileChange {

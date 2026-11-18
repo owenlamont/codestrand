@@ -162,6 +162,12 @@ fn valid_snapshot(snapshot: &Snapshot, tip: &str) -> bool {
             || !commits.insert(&event.commit)
             || event.author.name.len() > 4096
             || event.author.email.len() > 4096
+            || event.co_authors.len() > timeline::MAX_CO_AUTHORS
+            || event.co_authors.iter().any(|identity| {
+                identity.email.is_empty()
+                    || identity.email.len() > timeline::MAX_IDENTITY_BYTES
+                    || identity.name.len() > timeline::MAX_IDENTITY_BYTES
+            })
             || !(-62_135_596_800..=253_402_300_799).contains(&event.seconds)
         {
             return false;

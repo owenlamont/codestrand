@@ -3,7 +3,14 @@ use std::{collections::HashMap, fmt::Write};
 use crate::history::{BlobDiff, ChangeKind, Commit, History};
 
 // Bump when the snapshot format, history import policies or timeline conversion change.
-pub(super) const CACHE_VERSION: u32 = 6;
+pub(super) const CACHE_VERSION: u32 = 7;
+
+/// Co-authors read from one commit; later `Co-authored-by:` trailers are ignored.
+pub(super) const MAX_CO_AUTHORS: usize = 8;
+/// Name or email bytes beyond which a co-author trailer is ignored.
+pub(super) const MAX_IDENTITY_BYTES: usize = 4096;
+/// Trailers are parsed from at most this many final message bytes.
+const TRAILER_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(super) enum Kind {
@@ -37,11 +44,26 @@ pub(super) struct Event {
     #[serde(skip)]
     pub repository: usize,
     pub author: Identity,
+    /// `Co-authored-by:` identities, excluding the author and repeated emails.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub co_authors: Vec<Identity>,
     pub commit: String,
     #[serde(skip)]
     pub contributor: Option<crate::contributors::Contributor>,
+    /// Resolved co-authors, excluding any that resolve to the author's contributor.
+    #[serde(skip)]
+    pub co_contributors: Vec<crate::contributors::Contributor>,
     pub seconds: i64,
     pub changes: Vec<FileChange>,
+}
+
+impl Event {
+    /// The author's contributor, then each co-author's.
+    pub(super) fn participants(
+        &self,
+    ) -> impl Iterator<Item = &crate::contributors::Contributor> {
+        self.contributor.iter().chain(&self.co_contributors)
+    }
 }
 
 /// Events along the first-parent chain, whose first-parent diffs transition each
@@ -70,13 +92,62 @@ pub(super) fn from_history(history: &History) -> Vec<Event> {
                 name: commit.author.name.clone(),
                 email: commit.author.email.clone(),
             },
+            co_authors: co_authors(&commit.message, &commit.author.email),
             repository: 0,
             contributor: None,
+            co_contributors: Vec::new(),
             commit: commit.id.clone(),
             seconds: commit.author.seconds,
             changes: sampled_changes(commit),
         })
         .collect()
+}
+
+/// Reads `Co-authored-by: Name <email>` trailers as Git and GitHub do: from the
+/// message's final trailer block, skipping malformed, oversized, empty-email and
+/// repeated identities, up to [`MAX_CO_AUTHORS`].
+fn co_authors(message: &[u8], author_email: &[u8]) -> Vec<Identity> {
+    let cut = message.len().saturating_sub(TRAILER_BYTES);
+    let tail = if cut == 0 {
+        message
+    } else {
+        // Start on a line boundary so a cut line is not misread as a trailer.
+        message[cut..]
+            .iter()
+            .position(|&byte| byte == b'\n')
+            .map_or(&[][..], |newline| &message[cut + newline + 1..])
+    };
+    let mut seen = vec![author_email.to_ascii_lowercase()];
+    let mut found = Vec::new();
+    let Some(body) = gix::objs::commit::MessageRef::from_bytes(tail).body() else {
+        return found;
+    };
+    for trailer in body.trailers().co_authored_by() {
+        if found.len() == MAX_CO_AUTHORS {
+            break;
+        }
+        let mut value: &[u8] = &trailer.value;
+        let Ok(identity) = gix::actor::IdentityRef::from_bytes_consuming(&mut value)
+        else {
+            continue;
+        };
+        let identity = identity.trim();
+        let email = identity.email.to_ascii_lowercase();
+        if !value.trim_ascii().is_empty()
+            || email.is_empty()
+            || email.len() > MAX_IDENTITY_BYTES
+            || identity.name.len() > MAX_IDENTITY_BYTES
+            || seen.contains(&email)
+        {
+            continue;
+        }
+        seen.push(email);
+        found.push(Identity {
+            name: identity.name.to_vec(),
+            email: identity.email.to_vec(),
+        });
+    }
+    found
 }
 
 fn sampled_changes(commit: &Commit) -> Vec<FileChange> {
@@ -148,8 +219,10 @@ fn synthetic_event(author: &str, changes: Vec<FileChange>, index: usize) -> Even
             name: author.as_bytes().to_vec(),
             email: format!("{author}@example.invalid").into_bytes(),
         },
+        co_authors: Vec::new(),
         repository: 0,
         contributor: None,
+        co_contributors: Vec::new(),
         commit: String::new(),
         seconds: 1_700_000_000 + 86_400 * i64::try_from(index).unwrap_or(0),
         changes,

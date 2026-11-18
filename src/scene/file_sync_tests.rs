@@ -8,6 +8,8 @@ fn event(seconds: i64, changes: Vec<FileChange>) -> Event {
             name: b"author".to_vec(),
             email: b"author@example.invalid".to_vec(),
         },
+        co_authors: Vec::new(),
+        co_contributors: Vec::new(),
         commit: String::new(),
         contributor: None,
         seconds,

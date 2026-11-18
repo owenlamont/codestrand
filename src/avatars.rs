@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    contributors::{Accounts, Avatar, Key},
+    contributors::{Accounts, Avatar, Contributor, Key},
     timeline::Event,
 };
 
@@ -344,15 +344,12 @@ pub(super) fn now() -> u64 {
         .as_secs()
 }
 
-fn priority(event: &Event) -> u8 {
-    if event.contributor.as_ref().is_some_and(|contributor| {
-        let accounts = &contributor.accounts;
-        accounts.github.is_some()
-            || accounts.gitlab.is_some()
-            || accounts.avatar.is_some()
-    }) {
+fn priority(contributor: &Contributor) -> u8 {
+    let accounts = &contributor.accounts;
+    if accounts.github.is_some() || accounts.gitlab.is_some() || accounts.avatar.is_some()
+    {
         0
-    } else if noreply(&String::from_utf8_lossy(&event.author.email)).is_some() {
+    } else if noreply(&String::from_utf8_lossy(&contributor.email)).is_some() {
         1
     } else {
         2
@@ -424,28 +421,35 @@ impl<N: Network> Resolver<N> {
     pub(super) fn resolve(&mut self, events: &mut [Event], remote: Option<&str>) {
         let mut portraits = HashMap::<Key, Arc<Portrait>>::new();
         let mut seen = HashSet::new();
-        let mut candidates: Vec<_> = events
-            .iter_mut()
-            .filter(|event| {
-                event.contributor.as_ref().is_some_and(|contributor| {
-                    seen.insert((
-                        contributor.key.clone(),
-                        event.author.email.to_ascii_lowercase(),
-                    ))
-                })
+        // Only an author's own commit can identify their GitHub account, so a co-author
+        // is looked up with no commit.
+        let mut candidates: Vec<(&Contributor, &str)> = events
+            .iter()
+            .flat_map(|event| {
+                let commit = event.commit.as_str();
+                event
+                    .contributor
+                    .iter()
+                    .map(move |contributor| (contributor, commit))
+                    .chain(event.co_contributors.iter().map(|c| (c, "")))
+            })
+            .filter(|(contributor, _)| {
+                seen.insert((
+                    contributor.key.clone(),
+                    contributor.email.to_ascii_lowercase(),
+                ))
             })
             .collect();
-        candidates.sort_by_key(|event| priority(event));
+        candidates.sort_by_key(|&(contributor, commit)| {
+            (priority(contributor), commit.is_empty())
+        });
         let total = candidates.len();
         let mut processed = 0;
-        for event in candidates {
-            let Some(contributor) = &mut event.contributor else {
-                continue;
-            };
+        for (contributor, commit) in candidates {
             if portraits.contains_key(&contributor.key) {
                 continue;
             }
-            let email = String::from_utf8_lossy(&event.author.email)
+            let email = String::from_utf8_lossy(&contributor.email)
                 .trim()
                 .to_ascii_lowercase();
             let accounts = &contributor.accounts;
@@ -474,7 +478,7 @@ impl<N: Network> Resolver<N> {
                         "avatars: resolving {processed}/{total} (30s fetch budget)"
                     );
                 }
-                let portrait = self.one(&key, &email, accounts, remote, &event.commit);
+                let portrait = self.one(&key, &email, accounts, remote, commit);
                 self.memo.insert(key, portrait.clone());
                 portrait
             };
@@ -485,7 +489,11 @@ impl<N: Network> Resolver<N> {
         self.network
             .summary(portraits.len(), seen.len(), remote.is_none());
         for event in events {
-            if let Some(contributor) = &mut event.contributor {
+            for contributor in event
+                .contributor
+                .iter_mut()
+                .chain(&mut event.co_contributors)
+            {
                 contributor.portrait = portraits.get(&contributor.key).cloned();
             }
         }
@@ -834,7 +842,7 @@ mod tests {
     use std::{collections::VecDeque, fs};
 
     use super::*;
-    use crate::contributors::{Accounts, Contributor};
+    use crate::contributors::Accounts;
 
     #[test]
     fn linked_avatar_cache_does_not_write_outside() {
@@ -966,12 +974,15 @@ mod tests {
                 bot: None,
                 key: Key::Email(email.as_bytes().to_vec()),
                 name: "Author".to_owned(),
+                email: email.as_bytes().to_vec(),
                 accounts: Accounts {
                     github: github.map(str::to_owned),
                     ..Accounts::default()
                 },
                 portrait: None,
             }),
+            co_authors: Vec::new(),
+            co_contributors: Vec::new(),
             commit: "0123456789012345678901234567890123456789".to_owned(),
             seconds: 0,
             changes: vec![],
@@ -1330,8 +1341,8 @@ mod tests {
         let mut avatar = event("avatar@example.invalid", None);
         avatar.contributor.as_mut().unwrap().accounts.avatar =
             Some(Avatar::Remote("https://example.invalid/a.png".to_owned()));
-        assert!(priority(&gitlab) < priority(&inferred));
-        assert!(priority(&avatar) < priority(&inferred));
+        assert!(priority(gitlab.contributor.as_ref().unwrap()) < priority(inferred.contributor.as_ref().unwrap()));
+        assert!(priority(avatar.contributor.as_ref().unwrap()) < priority(inferred.contributor.as_ref().unwrap()));
     }
 
     #[test]

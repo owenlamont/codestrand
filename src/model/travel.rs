@@ -469,7 +469,7 @@ fn replay(simulation: &mut Simulation, frames: u32) -> Capture {
                     .expect("tile exists before service")
                     .point,
                 radius: state.avatar_radius(),
-                bot: contributor.is_bot(&simulation.events[event].author.email),
+                bot: contributor.is_bot(),
                 dock: avatar.slot.as_ref().expect("service slot").dock,
             });
         }
