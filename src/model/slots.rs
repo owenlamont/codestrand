@@ -777,7 +777,12 @@ impl State {
             let body = bodies[index].expect("projected visible avatar");
             let size = self.name_size(&displayed[index]);
             let distance = self.avatar_radius() + 4.0 / 3.0;
-            let previous = self.avatars[index].name_visibility.placement.as_ref();
+            // A body that jumps further than its name's width has no on-screen motion to follow.
+            let previous = self.avatars[index]
+                .name_visibility
+                .placement
+                .as_ref()
+                .filter(|placement| placement.body.distance(body) <= size.x);
             let (angle, angular_velocity, motion) = previous.map_or_else(
                 || {
                     (

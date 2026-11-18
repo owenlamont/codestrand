@@ -2797,6 +2797,7 @@ mod tests {
                 simulation.state.avatar_scale * options.avatar_size * detail
             );
         }
+        simulation.assert_stitched_travel_rules();
     }
 
     #[test]

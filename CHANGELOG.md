@@ -31,6 +31,9 @@ All notable changes to Codestrand are documented here, following
 - Many repositories starting on the same day no longer stop playback with
   "presence-scaled tiles remain feasible" while their tiles ease in.
   ([#180](https://github.com/owenlamont/codestrand/pull/180))
+- A contributor name no longer vanishes for a moment under the top caption bar when its
+  avatar jumps to another repository without travelling.
+  ([#180](https://github.com/owenlamont/codestrand/pull/180))
 
 ## v0.2.0 - 2026-11-16
 
