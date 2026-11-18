@@ -391,6 +391,7 @@ impl Source {
             histories.push(events);
         }
         let mut events = boundaries;
+        events.sort_by_key(|event| event.seconds);
         let settled = events.len();
         if histories.len() == 1 {
             events.append(&mut histories[0]);

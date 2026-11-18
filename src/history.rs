@@ -547,21 +547,37 @@ fn refusal(
     ))
 }
 
-/// The first UTC day whose selection starts after `after`, if that range and its
-/// boundary fit; `spent` holds the charges after each link, newest first.
+/// The first UTC day whose selection starts after `after` with a range and boundary
+/// that fit; `spent` holds the charges after each link, newest first. Boundary trials
+/// share one work allowance, so the search stays within the import's own work limit.
 fn later_start(
     repo: &gix::Repository,
     links: &[Link],
-    after: usize,
+    mut after: usize,
     mut budget: Budget,
     spent: &[Spent],
 ) -> Option<i64> {
-    let latest = links.get(..=after)?.iter().map(|link| link.seconds).max()?;
-    let date = (latest.div_euclid(86_400) + 1) * 86_400;
-    let start = links.iter().position(|link| link.seconds >= date)?;
-    budget.spent = spent[links.len() - 1 - start];
-    boundary(repo, &links[start - 1], &mut budget).ok()?;
-    Some(date)
+    let mut trials = 0;
+    loop {
+        let latest = links.get(..=after)?.iter().map(|link| link.seconds).max()?;
+        let date = (latest.div_euclid(86_400) + 1) * 86_400;
+        let start = links.iter().position(|link| link.seconds >= date)?;
+        let before = spent[links.len() - 1 - start];
+        budget.spent = before;
+        let fits = boundary(repo, &links[start - 1], &mut budget).is_ok();
+        trials = budget
+            .spent
+            .work
+            .saturating_sub(before.work)
+            .saturating_add(trials);
+        if fits {
+            return Some(date);
+        }
+        if trials > budget.limits.work {
+            return None;
+        }
+        after = start;
+    }
 }
 
 fn scan(
@@ -1371,19 +1387,21 @@ mod security_tests {
         assert_eq!(fitted.boundary.unwrap().id, first.to_string());
     }
 
-    #[test]
-    fn a_boundary_over_budget_names_a_later_start() {
-        let (_root, repo, root) = hostile_history(0, b"ok\n");
+    /// A root commit on 2023-11-14 holding one file, then one commit per `(day, files)`
+    /// after it whose tree holds that many files.
+    fn daily_history(
+        days: &[(i64, usize)],
+    ) -> (tempfile::TempDir, gix::Repository, Vec<Link>) {
+        let (root, repo, mut parent) = hostile_history(0, b"ok\n");
         let blob = repo.write_blob(b"ok\n").unwrap().detach();
         let mut commit = repo
-            .find_commit(root)
+            .find_commit(parent)
             .unwrap()
             .decode()
             .unwrap()
             .to_owned()
             .unwrap();
-        let mut parent = root;
-        for (day, files) in [(0, 10), (1, 1), (2, 2)] {
+        for &(day, files) in days {
             commit.tree = repo
                 .write_object(&gix::objs::Tree {
                     entries: (0..files)
@@ -1401,23 +1419,46 @@ mod security_tests {
             parent = repo.write_object(&commit).unwrap().detach();
         }
         let links = scan(&repo, parent, &mut Budget::new(Limits::default())).unwrap();
-        let limits = Limits {
-            entries: 12,
-            ..Limits::default()
-        };
-        let error = load_with_limits(&repo, parent, &links, 2, limits)
-            .err()
-            .unwrap();
-        assert!(
-            format!("{error:#}").contains(&format!(
-                "commit {} dated 2023-11-14 UTC exceeds the import budget; --start-date 2023-11-16 fits",
-                links[1].id
-            )),
-            "{error:#}"
-        );
-        assert!(load_with_limits(&repo, parent, &links, 3, limits).is_ok());
+        (root, repo, links)
     }
 
+    /// The refusal for `skip`, after checking that the last link alone fits.
+    fn refusal_text(repo: &gix::Repository, links: &[Link], skip: usize) -> String {
+        let tip = links.last().unwrap().id;
+        let limits = Limits {
+            entries: 25,
+            ..Limits::default()
+        };
+        assert!(load_with_limits(repo, tip, links, links.len() - 1, limits).is_ok());
+        format!(
+            "{:#}",
+            load_with_limits(repo, tip, links, skip, limits)
+                .err()
+                .unwrap()
+        )
+    }
+
+    #[test]
+    fn a_boundary_over_budget_names_a_later_start() {
+        let (_root, repo, links) = daily_history(&[(0, 20), (1, 1), (2, 2)]);
+        let error = refusal_text(&repo, &links, 2);
+        let expected = format!(
+            "commit {} dated 2023-11-14 UTC exceeds the import budget; --start-date 2023-11-16 fits",
+            links[1].id
+        );
+        assert!(error.contains(&expected), "{error}");
+    }
+
+    #[test]
+    fn a_later_start_skips_candidates_whose_boundary_is_over_budget() {
+        let (_root, repo, links) = daily_history(&[(1, 20), (2, 1), (3, 2)]);
+        let error = refusal_text(&repo, &links, 0);
+        let expected = format!(
+            "commit {} dated 2023-11-15 UTC exceeds the import budget; --start-date 2023-11-17 fits",
+            links[1].id
+        );
+        assert!(error.contains(&expected), "{error}");
+    }
     #[test]
     fn each_independent_budget_refuses() {
         let (_root, repo, tip) = hostile_history(0, b"first\nsecond\n");

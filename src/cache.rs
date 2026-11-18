@@ -624,6 +624,7 @@ mod tests {
                     )
                     .unwrap();
                 assert_eq!(range, count..count + selected.len());
+                assert!(events[..count].is_sorted_by_key(|event| event.seconds));
                 assert_eq!(events[range], whole[selected.clone()]);
                 assert_eq!(
                     present(&events[..count]),
