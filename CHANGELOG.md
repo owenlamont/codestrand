@@ -42,6 +42,9 @@ All notable changes to Codestrand are documented here, following
 
 ### Fixed
 
+- Camera path files are limited to 1 MiB like the other TOML inputs, and every TOML
+  input names a FIFO or device as not a regular file instead of waiting on it.
+  ([#184](https://github.com/owenlamont/codestrand/pull/184))
 - Many repositories starting on the same day no longer stop playback with
   "presence-scaled tiles remain feasible" while their tiles ease in.
   ([#180](https://github.com/owenlamont/codestrand/pull/180))

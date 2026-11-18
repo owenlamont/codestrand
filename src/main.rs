@@ -32,6 +32,7 @@ mod progress;
 mod repositories;
 mod resolution;
 mod scene;
+mod small_file;
 mod theme;
 mod timeline;
 
