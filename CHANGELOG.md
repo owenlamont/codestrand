@@ -32,6 +32,9 @@ All notable changes to Codestrand are documented here, following
   [#181](https://github.com/owenlamont/codestrand/pull/181))
 - The `bevelled-desktop` theme is now `retro-desktop`, titled "Retro Desktop"; the old
   name is no longer accepted. ([#185](https://github.com/owenlamont/codestrand/pull/185))
+- Every theme shows file type icons: Outrun, Blueprint and Retro Desktop frame them,
+  Atlas shows them bare and Forge cuts them through its plates.
+  ([#195](https://github.com/owenlamont/codestrand/pull/195))
 
 ### Fixed
 
