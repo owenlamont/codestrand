@@ -557,11 +557,18 @@ fn later_start(
     mut budget: Budget,
     spent: &[Spent],
 ) -> Option<i64> {
-    let mut trials = 0;
+    let mut latest = links.get(..=after)?.iter().map(|link| link.seconds).max()?;
+    let mut trials = 0u64;
     loop {
-        let latest = links.get(..=after)?.iter().map(|link| link.seconds).max()?;
-        let date = (latest.div_euclid(86_400) + 1) * 86_400;
-        let start = links.iter().position(|link| link.seconds >= date)?;
+        let date = latest
+            .div_euclid(86_400)
+            .checked_add(1)?
+            .checked_mul(86_400)?;
+        let start = after
+            + 1
+            + links[after + 1..]
+                .iter()
+                .position(|link| link.seconds >= date)?;
         let before = spent[links.len() - 1 - start];
         budget.spent = before;
         let fits = boundary(repo, &links[start - 1], &mut budget).is_ok();
@@ -570,12 +577,14 @@ fn later_start(
             .work
             .saturating_sub(before.work)
             .saturating_add(trials);
-        if fits {
-            return Some(date);
-        }
         if trials > budget.limits.work {
             return None;
         }
+        if fits {
+            let accepted = crate::start_date(&crate::model::date(date)) == Ok(date);
+            return accepted.then_some(date);
+        }
+        latest = links[start].seconds;
         after = start;
     }
 }
@@ -628,7 +637,8 @@ fn boundary(
 ) -> anyhow::Result<Commit> {
     budget.object(repo, link.id)?;
     let commit = repo.find_commit(link.id)?;
-    budget.tree(repo, link.tree, 0)?;
+    let (entries, ..) = budget.tree(repo, link.tree, 0)?;
+    budget.charge(entries)?;
     let mut recorder = gix::traverse::tree::Recorder::default();
     repo.find_tree(link.tree)?
         .traverse()
@@ -1459,6 +1469,15 @@ mod security_tests {
         );
         assert!(error.contains(&expected), "{error}");
     }
+    #[test]
+    fn a_start_date_the_cli_rejects_is_not_suggested() {
+        let year_10000 = 2_913_241;
+        let (_root, repo, links) =
+            daily_history(&[(1, 20), (year_10000, 1), (year_10000 + 1, 2)]);
+        let error = refusal_text(&repo, &links, 0);
+        assert!(error.contains("no later --start-date fits"), "{error}");
+    }
+
     #[test]
     fn each_independent_budget_refuses() {
         let (_root, repo, tip) = hostile_history(0, b"first\nsecond\n");
