@@ -3,7 +3,11 @@ use std::ops::Range;
 use bevy::math::{Vec2, Vec3};
 
 use super::{Envelope, Target, ground, place_point};
-use crate::{layout::packing::Packing, model::State, timeline::Event};
+use crate::{
+    layout::packing::Packing,
+    model::{FragmentPace, State},
+    timeline::Event,
+};
 
 struct ServiceFrame {
     tick: u64,
@@ -21,20 +25,17 @@ pub(in crate::model) struct Snapshots {
 impl Snapshots {
     /// The most ticks one pulse is captured on: one for each started tick of its
     /// longest lifetime, and a spare.
-    pub(in crate::model) fn pulse_ticks() -> usize {
+    pub(in crate::model) fn pulse_ticks(pace: FragmentPace) -> usize {
         usize::try_from(
-            crate::model::frames_for(
-                crate::model::pulse_end(crate::model::Time::ZERO),
-                60,
-            )
-            .expect("bounded pulse"),
+            crate::model::frames_for(pace.pulse_end(crate::model::Time::ZERO), 60)
+                .expect("bounded pulse"),
         )
         .expect("pulse ticks fit usize")
             + 1
     }
 
-    fn capacity(events: &[Event]) -> (usize, usize) {
-        let ticks = Self::pulse_ticks();
+    fn capacity(events: &[Event], pace: FragmentPace) -> (usize, usize) {
+        let ticks = Self::pulse_ticks(pace);
         let points = events
             .iter()
             .map(|event| event.changes.len() * 2)
@@ -42,14 +43,17 @@ impl Snapshots {
         (points * ticks, events.len() * ticks)
     }
 
-    pub(in crate::model) fn estimated_bytes(events: &[Event]) -> u128 {
-        let (points, frames) = Self::capacity(events);
+    pub(in crate::model) fn estimated_bytes(
+        events: &[Event],
+        pace: FragmentPace,
+    ) -> u128 {
+        let (points, frames) = Self::capacity(events, pace);
         points as u128 * std::mem::size_of::<Vec2>() as u128
             + frames as u128 * std::mem::size_of::<ServiceFrame>() as u128
     }
 
-    pub(in crate::model) fn new(events: &[Event]) -> Self {
-        let (points, frames) = Self::capacity(events);
+    pub(in crate::model) fn new(events: &[Event], pace: FragmentPace) -> Self {
+        let (points, frames) = Self::capacity(events, pace);
         Self {
             points: Vec::with_capacity(points),
             frames: Vec::with_capacity(frames),
@@ -205,9 +209,16 @@ mod tests {
                     &mut None,
                 )
                 .unwrap();
-                let mut snapshots = Snapshots::new(&sim.events);
+                let mut snapshots =
+                    Snapshots::new(&sim.events, options.fragment_pace());
                 let bytes = snapshots.allocated_bytes();
-                assert_eq!(Snapshots::estimated_bytes(&events[start..]), bytes as u128);
+                assert_eq!(
+                    Snapshots::estimated_bytes(
+                        &events[start..],
+                        options.fragment_pace()
+                    ),
+                    bytes as u128
+                );
                 for tick in 0..=crate::model::frames_for(sim.duration(), 60).unwrap() {
                     sim.advance_to(tick, 60);
                     snapshots.capture(&sim.state);

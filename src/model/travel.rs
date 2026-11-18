@@ -1049,6 +1049,52 @@ mod tests {
         );
     }
     #[test]
+    fn a_slower_fragment_speed_holds_the_trip_until_the_last_fragment_lands() {
+        let mut events = Vec::new();
+        for (index, repository) in [0, 1, 1].into_iter().enumerate() {
+            let mut event = crate::timeline::synthetic().remove(0);
+            event.seconds = i64::try_from(index).unwrap() * 2 * 86_400;
+            if index == 1 {
+                event.author.email = b"other@example.invalid".to_vec();
+            }
+            let mut history = vec![event];
+            crate::repositories::namespace(&mut history, repository);
+            events.extend(history);
+        }
+        let departures = [1.0, 0.5].map(|scale| {
+            let options = super::super::Options {
+                seconds_per_day: 1.0,
+                max_idle_seconds: 30.0,
+                travel_cap: super::super::TravelCap::None,
+                fragment_speed: scale,
+                ..Default::default()
+            };
+            let mut simulation = Simulation::build(
+                events.clone(),
+                &options,
+                &crate::theme::Theme::neon(),
+                &crate::contributors::Mappings::default(),
+                &[],
+                &["first".into(), "second".into()],
+                &mut None,
+            )
+            .unwrap();
+            let captured = capture(&mut simulation);
+            let first = &captured.services[0];
+            assert_eq!(first.author, 0);
+            let end = options
+                .fragment_pace()
+                .pulse_end(simulation.schedule.starts[0]);
+            assert_eq!(first.release, u64::from(frames_for(end - 0.3, 60).unwrap()));
+            let (routes, _) = trips(&captured, 480.0, options.bot_travel, true);
+            let route = routes.iter().find(|route| route.author == 0).unwrap();
+            assert!(!route.fade);
+            assert_eq!(route.departure, first.release);
+            route.departure - first.tick
+        });
+        assert!(departures[1] > departures[0], "{departures:?}");
+    }
+    #[test]
     fn faded_contributor_returns_from_the_moved_gutter() {
         let mut events = Vec::new();
         for (index, repository) in [0, 1, 1].into_iter().enumerate() {

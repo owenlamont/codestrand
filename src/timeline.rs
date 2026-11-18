@@ -3,7 +3,7 @@ use std::{collections::HashMap, fmt::Write};
 use crate::history::{BlobDiff, ChangeKind, Commit, History};
 
 // Bump when the snapshot format, history import policies or timeline conversion change.
-pub(super) const CACHE_VERSION: u32 = 7;
+pub(super) const CACHE_VERSION: u32 = 8;
 
 /// Co-authors read from one commit; later `Co-authored-by:` trailers are ignored.
 pub(super) const MAX_CO_AUTHORS: usize = 8;

@@ -1,0 +1,1432 @@
+# Codestrand
+
+> Watch Git history take shape over time
+
+---
+
+Source: https://codestrand.pages.dev/
+
+# Codestrand
+
+![Codestrand logo](assets/codestrand.svg)
+
+Watch a Git repository take shape over time. Files keep persistent positions while
+contributors glide above the directory graph. Each commit connects a contributor to
+all affected files; diff fragments show additions and removals.
+
+![Codestrand playing Git histories in seven themes: repositories appear, grow and are archived, contributors send beams to changed files, and the camera flies in behind an avatar](assets/montage.webp)
+
+Watch the [feature tour on YouTube](https://youtu.be/gmueXAHnvAE).
+
+Codestrand has seven steady themes, labels, contributor
+portraits and a mostly planar scene. Preview and export share a repeatable
+simulation, including playback of multiple repositories. Export writes PNG frames or
+streams video to your installed FFmpeg.
+
+## Start here
+
+1. [Install Codestrand](https://codestrand.pages.dev/getting-started/installation/).
+2. [Play your repository](https://codestrand.pages.dev/getting-started/quickstart/).
+3. Adjust [playback and camera controls](https://codestrand.pages.dev/playback/).
+4. [Export frames](https://codestrand.pages.dev/export/) or set up [contributors and avatars](https://codestrand.pages.dev/contributors/).
+
+Use [Git history import](https://codestrand.pages.dev/history/) for revisions and cache behaviour, and
+[troubleshooting](https://codestrand.pages.dev/troubleshooting/) for platform and configuration problems.
+
+## Acknowledgements
+
+Codestrand is licensed MIT OR Apache-2.0. Thanks to
+[Material Icon Theme](https://github.com/material-extensions/vscode-material-icon-theme)
+for file icons (MIT), [Bevy](https://bevy.org/) for rendering,
+[resvg](https://github.com/linebender/resvg) for SVG rasterisation,
+[gix](https://github.com/GitoxideLabs/gitoxide) for Git access and
+[Gource](https://gource.io/) for inspiration.
+
+---
+
+Source: https://codestrand.pages.dev/getting-started/installation/
+
+# Installation
+
+Codestrand ships as a native binary. Choose a channel matching your tools.
+The guides describe 0.2.0. Until publication, install from `main` for these features.
+If an option in the guides is missing from `--help`, build from `main`:
+
+```sh
+cargo install --locked --git https://github.com/owenlamont/codestrand --branch main
+```
+
+This requires Rust and the native build prerequisites described below.
+Check `codestrand --version` and the command's `--help` after installing.
+
+## PyPI
+
+With [uv](https://docs.astral.sh/uv/getting-started/installation/) and Python 3.11+:
+
+```sh
+uv tool install codestrand
+```
+
+## npm
+
+With Node.js 18+:
+
+```sh
+npm install --global @owenlamont/codestrand
+```
+
+The wrapper selects a platform binary through optional dependencies. Keep optional
+dependencies enabled when installing.
+
+## crates.io
+
+With [Rust](https://rustup.rs/) and the native build prerequisites:
+
+```sh
+cargo install --locked codestrand
+```
+
+Building from source compiles Bevy and can take several minutes. A checkout uses
+Rust 1.99.1, pinned in `rust-toolchain.toml`.
+
+## GitHub releases
+
+Download a ZIP from [GitHub releases](https://github.com/owenlamont/codestrand/releases),
+extract the archive and put `codestrand` (Windows: `codestrand.exe`) on your `PATH`.
+Keep the included licences and third-party notices when redistributing the binary.
+Compare the archive's SHA-256 digest with the release's `SHA256SUMS` file.
+
+## Platforms
+
+PyPI wheels, npm binaries and release ZIPs target:
+
+- Linux with glibc 2.28+: x86-64 and ARM64.
+- macOS: Apple Silicon (ARM64).
+- Windows: x86-64 and ARM64.
+
+There is no prebuilt Intel macOS or Linux musl binary. Rendering requires a working
+graphics adapter; interactive preview also needs a windowing environment. History
+inspection does not start the renderer. See [troubleshooting](https://codestrand.pages.dev/troubleshooting/)
+for build and graphics problems.
+
+## Verify
+
+```sh
+codestrand --version
+codestrand --help
+codestrand preview --help
+```
+
+Continue with [first use](https://codestrand.pages.dev/getting-started/quickstart/).
+
+---
+
+Source: https://codestrand.pages.dev/getting-started/quickstart/
+
+# First use
+
+## Play the current repository
+
+```sh
+codestrand preview
+```
+
+Run the command inside a Git working tree or one of its subdirectories. Codestrand
+searches upward for the repository. Outside a repository, pass `--repository PATH`.
+Escape closes the window.
+
+## Play a local repository
+
+```sh
+codestrand preview --repository /path/to/repository
+```
+
+Replace the path with a local working or bare repository. Quote paths containing
+spaces. Codestrand reads committed history without changing the repository;
+uncommitted working-tree edits are not shown.
+
+To choose a revision and a smaller playback window:
+
+```sh
+codestrand preview --repository /path/to/repository --revision HEAD \
+  --start-date 2026-05-01 --end-date 2026-05-31
+```
+
+Both UTC date bounds are inclusive: playback includes the whole named end day.
+Choose dates present in the repository. Omit either bound to use the beginning or
+end of history; earlier commits are settled before playback.
+
+## Next steps
+
+- [Camera controls and pacing](https://codestrand.pages.dev/playback/).
+- [Import and inspect history](https://codestrand.pages.dev/history/).
+- [Export PNG frames](https://codestrand.pages.dev/export/).
+- [Map contributor names and fetch portraits](https://codestrand.pages.dev/contributors/).
+
+From a source checkout, replace `codestrand` with `cargo run --locked --`.
+For smoother rendering, use `cargo run --locked --release --`.
+
+---
+
+Source: https://codestrand.pages.dev/history/
+
+# Git history import
+
+## Inspect a repository
+
+```sh
+codestrand inspect /path/to/repository --revision HEAD
+```
+
+Inspection reads a complete local working or bare repository without modifying
+history. The experimental JSON includes parent-before-child commits, raw author
+identities and paths, and first-parent file changes. Merge changes compare against
+the first parent. Avoid treating the experimental schema as a stable contract.
+
+## Choose history for playback
+
+```sh
+codestrand preview --repository /path/to/repository --revision HEAD
+```
+
+Preview and export use the selected revision's first-parent timeline. Revision
+defaults to `HEAD`. Codestrand does not clone or fetch a remote repository: obtain
+a complete local repository first. Inspection includes reachable commits, while
+playback follows the first-parent sequence.
+
+Revisions accept reference names, full or unambiguous abbreviated object IDs, and
+`HEAD` (also `@`). Parent selectors `^N` and first-parent ancestor selectors `~N` can
+be combined; `^{}` and `^{commit}` are accepted. Other Git revision expressions,
+including reflog and message searches, are rejected rather than delegated to unbounded
+reference traversal. Revision strings are limited to 4,096 bytes and navigation to
+1,000,000 steps, with the existing object-size and work budgets applied before loading.
+Annotated tags and symbolic references have a 64-hop limit and cycle detection.
+Cyclic or excessive chains produce an error, including when encountered through HEAD
+during diff setup. Import uses no wall-clock deadline.
+
+## Analysis limits
+
+Import stops at fixed safety limits and refuses incomplete history by default.
+`--allow-truncated-history` accepts completed commits and prints the exhausted budget
+and the inclusive last complete first-parent commit, when known. Inspection sets
+`truncated` in JSON. Playback uses that first-parent prefix, which can be empty;
+commits with no file changes are not shown. Partial imports are never cached;
+later runs retry analysis.
+
+Blob size, diff input and per-diff comparison limits skip line detail only. Inspection
+records the path, change kind and rename with diff kind `skipped`, without line counts
+or samples. Playback retains the file event with zero line counts and no samples;
+touch heat still applies. Skipped blobs still consume global work units. Once the
+aggregate byte or line allowance is spent, later diffs also omit line detail.
+
+| Budget | Limit |
+| --- | --- |
+| Reachable commits and pending parent references | 1,000,000 each |
+| Expanded entries per tree and retained changes overall | 2,000,000 each |
+| Expanded path bytes per tree | 64 MiB |
+| Tree depth and individual path bytes | 256 levels; 16,384 bytes |
+| Single inflated object / allocation | 16 MiB |
+| Inflated diff blob bytes overall | 8 GiB |
+| Diff input lines overall | 20,000,000 |
+| Potential line comparisons per diff | 1,000,000,000 |
+| Total work charged for objects, bytes and lines | 32 GiB of work units |
+| Accounted graph, tree and retained history storage | 512 MiB |
+
+Tree summaries count repeated subtrees at every expanded location before diffing.
+Object headers are checked before loading data; lines are counted before interning.
+The storage budget accounts for payloads and overhead, rather than measuring process
+RSS; dependency buffers and rendering need additional memory. Limits are fixed to keep
+hostile inputs bounded; playback selection does not increase limits.
+
+## Cache
+
+Repository playback saves the latest imported timeline, diff counts and bounded
+line samples under the platform user cache directory, inside `codestrand/`.
+Linked worktrees share a cache
+namespace based on the canonical common Git directory. A different resolved tip
+replaces the saved timeline after a full import. Changing range or pacing reuses
+the imported timeline. Contributor mapping edits take effect on cache hits.
+
+Cache errors regenerate data without blocking playback. To bypass history and
+avatar cache reads and writes:
+
+```sh
+codestrand preview --repository /path/to/repository --no-cache
+```
+
+Inspection and repositories with Git replacement objects always import directly.
+Messages, signatures, blob IDs and hunks are not cached. See
+[contributors](https://codestrand.pages.dev/contributors/) for separately cached portraits.
+
+Cache files are read only through real directories, with a 64 MiB byte ceiling before
+JSON parsing. Version, selected tip, commit identifiers, event/change counts, paths,
+author lengths, timestamps, diff counts and sample limits are checked before reuse.
+Only the canonical snapshot encoding is accepted: padded, malformed or invalid snapshots
+are misses and are rebuilt. Cache validation does not authenticate who wrote a snapshot.
+
+---
+
+Source: https://codestrand.pages.dev/playback/
+
+# Playback
+
+Preview loops the selected history. Export renders the same launch timeline at
+explicit frame times, with a 1x playback multiplier and a fitted or scripted export camera.
+
+Preview renders at the window's physical resolution, including on HiDPI displays.
+Resizing or maximising keeps a 720-logical-pixel-high UI: text scales with height,
+and wider windows show more scene. See [Export](https://codestrand.pages.dev/export/) for native output sizes.
+
+Preview opens its window at once and shows planning progress until playback is ready.
+For long histories, the first frame appears while later history is still being
+planned. Playback pauses if planning falls behind, then resumes without skipping
+history. Camera controls remain active during the pause, and a small label shows
+the planning stage and percentage. Rewinding or looping may need another planning pause.
+Export prints the stage and its percentage to standard error at most once a second.
+
+Commit application times are planned ahead for the selected history and pacing.
+The caption shows the last applied commit's date; cooling and fades advance in
+playback seconds. Seeking or restarting replays the same fixed simulation ticks.
+The caption's percentage follows history time, excluding extra walking waits, so it
+holds while contributors finish a walk.
+
+Repository captions also name the applying commit's repository, including single-tile
+playback. The default
+`--caption-style bar` tints the entire caption bar, matching the repository tile hue
+and cross-fading for 0.3 playback
+seconds, with at least 0.8 seconds between transitions (at least 0.5 seconds steady).
+Rapid changes coalesce to the
+latest repository when the hold expires; the caption text always updates immediately.
+Both treatments use white text on opaque dark tints with at least 5.52:1 contrast.
+`--caption-style chip` colours only the repository name's background instead.
+
+Caption columns have fixed widths for the entire playback, including the lead-in.
+Widths use the longest scheduled date, repository and resolved contributor name, plus
+the total commit counter's digits. Speed and theme columns reserve their longest
+available values so preview controls cannot move separators. Captions always use the
+embedded monospace Fira Mono font, even when another theme uses proportional labels.
+CLI playback uses the same six fixed columns for single and multiple repositories.
+
+Text falls back from the selected theme font to bundled IBM Plex Mono for accented
+and Cyrillic names, then to installed system fonts for other scripts, including Greek.
+Install fonts covering the required scripts on export machines; use the same fonts when
+comparing frames across machines.
+Linux system-font discovery uses Fontconfig. Linux installations with no system fonts
+are outside the supported configuration.
+macOS discovers installed fonts through CoreText and Library/Fonts directories.
+
+## Controls
+
+| Input | Action |
+| --- | --- |
+| Escape | Release captured mouse; otherwise close preview |
+| C | Capture or release the mouse while display settings are closed |
+| Left click in viewport | Capture the mouse while display settings are closed |
+| Mouse movement (captured) | Aim directly without holding a button |
+| Hold left / right button (captured) | Move along world Y up / down; both cancel |
+| F10 | Open or close display settings; release capture and pause camera controls |
+| F11 | Toggle borderless fullscreen on the current monitor |
+| `[` | Halve live speed, down to 0.125x |
+| `]` | Double live speed, up to 8x |
+| `,` / `.` | Previous or next theme |
+| WASD | Move horizontally relative to yaw; release contributor follow |
+| Right drag (released) | Orbit with world-Y yaw and pitch clamped to ±90° |
+| Scroll wheel | Zoom; scroll the preset list when over display settings |
+| Tab | Follow or cycle visible contributors |
+| Space | Restore the fit-to-scene camera over half a second |
+
+The caption shows the live multiplier, theme, camera mode and follow target. Following
+returns to free camera when the target fades out. Preview controls do not change
+the exported camera or timeline.
+
+Preview starts with the cursor released. Capture hides and locks the cursor; C or
+Escape releases capture, and another Escape closes preview. Opening F10 settings or
+losing window focus also releases capture. Closing settings or returning to the window
+does not recapture: press C or click the viewport again. Clicks in letterbox bars do
+not capture. Capture and release discard that frame's mouse motion to avoid a jump.
+Mouse aim uses 0.003 radians per mouse count, independent of frame time.
+Held mouse buttons move at the WASD speed along world Y, independent of pitch.
+Descending stops at floor clearance. The left click that
+captures the mouse cannot move the camera until released and pressed again.
+
+Display settings have a scrollable preset list with a draggable scrollbar. Monitor native
+is first; other choices are grouped by aspect ratio, then ascending pixel size.
+Ratios use conventional display names: 3440×1440 is labelled 21:9.
+
+| Aspect | Presets (physical pixels) |
+| --- | --- |
+| 16:9 | 1280×720, 1600×900, 1920×1080, 2560×1440, 3840×2160 |
+| 16:10 | 1280×800, 1920×1200, 2560×1600 |
+| 21:9 | 2560×1080, 3440×1440, 3840×1600 |
+| 32:9 | 3840×1080, 5120×1440 |
+
+Choices exceeding either dimension of the current monitor are greyed out with a reason
+and cannot be selected. Windowed choices resize the window after restoring normal
+window placement; the desktop may further constrain the actual window size.
+
+In borderless fullscreen, presets keep fullscreen and render at exactly the selected
+pixel size, centred with black bars around the unused monitor area. No preset is
+upscaled. Monitor native fills the display. Captions and other UI stay inside the
+rendered viewport, scaled by its height rather than the full monitor height.
+F11 restores the previous windowed size and position. Playback continues while
+settings are open; mouse wheel input over the panel scrolls instead of zooming.
+
+The default camera looks straight down at the centre of the repository tile area.
+Repository tiles are rectangles in world coordinates. Preview stores yaw and pitch
+explicitly, with no roll. Yaw rotates about world Y; pitch rotates about the camera's
+local right axis and clamps to −90° through +90°, inclusive. The camera can look
+exactly straight down or up, and yaw still rotates the view at either pole.
+Camera up never opposes world up. The eye stays at least 1.2 world units above the plane,
+above the glass and file geometry, and can look up at contributors at height 3.2.
+Vertical mouse motion changes pitch; horizontal motion changes yaw. Captured mouse
+aim turns about the eye in free mode. WASD uses forward and right from yaw alone,
+stays horizontal and remains well-defined when looking straight down or up.
+Right-drag orbit remains available with the cursor released.
+Orbit, captured aim and zoom retain the followed
+contributor as the aim; WASD or button elevation releases follow. Released right-drag
+and follow orbit use the same yaw and pitch limits. At the floor, free orbit turns about
+the eye instead of crossing the plane; zoom slides along the floor.
+Follow shortens its orbit radius at the floor while keeping its aim on the contributor.
+Space smoothly raises the eye and restores the
+overhead view with yaw 0°, pitch −90° and camera up pointing toward −Z.
+
+Export defaults to the overhead perspective camera at explicit frame times;
+[scripted paths](https://codestrand.pages.dev/export/#scripted-camera) can override the view. Default
+framing reserves space for elevated avatars and labels; clearance guarantees apply to
+the fitted view. Free orbit and zoom can crop content. File glyphs lie flat with upright
+artwork in the overhead view. Directory structures, membership rings and activity halos
+remain on the file plane.
+Avatar portraits face the camera.
+The plane cannot be viewed from underneath; glass and file surfaces use backface culling.
+
+## Themes
+
+`--theme` selects the starting theme for preview and export;
+the default is `neon`. Switching themes in preview changes styling:
+layout, playback position and camera stay put.
+
+The seven themes are `neon`, `phosphor`, `outrun`, `blueprint`,
+`retro-desktop`, `atlas` and `forge`. Choose one for preview or export:
+
+```sh
+codestrand preview --theme outrun
+codestrand export frames --theme atlas --frames 90 --fps 30
+```
+
+Outrun uses pink tiles, arched beams and a banded sunset. Blueprint uses hatched
+plates and construction lines. Retro Desktop uses page icons and static
+black/white dashed beams. Atlas uses survey points, paper contours and tinted
+top-level territories. Forge uses iron plates coloured by file heat.
+Blueprint and Atlas use ink without additive glow. All grounds and dash patterns
+are steady; switching with `,` and `.` preserves playback and file positions.
+
+## File heat
+
+Each non-deletion touch adds heat based on added plus removed lines. Logarithmic
+damping keeps large changes from overwhelming small ones; repeated touches
+accumulate up to a cap.
+Neon and Phosphor brighten file icons through 32 shared brightness levels while
+cold icons remain readable. Heat below 0.001 settles to zero. Activity halos pulse
+on every touch and decay independently with a 1.6-second time constant, unaffected
+by diff size or the heat half-life.
+
+Forge maps the same 32 heat buckets from dark iron through red and orange to
+white heat. Only warm plates contribute to thresholded bloom. Blueprint, Atlas
+and Retro Desktop keep constant ink brightness; touched files still receive
+activity outlines.
+
+`--heat-half-life 3` sets the cooling half-life in canonical playback seconds for
+preview and export (default `3`, accepted range `0.01` through `86400`, inclusive).
+Live speed keys speed up cooling along with the rest of playback. Export cooling uses
+explicit frame times. Files settled before the inclusive start date begin cold.
+
+```sh
+codestrand export frames --heat-half-life 3 --frames 90 --fps 30
+```
+
+## Multiple repositories
+
+Repeat `--repository` to play local repositories on one author-time timeline:
+
+```sh
+codestrand preview --repository /path/to/first --repository /path/to/second
+```
+
+Alternatively, pass `--repositories-file repositories.toml` to preview or export:
+
+```toml
+[[repositories]]
+path = "/path/to/first"
+label = "First project"
+archived = true
+
+[[repositories]]
+path = "../second"
+ended = "2026-05-01"
+```
+
+Paths in the TOML file resolve relative to the file. Labels default to the repository
+directory name. Repeated flags and a file can be combined; flag entries come first.
+Paths resolving to the same location are rejected as duplicate repositories. Labels for
+distinct repositories must be unique. There is no fixed repository-count limit.
+When minimum tiles and gutters cannot fit the field, tiles, gutters, avatars and titles
+shrink by one detail scale chosen before playback, as if the camera pulled back.
+Tile packing time grows steeply with repository count.
+
+`archived = true` ends a repository after the final commit in the selected revision,
+once the commit's activity finishes. `ended = "YYYY-MM-DD"` supplies an explicit UTC
+ending date and overrides `archived`, for example after deletion. The repository is
+shown through the end of that day, inclusive: `ended = "2026-05-01"` includes all of
+1 May UTC and begins ending at 00:00 UTC on 2 May. A commit after the ending in
+imported history order is an error, even when a rebased commit has an older author
+date. The error names the first offending commit and a valid ending date.
+Neither field fetches platform metadata. Without either field the repository remains
+visible.
+An ending before the selected playback interval is already complete when playback starts.
+
+The ending tile, files and directories grey, rise and fade over 2.5 playback seconds.
+Neighbours then reclaim the space over four seconds. Text fades in place.
+
+## Contributor and file lifecycles
+
+The first commit enlarges the contributor avatar, settling over 1.2 playback seconds.
+Whole-file additions descend from the contributor along the beam to the file layout;
+deletions grey, rise and fade over 1.2 seconds. Line fragments remain separate.
+
+`--contributor-inactivity-days 60` assumes a contributor has left after 60 calendar
+days without a commit across the combined history. The avatar greys and fades over
+1.2 playback seconds; another commit revives the same contributor. The two-month default
+flags Owen's observed 88-day pause in the combined first-parent histories.
+Departure is an assumption, not platform knowledge. Deadlines follow the compressed,
+padded timeline, using the latest author date reached so reversed dates cannot trigger
+an immediate departure. Playback does not extrapolate contributor departures beyond
+the final history date.
+
+```sh
+codestrand preview --repositories-file repositories.toml \
+  --contributor-inactivity-days 60
+```
+
+Repository manifests must be regular files no larger than 1 MiB.
+Repository paths are limited to 4,096 bytes before filesystem resolution.
+
+Events merge by comparing the next commit from each repository by author timestamp,
+breaking ties by repository input order. Each repository retains its first-parent
+order, including children authored before their parents. One `--revision` applies
+to every repository; `--start-date` and `--end-date`
+select from the merged history. Single-repository playback retains first-parent
+order. Contributor mappings apply across all repositories, so a matched contributor
+uses one avatar that moves between regions.
+
+Live repositories share the inset viewport inside a 24-pixel frame margin. The
+same frame-scaled avatar sizing and gutter placement apply to single repositories.
+The top wordmark has a separate 26-pixel reserved strip, including
+a four-pixel buffer;
+avatars, gutter routes and name labels stay below the strip, matching caption clearance.
+The default 16:9 export camera stays fixed. Spacing and size floors use a fixed world scale
+calibrated in reference pixels; apparent ground spacing is slightly smaller to reserve
+room for elevated portraits. Preview orbit changes the projection, not the packing.
+Shared gutters separate neighbouring tiles, with no
+contributor band. Tile weights follow eased square roots of live file counts;
+empty active repositories retain weight one. Each repository keeps file identity,
+local layout and one uniform scale, with a fixed quarter-turn chosen for its history.
+Content zoom anticipates growth with a precomputed safe-fit envelope and half-second
+easing. The log-scale limit is 0.12 per second when zooming out and 0.08 when zooming in
+(about 11.3% shrink or 8.3% growth). A larger future contraction can start the
+adjustment earlier; the chosen scale never exceeds the tile's current safe fit.
+The usable content area leaves an eight-pixel edge inset. Corner titles share one
+character size, which shrinks once each repository's share of the field holds fewer
+than four minimum tiles, reaching about half size at 72 repositories and never below
+6 pixels. They end in an ellipsis when wider than their tile and sit 4 pixels from the
+tile edge, instead of one avatar diameter, on tiles too small for that clearance; they
+are omitted only from tiles too short for the text.
+Directory and touched-file labels shrink with their tile's files, are never larger than
+the corner titles, stop at the same 6 pixel floor, and end in an ellipsis when wider than
+their tile. Invisible archived
+content cannot constrain earlier zoom.
+
+A newcomer splits one existing tile or subtree. Other repositories retain their
+relative order. Splits clamp to a ground-aspect range of 1:2.5 to 2.5:1, inclusive,
+and a 144-by-64 reference-pixel floor at full detail. Births ease for up to 0.75
+playback seconds before their first commit; births near the lead-in use the available
+lead-in time. Aspect and size clamps scale with presence during the transition.
+Tiles and shared gutters partition the whole inset field. `--gutter` sets the visible
+spacing in 1280×720 reference pixels: default `4`, range `0`–`20`, inclusive,
+including touching tiles at `0`. Crowd scaling shrinks avatars and names when many are
+active.
+Names prefer clear content rectangles, including repository labels
+and a small margin, but may overlap content near tile edges when space is tight.
+Different content shapes can leave space inside a uniformly fitted tile.
+
+Contributor names orbit at no more than 30 degrees per playback second, with a
+three-second minimum between direction reversals. A new position must reduce the
+currently occluded text area by at least a quarter for 0.75 playback seconds before
+the name moves. Brief overlap is preferable to fast or oscillating text.
+
+Close zoom keeps inactive file and directory names visible. Names appear when the
+smaller dimension of the object's projected footprint reaches 48 logical pixels and
+remain until the footprint drops below 40 pixels. These names bypass the activity and
+landmark limits. Names use fixed world anchors and upright text; long names can overlap.
+The same rules apply to preview and export, using each mode's camera.
+
+Contributors first appear in a gutter slot above their repository, aligned with the
+projected mean of touched files. Switching repositories chooses the nearest valid edge
+instead of requiring a detour to the top. A slot survives consecutive commits while
+its beam and frame checks remain valid.
+Placement checks the touched files throughout service, including
+additions and deletions, for an open half-plane and beams crossing another repository
+or its label.
+Other edges provide fallback docks. Avatars spread along edges; names shrink to a readable
+minimum, then move to free nearby lanes before truncating as a last resort. Names remain
+visible with their avatars. Portrait size accounts for perspective.
+
+Avatar travel follows gutter centrelines and the outer margin. Parking slots
+sit on the same network. Routes never cross tile interiors, including unused areas;
+portraits may overlap tile edges beside a narrow gutter. Dijkstra minimises network
+length. Other avatars have no travel cost: walkers never wait or detour for each other.
+Parking still spreads avatars when clear slots are available.
+
+A contributor can depart once its previous commit's last fragment has arrived and the
+moving gutter route can meet the speed limit. Travel overlaps other contributors'
+animations; commits remain strictly chronological. Routes stop at corners and accelerate
+toward `--avatar-max-speed` reference pixels/second (default `480`, minimum `1`).
+Moving junctions follow the gutter network, with every canonical sample checked against
+the speed limit, frame bounds and tile guards. A shared parking point creates no trip.
+Contributors follow their parked gutter slot until their inferred calendar departure,
+then fade over 1.2 playback seconds. Capped playback releases faded lanes and re-enters
+at the next service slot after a long idle gap.
+
+`--contributor-travel auto` is the default: contributors walk short trips and fade
+when a longer route would delay the commit. `--contributor-travel walk` keeps them
+walking along the shortest safe gutter route, waiting as long as needed.
+`--bot-travel fade` is the default for bots; `--bot-travel walk` gives bots the same
+travel policy selected for other contributors. Bot classification uses an explicit
+`bot` override
+in `contributors.toml`, then a GitHub noreply login ending in `[bot]`, then the displayed
+name's `[bot]` suffix. Travel policies also apply to single repositories.
+Walking avatars remain visible during travel until an inferred calendar departure.
+With `--contributor-travel walk`, walking trips
+also remain routed across long idle gaps instead of disappearing and re-entering at a
+different repository. After the last service, the normal inactivity fade still applies.
+Uncapped walking services trips in commit order and adds another second of waiting
+when tile motion or insufficient travel time blocks a route. New repository tiles get
+a full 0.75-second birth window inside their added wait. At the start of a wait,
+tile sizes transition toward the upcoming commit for at most 0.75 seconds,
+finishing before arrival. Tiles then hold their size, using the upcoming commit's
+zoom ceiling while fitting the content from before the commit. The content outline
+switches on arrival without moving the tile. Layout and calendar departures follow
+history time, which holds during travel waits. An uncapped plan
+that cannot find safe routes within the planning budgets reports an error instead of
+silently accepting a travel fade.
+A plan that cannot converge within 32 replans stops with an error.
+Dormant contributors follow their previous repository's lane while waiting, so later
+tile growth cannot bury the starting point of their next uncapped trip.
+The caption holds the last applied date during waiting; heat, fragments and fades
+continue in presentation seconds.
+
+```sh
+codestrand export frames --repositories-file repositories.toml \
+  --contributor-travel walk --bot-travel walk --avatar-max-speed 480 --frames 90 --fps 30
+```
+
+Planning tests departure ticks from the contributor's fragment completion onward.
+Gaps between that contributor's commits absorb travel before padding is needed.
+Padding is revalidated as scene geometry changes. The automatic policy uses at most five
+padded rebuilds, including one cleanup of unused service padding.
+Uncapped padding grows until every walking trip completes, subject to the planning
+memory estimate. Each Dijkstra search is limited to 10,000 graph nodes.
+Numeric caps apply to accumulated extra waiting per commit.
+
+Header and caption remain in the outer frame. Other preview aspect ratios use conservative
+framing;
+free-camera controls remain independent.
+
+Planning snapshots the machine's available physical memory before importing history.
+Swap does not count. An estimate above that snapshot is refused, with both values
+reported in bytes and MiB. If memory information cannot be read, planning stops.
+The estimate uses the actual selected schedule, repository samples, contributor
+first arrivals, imported changes, path bytes and directory samples. Variable allocation
+sizes are estimates, so the figure is not a process-memory ceiling. Each padded schedule
+is checked before rebuilding; the automatic policy does not reserve hypothetical waits.
+The same check applies to single repositories.
+
+Use fewer repositories or a later inclusive `--start-date` to reduce the estimate.
+The snapshot is not a memory reservation; other processes can consume RAM afterward.
+It is the host's available RAM, without container or job-specific memory limits.
+Rendering and video encoding need additional memory beyond the planning estimate.
+The check is an estimate made before planning, not a guarantee that the process will
+fit in memory. It can be conservative on some inputs and too low on others.
+Packing reserves tiles before applying repository endings, so sequential repositories
+share the detail scale of repositories visible together.
+Route searches stop at 10,000 nodes; capped playback can fade across when a search
+exceeds that bound, while uncapped walking reports an error.
+
+Large multi-repository histories can take time to begin playback. Consumed travel plans
+are discarded to bound retained travel windows and checkpoints; the shared layout
+remains available throughout playback. This does not bound total process memory.
+To inspect a smaller interval, use inclusive `--start-date` and `--end-date`.
+
+Playback memory and duration checks use the range selected by `--start-date` and `--end-date`;
+the layout estimate also includes the imported history needed to settle that range.
+
+To choose visual treatments, use
+`--repository-boundary none|glass` and `--repository-label-plane files|raised`.
+Defaults are `glass` and `raised`. Glass is a faint, coloured ground-plane tile for
+each live repository; raised labels stay at a constant height of 1.6 scene units.
+Both options apply to preview and export, including single repositories.
+
+## Range and pacing
+
+Import refuses truncated history by default, before planning or rendering. The error
+names the exhausted budget. `--allow-truncated-history` accepts completed commits only
+and prints the reason; the incomplete result is never cached. The option applies
+to `inspect`, `preview` and `export`. When a playback prefix was read, both messages
+name its last complete first-parent commit, position and UTC author date, inclusive.
+Commits with no file changes are not shown. If import stopped before completing a
+playback commit, the message says so.
+
+Import budgets are 1,000,000 commits, 2,000,000 changed entries, 20,000,000 diff input
+lines and 512 MiB of retained-input accounting per repository.
+
+Single-object and single-tree limits stay fixed, including 16 MiB objects, 2,000,000
+expanded tree entries, depth 256, 16,384-byte paths and 64 MiB of expanded path bytes.
+The 32 GiB cumulative work ceiling, 8 GiB blob-detail budget and per-diff work limits
+also stay fixed. Oversized or expensive blob diffs keep file changes but omit detail;
+exhausting the cumulative line budget also omits detail. Playback range options do not
+reduce import work: the reachable history is checked before selecting the playback range.
+
+```sh
+codestrand inspect /path/to/repository --allow-truncated-history
+```
+
+```sh
+codestrand preview --repository /path/to/repository --start-date 2026-05-01 --end-date 2026-05-31 \
+  --seconds-per-day 2 --max-idle-seconds 1
+```
+
+- `--start-date YYYY-MM-DD`: first commit in merged order authored on or after
+  00:00 UTC that day, inclusive; preceding commits are settled before playback.
+- `--end-date YYYY-MM-DD`: last commit in merged order authored on or before that
+  UTC day, inclusive of the whole day. Omitted bounds use the beginning or end of
+  history. A reversed range or one containing no commits reports both bounds.
+
+Selection is a contiguous span of merged history. Rebased commits with older author
+dates remain in that span; date bounds do not reorder or remove interior commits.
+
+- `--seconds-per-day`: timeline seconds per calendar day; default `0.5`.
+- `--max-idle-seconds`: maximum timeline gap between commits; default `1`.
+
+```sh
+codestrand preview --repository /path/to/repository --start-date 2026-05-01 --end-date 2026-05-31
+```
+
+Pacing preserves within-day timestamp spacing. Coincident, reversed or very close
+timestamps get a 0.05-second minimum gap, limited by the idle cap, preserving commit
+order. Seconds per day accepts `0.01` through `86400`, inclusive; the idle cap must
+also be at least one simulation tick (1/60 second).
+
+Live speed keys move through the canonical timeline faster or slower without
+changing commit times, layout, pulses, beams, avatar motion, settling or fades in
+timeline seconds. Changing live speed preserves the current position.
+
+Commits affecting more than 24 files aim beams at directories to reduce clutter.
+
+## Overview detail
+
+Directory collapsing is on by default. Use `--collapse-directories off` in preview
+or export to keep every file and directory visible at every zoom. Drawing every file
+can reduce frame rate in large repositories. `--collapse-directories on` restores
+aggregation. The option affects rendering only; file identity, layout and playback
+remain unchanged.
+
+Small subtrees containing multiple files collapse into folder glyphs below a 32-pixel screen
+footprint. Zooming in expands the subtree above 40 pixels; the gap prevents
+flicker near the boundary. Each touch expands the affected subtree and
+its ancestors for 2.5 playback seconds, independently of heat. Files and folders scale
+between the two views over 0.3 real seconds in preview and 0.3 playback seconds in export.
+Footprints use logical pixels and a bounding circle to stay stable during orbit.
+
+Collapsed folders have the theme's file-glyph footprint at the directory's scale,
+centred on the directory and raised clear of file surfaces. Folders shrink with the
+repository instead of growing to a minimum screen size.
+
+Aggregation changes rendering only. Every directory and file keeps the same
+simulation and position at every zoom, including export. Directory landmarks rank by
+subtree size, with at most four extra top-level labels beyond the usual twenty.
+Labels inside fully collapsed subtrees and overlapping directory labels are omitted
+to keep the overview readable.
+
+In repository playback, sampled added lines descend from the contributor; removed
+lines rise from the file and smoothly fade to transparent. The camera-facing snippet
+is the fragment, following the same path and phase above beams, with
+a text shadow and theme backing for contrast. Text and plain prisms crossfade; fully
+visible snippets replace their prisms. Extra fragments stay plain. Every theme supplies
+added/removed colours; Atlas uses dark ink on its light ground. Snippets use alpha
+blending and the theme's monospace font, with IBM Plex Mono for Atlas code beside its
+serif labels.
+Theme switching restyles active snippets without restarting their motion or fade.
+
+`--fragment-speed` scales how fast fragments cross their beams in preview and export
+(default `1`, about 0.9 playback seconds per crossing; accepted range `0.25` through
+`2`, inclusive). `0.5` doubles the crossing time, giving snippets longer to read.
+A walking contributor stays until its last fragment lands before leaving for its
+next repository, and a slower setting also delays a calendar departure until then.
+Commits keep their timeline spacing unless a walking trip needs the extra wait;
+`--contributor-travel auto` may still fade a contributor across mid-flight.
+
+```sh
+codestrand export frames --fragment-speed 0.5 --frames 90 --fps 30
+```
+
+Snippet text keeps the font's natural proportions with equal X and Y scaling.
+Lines are cut at 88 characters. Samples are hidden at 6 projected beam-diameter
+pixels or less and fully visible at 14 or more, with a smooth transition between.
+Visible text stays between 14 and 20 logical pixels high, inclusive, making close
+oblique shots readable while the overview keeps plain fragments.
+Text holds full contrast through the first three quarters of the fragment's alpha
+fade, then fades out with the backing.
+Overlapping snippets may overlap freely without collision or viewport-edge hiding.
+Files inside collapsed subtrees show no sample text; LOD keeps its fragment behaviour.
+
+Samples come from actual changed lines: up to three per file and twelve per commit,
+preferring lines of 16–60 bytes, inclusive. Lines over 72 bytes before trimming,
+non-ASCII text, controls and trivial lines are omitted. Binary files and submodules
+have no samples.
+Selection is deterministic; crowded commits use path order to spend the budget.
+At most twelve samples appear at once.
+
+**Source lines can contain secrets or personal information.** Review exports before
+sharing. Sensitive paths (`.env*`, `*.pem`, `*.key`, `id_rsa*`) and common credential
+patterns are skipped, but filtering cannot guarantee redaction. Use
+`--no-diff-samples` for preview or export to hide all sampled source lines. The
+opt-out controls playback; bounded samples may still exist in the history cache.
+
+The history cache stores these bounded samples. Older cache versions are rebuilt
+automatically from local Git history.
+
+---
+
+Source: https://codestrand.pages.dev/export/
+
+# Export
+
+## Numbered PNG frames
+
+```sh
+codestrand export frames --repository /path/to/repository --start-date 2026-05-01 --end-date 2026-05-31
+```
+
+The output directory (`frames` here) must not already exist. Without a repository
+argument or manifest, export discovers the repository from the current directory,
+searching upward. Export writes `frame-00000.png` onwards and a
+`frames.csv` logical-state manifest. Frames default to 1280×720.
+The final `glyphs` and `missing_glyphs` columns count visible text-layout glyphs
+used for each captured frame. A nonzero missing count indicates unavailable glyphs;
+install fonts covering the contributor names' scripts before exporting again.
+
+Select a native render size with `--resolution WIDTHxHEIGHT`:
+
+```sh
+codestrand export hd-frames --resolution 1920x1080 --frames 2
+codestrand export uhd-frames --resolution 3840x2160 --frames 2
+```
+
+Each side accepts 64–8192 pixels, inclusive, with at most 33,554,432 pixels per frame
+(including 7680×4320). The graphics adapter must support the selected texture size
+and have enough memory. Both PNG and video exports render at the selected size
+from the start. No upscaling is used. The default H.264 encoder needs even dimensions;
+use PNGs or a suitable custom encoder for odd dimensions.
+
+Export and preview share a 720-logical-pixel-high UI. Text, captions, labels and
+diff snippets scale with frame height; wider aspect ratios reveal more scene
+without stretching it. Preview renders at the window's physical resolution,
+including after resize, maximise or fullscreen and with display scaling enabled.
+Display scaling does not multiply the height-based text size a second time.
+
+By default the whole playback is exported at 30 fps. To make a short capture:
+
+```sh
+codestrand export short-frames --frames 60 --fps 30
+```
+
+`--frames` accepts 2 through 4,294,967,295, inclusive, matching the supported frame
+index range; `--fps` accepts 1 through 240, inclusive. An explicit
+frame count stops capture after that many frames rather than changing the timeline
+speed.
+
+Export accepts the same repository, revision, range, pacing, contributor and cache
+options as preview. By default, the camera uses the fit-to-scene view. Explicit frame
+times keep export independent of rendering speed. Each capture is confirmed
+written before export completes. Export needs a working graphics adapter.
+
+Diff snippets appear in close views, including scripted camera paths. Their text stays
+14–20 logical pixels high (inclusive); the twelve-sample limit and collapsed-directory
+hiding still apply. Snippets may overlap.
+
+Moving translucent surfaces overlap using their current positions. Halos and glyphs
+can look different from older builds.
+
+Repeated PNG exports produce byte-identical frames and `frames.csv` manifests on the
+same machine, graphics driver and build, with the same graphics backend, repository
+history, options and portrait assets. Overlapping solid shapes of different colours
+keep a stable draw order.
+Use cached or local portraits offline: leave `--fetch-avatars` off and keep the avatar
+cache unchanged between exports. Live fetching can change portraits with network
+availability, deadlines and cache expiry. Fetch portraits before making repeatable captures.
+
+## Stream a video to FFmpeg
+
+```sh
+codestrand export clip-state --video history.mp4 --frames 60 --fps 30
+```
+
+`--video` streams RGB frames directly to your installed FFmpeg instead of writing
+PNGs. The required new directory (`clip-state`) still receives `frames.csv`.
+The video path is relative to the current working directory. Choose a new video
+filename; existing videos are refused. Codestrand never downloads, bundles or
+links an encoder.
+
+FFmpeg is found on PATH. `CODESTRAND_FFMPEG` selects another executable;
+`--ffmpeg /path/to/ffmpeg` takes precedence. Paths containing spaces are supported
+when quoted. Install FFmpeg with `winget install Gyan.FFmpeg` on Windows,
+`brew install ffmpeg` on macOS, or your distribution's `ffmpeg` package on Linux.
+PNG export works without FFmpeg.
+
+The default encode uses `-c:v libx264 -pix_fmt yuv420p -crf 18 -movflags +faststart`
+for an H.264 MP4 suitable for GitHub, X, Bluesky and QuickTime. Codestrand checks
+FFmpeg and the default encoder before rendering. Install a libx264-enabled build
+if the default encoder is unavailable, or replace the encoding options:
+
+```sh
+codestrand export lossless-state --video history.mkv --frames 60 \
+  --ffmpeg-arg=-c:v --ffmpeg-arg=ffv1
+```
+
+Repeat `--ffmpeg-arg=VALUE` for every argument, including option values. Supplying
+any arguments replaces **all** default encoding options. Arguments are passed
+directly without shell expansion, after the fixed raw RGB input and before the
+video filename. Select codecs, filters, pixel format and container options there;
+input dimensions and frame rate come from Codestrand. Frame times stay explicit,
+independent of encoding speed. Stderr is drained concurrently, and failures
+include FFmpeg's diagnostic tail. Frame writes have a 30-second timeout. After the
+last frame, Codestrand waits while the output file's size or modification time
+changes; 30 seconds without either changing fails the export. Finalizing a large
+video can therefore take longer than 30 seconds. Failed exports may leave a
+partial video and manifest.
+
+## Encode PNG frames manually
+
+With external
+[FFmpeg](https://github.com/FFmpeg/FFmpeg) and its libx264 encoder, encode a 30 fps
+sequence:
+
+```sh
+ffmpeg -framerate 30 -i frames/frame-%05d.png -c:v libx264 -pix_fmt yuv420p history.mp4
+```
+
+Match `-framerate` to the `--fps` used for export. Choose a new output filename;
+FFmpeg asks before replacing an existing file. Keep PNGs for re-encoding or remove
+them manually after checking the video.
+
+## Scripted camera
+
+`--camera-path` replaces the fitted export camera with TOML keys. Save the
+[example path](examples/camera-path.toml) as `camera-path.toml` in a Git working
+tree, then run there:
+
+```sh
+codestrand export camera-frames --camera-path camera-path.toml \
+  --frames 241 --fps 30 --video camera.mkv --ffmpeg-arg=-c:v --ffmpeg-arg=ffv1
+```
+
+The file must be a regular file of at most 1 MiB. It requires `fps` (1–240, inclusive)
+and one or more `[[key]]` tables. Each key requires an unsigned `frame`, `eye` and
+`focus`. Frames must increase strictly. Key seconds are `frame / file fps`; export
+`--fps` samples the same path at its own rate.
+A path never changes playback speed or export duration. Frame zero follows the
+selected inclusive start date; before the first key and after the last, the endpoint key
+continues resolving its targets.
+
+```toml
+fps = 30
+[[key]]
+frame = 30
+eye = { point = [0.0, 24.0, 16.0] }
+focus = { point = [0.0, 0.0, 0.0] }
+[[key]]
+frame = 60
+eye = { avatar = "Ada", offset = [0.0, 6.0, 8.0] }
+focus = { avatar = "Ada" }
+```
+
+Each anchor selects exactly one of `point`, `avatar`, `file` or `directory`.
+Coordinates and optional `offset` vectors use world units: +Y is up, with files
+on the XZ plane. Offsets remain world-aligned. Contributor names match resolved
+display names exactly; ambiguous names fail.
+File and directory paths match repository-relative layout strings, including case.
+An empty directory path selects the repository root. A `repository`
+label can qualify a file or directory; without the label, an ambiguous path reports
+candidate repositories. Paths are matched, never opened by the camera evaluator.
+
+Targets resolve from the simulation's current world positions on every frame,
+including arrival/deletion effects. Avatars retain their simulation positions after
+leaving, but have none before first creation. A referenced target without a position
+fails with the output frame, key and target name; there is no origin fallback.
+The first key must use points or targets already present at playback start. Hold a point
+view until a target exists before blending toward that target's key.
+
+A file target follows the same file through renames. A name used by multiple file
+identities is ambiguous; choose another historical name. Re-adding after a deletion's
+fade completes creates a new identity, so pacing can affect ambiguity.
+Directories bind directly to the loaded layout, including planned positions before
+appearance and outside the selected playback interval. There is no follow
+filter: target motion retains the simulation's fixed 60 Hz ticks, which can show
+steps at high output rates. Smoothstep blends the two keys' current eye/focus
+positions; a repeated target follows throughout the segment without easing to a stop.
+
+`up` inherits from the preceding key and defaults to `[0, 0, -1]`, suitable for
+straight-down views. Normalised up vectors blend with smoothstep; orientation is
+constructed from the resolved eye, focus and up, without Euler interpolation.
+Opposite consecutive ups fail. Unknown fields, non-finite coordinates, invalid
+ordering and unknown targets fail before the GPU, encoder or output directory starts.
+Each output frame also rejects an eye below the 1.2-unit camera floor, coincident
+eye/focus, or up parallel to the view. A later invalid pose can leave partial output.
+Right/forward turns >90°/frame fail; add a key, raise fps, or lengthen the move.
+
+The same inputs, including fps, produce the same logical camera poses regardless
+of render delays. Rendered pixels can differ across graphics adapters, backends and
+drivers, and slightly between runs. Camera paths affect export only; preview controls
+remain independent.
+Close-zoom names still enter at 48 pixels and leave below 40 pixels during camera moves.
+
+---
+
+Source: https://codestrand.pages.dev/configuration/
+
+# Config file
+
+`--config FILE` reads `preview` and `export` options from a TOML file, so a run can be
+kept and repeated as one file. Each key is a flag name without the leading dashes:
+
+```toml
+seconds-per-day = 2
+start-date = "2025-01-01"
+gutter = 8
+caption-style = "chip"
+no-diff-samples = true
+fps = 60
+video = "history.mp4"
+
+[[repositories]]
+path = "../first"
+label = "First project"
+
+[[repositories]]
+path = "../second"
+```
+
+```sh
+codestrand preview --config codestrand.toml
+codestrand export frames --config codestrand.toml --start-date 2025-06-01
+```
+
+- Flags on the command line override the file. A repeated flag such as `--repository`
+  replaces the file's list rather than adding to it, and any `--repository` or
+  `--repositories-file` flag replaces the whole repository list, and the file's list
+  is then not read.
+- One file serves both commands: an export option such as `fps` is checked but ignored
+  by `preview`.
+- Relative paths resolve beside the file, as repository paths do. `ffmpeg` is the
+  exception, because a bare name is looked up on `PATH`.
+- Switches such as `no-cache` take `true` or `false`. A switch set to `true` in the file
+  cannot be turned off from the command line.
+- Repeatable flags take a list, such as `repository = ["../first", "../second"]`.
+- The `[[repositories]]` tables use the
+  [repositories file](https://codestrand.pages.dev/playback/#multiple-repositories) format. A file holding them
+  cannot also set `repositories-file`.
+- Unknown keys and invalid values are errors that name the key.
+- The export directory is a positional argument and stays on the command line.
+
+Codestrand reads a config file only when `--config` names it. A file can enable avatar
+fetching or choose the FFmpeg executable, so treat one from elsewhere like a script.
+
+---
+
+Source: https://codestrand.pages.dev/contributors/
+
+# Contributors and avatars
+
+Preview and export read `contributors.toml` from the user configuration directory:
+
+- Linux: `~/.config/codestrand/` (or `$XDG_CONFIG_HOME/codestrand/` when set).
+- macOS: `~/Library/Application Support/codestrand/`.
+- Windows: `%APPDATA%\codestrand\`.
+
+Override the file with `--contributors /path/to/contributors.toml`:
+
+```toml
+[[contributor]]
+name = "Owen Lamont"
+emails = ["owen@personal.example", "owen@work.example"]
+github = "owenlamont"           # optional GitHub login
+gitlab = "owenlamont"           # optional GitLab.com username
+gravatar = "owen@avatar.example" # optional Gravatar email
+bot = false                   # optional bot classification override
+# avatar = "portraits/owen.png"  # optional local path or HTTPS URL; overrides lookups
+```
+
+Emails match case-insensitively; duplicate emails are errors. Matching names never merge
+people with different nonempty emails. Unlisted emails keep separate identities,
+displayed with the name from the last commit in playback order. Commits without an email
+are grouped by author name. A missing default file is fine; an explicit missing file,
+unknown key or malformed TOML is an error. Edits take effect on cache hits; original
+authors and repository history remain unchanged.
+
+`bot = true` marks automation and `bot = false` marks a human, overriding automatic
+detection even after a display-name change. Without an override, a parsed GitHub noreply
+login ending in `[bot]` identifies a bot; a displayed name ending in `[bot]` is the
+fallback. `[bot]` elsewhere in a name does not match. Bot avatars fade between
+repositories by default; use `--bot-travel walk` to route them like humans.
+
+Configuration is limited to 1 MiB before parsing, 4,096 contributors, 4,096 total email
+aliases, and 4,096 bytes per string. Expanded alias payloads may total at most 16 MiB.
+Files exceeding a limit are rejected with a configuration error before alias expansion.
+
+Account fields accept usernames, never profile URLs or whitespace. GitHub logins use
+letters, digits and hyphens (bot logins may end in `[bot]`); GitLab usernames start with
+a letter or digit and may also contain `_`, `-` and `.`. Invalid fields report the file,
+contributor and field. Local avatar paths resolve relative to the TOML file and must stay
+inside the TOML file's directory. Absolute paths are accepted only inside that directory.
+Parent escapes, symlinks, directory junctions, network paths and device paths are rejected
+before opening an image. Rejected paths warn and use the default coloured sphere.
+All ancestors must be real directories, including ancestors of the TOML directory.
+Local images
+must decode as PNG, JPEG or GIF, at most 4 MiB and 2048 pixels per side. Missing or
+undecodable local images produce a warning and fall back to account lookups.
+Remote overrides require an HTTPS URL without credentials.
+
+## Contributor avatars
+
+Contributors stay above the file plane and move between repository service lanes.
+`--avatar-scale` controls disc diameter relative to the original size: default `2`,
+range `0.5`–`2`, inclusive. The default doubles portraits in both single- and
+multi-repository playback; single-repository pixels therefore change too. Use
+`--avatar-scale 1` for the original small-group disc diameter. Repository count
+shrinks avatars only through the packing detail scale in [Playback](https://codestrand.pages.dev/playback/).
+Name fonts retain their existing readability policy. `--gutter` independently controls
+visible tile spacing (default `4` reference pixels at full detail, `0` allowed); the
+outer margin is 24 pixels.
+Visible avatars keep their names, including during travel and idle fade-out.
+Crowded playback shrinks avatars and names; small groups retain their normal size.
+Names first shrink to a minimum of 12 pixels at the reference 1280×720 viewport,
+then try nearby free lane positions. Truncation is the last resort when the full name
+cannot fit at the minimum size. Names prefer to avoid every repository’s content
+rectangle and labels, with edge overlap permitted when no clear lane fits.
+Name placement uses the default fitted view, including when preview is orbited or zoomed.
+Playback time drives crowd scaling and placement, so export speed does not change them.
+
+Preview and export stay offline by default: local overrides and cached portraits are
+used, with the coloured sphere as the fallback. Add `--fetch-avatars` to either command
+to opt in to network requests before playback starts. Export never fetches during frame
+capture.
+
+```sh
+codestrand preview --repository /path/to/repo --fetch-avatars
+codestrand export frames --repository /path/to/repo --fetch-avatars
+```
+
+Resolution stops at the first usable portrait, in the following order:
+
+1. Explicit `avatar`: local file or cached/fetched HTTPS image. An unavailable local
+   file warns and continues below. An unavailable HTTPS override keeps the default glyph
+   (or its previous cached portrait), without account lookups.
+2. Explicit `github`, then explicit `gitlab` using the GitLab.com Users API.
+3. GitHub noreply login, then the commit author's GitHub account when a remote points
+   to github.com (`origin` preferred). An explicit GitHub login replaces inferred
+   GitHub lookup. The commit API runs at most once per distinct unresolved email per run.
+4. GitLab.com email lookup, only with **both** `--fetch-avatars` and
+   `--gitlab-email-avatars`.
+5. Gravatar using `gravatar` when provided, otherwise the commit email, hashed with
+   SHA-256 after trimming and lowercasing; `d=404` avoids Gravatar placeholders.
+6. Default coloured sphere.
+
+`GH_TOKEN` or `GITHUB_TOKEN`, when present, authenticates only GitHub API requests.
+Public repositories work without a token; private repositories need a token with
+repository access. GitLab lookups are unauthenticated and support GitLab.com only.
+Rate limits and network failures leave playback available. HTTPS uses Rustls with ring
+and the operating system trust store on Linux, macOS and Windows.
+
+## Privacy and network settings
+
+`--fetch-avatars` alone **never sends raw commit emails**. GitLab email lookup is off by
+default, even when fetching is enabled. Opt in explicitly for each invocation:
+
+```sh
+codestrand export frames --repository /path/to/repo --fetch-avatars --gitlab-email-avatars
+```
+
+- No fetch flags: no requests; local overrides and cache only.
+- `--fetch-avatars`, remote `avatar`: the override host receives the configured URL,
+  including path and query.
+- `--fetch-avatars`, GitHub: GitHub receives the configured or noreply login, or the
+  repository and commit SHA. The image host receives the image URL, possibly containing
+  a numeric account ID.
+- `--fetch-avatars`, `gitlab`: GitLab.com receives the configured username. The returned
+  image host receives the avatar URL.
+- `--fetch-avatars`, Gravatar: Gravatar receives the normalized email's SHA-256 hash,
+  never the email.
+- Both flags, GitLab email: GitLab.com receives the trimmed, lowercased commit email
+  in a URL query. The returned image host receives the avatar URL.
+
+Identifiers and email hashes are identifying information. GitLab may return an external
+avatar URL; fetching follows that URL unless the host is `gravatar.com` or a subdomain.
+GitLab Gravatar URLs are treated as misses so the configured Gravatar step decides.
+HTTPS redirects can also contact another image host.
+An explicit avatar URL can itself contain identifying information supplied by the user.
+GitHub credentials are never added to GitLab or image requests. Diagnostics show counts,
+not emails or request URLs. Local avatar overrides do not require either fetch flag.
+
+## Cache
+
+Portraits and account resolutions live under `codestrand/avatars-v2/` in the platform
+cache directory, keyed by a hash of email, explicit accounts, override, remote and GitLab
+email setting. Remote overrides are keyed only by URL. Existing GitHub/Gravatar-only
+cache entries remain usable. For account lookups, changing the GitLab email flag selects
+a separate cache entry; pass `--gitlab-email-avatars` without
+`--fetch-avatars` to reuse an opted-in portrait offline. The email flag alone never
+enables network requests.
+Portraits are resized to 128-pixel PNG files beside small JSON account records.
+Fetching covers only contributors in the selected playback window, with a 30-second
+total network budget. Entries refresh after seven days when fetching is enabled;
+offline playback can reuse expired images. Failed refreshes retain cached images.
+`--no-cache` disables avatar cache reads and writes too; local overrides still work.
+Delete the directory to clear saved avatars. Circular portraits retain the contributor
+colour as a ring; contributors without images keep the coloured sphere.
+
+Cache reads and writes reject linked directories in every path component. An unusable
+cache is treated as a miss; no linked destination is read or written.
+
+---
+
+Source: https://codestrand.pages.dev/security/
+
+# Privacy and local processing
+
+Codestrand makes no application network requests by default. Git import, planning
+and rendering run locally; repositories are not uploaded. Avatar fetching is opt-in.
+
+## Avatar requests
+
+`--fetch-avatars` enables HTTPS requests for selected contributors. Depending on the
+available portrait and account information, requests can disclose:
+
+- A GitHub repository's owner and name and a commit hash to `api.github.com`, to find
+  the matching account. API authentication uses `GH_TOKEN`, or `GITHUB_TOKEN` when
+  `GH_TOKEN` is unset or not valid Unicode. An empty `GH_TOKEN` disables authentication
+  without falling back to `GITHUB_TOKEN`; empty tokens are ignored. GitHub avatar
+  servers receive the account name or numeric ID.
+- A SHA-256 digest of a selected email address, or its configured Gravatar address,
+  to Gravatar when a portrait is still missing. The address is trimmed and lowercased
+  first. A hash is not anonymity:
+  someone who knows an address can calculate the same value.
+- A configured GitLab username to GitLab. Raw email lookup at GitLab requires both
+  `--fetch-avatars` and `--gitlab-email-avatars`.
+- A configured remote avatar URL to its HTTPS server, and any redirect destination.
+
+Codestrand does not add source file paths, source contents or diff text to these
+requests. Servers also receive ordinary connection information such as the source
+IP address and the Codestrand user agent. Configured URLs can contain whatever
+information their author put in them.
+
+## Local files and processes
+
+The history cache contains commit IDs and dates, contributor names and email
+addresses, file paths, change counts and sampled source lines in plain text.
+Portrait images and account lookup results are cached locally too. These files are
+not encrypted by Codestrand. `--no-cache` disables reading and writing its caches.
+
+The cache is under `codestrand` in the operating system's user cache directory:
+`%LOCALAPPDATA%` on Windows, `~/Library/Caches` on macOS, and `$XDG_CACHE_HOME` or
+`~/.cache` on Linux. History snapshots use per-repository subdirectories;
+portrait data uses `avatars-v2`.
+
+Video export starts FFmpeg and sends it rendered frames through standard input.
+Codestrand's production import and renderer do not launch Git, repository hooks,
+external diff drivers or other subprocesses.
+
+Before planning, Codestrand compares a planning-memory estimate with available physical
+memory. The estimate excludes the renderer and video encoder; it can be conservative
+on some inputs and too low on others. It is not a process-memory limit or reservation.
+Windowed planning bounds retained travel windows and checkpoints, not total process
+memory. The available-memory snapshot excludes swap and container or job-specific limits.
+
+This describes Codestrand's own behavior. It cannot promise what a user-selected
+encoder executable does, or keep an operating system from accessing a network-mounted
+repository, cache, avatar file or output path. HTTPS avatar requests use environment
+proxy settings and the system certificate verifier. Operating-system services and other
+software are outside this guarantee.
+
+---
+
+Source: https://codestrand.pages.dev/troubleshooting/
+
+# Troubleshooting
+
+## Command not found or missing options
+
+Open a new terminal after installing and confirm the installation directory is on
+`PATH`. Use `codestrand --version` and `codestrand --help` to check which binary
+runs. The guides describe 0.2.0; upgrade an older release if an option is
+missing. See [installation](https://codestrand.pages.dev/getting-started/installation/) for supported targets.
+
+## Repository or revision cannot be read
+
+Use a local repository path rather than a remote URL. Quote paths with spaces and
+check the revision exists locally. Obtain a complete clone: shallow or partial
+repositories can lack commits or objects needed for import. Inspect without
+starting the renderer:
+
+```sh
+codestrand inspect /path/to/repository --revision HEAD
+```
+
+For stale or damaged playback cache data, retry with `--no-cache`. Inspection
+always reads directly from Git. An inclusive `--start-date` / `--end-date` range
+limits playback but
+still imports the history; the first load of a large repository can take time.
+
+## Graphics window or export fails
+
+Both preview and export need a working graphics adapter. Preview also needs a
+windowing environment. Update graphics drivers and try a local desktop session
+for preview. `inspect` works without a GPU.
+For slow source-checkout playback, use `cargo run --locked --release -- preview`.
+
+## Source build fails
+
+Install the Rust toolchain and native build prerequisites. Linux release builds
+install ALSA, systemd/udev, X11, Xcursor, Xi, Xrandr, Wayland, EGL and xkbcommon
+development packages. Wayland support requires `libwayland-dev` and `libxkbcommon-dev`
+on Debian/Ubuntu, or `wayland-devel` and `libxkbcommon-devel` on Fedora.
+Package names differ by distribution. Windows source builds need the
+MSVC C++ build tools; macOS builds need the Xcode command-line tools.
+
+## Export directory already exists
+
+Choose a new directory for each export. Codestrand rejects an existing directory
+rather than overwriting frames. Match FFmpeg's input framerate to the export's
+`--fps`; see [export](https://codestrand.pages.dev/export/).
+
+## Contributor configuration or portraits fail
+
+An explicitly selected `--contributors` file must exist. Unknown TOML keys,
+malformed TOML and duplicate emails are errors. A missing default file is allowed.
+See the [configuration example](https://codestrand.pages.dev/contributors/).
+
+Portraits stay offline unless `--fetch-avatars` is supplied. Network errors and
+rate limits leave coloured spheres or previously cached images available.
+`--no-cache` disables portrait reuse as well as history caching. Private GitHub
+repositories need an API token with access.
+
+## Report a problem
+
+Terminal diagnostics escape control characters in paths and dependency error chains.
+For example, an escape character is printed as `\u{1b}` rather than changing terminal
+colour or interpreting a terminal command.
+
+Include the version, operating system, exact command and error text in a
+[GitHub issue](https://github.com/owenlamont/codestrand/issues). Remove private
+repository paths, author identities and credentials before sharing logs or JSON.
+
+---
+
+Source: https://codestrand.pages.dev/ai-agents/
+
+# Using Codestrand with AI agents
+
+Coding agents can run Codestrand for you: inspect a repository, open a preview or export
+frames and video. This page lists the context Codestrand publishes for them; the rest of
+these docs cover the CLI itself.
+
+## The Codestrand agent skill
+
+The agent skill, `skills/codestrand/SKILL.md` in the
+[repository](https://github.com/owenlamont/codestrand), teaches an agent the commands,
+the export manifest, what leaves the machine and the common failures. Install it for
+your user with the GitHub CLI:
+
+```sh
+gh skill install owenlamont/codestrand codestrand --agent claude-code --scope user
+```
+
+Swap `--agent` for `codex`, `cursor`, `github-copilot` or another host listed by
+`gh skill install --help`. The skill installs from the latest release, so it is
+available from the first release after 0.2.0. A test checks that every option the skill
+names is in `--help` and that every command it shows parses.
+
+## Prompting in AGENTS.md
+
+A line in a repository's `AGENTS.md` or `CLAUDE.md` points agents at the tool:
+
+> Visualise this repository's history with `codestrand preview --repository .`, or
+> export it with `codestrand export <new directory> --repository .`. Do not pass
+> `--fetch-avatars` without asking: it sends contributor lookups to GitHub and Gravatar.
+
+## Feeding the docs to an LLM
+
+The docs site publishes [llmstxt.org](https://llmstxt.org) files for agents that read
+documentation directly:
+
+- [llms.txt](llms.txt): an index of every page with a one-line summary.
+- [llms-full.txt](llms-full.txt): every page's Markdown in one file.
+
+Both are generated from these pages by `scripts/gen_llms_txt.py`.
+
+---
+
+Source: https://codestrand.pages.dev/related-tools/
+
+# Related tools
+
+Codestrand is inspired by [Gource][gource]; other Git history visualisers and
+Gource helpers offer several ways to explore a repository.
+
+## Gource and helpers
+
+| Tool | View or role | Built with | Runs as |
+| --- | --- | --- | --- |
+| [Gource][gource] | File trees and contributors | OpenGL | Desktop; frame output |
+| [Rource (AdamLeyshon)][logs] | Multi-repo logs and aliases | Rust | CLI for Gource |
+| [gourcers][gourcers] | Clone repos and merge logs | Rust | CLI for Gource |
+| [Envisaged][envisaged] | Git history videos | Python, Gource, FFmpeg | CLI; web UI |
+| [Envisaged Redux][redux] | Git history videos | Gource, FFmpeg | Docker; web preview |
+
+## Gource-style trees
+
+| Tool | View | Built with | Runs as |
+| --- | --- | --- | --- |
+| [Gource View][view] | Trees and contributors | Node.js server | Browser; MP4 export |
+| [Rource (kauandotnet)][rource] | Animated trees | Rust, WASM | Desktop; browser |
+
+## Cities, networks and treemaps
+
+| Tool | View | Built with | Runs as |
+| --- | --- | --- | --- |
+| [Sourcity][sourcity] | Voxel cities and robots | .NET, Raylib-cs | Desktop |
+| [Git City][city] | City and farm history replay | Electron | Desktop Git client |
+| [Repo Visualizer][network] | Import networks | Canvas, WebGL | Browser; video |
+| [strata][strata] | Treemaps, trees and charts | Rust, TypeScript/D3 | Browser; video |
+| [gitatlas][atlas] | Animated file treemaps | Rust, FFmpeg | CLI video renderer |
+
+[gource]: https://github.com/acaudwell/Gource
+[logs]: https://github.com/AdamLeyshon/rource
+[gourcers]: https://github.com/campbellcole/gourcers
+[envisaged]: https://github.com/utensils/Envisaged
+[redux]: https://envisaged-redux.vercel.app/
+[view]: https://github.com/schlunsen/gource-view
+[rource]: https://github.com/kauandotnet/rource
+[sourcity]: https://github.com/mii-nipah/sourcity
+[city]: https://github.com/maximalcode/git-city
+[network]: https://github.com/Jany-M/repo-visualizer
+[strata]: https://github.com/MrSeal04/strata
+[atlas]: https://github.com/SupremeVoid/gitatlas

@@ -236,7 +236,7 @@ fn padded_state_replays_identically_at_thirty_and_sixty_fps_and_after_rewind() {
         Options::default(),
         Options {
             start: 2,
-            commits: Some(4),
+            commits: 4,
             ..Options::default()
         },
     ] {

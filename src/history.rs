@@ -98,15 +98,14 @@ struct Exhausted {
     remedy: &'static str,
 }
 
-fn exhausted(name: &'static str, limit: u64, cumulative: bool) -> anyhow::Error {
+const TRUNCATABLE: &str = "use --allow-truncated-history to play completed commits";
+const CEILING: &str = "fixed security ceiling";
+
+fn exhausted(name: &'static str, limit: u64, remedy: &'static str) -> anyhow::Error {
     Exhausted {
         name,
         limit,
-        remedy: if cumulative {
-            "use --allow-truncated-history to play completed commits"
-        } else {
-            "fixed security ceiling"
-        },
+        remedy,
     }
     .into()
 }
@@ -143,7 +142,7 @@ impl Budget {
     fn charge(&mut self, amount: u64) -> anyhow::Result<()> {
         self.work = self.work.saturating_add(amount);
         if self.work > self.limits.work {
-            return Err(exhausted("cumulative work", self.limits.work, false));
+            return Err(exhausted("cumulative work", self.limits.work, CEILING));
         }
         Ok(())
     }
@@ -154,7 +153,7 @@ impl Budget {
             return Err(exhausted(
                 "retained input bytes",
                 self.limits.retained_bytes,
-                true,
+                TRUNCATABLE,
             ));
         }
         Ok(())
@@ -164,7 +163,11 @@ impl Budget {
         self.changes += 1;
         self.charge(1)?;
         if self.changes > self.limits.entries {
-            return Err(exhausted("changed entries", self.limits.entries, true));
+            return Err(exhausted(
+                "changed entries",
+                self.limits.entries,
+                TRUNCATABLE,
+            ));
         }
         let source_bytes = match change {
             TreeChange::Rewrite {
@@ -183,7 +186,7 @@ impl Budget {
         self.charge(1)?;
         let size = repo.find_header(id)?.size();
         if size > self.limits.object_bytes {
-            return Err(exhausted("object bytes", self.limits.object_bytes, false));
+            return Err(exhausted("object bytes", self.limits.object_bytes, CEILING));
         }
         self.charge(size)?;
         Ok(size)
@@ -197,7 +200,7 @@ impl Budget {
     ) -> anyhow::Result<(u64, usize, usize, u64)> {
         self.charge(1)?;
         if depth > 256 {
-            return Err(exhausted("tree depth", 256, false));
+            return Err(exhausted("tree depth", 256, CEILING));
         }
         if let Some(&summary) = self.trees.get(&id) {
             return Ok(summary);
@@ -227,7 +230,7 @@ impl Budget {
                 (summary.3, 64 * 1024 * 1024, "single-tree path bytes"),
             ] {
                 if value > limit {
-                    return Err(exhausted(name, limit, false));
+                    return Err(exhausted(name, limit, CEILING));
                 }
             }
         }
@@ -548,7 +551,7 @@ fn reachable(
             return Err(exhausted(
                 "reachable commits",
                 budget.limits.commits as u64,
-                true,
+                TRUNCATABLE,
             ));
         }
         budget.object(repo, id).with_context(|| {
@@ -564,7 +567,7 @@ fn reachable(
                 return Err(exhausted(
                     "pending parents",
                     budget.limits.commits as u64,
-                    true,
+                    TRUNCATABLE,
                 ));
             }
             parents.push(parent.detach());
