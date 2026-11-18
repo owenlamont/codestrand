@@ -19,7 +19,10 @@ All notable changes to Codestrand are documented here, following
 - Avatars no longer shrink as repository count rises, so many-repository playback
   shows them up to four times larger.
   ([#180](https://github.com/owenlamont/codestrand/pull/180))
-- Repository titles share one size across tiles and end in an ellipsis when too wide.
+- Repository titles share one size across tiles, never below 12 pixels, and end in an
+  ellipsis when too wide. ([#180](https://github.com/owenlamont/codestrand/pull/180))
+- Directory and touched-file labels shrink with their tile's files, to no less than 8
+  pixels, and end in an ellipsis when wider than their tile.
   ([#180](https://github.com/owenlamont/codestrand/pull/180))
 
 ## v0.2.0 - 2026-11-16

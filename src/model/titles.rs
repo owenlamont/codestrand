@@ -63,6 +63,8 @@ pub(super) fn obstacles(sim: &Simulation) -> Vec<(usize, Rect)> {
 }
 
 const INSET: f32 = 34.0;
+/// Title text scale at the 12 pixel floor contributor names keep, against 14 pixels.
+pub(super) const MIN_SCALE: f32 = 12.0 / 14.0;
 const STEP: u32 = 15;
 const CHANGE_COST: f64 = 20_000.0;
 
@@ -104,16 +106,20 @@ impl Title {
         })
     }
 }
-/// A title at one `scale` for every tile, elided to the tile width; `None` when too short.
+/// A title at one size for every tile, elided to the tile width; `None` when too short.
+///
+/// `detail` scales the corner inset with the avatars; the text never shrinks below
+/// [`MIN_SCALE`].
 fn title(
     tile: crate::layout::packing::Tile,
     label: &str,
     height: f32,
     corner: u8,
-    scale: f32,
+    detail: f32,
 ) -> Option<Title> {
     let tile =
-        Rect::from_corners(tile.low * HALF, tile.high * HALF).inflate(-INSET * scale);
+        Rect::from_corners(tile.low * HALF, tile.high * HALF).inflate(-INSET * detail);
+    let scale = detail.max(MIN_SCALE);
     let fits = ((tile.width() - 8.0) / (8.6 * scale)).floor();
     if fits < 1.0 || tile.height() < height * scale + 4.0 {
         return None;
@@ -456,6 +462,66 @@ mod tests {
         assert!(narrow.text.ends_with('…'));
         assert_eq!(wide.size.y, narrow.size.y);
         assert!(narrow.rect().max.x <= tile(0.2).high.x * HALF.x - INSET);
+    }
+
+    #[test]
+    fn titles_stop_shrinking_at_the_name_floor() {
+        let low = title(
+            crate::layout::packing::Tile::viewport(),
+            "repo",
+            20.0,
+            0,
+            0.5,
+        );
+        assert_eq!(low.unwrap().scale, MIN_SCALE);
+    }
+
+    #[test]
+    fn directory_and_file_labels_shrink_with_their_tile_and_fit_its_width() {
+        let count = 16;
+        let mut events: Vec<_> = (0..count)
+            .flat_map(|index| {
+                let mut history = crate::timeline::synthetic();
+                crate::repositories::namespace(&mut history, index);
+                for event in &mut history {
+                    event.seconds += i64::try_from(index).unwrap() * 86_400;
+                }
+                history
+            })
+            .collect();
+        events.sort_by_key(|event| event.seconds);
+        let labels: Vec<_> = (0..count).map(|index| format!("repo{index}")).collect();
+        let options = crate::model::Options {
+            seconds_per_day: 0.05,
+            max_idle_seconds: 0.05,
+            ..crate::model::Options::default()
+        };
+        let mut sim = crate::model::Simulation::build(
+            events,
+            &options,
+            &crate::theme::Theme::neon(),
+            &crate::contributors::Mappings::default(),
+            &[],
+            &labels,
+            &mut None,
+        )
+        .unwrap();
+        sim.advance_to(crate::model::frames_for(sim.duration(), 60).unwrap(), 60);
+        let long = "a-very-long-directory-name/".repeat(8);
+        let mut shrunk = false;
+        for (index, dir) in sim.state.layout.dirs() {
+            let (text, scale) = sim.tile_label(index, long.clone());
+            let tile = sim.state.layout.repositories[dir.repository].tile.unwrap();
+            let width =
+                super::super::names::rect(Vec2::ZERO, &text, scale, 20.0).width();
+            assert_eq!(
+                scale,
+                dir.scale.clamp(super::super::MIN_TILE_LABEL_SCALE, 1.0)
+            );
+            assert!(width <= (tile.high.x - tile.low.x) * HALF.x, "{text}");
+            shrunk |= scale < 1.0;
+        }
+        assert!(shrunk);
     }
 
     #[test]

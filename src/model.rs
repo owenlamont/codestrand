@@ -70,6 +70,8 @@ const SETTLE_TICKS: u32 = 1200;
 /// Ticks of the global replay whose region samples are held before they become inputs.
 const REGION_BATCH: usize = 512;
 const DIR_LABELS: usize = 20;
+/// Directory and file label scale at an 8 pixel floor, against 14 pixels.
+const MIN_TILE_LABEL_SCALE: f32 = 8.0 / 14.0;
 
 fn check_travel_pass(pass: u32) -> anyhow::Result<()> {
     anyhow::ensure!(
@@ -1624,6 +1626,23 @@ impl Simulation {
                     })
             })
     }
+    /// A directory or file label scaled with its tile's files, elided to the tile width.
+    fn tile_label(&self, dir: usize, text: String) -> (String, f32) {
+        let dir = self.state.layout.dir(dir);
+        let scale = dir.scale.clamp(MIN_TILE_LABEL_SCALE, 1.0);
+        let Some(tile) = self.state.layout.repositories[dir.repository].tile else {
+            return (text, scale);
+        };
+        let width = (tile.high.x - tile.low.x) * titles::HALF.x;
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a whole character count bounded by the tile width"
+        )]
+        let fits = ((width - 8.0) / (8.6 * scale)).floor().max(1.0) as usize;
+        (names::elide(&text, fits), scale)
+    }
+
     pub(super) fn labels_for_detail(
         &self,
         visible: impl Fn(usize) -> bool,
@@ -1681,13 +1700,16 @@ impl Simulation {
         dirs.sort_by_key(|&(index, _)| std::cmp::Reverse(subtree[index]));
         let mut labels: Vec<Label> = dirs
             .into_iter()
-            .map(|(index, dir)| Label {
-                position: ground(centroids[index] / count(subtree[index].max(1))),
-                text: format!("{}/", dir.name()),
-                kind: LabelKind::Landmark,
-                scale: 1.0,
-                opacity: self.repository_effect(dir.repository).1,
-                priority: 0.0,
+            .map(|(index, dir)| {
+                let (text, scale) = self.tile_label(index, format!("{}/", dir.name()));
+                Label {
+                    position: ground(centroids[index] / count(subtree[index].max(1))),
+                    text,
+                    kind: LabelKind::Landmark,
+                    scale,
+                    opacity: self.repository_effect(dir.repository).1,
+                    priority: 0.0,
+                }
             })
             .collect();
         labels.extend(self.repository_labels());
@@ -1700,19 +1722,22 @@ impl Simulation {
                     continue;
                 }
                 let text = match target {
-                    Target::File(id) => {
-                        layout.file(id).map(|file| file.name().to_owned())
-                    }
+                    Target::File(id) => layout
+                        .file(id)
+                        .map(|file| (file.dir, file.name().to_owned())),
                     Target::Dir(index) => {
-                        Some(format!("{}/", layout.directory_label(index)))
+                        Some((index, format!("{}/", layout.directory_label(index))))
                     }
                 };
-                if let (Some(text), Some(position)) = (text, self.state.point(target)) {
+                if let (Some((dir, text)), Some(position)) =
+                    (text, self.state.point(target))
+                {
+                    let (text, scale) = self.tile_label(dir, text);
                     labels.push(Label {
                         position: position + Vec3::new(-0.2, 0.0, 0.45),
                         text,
                         kind: LabelKind::Activity,
-                        scale: 1.0,
+                        scale,
                         opacity: 1.0,
                         priority: 0.0,
                     });
