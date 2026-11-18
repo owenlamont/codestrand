@@ -238,7 +238,7 @@ impl Simulation {
             next.repository_boundary = self.repository_boundary;
             next.repository_label_plane = self.repository_label_plane;
             next.collapse_directories = self.collapse_directories;
-            next.diff_text_distance = self.diff_text_distance;
+            next.diff_text = self.diff_text;
             next.stream = Some(shared.clone());
             *self = next;
         }

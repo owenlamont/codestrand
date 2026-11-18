@@ -329,6 +329,7 @@ pub(super) struct DiffLine {
     pub fragment: usize,
     pub detail: f32,
     pub position: Vec3,
+    pub tangent: Vec3,
     pub scale: f32,
     pub sample: crate::diff_samples::Sample,
     pub alpha: f32,
@@ -388,6 +389,8 @@ pub(super) struct Fragment {
     #[cfg(test)]
     beam: Option<(usize, Target)>,
     pub position: Vec3,
+    /// Beam direction from author to file at `position`, unnormalised.
+    pub tangent: Vec3,
     pub rising: bool,
     pub sample_detail: f32,
     pub alpha: f32,
@@ -491,7 +494,7 @@ pub(super) struct Simulation {
     envelopes: Vec<slots::Envelope>,
     pub repository_boundary: crate::repositories::Boundary,
     pub(super) collapse_directories: bool,
-    pub(super) diff_text_distance: f32,
+    pub(super) diff_text: crate::diff_samples::Presentation,
     pub repository_label_plane: crate::repositories::LabelPlane,
     events: windows::Events,
     offset: usize,
@@ -942,7 +945,7 @@ impl Simulation {
             envelopes: Vec::new(),
             repository_boundary: crate::repositories::Boundary::default(),
             collapse_directories: true,
-            diff_text_distance: 1.0,
+            diff_text: crate::diff_samples::Presentation::default(),
             repository_label_plane: crate::repositories::LabelPlane::default(),
             events: events.into(),
             offset: start,
@@ -1603,6 +1606,7 @@ impl Simulation {
                     fragment: index,
                     detail: fragment.sample_detail,
                     position: fragment.position,
+                    tangent: fragment.tangent,
                     scale: fragment.scale * self.scale().sqrt(),
                     sample: fragment.sample?,
                     alpha: fragment.alpha,
@@ -2093,11 +2097,15 @@ fn diff_fragments(
     (0..pieces).map(move |piece| {
         let phase = (age * pace.speed + count_u32(piece) / count_u32(pieces)).fract();
         let (style, from, to) = beam;
-        let position = style.point(from, to, if rising { 1.0 - phase } else { phase });
+        let along = if rising { 1.0 - phase } else { phase };
+        let position = style.point(from, to, along);
+        let tangent = style.point(from, to, (along + 0.01).min(1.0))
+            - style.point(from, to, (along - 0.01).max(0.0));
         Fragment {
             #[cfg(test)]
             beam: None,
             position,
+            tangent,
             rising,
             sample_detail: 1.0,
             alpha: if rising {

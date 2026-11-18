@@ -95,6 +95,46 @@ pub(super) fn sample_visibility(on_screen_px: f32, distance: f32) -> f32 {
     weight * weight * (3.0 - 2.0 * weight)
 }
 
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum, serde::Serialize,
+)]
+pub(crate) enum Orientation {
+    #[default]
+    CameraFacing,
+    AlongBeam,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Presentation {
+    /// Multiplies on-screen sample height before the visibility ramp.
+    pub distance: f32,
+    pub orientation: Orientation,
+}
+
+impl Default for Presentation {
+    fn default() -> Self {
+        Self {
+            distance: 1.0,
+            orientation: Orientation::default(),
+        }
+    }
+}
+
+/// Clockwise screen rotation that lays text along a beam's on-screen direction
+/// (y down), turned by half a revolution where the beam points left so text never
+/// reads upside down.
+pub(super) fn beam_rotation(direction: bevy::math::Vec2) -> bevy::math::Rot2 {
+    if direction.length_squared() < 1e-6 {
+        return bevy::math::Rot2::IDENTITY;
+    }
+    let upright = if direction.x < 0.0 {
+        -direction
+    } else {
+        direction
+    };
+    bevy::math::Rot2::radians(upright.y.atan2(upright.x))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,5 +243,22 @@ mod tests {
         }
         assert_eq!(forward, reverse);
         assert_eq!(forward[0].text, "let result = calculate_value();");
+    }
+
+    #[test]
+    fn beam_rotation_follows_the_beam_and_keeps_text_upright() {
+        use bevy::math::Vec2;
+        use std::f32::consts::FRAC_PI_4;
+        for (direction, expected) in [
+            (Vec2::new(1.0, 1.0), FRAC_PI_4),
+            (Vec2::new(-1.0, -1.0), FRAC_PI_4),
+            (Vec2::new(1.0, -1.0), -FRAC_PI_4),
+            (Vec2::new(-1.0, 1.0), -FRAC_PI_4),
+            (Vec2::new(-3.0, 0.0), 0.0),
+            (Vec2::ZERO, 0.0),
+        ] {
+            let angle = beam_rotation(direction).as_radians();
+            assert!((angle - expected).abs() < 1e-6, "{direction}: {angle}");
+        }
     }
 }

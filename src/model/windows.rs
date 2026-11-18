@@ -346,7 +346,7 @@ impl Simulation {
             envelopes: self.envelopes.clone(),
             repository_boundary: self.repository_boundary,
             collapse_directories: self.collapse_directories,
-            diff_text_distance: self.diff_text_distance,
+            diff_text: self.diff_text,
             repository_label_plane: self.repository_label_plane,
             events,
             offset: self.offset,

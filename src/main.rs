@@ -271,6 +271,9 @@ struct Source {
     /// Hide changed source lines in preview and exported frames.
     #[arg(long)]
     no_diff_samples: bool,
+    /// Diff sample text faces the camera or lies along its beam, kept upright.
+    #[arg(long, value_enum, default_value = "camera-facing")]
+    diff_text_orientation: diff_samples::Orientation,
     /// Collapse small directory subtrees into file-sized folder icons (on|off).
     #[arg(long, action = clap::ArgAction::Set, default_value = "on", value_parser = directory_collapsing)]
     collapse_directories: bool,
@@ -519,6 +522,7 @@ impl Source {
         simulation.collapse_directories = self.collapse_directories;
         simulation.caption_style = self.caption_style;
         simulation.repository_label_plane = self.repository_label_plane;
+        simulation.diff_text.orientation = self.diff_text_orientation;
         Ok((simulation, title))
     }
 
@@ -1047,7 +1051,7 @@ mod tests {
                 panic!("playback command")
             };
             let (simulation, _) = source.load(&Progress::default()).unwrap();
-            assert_eq!(simulation.diff_text_distance, 1.0);
+            assert_eq!(simulation.diff_text.distance, 1.0);
         }
     }
 

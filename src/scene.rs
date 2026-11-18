@@ -2527,7 +2527,7 @@ fn diff_samples(world: &mut World, camera: &Camera, transform: &GlobalTransform)
             let projected = point.distance(top);
             let visibility = crate::diff_samples::sample_visibility(
                 projected,
-                playback.diff_text_distance,
+                playback.diff_text.distance,
             ) * line.detail;
             if visibility == 0.0 {
                 return None;
@@ -2547,14 +2547,24 @@ fn diff_samples(world: &mut World, camera: &Camera, transform: &GlobalTransform)
             let scale = Vec2::splat(size / 24.0);
             let extent = Vec2::new(columns * 24.0 * 0.6, 24.0 * 1.2);
             let origin = point - extent * 0.5;
+            let rotation = match playback.diff_text.orientation {
+                crate::diff_samples::Orientation::CameraFacing => Rot2::IDENTITY,
+                crate::diff_samples::Orientation::AlongBeam => {
+                    project_point(camera, transform, line.position + line.tangent)
+                        .map_or(Rot2::IDENTITY, |ahead| {
+                            crate::diff_samples::beam_rotation(ahead - point)
+                        })
+                }
+            };
             replacements.push((line.fragment, visibility));
-            Some((
-                format!("{prefix} {text}"),
+            Some(SampleText {
+                text: format!("{prefix} {text}"),
                 origin,
                 scale,
+                rotation,
                 extent,
-                color.with_alpha((line.alpha * 4.0).min(1.0) * visibility),
-            ))
+                ink: color.with_alpha((line.alpha * 4.0).min(1.0) * visibility),
+            })
         })
         .collect();
     let fragments = world.resource::<Pools>().fragments.clone();
@@ -2578,9 +2588,18 @@ fn diff_samples(world: &mut World, camera: &Camera, transform: &GlobalTransform)
     sync_diff_samples(world, wanted, sample_shadow, sample_backing);
 }
 
+struct SampleText {
+    text: String,
+    origin: Vec2,
+    scale: Vec2,
+    rotation: Rot2,
+    extent: Vec2,
+    ink: Color,
+}
+
 fn sync_diff_samples(
     world: &mut World,
-    wanted: Vec<(String, Vec2, Vec2, Vec2, Color)>,
+    wanted: Vec<SampleText>,
     sample_shadow: TextShadow,
     sample_backing: Color,
 ) {
@@ -2604,13 +2623,22 @@ fn sync_diff_samples(
         background,
     ) in query.iter_mut(world)
     {
-        if let Some((value, point, scale, extent, ink)) = wanted.next() {
+        if let Some(SampleText {
+            text: value,
+            origin,
+            scale,
+            rotation,
+            extent,
+            ink,
+        }) = wanted.next()
+        {
             text.set_if_neq(Text::new(value));
-            node.left = px(point.x);
-            node.top = px(point.y);
+            node.left = px(origin.x);
+            node.top = px(origin.y);
             node.width = px(extent.x);
             node.height = px(extent.y);
             ui_transform.scale = scale;
+            ui_transform.rotation = rotation;
             color.set_if_neq(TextColor(ink));
             if let Some(mut background) = background {
                 let backing = sample_backing;
@@ -3187,7 +3215,7 @@ mod tests {
             &crate::contributors::Mappings::default(),
         );
         simulation.advance_to(45, 60);
-        simulation.diff_text_distance = distance;
+        simulation.diff_text.distance = distance;
         let line = simulation.diff_lines().pop().unwrap();
         let mut world = World::new();
         world.init_resource::<Assets<Mesh>>();

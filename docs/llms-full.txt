@@ -788,6 +788,10 @@ fade, then fades out with the backing.
 Overlapping snippets may overlap freely without collision or viewport-edge hiding.
 Files inside collapsed subtrees show no sample text; LOD keeps its fragment behaviour.
 
+Snippets face the camera by default. `--diff-text-orientation along-beam` turns each
+line to its beam's on-screen direction, flipped where needed so it never reads
+upside down; on steep beams the text runs close to vertical.
+
 Samples come from actual changed lines: up to three per file and twelve per commit,
 preferring lines of 16–60 bytes, inclusive. Lines over 72 bytes before trimming,
 non-ASCII text, controls and trivial lines are omitted. Binary files and submodules
