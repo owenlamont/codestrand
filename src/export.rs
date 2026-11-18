@@ -25,8 +25,10 @@ use crate::{encoder::Encoder, scene};
 
 const WAIT_LIMIT: Duration = Duration::from_secs(30);
 const MAX_PENDING_CAPTURES: usize = 4;
+const PLAN_POLL: Duration = Duration::from_millis(50);
 
 mod png;
+pub(super) mod report;
 
 pub(super) fn prepare(directory: &Path) -> anyhow::Result<()> {
     fs::create_dir(directory)
@@ -50,6 +52,7 @@ pub(super) fn render(
     initialize(&mut app, &target)?;
     let mut png = encoder.is_none().then(png::Writer::new).transpose()?;
     let started = Instant::now();
+    let mut report = report::Report::new(started, fps);
     let (mut previous_camera, mut captures) = (None, Captures::default());
     let mut index = 0;
     let rendered = (|| -> anyhow::Result<()> {
@@ -72,13 +75,7 @@ pub(super) fn render(
                 waiting,
                 update,
                 &mut write,
-                |app| {
-                    app.world_mut()
-                        .resource_mut::<scene::Playback>()
-                        .0
-                        .prepare_frame(index, fps, true)
-                        .map(|_| ())
-                },
+                |app| wait_for_plan(app, &mut report, index, fps),
             )?;
             let playback = &app.world().resource::<scene::Playback>().0;
             let planned = crate::model::frames_for(playback.duration(), fps)?;
@@ -109,11 +106,13 @@ pub(super) fn render(
                 captures.write_ready(&mut write)?;
             }
             thread::sleep(Duration::from_millis(u64::from(delay_ms)));
-            if index % u32::from(fps) == 0
-                && frames.is_none_or(|frames| index + 1 < frames)
-            {
-                report_progress(&app, index + 1, frames, planned, started.elapsed());
-            }
+            report_progress(
+                &app,
+                &mut report,
+                captures.written,
+                frames,
+                (planned, fps),
+            );
             index += 1;
         }
         captures.finish(index, || update(&mut app), &mut write)?;
@@ -141,39 +140,47 @@ pub(super) fn render(
 
 fn report_progress(
     app: &App,
+    report: &mut report::Report,
     written: u32,
     frames: Option<u32>,
-    planned: u32,
-    elapsed: Duration,
+    (planned, fps): (u32, u16),
 ) {
     let playback = &app.world().resource::<scene::Playback>().0;
-    let total = frames.or_else(|| playback.planning_complete().then_some(planned));
-    eprintln!(
-        "{}",
-        progress_line(written, total, playback.history_progress(), elapsed)
-    );
+    let now = Instant::now();
+    report.planned(now, playback.planned_history(), written);
+    let length = match frames {
+        Some(frames) => report::Length::Requested(frames),
+        None if playback.planning_complete() => report::Length::Planned(planned),
+        // A projection past the export range only says the video is too long.
+        None => report::Length::Projected(
+            crate::model::frames_for(playback.projected_duration(), fps)
+                .unwrap_or(u32::MAX),
+        ),
+    };
+    let history = playback.history_progress();
+    if let Some(line) = report.progress(now, written, length, history) {
+        eprintln!("{line}");
+    }
 }
 
-fn progress_line(
-    written: u32,
-    frames: Option<u32>,
-    (history, total): (crate::model::Time, crate::model::Time),
-    elapsed: Duration,
-) -> String {
-    let progress = frames.map_or_else(
-        || {
-            format!(
-                "{written} frames; history {:.1}/{:.1}s",
-                history.lossy_secs_f32(),
-                total.lossy_secs_f32(),
-            )
-        },
-        |frames| format!("{written}/{frames} frames"),
-    );
-    format!(
-        "Exported {progress} ({:.1}s elapsed)",
-        elapsed.as_secs_f32()
-    )
+/// Prepares frame `index`, polling the planner so a long wait is reported as one.
+fn wait_for_plan(
+    app: &mut App,
+    report: &mut report::Report,
+    index: u32,
+    fps: u16,
+) -> anyhow::Result<()> {
+    loop {
+        let mut playback = app.world_mut().resource_mut::<scene::Playback>();
+        if playback.0.prepare_frame(index, fps, false)? {
+            return Ok(());
+        }
+        if let Some(line) = report.waiting(Instant::now(), playback.0.planned_history())
+        {
+            eprintln!("{line}");
+        }
+        thread::sleep(PLAN_POLL);
+    }
 }
 
 fn record_frame(
@@ -412,19 +419,6 @@ mod tests {
         timeline,
     };
     use bevy::{color::ColorToPacked, prelude::IntoScheduleConfigs};
-
-    #[test]
-    fn progress_does_not_present_a_window_as_the_final_frame_count() {
-        let history = (model::Time::seconds(2.0), model::Time::seconds(100.0));
-        assert_eq!(
-            progress_line(61, None, history, Duration::from_secs(3)),
-            "Exported 61 frames; history 2.0/100.0s (3.0s elapsed)"
-        );
-        assert_eq!(
-            progress_line(61, Some(3000), history, Duration::from_secs(3)),
-            "Exported 61/3000 frames (3.0s elapsed)"
-        );
-    }
 
     #[test]
     fn captures_write_in_request_order_once() {
@@ -684,7 +678,11 @@ mod tests {
         let available = sample_memory();
         let (mut simulation, title) = crate::Source::report_loading(
             Duration::from_secs(1),
-            |update| eprintln!("{update}"),
+            |update| {
+                if let Some(update) = update {
+                    eprintln!("{update}");
+                }
+            },
             |progress| source.load_with_memory(progress, available),
         )
         .unwrap();

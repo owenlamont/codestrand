@@ -250,6 +250,32 @@ impl Simulation {
             self.clock.history.duration(),
         )
     }
+
+    /// History time planned so far; playback past it waits for the next window.
+    pub(crate) fn planned_history(&self) -> Time {
+        self.ready_end
+            .map_or(self.clock.history.duration(), |(end, _)| {
+                super::tick_time(self.clock.rows(end).1)
+            })
+    }
+
+    /// Whole playback length, exact once planning completes. Until then, the
+    /// unpadded history plus the walk padding planned so far, scaled from the
+    /// commits planned to every commit.
+    pub(crate) fn projected_duration(&self) -> Time {
+        let Some((end, false)) = self.ready_end else {
+            return self.duration();
+        };
+        let padding = end.saturating_sub(self.clock.rows(end).1);
+        let planned = self.schedule.applied(end) as u64;
+        let commits = self.clock.history.starts.len() as u64;
+        let projected = padding
+            .saturating_mul(commits)
+            .checked_div(planned)
+            .unwrap_or(padding);
+        let unpadded = self.clock.history.duration().ticks(true);
+        super::tick_time(unpadded.saturating_add(projected).max(end))
+    }
 }
 
 #[cfg(test)]
@@ -536,6 +562,33 @@ pub(crate) mod tests {
                 "{error}"
             );
         }
+    }
+
+    #[test]
+    fn projected_length_covers_planned_waits_and_is_exact_once_planned() {
+        let whole = fixture_with(true, None, super::super::TravelCap::None);
+        let mut stream = fixture_with(false, None, super::super::TravelCap::None);
+        let unpadded = stream.history_progress().1;
+        let mut windows = Vec::new();
+        for frame in 0.. {
+            stream.prepare_frame(frame, 60, true).unwrap();
+            if stream.planning_complete() {
+                break;
+            }
+            let projected = stream.projected_duration();
+            assert!(
+                projected >= stream.duration().max(unpadded),
+                "frame {frame}"
+            );
+            if windows.last() != Some(&stream.planned_history()) {
+                windows.push(stream.planned_history());
+            }
+        }
+        assert!(windows.len() > 1, "fixture plans several windows");
+        assert!(windows.is_sorted());
+        assert_eq!(stream.planned_history(), unpadded);
+        assert_eq!(stream.projected_duration(), whole.duration());
+        assert!(whole.duration() > unpadded, "walk waits pad the fixture");
     }
 
     #[test]

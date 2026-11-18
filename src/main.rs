@@ -343,12 +343,14 @@ impl Source {
                 cache_root.filter(|_| !self.no_cache),
                 self.history,
             )?;
-            eprintln!(
-                "repository={} import_seconds={:.6} events={}",
-                terminal_escape(&repository.name()),
-                started.elapsed().as_secs_f64(),
-                events.len()
-            );
+            if self.trace.on() {
+                eprintln!(
+                    "repository={} import_seconds={:.6} events={}",
+                    terminal_escape(&repository.name()),
+                    started.elapsed().as_secs_f64(),
+                    events.len()
+                );
+            }
             if repositories.len() > 1 {
                 repositories::namespace(&mut events, index);
             }
@@ -591,35 +593,33 @@ impl Source {
         )
     }
 
-    /// Reports initial planning through `report`, then later planning to stderr,
-    /// at most once per `interval`.
+    /// Reports planning until the first window is ready through `report`, with
+    /// each update at most once per `interval` and `None` every 50 ms between them.
     fn load_reporting(
         &self,
         interval: std::time::Duration,
-        report: impl FnMut(progress::Update),
+        report: impl FnMut(Option<progress::Update>),
     ) -> anyhow::Result<(model::Simulation, String)> {
         Self::report_loading(interval, report, |progress| self.load(progress))
     }
 
     fn report_loading(
         interval: std::time::Duration,
-        mut report: impl FnMut(progress::Update),
+        mut report: impl FnMut(Option<progress::Update>),
         load: impl FnOnce(&Progress) -> anyhow::Result<(model::Simulation, String)> + Send,
     ) -> anyhow::Result<(model::Simulation, String)> {
         let (progress, updates) = Progress::channel(interval);
         std::thread::scope(|scope| {
-            let worker_progress = progress.clone();
-            let worker = scope.spawn(move || load(&worker_progress));
+            let worker = scope.spawn(move || load(&progress));
             while !worker.is_finished() {
                 match updates.recv_timeout(std::time::Duration::from_millis(50)) {
-                    Ok(update) => report(update),
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => (),
+                    Ok(update) => report(Some(update)),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => report(None),
                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                 }
             }
-            progress.continue_on_stderr();
             for update in updates.try_iter() {
-                report(update);
+                report(Some(update));
             }
             worker
                 .join()
@@ -873,9 +873,14 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
             resolution,
             camera_path,
         }) => {
+            let mut loading = export::report::Loading::new(std::time::Instant::now());
             let (mut simulation, title) =
                 source.load_reporting(std::time::Duration::from_secs(1), |update| {
-                    eprintln!("{update}");
+                    if let Some(line) =
+                        loading.observe(std::time::Instant::now(), update)
+                    {
+                        eprintln!("{line}");
+                    }
                 })?;
             simulation.set_theme(theme.build());
 
@@ -1075,7 +1080,7 @@ mod tests {
                 let mut lines = Vec::new();
                 let (mut reported, title) = source
                     .load_reporting(std::time::Duration::ZERO, |update| {
-                        lines.push(update.to_string());
+                        lines.extend(update.map(|update| update.to_string()));
                     })
                     .unwrap();
                 for stage in [
