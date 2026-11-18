@@ -33,8 +33,8 @@ All notable changes to Codestrand are documented here, following
 - The `bevelled-desktop` theme is now `retro-desktop`, titled "Retro Desktop"; the old
   name is no longer accepted. ([#185](https://github.com/owenlamont/codestrand/pull/185))
 - Export checks its output directory, camera path syntax and video encoder before
-  planning, so a typo fails at once rather than after planning; `--video` encodes one
-  frame with the chosen options and resolution first.
+  planning, so a typo fails at once rather than after planning; the default `--video`
+  encoder is tried on one frame at the chosen resolution first.
   ([#193](https://github.com/owenlamont/codestrand/pull/193))
 
 ### Fixed

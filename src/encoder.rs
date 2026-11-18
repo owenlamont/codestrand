@@ -42,7 +42,7 @@ impl Options {
         )
     }
 
-    /// Encodes one blank frame with the selected options before planning starts.
+    /// Runs `FFmpeg` and, with the default options, encodes one blank frame.
     pub(super) fn check(
         &self,
         fps: u16,
@@ -66,24 +66,18 @@ impl Options {
             .with_context(|| {
                 format!("cannot run FFmpeg at {}; {INSTALL}", path.display())
             })?;
-        let scratch = tempfile::tempdir().context("create FFmpeg probe directory")?;
+        if !self.ffmpeg_arg.is_empty() {
+            return Ok(());
+        }
         let mut probe = command(&path);
-        probe.current_dir(scratch.path());
         probe.args(input_args(fps, &resolution.to_string()));
-        probe.args(output_args(&self.ffmpeg_arg));
-        probe.arg(scratch.path().join(output.file_name().unwrap_or_default()));
+        probe.args(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-f", "null", "-"]);
         let mut encoder = Encoder::spawn(&mut probe)?;
         let frame = usize::from(resolution.width) * usize::from(resolution.height) * 3;
-        let result = encoder
+        encoder
             .write(vec![0; frame])
-            .and_then(|()| encoder.finish());
-        if self.ffmpeg_arg.is_empty() {
-            result.with_context(|| format!("FFmpeg could not encode a {resolution} frame with libx264; install a libx264-enabled build or select another encoder with repeated --ffmpeg-arg options"))
-        } else {
-            result.with_context(|| {
-                format!("FFmpeg could not encode a {resolution} frame with the --ffmpeg-arg options")
-            })
-        }
+            .and_then(|()| encoder.finish())
+            .with_context(|| format!("FFmpeg could not encode a {resolution} frame with libx264; install a libx264-enabled build or select another encoder with repeated --ffmpeg-arg options"))
     }
 
     pub(super) fn start(
@@ -509,12 +503,9 @@ fn main() {
         assert!(!output.exists());
         options.ffmpeg = Some(binary);
         options.ffmpeg_arg = vec!["fail".into()];
-        let error = options
+        options
             .check(30, crate::resolution::Resolution::default())
-            .unwrap_err();
-        let message = format!("{error:#}");
-        assert!(message.contains("1280x720 frame with the --ffmpeg-arg options"));
-        assert!(message.contains("deliberate encoder failure"));
+            .unwrap();
         assert!(!output.exists());
     }
 
