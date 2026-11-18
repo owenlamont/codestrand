@@ -163,6 +163,10 @@ fn the_repository_list_can_live_in_the_file() {
     let source = preview(&file, &["--repository", "elsewhere"]);
     assert_eq!(source.repositories_file, None);
 
+    let file = config(scratch.path(), "repositories-file = 'other.toml'\n");
+    let source = preview(&file, &["--repository", "elsewhere"]);
+    assert_eq!(source.repositories_file, None);
+
     let file = config(
         scratch.path(),
         "repositories-file = 'other.toml'\n[[repositories]]\npath = 'repo'\n",

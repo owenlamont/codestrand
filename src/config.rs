@@ -89,7 +89,8 @@ fn flags(
         let values = values(known, key, value, base)?;
         if arg.is_some()
             && !on_command_line(known.get_id().as_str())
-            && !(list_given && key == "repository")
+            && !(list_given
+                && matches!(key.as_str(), "repository" | "repositories-file"))
         {
             flags.extend(values);
         }
