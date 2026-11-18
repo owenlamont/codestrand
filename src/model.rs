@@ -2740,6 +2740,36 @@ mod tests {
     }
 
     #[test]
+    fn forty_repositories_born_together_ease_in_without_conflicting_tiles() {
+        let count = 40;
+        let mut events: Vec<_> = (0..count)
+            .flat_map(|index| {
+                let mut history = timeline::synthetic();
+                crate::repositories::namespace(&mut history, index);
+                history
+            })
+            .collect();
+        events.sort_by_key(|event| event.seconds);
+        let labels: Vec<_> = (0..count).map(|index| format!("repo{index}")).collect();
+        let options = Options {
+            seconds_per_day: 0.05,
+            max_idle_seconds: 0.05,
+            ..Options::default()
+        };
+        let mut simulation = Simulation::build(
+            events,
+            &options,
+            &Theme::neon(),
+            &Mappings::default(),
+            &[],
+            &labels,
+            &mut None,
+        )
+        .unwrap();
+        simulation.advance_to(frames_for(simulation.duration(), 60).unwrap(), 60);
+    }
+
+    #[test]
     fn repositories_beyond_full_detail_play_with_scaled_avatars() {
         let (events, labels) = short_repository_history(56);
         let options = Options {

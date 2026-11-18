@@ -18,6 +18,8 @@ const ALLOCATION_TOLERANCE_PX: f32 = 0.25;
 /// Detail shrink per failed packing attempt, and the attempts allowed before giving up.
 const DETAIL_SHRINK: f32 = 1.125;
 const DETAIL_ATTEMPTS: u32 = 64;
+/// Bisection steps towards full presence for a sample whose easing tiles conflict.
+const FIRMING_STEPS: u32 = 8;
 
 #[derive(Debug, thiserror::Error)]
 #[error(
@@ -327,9 +329,9 @@ fn allocate(
     states: &[Feasible],
     stretch: Vec2,
     tiles: &mut [Option<Tile>],
-) {
+) -> Option<()> {
     if states[index].presence == 0.0 {
-        return;
+        return Some(());
     }
     match nodes[index] {
         Node::Repository(i) => tiles[i] = Some(tile),
@@ -341,12 +343,10 @@ fn allocate(
             let a = &states[first];
             let b = &states[second];
             if a.presence == 0.0 {
-                allocate(nodes, second, tile, states, stretch, tiles);
-                return;
+                return allocate(nodes, second, tile, states, stretch, tiles);
             }
             if b.presence == 0.0 {
-                allocate(nodes, first, tile, states, stretch, tiles);
-                return;
+                return allocate(nodes, first, tile, states, stretch, tiles);
             }
             let size = tile.pixels() / stretch;
             let pa = a.presence / states[index].presence;
@@ -356,25 +356,22 @@ fn allocate(
                 let (low, high) = outline::bounds(&child.sizes);
                 let clamped = cross.clamp(low[1 - axis], high[1 - axis]);
                 // Inverting a subpixel birth sliver amplifies cancellation in its tile edges.
-                assert!(
-                    (cross - clamped).abs() * stretch[1 - axis]
-                        < ALLOCATION_TOLERANCE_PX,
-                    "feasible child cross-section: cross={cross} clamped={clamped} stretch={stretch:?} delta_px={}",
-                    (cross - clamped).abs() * stretch[1 - axis]
-                );
+                if (cross - clamped).abs() * stretch[1 - axis]
+                    >= ALLOCATION_TOLERANCE_PX
+                {
+                    return None;
+                }
                 interval(&child.sizes, axis, clamped)
-                    .expect("feasible child cross-section")
             };
-            let (a0, a1) = child_interval(a);
-            let (b0, b1) = child_interval(b);
+            let (a0, a1) = child_interval(a)?;
+            let (b0, b1) = child_interval(b)?;
             let (a0, a1, b0, b1) = (a0 * pa, a1 * pa, b0 * pb, b1 * pb);
             let available = size[axis] - states[index].gap;
             let low = a0.max(available - b1);
             let high = a1.min(available - b0);
-            assert!(
-                (low - high) * stretch[axis] <= ALLOCATION_TOLERANCE_PX,
-                "infeasible split: {low} > {high}; node={index} axis={axis} size={size:?} stretch={stretch:?} pa={pa} pb={pb} a={a0},{a1} b={b0},{b1}"
-            );
+            if (low - high) * stretch[axis] > ALLOCATION_TOLERANCE_PX {
+                return None;
+            }
             let share = available * a.weight / (a.weight + b.weight).max(1e-9);
             // Tile-edge cancellation during births is bounded in reference pixels, not unstretched coordinates.
             let extent = if low > high {
@@ -394,10 +391,11 @@ fn allocate(
             let mut sb = stretch;
             sa[axis] *= pa;
             sb[axis] *= pb;
-            allocate(nodes, first, near, states, sa, tiles);
-            allocate(nodes, second, far, states, sb, tiles);
+            allocate(nodes, first, near, states, sa, tiles)?;
+            allocate(nodes, second, far, states, sb, tiles)?;
         }
     }
+    Some(())
 }
 
 /// Recomputes only the weights of feasibility states, as [`update`] would.
@@ -474,7 +472,7 @@ fn allocated(
         return None;
     }
     let mut output = vec![None; repositories];
-    allocate(nodes, 0, Tile::viewport(), states, Vec2::ONE, &mut output);
+    allocate(nodes, 0, Tile::viewport(), states, Vec2::ONE, &mut output)?;
     Some(output)
 }
 
@@ -1101,6 +1099,35 @@ impl Packing {
         allocated(&self.nodes, weights.len(), &tiling.states)
     }
 
+    /// Tiles with every easing repository moved towards full presence by the least
+    /// bisected fraction that fits, since fractional slivers can conflict where the
+    /// planned full-presence arrangement does not.
+    fn firmer_tiles(
+        &self,
+        weights: &[f32],
+        presence: &[f32],
+    ) -> Option<Vec<Option<Tile>>> {
+        let at = |firmness: f32| {
+            let firm: Vec<_> = presence
+                .iter()
+                .map(|&p| if p > 0.0 { p.lerp(1.0, firmness) } else { 0.0 })
+                .collect();
+            tiles(&self.nodes, weights, &firm, self.space())
+        };
+        let mut best = at(1.0)?;
+        let (mut loose, mut firm) = (0.0_f32, 1.0_f32);
+        for _ in 0..FIRMING_STEPS {
+            let middle = loose.midpoint(firm);
+            if let Some(placement) = at(middle) {
+                best = placement;
+                firm = middle;
+            } else {
+                loose = middle;
+            }
+        }
+        Some(best)
+    }
+
     fn space(&self) -> Space {
         Space::new(self.detail(), self.gutter_scale)
     }
@@ -1169,7 +1196,8 @@ impl Packing {
             }
             _ => self.tiles(&weights, &presence),
         }
-        .expect("presence-scaled tiles remain feasible");
+        .or_else(|| self.firmer_tiles(&weights, &presence))
+        .expect("tiles at full presence remain feasible");
         self.inputs[tick]
             .iter()
             .enumerate()

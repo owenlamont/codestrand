@@ -26,6 +26,12 @@ All notable changes to Codestrand are documented here, following
   pixels, and end in an ellipsis when wider than their tile.
   ([#180](https://github.com/owenlamont/codestrand/pull/180))
 
+### Fixed
+
+- Many repositories starting on the same day no longer stop playback with
+  "presence-scaled tiles remain feasible" while their tiles ease in.
+  ([#180](https://github.com/owenlamont/codestrand/pull/180))
+
 ## v0.2.0 - 2026-11-16
 
 Watch the [feature tour video](https://youtu.be/gmueXAHnvAE).
