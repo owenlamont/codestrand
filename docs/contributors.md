@@ -30,8 +30,9 @@ Each `Co-authored-by: Name <email>` trailer in a commit message's final trailer 
 makes that person a contributor of the commit, as on GitHub. Co-authors match by email
 like authors, so a co-author shares the avatar of their own commits. Every contributor of
 a commit travels to it and beams to its files; the author's colour marks the files and
-the caption names the author. Codestrand reads at most 8 co-authors per commit and
-ignores a trailer without an email or with a name or email over 4,096 bytes.
+the caption names the author. Codestrand reads at most 8 co-authors per commit, none
+from a message over 64 KiB, and ignores a trailer without an email or with a name or
+email over 4,096 bytes.
 
 `bot = true` marks automation and `bot = false` marks a human, overriding automatic
 detection even after a display-name change. Without an override, a parsed GitHub noreply

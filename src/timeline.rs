@@ -1,7 +1,5 @@
 use std::{collections::HashMap, fmt::Write};
 
-use gix::objs::commit::message::BodyRef;
-
 use crate::history::{BlobDiff, ChangeKind, Commit, History};
 
 // Bump when the snapshot format, history import policies or timeline conversion change.
@@ -13,8 +11,8 @@ pub(super) const MAX_CO_AUTHORS: usize = 8;
 const _: () = assert!(MAX_CO_AUTHORS < 16);
 /// Name or email bytes beyond which a co-author trailer is ignored.
 pub(super) const MAX_IDENTITY_BYTES: usize = 4096;
-/// Trailers are parsed from at most this many final message bytes.
-const TRAILER_BYTES: usize = 64 * 1024;
+/// Longer commit messages are not read for co-authors, which bounds trailer parsing.
+const MAX_TRAILER_MESSAGE_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(super) enum Kind {
@@ -111,19 +109,12 @@ pub(super) fn from_history(history: &History) -> Vec<Event> {
 /// message's final trailer block, skipping malformed, oversized, empty-email and
 /// repeated identities, up to [`MAX_CO_AUTHORS`].
 fn co_authors(message: &[u8], author_email: &[u8]) -> Vec<Identity> {
-    let cut = message.len().saturating_sub(TRAILER_BYTES);
-    let body = if cut == 0 {
-        gix::objs::commit::MessageRef::from_bytes(message).body()
-    } else {
-        // Start at a paragraph so a cut paragraph's last lines are not misread as trailers.
-        message[cut..]
-            .windows(2)
-            .position(|pair| pair == b"\n\n")
-            .map(|blank| BodyRef::from_bytes(&message[cut + blank + 2..]))
-    };
     let mut seen = vec![author_email.to_ascii_lowercase()];
     let mut found = Vec::new();
-    let Some(body) = body else {
+    if message.len() > MAX_TRAILER_MESSAGE_BYTES {
+        return found;
+    }
+    let Some(body) = gix::objs::commit::MessageRef::from_bytes(message).body() else {
         return found;
     };
     for trailer in body.trailers().co_authored_by() {
@@ -422,21 +413,22 @@ mod tests {
     }
 
     #[test]
-    fn co_authors_stop_at_the_cap_and_after_the_final_trailer_bytes() {
+    fn co_authors_stop_at_the_cap_and_skip_oversized_messages() {
         let mut trailers = String::new();
         for index in 0..=MAX_CO_AUTHORS {
             writeln!(trailers, "Co-authored-by: P{index} <p{index}@example.com>")
                 .unwrap();
         }
-        let capped = co_authors(format!("Title\n\n{trailers}").as_bytes(), b"");
+        let message = |body_bytes| {
+            let body = "x".repeat(body_bytes);
+            format!("Title\r\n\r\n{body}\r\n\r\n{trailers}")
+        };
+        let fits = message(MAX_TRAILER_MESSAGE_BYTES - message(0).len());
+        let capped = co_authors(fits.as_bytes(), b"");
         assert_eq!(capped.len(), MAX_CO_AUTHORS);
         assert_eq!(capped[0].email, b"p0@example.com");
-        let padded = format!("Title\n\n{}\n\n{trailers}", "x".repeat(TRAILER_BYTES));
-        assert_eq!(co_authors(padded.as_bytes(), b"").len(), MAX_CO_AUTHORS);
-        let buried = format!("Title\n\n{trailers}{}", "y\n".repeat(TRAILER_BYTES));
-        assert_eq!(co_authors(buried.as_bytes(), b""), []);
-        let prose = format!("Title\n\n{}\n{trailers}", "z".repeat(TRAILER_BYTES));
-        assert_eq!(co_authors(prose.as_bytes(), b""), []);
+        let oversized = message(MAX_TRAILER_MESSAGE_BYTES - message(0).len() + 1);
+        assert_eq!(co_authors(oversized.as_bytes(), b""), []);
     }
 
     #[test]
