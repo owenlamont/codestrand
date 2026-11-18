@@ -263,7 +263,7 @@ fn collapsing_off_restores_files_immediately_through_rewind_and_theme_switch() {
         world.insert_resource(Playback(sim));
         for name in [
             crate::theme::ThemeName::Neon,
-            crate::theme::ThemeName::BevelledDesktop,
+            crate::theme::ThemeName::RetroDesktop,
         ] {
             switch_theme(&mut world, name);
             let palette = world.remove_resource::<Palette>().unwrap();

@@ -111,7 +111,7 @@ pub(super) fn build(name: ThemeName) -> Theme {
                 [0x00ff_ffff; 4],
             )
         }
-        ThemeName::BevelledDesktop => {
+        ThemeName::RetroDesktop => {
             t.glyph_style = GlyphStyle::Page;
             t.beam_style = BeamStyle::Ants;
             t.avatar_style = AvatarStyle::Pointer;
@@ -161,7 +161,7 @@ pub(super) fn build(name: ThemeName) -> Theme {
     let (added, removed) = match name {
         ThemeName::Outrun => (0x0066_ffaa, 0x00ff_709e),
         ThemeName::Blueprint => (0x008e_ffca, 0x00ff_b4a6),
-        ThemeName::BevelledDesktop => (0x00d8_ffdf, 0x00ff_efef),
+        ThemeName::RetroDesktop => (0x00d8_ffdf, 0x00ff_efef),
         ThemeName::Atlas => (0x001c_643b, 0x00a1_292d),
         ThemeName::Forge => (0x008c_e8aa, 0x00ff_8a78),
         ThemeName::Neon | ThemeName::Phosphor => unreachable!("candidate theme"),
@@ -191,7 +191,7 @@ fn apply_palette(
     t.label_emphasis = color(ink);
     t.label_landmark = color(ink);
     t.label_shadow.color = color(ground).with_alpha(0.8);
-    if t.name == ThemeName::Atlas || t.name == ThemeName::BevelledDesktop {
+    if t.name == ThemeName::Atlas || t.name == ThemeName::RetroDesktop {
         t.label_shadow.color = Color::NONE;
     }
     t.descending = solid(fragment);

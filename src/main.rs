@@ -1250,7 +1250,8 @@ mod tests {
             ("phosphor", ThemeName::Phosphor),
             ("outrun", ThemeName::Outrun),
             ("blueprint", ThemeName::Blueprint),
-            ("bevelled-desktop", ThemeName::BevelledDesktop),
+            ("retro-desktop", ThemeName::RetroDesktop),
+            ("bevelled-desktop", ThemeName::RetroDesktop),
             ("atlas", ThemeName::Atlas),
             ("forge", ThemeName::Forge),
         ] {
