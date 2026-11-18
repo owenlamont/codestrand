@@ -1790,7 +1790,6 @@ fn file_identities(state: &State) -> HashMap<String, FileIdentity> {
 }
 
 impl State {
-    /// The state before any commit plays.
     fn new(layout: Layout, geometry: Geometry, options: &Options) -> Self {
         Self {
             region_depth: 0.0,
