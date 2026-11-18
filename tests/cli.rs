@@ -18,16 +18,16 @@ fn codestrand_in(directory: &Path) -> Command {
 #[test]
 fn omitted_repository_outside_git_explains_how_to_supply_one() {
     let scratch = tempfile::tempdir().unwrap();
-    // Preview fails before opening a window, so this runs without a display.
     for arguments in [&["export", "frames"][..], &["preview"]] {
         let output = codestrand_in(scratch.path())
             .args(arguments)
             .output()
             .unwrap();
         assert!(!output.status.success());
-        assert!(
-            String::from_utf8_lossy(&output.stderr).contains("pass --repository PATH")
-        );
+        // A lone error line shows no renderer started, so no window opened.
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(stderr.lines().count(), 1, "{stderr}");
+        assert!(stderr.contains("pass --repository PATH"), "{stderr}");
     }
     assert!(!scratch.path().join("frames").exists());
 }

@@ -33,6 +33,9 @@ All notable changes to Codestrand are documented here, following
 
 ### Fixed
 
+- `codestrand preview` outside a repository exits with "pass --repository PATH"
+  before opening a window.
+  ([#186](https://github.com/owenlamont/codestrand/pull/186))
 - Many repositories starting on the same day no longer stop playback with
   "presence-scaled tiles remain feasible" while their tiles ease in.
   ([#180](https://github.com/owenlamont/codestrand/pull/180))
