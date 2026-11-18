@@ -1,5 +1,6 @@
 use super::*;
 use bevy::mesh::VertexAttributeValues;
+use clap::Parser as _;
 
 #[test]
 fn export_lod_crosses_threshold_using_the_rendered_camera_pose() {
@@ -71,7 +72,7 @@ fn collapsing_option_defaults_on_and_accepts_only_on_or_off() {
             let mut args = vec!["codestrand"];
             args.extend(command.clone());
             args.extend(flags);
-            let cli = crate::Cli::try_fixture_from(args).unwrap();
+            let cli = crate::Cli::try_parse_from(args).unwrap();
             let (crate::Command::Preview { source, .. }
             | crate::Command::Export { source, .. }) = cli.command.unwrap()
             else {
@@ -85,7 +86,7 @@ fn collapsing_option_defaults_on_and_accepts_only_on_or_off() {
         let mut args = vec!["codestrand"];
         args.extend(command);
         args.extend(["--collapse-directories", "sometimes"]);
-        assert!(crate::Cli::try_fixture_from(args).is_err());
+        assert!(crate::Cli::try_parse_from(args).is_err());
     }
 }
 
@@ -211,84 +212,85 @@ fn folder_top_has_no_overlapping_tab_faces() {
 
 #[test]
 fn collapsing_off_restores_files_immediately_through_rewind_and_theme_switch() {
-    for command in [vec!["preview"], vec!["export", "unused"]] {
-        let mut args = vec!["codestrand"];
-        args.extend(command);
-        args.extend(["--collapse-directories", "off", "--start", "1000"]);
-        let cli = crate::Cli::try_fixture_from(args).unwrap();
-        let (crate::Command::Preview { source, .. }
-        | crate::Command::Export { source, .. }) = cli.command.unwrap()
-        else {
-            panic!("playback command")
-        };
-        let (mut sim, _) = source.load(&crate::progress::Progress::default()).unwrap();
-        sim.advance_to(120, 30);
-        let mut world = World::new();
-        world.init_resource::<Assets<Mesh>>();
-        world.init_resource::<Assets<Image>>();
-        world.init_resource::<Assets<StandardMaterial>>();
-        let palette = Palette::new(&mut world, sim.theme());
-        let mut pools = Pools::default();
-        world.insert_resource(PreviewCamera::new((Vec3::ZERO, 20000.0)));
-        pools.lod.sample(
-            sim.layout(),
-            sim.seconds().lossy_secs_f32(),
-            lod::View {
-                eye: Vec3::Y * 20000.0,
-                focus: Vec3::ZERO,
-                height: 720.0,
-                fov: std::f32::consts::FRAC_PI_4,
-            },
-        );
-        assert_ne!(pools.lod.glyphs, [] as [usize; 0]);
-        sync_structure(&mut world, &palette, &mut pools, &sim);
-        let (_, file) = sim.layout().files().next().unwrap();
-        let target = ground(file.position);
-        let scale = sim.layout().dir(file.dir).scale;
-        world.spawn((
-            SceneCamera,
-            Camera::default(),
-            Transform::from_translation(target + Vec3::Y * scale * 2.0)
-                .looking_at(target, Vec3::NEG_Z),
-            Projection::Perspective(PerspectiveProjection {
-                near: scale * 0.01,
-                ..default()
-            }),
-        ));
+    let events = crate::timeline::synthetic();
+    // Starting after the last commit settles the whole history before tick 0.
+    let mut sim = Simulation::new(
+        events.clone(),
+        &model::Options {
+            start: events.len(),
+            ..default()
+        },
+        &Theme::neon(),
+        &crate::contributors::Mappings::default(),
+    );
+    sim.collapse_directories = false;
+    sim.advance_to(120, 30);
+    let mut world = World::new();
+    world.init_resource::<Assets<Mesh>>();
+    world.init_resource::<Assets<Image>>();
+    world.init_resource::<Assets<StandardMaterial>>();
+    let palette = Palette::new(&mut world, sim.theme());
+    let mut pools = Pools::default();
+    world.insert_resource(PreviewCamera::new((Vec3::ZERO, 20000.0)));
+    pools.lod.sample(
+        sim.layout(),
+        sim.seconds().lossy_secs_f32(),
+        lod::View {
+            eye: Vec3::Y * 20000.0,
+            focus: Vec3::ZERO,
+            height: 720.0,
+            fov: std::f32::consts::FRAC_PI_4,
+        },
+    );
+    assert_ne!(pools.lod.glyphs, [] as [usize; 0]);
+    sync_structure(&mut world, &palette, &mut pools, &sim);
+    let (_, file) = sim.layout().files().next().unwrap();
+    let target = ground(file.position);
+    let scale = sim.layout().dir(file.dir).scale;
+    world.spawn((
+        SceneCamera,
+        Camera::default(),
+        Transform::from_translation(target + Vec3::Y * scale * 2.0)
+            .looking_at(target, Vec3::NEG_Z),
+        Projection::Perspective(PerspectiveProjection {
+            near: scale * 0.01,
+            ..default()
+        }),
+    ));
+    sync_lod(&mut world, &mut pools, &sim);
+    sync_files(&mut world, &palette, &mut pools, &sim);
+    assert_eq!(pools.lod.glyphs, [] as [usize; 0]);
+    assert_ne!(pools.names.targets, std::collections::BTreeSet::new());
+    world.insert_resource(palette);
+    world.insert_resource(Playback(sim));
+    for name in [
+        crate::theme::ThemeName::Neon,
+        crate::theme::ThemeName::RetroDesktop,
+    ] {
+        switch_theme(&mut world, name);
+        let palette = world.remove_resource::<Palette>().unwrap();
+        let mut sim = world.remove_resource::<Playback>().unwrap().0;
+        sim.advance_to(0, 30);
         sync_lod(&mut world, &mut pools, &sim);
         sync_files(&mut world, &palette, &mut pools, &sim);
+        sync_structure(&mut world, &palette, &mut pools, &sim);
+        assert_eq!(pools.lod.detail, vec![1.0; sim.layout().dir_count()]);
+        assert_eq!(pools.lod.glyph, vec![0.0; sim.layout().dir_count()]);
         assert_eq!(pools.lod.glyphs, [] as [usize; 0]);
-        assert_ne!(pools.names.targets, std::collections::BTreeSet::new());
+        assert_eq!(pools.files.len(), sim.layout().files().count());
+        assert!(
+            pools
+                .files
+                .values()
+                .all(|&e| world.get::<Visibility>(e) == Some(&Visibility::Inherited))
+        );
+        assert!(
+            pools
+                .aggregates
+                .iter()
+                .all(|&e| world.get::<Visibility>(e) == Some(&Visibility::Hidden))
+        );
         world.insert_resource(palette);
         world.insert_resource(Playback(sim));
-        for name in [
-            crate::theme::ThemeName::Neon,
-            crate::theme::ThemeName::RetroDesktop,
-        ] {
-            switch_theme(&mut world, name);
-            let palette = world.remove_resource::<Palette>().unwrap();
-            let mut sim = world.remove_resource::<Playback>().unwrap().0;
-            sim.advance_to(0, 30);
-            sync_lod(&mut world, &mut pools, &sim);
-            sync_files(&mut world, &palette, &mut pools, &sim);
-            sync_structure(&mut world, &palette, &mut pools, &sim);
-            assert_eq!(pools.lod.detail, vec![1.0; sim.layout().dir_count()]);
-            assert_eq!(pools.lod.glyph, vec![0.0; sim.layout().dir_count()]);
-            assert_eq!(pools.lod.glyphs, [] as [usize; 0]);
-            assert_eq!(pools.files.len(), sim.layout().files().count());
-            assert!(
-                pools.files.values().all(
-                    |&e| world.get::<Visibility>(e) == Some(&Visibility::Inherited)
-                )
-            );
-            assert!(
-                pools
-                    .aggregates
-                    .iter()
-                    .all(|&e| world.get::<Visibility>(e) == Some(&Visibility::Hidden))
-            );
-            world.insert_resource(palette);
-            world.insert_resource(Playback(sim));
-        }
     }
 }
