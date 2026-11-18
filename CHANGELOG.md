@@ -5,6 +5,13 @@ All notable changes to Codestrand are documented here, following
 
 ## Unreleased
 
+### Added
+
+- An agent skill, installed with
+  `gh skill install owenlamont/codestrand codestrand`, and `llms.txt` and
+  `llms-full.txt` on the docs site, so coding agents can run Codestrand.
+  ([#158](https://github.com/owenlamont/codestrand/issues/158))
+
 ### Changed
 
 - Planning is faster: on thirty repositories, about 35% less time per window and 40%
