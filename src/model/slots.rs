@@ -647,7 +647,9 @@ impl State {
 
     /// Row places for an author's co-authors, in rank order, and whether any had to
     /// overlap another avatar. A co-author already parked at this dock for this commit
-    /// keeps its place; a new one takes the free end of the row nearer to where it was.
+    /// keeps its place while it stays on the edge; a new one takes the free end of the
+    /// row nearer to where it was, or a crowded end on the edge, leaving the edge only
+    /// when the edge has no room left at either end.
     fn row_steps(
         &self,
         choice: &Choice<'_>,
@@ -665,7 +667,8 @@ impl State {
                     .slot
                     .as_ref()
                     .filter(|s| s.commit == chosen.commit && s.dock == chosen.dock)
-                    .map(|s| row_step(chosen.dock.edge, s.offset, radius));
+                    .map(|s| row_step(chosen.dock.edge, s.offset, radius))
+                    .filter(|&step| choice.on_edge(chosen.dock, step));
                 let step = kept.unwrap_or_else(|| {
                     let ends = [
                         taken.iter().max().copied().unwrap_or(0) + 1,
@@ -688,7 +691,10 @@ impl State {
                         .find(|&step| choice.free_cell(chosen.dock, step))
                         .unwrap_or_else(|| {
                             crowded = true;
-                            order[0]
+                            order
+                                .into_iter()
+                                .find(|&step| choice.on_edge(chosen.dock, step))
+                                .unwrap_or(order[0])
                         })
                 });
                 taken.push(step);
@@ -1341,6 +1347,14 @@ impl Choice<'_> {
     /// Whether the row place `step` beside `dock` lies on the dock's edge and is clear
     /// of other avatars.
     fn free_cell(&self, dock: Dock, step: i8) -> bool {
+        self.on_edge(dock, step)
+            && self.avatar_cost(
+                self.point(dock) + row_offset(dock.edge, step, self.radius),
+            ) <= 0.001
+    }
+
+    /// Whether the row place `step` beside `dock` lies on the dock's edge.
+    fn on_edge(&self, dock: Dock, step: i8) -> bool {
         let [start, end] = [0.0, 1.0].map(|fraction| {
             self.point(Dock {
                 edge: dock.edge,
@@ -1350,7 +1364,7 @@ impl Choice<'_> {
         let cell = self.point(dock) + row_offset(dock.edge, step, self.radius);
         let along =
             (cell - start).dot(end - start) / end.distance_squared(start).max(1e-6);
-        (0.0..=1.0).contains(&along) && self.avatar_cost(cell) <= 0.001
+        (0.0..=1.0).contains(&along)
     }
 
     fn reserved_cost(&self, point: Vec2) -> f32 {
@@ -1902,6 +1916,25 @@ mod tests {
         assert!(near.valid());
         assert_eq!(near.dock.edge, 2);
         assert!(near.point.distance(source) < free.select(None).point.distance(source));
+    }
+
+    #[test]
+    fn co_author_rows_stay_on_the_edge_and_cost_their_missing_places() {
+        let corner = Dock {
+            edge: 0,
+            fraction: 1.0,
+        };
+        let open = choice(&[], &[]);
+        assert!(!open.on_edge(corner, 1));
+        assert!(open.on_edge(corner, -1));
+        let inside = open.point(corner) + row_offset(0, -1, 7.5);
+        let neighbour = [disk(inside, 7.5)];
+        let blocked = Choice {
+            row: 2,
+            ..choice(&[], &neighbour)
+        };
+        assert_eq!(blocked.dock_cost(corner), 15.0);
+        assert_eq!(blocked.dock_cost(Dock::new(0, 0.5)), 0.0);
     }
 
     #[test]
