@@ -28,7 +28,8 @@ All notable changes to Codestrand are documented here, following
   ([#180](https://github.com/owenlamont/codestrand/pull/180))
 - Directory and touched-file labels shrink with their tile's files, never larger than
   repository titles and to no less than 6 pixels, and end in an ellipsis when wider than
-  their tile. ([#180](https://github.com/owenlamont/codestrand/pull/180))
+  their tile. ([#180](https://github.com/owenlamont/codestrand/pull/180),
+  [#181](https://github.com/owenlamont/codestrand/pull/181))
 
 ### Fixed
 
