@@ -136,7 +136,7 @@ the default is `neon`. Switching themes in preview changes styling:
 layout, playback position and camera stay put.
 
 The seven themes are `neon`, `phosphor`, `outrun`, `blueprint`,
-`bevelled-desktop`, `atlas` and `forge`. Choose one for preview or export:
+`retro-desktop`, `atlas` and `forge`. Choose one for preview or export:
 
 ```sh
 codestrand preview --theme outrun
@@ -144,7 +144,7 @@ codestrand export frames --theme atlas --frames 90 --fps 30
 ```
 
 Outrun uses pink tiles, arched beams and a banded sunset. Blueprint uses hatched
-plates and construction lines. Bevelled Desktop uses page icons and static
+plates and construction lines. Retro Desktop uses page icons and static
 black/white dashed beams. Atlas uses survey points, paper contours and tinted
 top-level territories. Forge uses iron plates coloured by file heat.
 Blueprint and Atlas use ink without additive glow. All grounds and dash patterns
@@ -162,7 +162,7 @@ by diff size or the heat half-life.
 
 Forge maps the same 32 heat buckets from dark iron through red and orange to
 white heat. Only warm plates contribute to thresholded bloom. Blueprint, Atlas
-and Bevelled Desktop keep constant ink brightness; touched files still receive
+and Retro Desktop keep constant ink brightness; touched files still receive
 activity outlines.
 
 `--heat-half-life 3` sets the cooling half-life in canonical playback seconds for

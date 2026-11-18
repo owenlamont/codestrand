@@ -53,7 +53,7 @@ class _Shot:
 _SHOTS: Final = (
     _Shot(
         name="single-repository",
-        theme="bevelled-desktop",
+        theme="retro-desktop",
         source="codestrand",
         options=(),
         first_frame=30,

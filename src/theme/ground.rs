@@ -22,7 +22,7 @@ impl Theme {
             ThemeName::Blueprint => {
                 art.push_str(r##"<defs><linearGradient id="d" x2="0" y2="1"><stop stop-color="#0d3a73"/><stop offset="1" stop-color="#0f4486"/></linearGradient><pattern id="g" width="20" height="20" patternUnits="userSpaceOnUse"><path d="M20 0H0V20" fill="none" stroke="white" stroke-opacity=".1"/></pattern><pattern id="b" width="100" height="100" patternUnits="userSpaceOnUse"><path d="M100 0H0V100" fill="none" stroke="white" stroke-opacity=".22"/></pattern></defs><rect width="1024" height="1024" fill="url(#d)"/><rect width="1024" height="1024" fill="url(#g)"/><rect width="1024" height="1024" fill="url(#b)"/><rect x="20" y="20" width="984" height="984" fill="none" stroke="white" stroke-opacity=".6" stroke-width="2"/>"##);
             }
-            ThemeName::BevelledDesktop => {
+            ThemeName::RetroDesktop => {
                 art.push_str(r##"<rect width="1024" height="1024" fill="#0f7b7b"/><defs><pattern id="p" width="8" height="8" patternUnits="userSpaceOnUse"><path d="M0 0h1v1H0zM4 4h1v1H4z" fill="#146e70"/></pattern></defs><rect width="1024" height="1024" fill="url(#p)"/>"##);
             }
             ThemeName::Atlas => {

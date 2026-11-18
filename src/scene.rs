@@ -4209,7 +4209,7 @@ mod tests {
     #[test]
     fn detail_backings_follow_the_theme_and_fade() {
         for name in [
-            crate::theme::ThemeName::BevelledDesktop,
+            crate::theme::ThemeName::RetroDesktop,
             crate::theme::ThemeName::Atlas,
         ] {
             let theme = name.build();
