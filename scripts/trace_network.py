@@ -36,6 +36,7 @@ with socket.socket(socket.AF_UNIX) as probe:
 @dataclass(frozen=True)
 class Trace:
     executed: bool
+    calls: int
     violations: list[str]
 
 
@@ -43,12 +44,14 @@ def parse(log: str, allowed: frozenset[str] = ALLOWED_UNIX_PATHS) -> Trace:
     """Classify strace lines; split `<unfinished ...>` calls carry their arguments
     on the first half, so resumed halves are ignored."""
     executed = False
+    calls = 0
     violations = []
     for line in log.splitlines():
         call = _CALL.match(line)
         if call is None:
             continue
         name, args = call["name"], call["args"]
+        calls += name != "execve"
         if name == "execve":
             executed = executed or line.endswith(" = 0")
         elif name == "socket" and _IP_FAMILY.match(args):
@@ -56,7 +59,7 @@ def parse(log: str, allowed: frozenset[str] = ALLOWED_UNIX_PATHS) -> Trace:
         elif name == "connect" and (path := _UNIX_PATH.search(args)):
             if path["path"].replace('"', "") not in allowed:
                 violations.append(f"Unix connect outside the allow-list: {line}")
-    return Trace(executed, violations)
+    return Trace(executed, calls, violations)
 
 
 def trace(command: list[str]) -> tuple[int, Trace]:
@@ -86,6 +89,11 @@ def main(command: list[str]) -> int:
     require_caught(_IP_PROBE, "AF_INET")
     require_caught(_UNIX_PROBE, _PROBE_PATH)
     status, result = trace(command)
+    print(
+        f"controls caught an IP socket and an off-list Unix connect; command made "
+        f"{result.calls} socket and connect calls",
+        file=sys.stderr,
+    )
     for violation in result.violations:
         print(violation, file=sys.stderr)
     if not result.executed:
