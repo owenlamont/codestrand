@@ -18,6 +18,7 @@ mod avatars;
 mod cache;
 mod camera;
 mod camera_path;
+mod config;
 mod contributors;
 mod diff_samples;
 mod encoder;
@@ -245,6 +246,10 @@ struct Source {
     /// TOML repository list; relative paths resolve beside the TOML file.
     #[arg(long)]
     repositories_file: Option<PathBuf>,
+    /// TOML options keyed by flag name and an optional [[repositories]] list; paths resolve beside it; flags override it.
+    #[arg(long, value_name = "FILE")]
+    #[serde(skip)]
+    config: Option<PathBuf>,
     #[arg(long, hide = true, value_enum, conflicts_with_all = ["repository", "repositories_file"])]
     #[serde(skip)]
     test_input: Option<TestInput>,
@@ -420,8 +425,14 @@ impl Source {
         } else {
             self.repository.clone()
         };
-        let repositories =
-            repositories::inputs(&paths, self.repositories_file.as_deref())?;
+        let file = self.repositories_file.as_deref();
+        let repositories = if self.config.is_some()
+            && self.config == self.repositories_file
+        {
+            repositories::inputs_with(&paths, file, repositories::Keys::AlsoOptions)?
+        } else {
+            repositories::inputs(&paths, file)?
+        };
         let mappings = contributors::load(self.contributors.as_deref())?;
         let mut events =
             self.events(cache::root().as_deref(), &repositories, progress)?;
@@ -792,14 +803,15 @@ fn preview(source: Source, theme: theme::ThemeName) -> anyhow::Result<()> {
 }
 
 fn run() -> anyhow::Result<()> {
-    let cli = match Cli::try_parse() {
-        Ok(cli) => cli,
-        Err(error) if error.use_stderr() => return Err(error.into()),
-        Err(error) => {
-            print!("{error}");
-            return Ok(());
-        }
-    };
+    let cli =
+        match Cli::try_parse_from(config::arguments(std::env::args_os().collect())?) {
+            Ok(cli) => cli,
+            Err(error) if error.use_stderr() => return Err(error.into()),
+            Err(error) => {
+                print!("{error}");
+                return Ok(());
+            }
+        };
     dispatch(cli)
 }
 
