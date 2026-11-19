@@ -1036,9 +1036,12 @@ mod tests {
     #[test]
     fn a_slower_fragment_speed_holds_the_trip_until_the_last_fragment_lands() {
         let mut events = Vec::new();
-        for (index, repository) in [0, 1, 1].into_iter().enumerate() {
+        // The second tile is born before the trip's release and still reflows at it.
+        for (index, (repository, day)) in
+            [(0, 0), (1, 1), (1, 6)].into_iter().enumerate()
+        {
             let mut event = crate::timeline::synthetic().remove(0);
-            event.seconds = i64::try_from(index).unwrap() * 3 * 86_400;
+            event.seconds = day * 86_400;
             if index == 1 {
                 event.author.email = b"other@example.invalid".to_vec();
             }
@@ -1074,7 +1077,7 @@ mod tests {
             let (routes, _) = trips(&captured, 480.0, options.bot_travel, true);
             let route = routes.iter().find(|route| route.author == 0).unwrap();
             assert!(!route.fade);
-            assert!(route.departure >= first.release);
+            assert_eq!(route.departure, first.release);
             route.departure - first.tick
         });
         assert!(departures[1] > departures[0], "{departures:?}");
