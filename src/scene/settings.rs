@@ -176,7 +176,6 @@ pub(super) fn captures_camera(world: &World) -> bool {
 #[derive(Component)]
 struct Panel;
 
-/// A settings tab and the body it shows.
 #[derive(Component, Clone, Copy, Default, PartialEq, Eq, Debug)]
 enum Page {
     #[default]
@@ -312,7 +311,6 @@ fn page() -> Node {
     }
 }
 
-/// Shows the selected tab's page and gives the selected tab a highlight.
 fn pages(
     mut settings: ResMut<Settings>,
     lists: Query<&SelectedTab, With<TabList>>,

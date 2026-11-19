@@ -59,7 +59,13 @@ pub(super) fn page() -> impl Bundle {
                 Checkbox,
                 Choice::Collapse,
                 Hovered::default(),
-                option("Collapse small directories"),
+                Node {
+                    align_self: AlignSelf::FlexStart,
+                    padding: UiRect::all(px(6)),
+                    ..default()
+                },
+                BackgroundColor(IDLE),
+                children![label("Collapse small directories", 16.0)],
                 observe(collapse),
             )),
         )),
