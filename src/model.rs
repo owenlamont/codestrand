@@ -367,6 +367,11 @@ pub(super) struct Avatar {
     ring_capacity: u8,
     /// A short walk from a position to the avatar's place, and when it began.
     settle: Option<(Vec3, Time)>,
+    /// How far through its settle the avatar is, from 0 to 1.
+    settled: f32,
+    /// Where the name stood when a walk to a seat began; it fades out there over the
+    /// walk's first half while the name at the seat fades in over the second.
+    leaving_name: Option<Vec2>,
     /// The seat offset last parked at, whose change starts a settle.
     seat: Vec2,
     travelling: bool,
@@ -380,25 +385,30 @@ impl Avatar {
         if let Some(point) = route {
             self.position = point;
             self.settle = None;
+            self.leaving_name = None;
             self.travelling = true;
         } else {
             let distance = self.position.distance(target);
             let seated = self.travelling && offset != Vec2::ZERO || offset != self.seat;
-            if seated {
-                // A new seat chooses its name afresh, at the ring point nearest it, rather
-                // than holding the place it had before.
-                self.name_visibility.placement = None;
-            }
+            // A new seat chooses its name afresh, at the ring point nearest it, rather than
+            // holding the place it had before.
+            let before = seated
+                .then(|| self.name_visibility.placement.take())
+                .flatten();
             if seated && self.presence > 0.0 && distance > 1e-4 && distance < reach {
                 self.settle = Some((self.position, now));
+                self.leaving_name = before.map(|name| name.point);
             }
             self.position = match self.settle {
                 Some((from, begun)) if now - begun < SETTLE_SECONDS => {
                     let t = (now - begun) / SETTLE_SECONDS;
+                    self.settled = t;
                     from.lerp(target, t * t * (3.0 - 2.0 * t))
                 }
                 _ => {
                     self.settle = None;
+                    self.settled = 1.0;
+                    self.leaving_name = None;
                     target
                 }
             };
@@ -1971,6 +1981,8 @@ impl State {
             ring_presence: 0.0,
             ring_capacity: 1,
             settle: None,
+            settled: 1.0,
+            leaving_name: None,
             seat: Vec2::ZERO,
             travelling: false,
         });

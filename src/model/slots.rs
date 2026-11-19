@@ -1706,13 +1706,20 @@ impl Choice<'_> {
 
 impl State {
     pub(super) fn avatar_label(&self, avatar: &super::Avatar) -> super::Label {
+        let fade = 2.0 * avatar.settled - 1.0;
         if let Some(name) = &avatar.name_visibility.placement {
+            let point = avatar.leaving_name.filter(|_| fade < 0.0);
+            let shown = if point.is_some() {
+                -fade
+            } else {
+                fade.max(0.0)
+            };
             return super::Label {
-                position: world(name.point),
+                position: world(point.unwrap_or(name.point)),
                 text: name.text.clone(),
                 kind: super::LabelKind::Avatar,
                 scale: name.scale,
-                opacity: avatar.presence,
+                opacity: avatar.presence * shown,
                 priority: avatar.activity,
             };
         }
@@ -2606,13 +2613,31 @@ mod tests {
             &Mappings::default(),
         );
         let first = crate::model::frames_for(sim.schedule.starts[2], 60).unwrap();
-        for frame in first..first + 120 {
+        let mut drawn = std::collections::HashMap::new();
+        for frame in first - 30..first + 120 {
             sim.advance_to(frame, 60);
             let state = &sim.state;
+            for avatar in &state.avatars {
+                let label = state.avatar_label(avatar);
+                let shown = avatar
+                    .name_visibility
+                    .placement
+                    .as_ref()
+                    .filter(|_| label.opacity > 0.5)
+                    .and_then(|_| state.screen(label.position));
+                if let (Some(&before), Some(now)) = (drawn.get(&avatar.name), shown) {
+                    let step = now.distance(before);
+                    assert!(step < 4.0, "frame {frame}: {} jumped {step}", avatar.name);
+                }
+                match shown {
+                    Some(point) => drawn.insert(avatar.name.clone(), point),
+                    None => drawn.remove(&avatar.name),
+                };
+            }
             let names: Vec<_> = state
                 .avatars
                 .iter()
-                .filter(|a| a.presence > 0.0)
+                .filter(|a| a.settled >= 0.5 && state.avatar_label(a).opacity > 0.5)
                 .filter_map(|a| a.name_visibility.placement.as_ref())
                 .map(|name| (&name.text, name.bounds(state.geometry.label_height)))
                 .collect();
