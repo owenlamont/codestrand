@@ -417,3 +417,54 @@ fn panel_toggle_captures_camera_without_a_window_backend() {
     assert!(app.world().resource::<Settings>().windowed.is_some());
     assert!(!captures_camera(app.world()));
 }
+
+#[test]
+fn closing_settings_releases_widget_focus() {
+    let mut app = App::new();
+    app.init_resource::<Settings>()
+        .init_resource::<ButtonInput<KeyCode>>()
+        .add_systems(Update, controls);
+    app.world_mut().spawn((Window::default(), PrimaryWindow));
+    app.world_mut().spawn((Node::default(), Panel));
+    app.world_mut().spawn((Text::default(), Status));
+    let tab = app.world_mut().spawn_empty().id();
+    app.insert_resource(InputFocus::from_entity(tab));
+    app.update();
+    assert_eq!(app.world().resource::<InputFocus>().get(), None);
+}
+
+#[test]
+fn preset_clicks_apply_only_on_the_display_page() {
+    for (page, applied) in [(Page::Display, true), (Page::Playback, false)] {
+        let mut app = App::new();
+        app.insert_resource(Settings {
+            open: true,
+            page,
+            monitor: Some(UVec2::new(3840, 2160)),
+            ..default()
+        })
+        .init_resource::<ButtonInput<MouseButton>>()
+        .add_systems(Update, clicks);
+        app.world_mut().spawn((
+            Window {
+                focused: true,
+                ..default()
+            },
+            PrimaryWindow,
+        ));
+        app.world_mut().spawn((
+            Action::Resize(UVec2::new(1280, 720)),
+            RelativeCursorPosition {
+                cursor_over: true,
+                normalized: Some(Vec2::ZERO),
+            },
+            BackgroundColor::default(),
+        ));
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Left);
+        app.update();
+        let pending = app.world().resource::<Settings>().pending_windowed;
+        assert_eq!(pending.is_some(), applied, "{page:?}");
+    }
+}

@@ -127,7 +127,7 @@ enum Command {
     },
     /// Play history in a loop as planning progresses; [ halves and ] doubles live speed (0.125x–8x).
     #[command(
-        after_help = "Camera: overhead by default; pitch clamps to ±90° and the eye stays above the file plane. Right drag orbits. With settings closed, C or a left viewport click captures the mouse to aim; while captured, hold left / right buttons to move up / down. C or Escape releases capture; Escape otherwise closes preview. WASD pans, scroll zooms, Tab cycles visible contributors, Space restores overhead. Orbit, captured aim and zoom retain follow; pan or button elevation releases it. F10 toggles display settings; F11 toggles borderless fullscreen."
+        after_help = "Camera: overhead by default; pitch clamps to ±90° and the eye stays above the file plane. Right drag orbits. With settings closed, C or a left viewport click captures the mouse to aim; while captured, hold left / right buttons to move up / down. C or Escape releases capture; Escape otherwise closes preview. WASD pans, scroll zooms, Tab cycles visible contributors, Space restores overhead. Orbit, captured aim and zoom retain follow; pan or button elevation releases it. F10 toggles settings for display and playback; F11 toggles borderless fullscreen."
     )]
     Preview {
         #[arg(long, value_enum, default_value = "neon")]
