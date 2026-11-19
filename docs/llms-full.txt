@@ -413,10 +413,11 @@ codestrand preview --theme outrun
 codestrand export frames --theme atlas --frames 90 --fps 30
 ```
 
-Outrun uses pink tiles, arched beams and a banded sunset. Blueprint uses hatched
-plates and construction lines. Retro Desktop uses page icons and static
-black/white dashed beams. Atlas uses survey points, paper contours and tinted
-top-level territories. Forge uses iron plates coloured by file heat.
+Every theme shows each file's type icon. Outrun frames icons in pink tiles and uses
+arched beams and a banded sunset. Blueprint frames them in outlined plates and uses
+construction lines. Retro Desktop draws them on pages and uses static black/white
+dashed beams. Atlas uses paper contours and tinted top-level territories. Forge cuts
+icons through iron plates coloured by file heat.
 Blueprint and Atlas use ink without additive glow. All grounds and dash patterns
 are steady; switching with `,` and `.` preserves playback and file positions.
 
