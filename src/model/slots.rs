@@ -338,11 +338,10 @@ impl Simulation {
             .count_replay(u64::from(frames).saturating_sub(self.state.tick));
         // Envelopes read only the files of live pulses, so files no pulse in this
         // replay can reach keep still.
-        let events = &self.events[self.state.next_event
-            ..self
-                .schedule
-                .applied(u64::from(frames))
-                .max(self.state.next_event)];
+        let applied = (self.state.next_event..self.events.len())
+            .find(|&index| self.schedule.start(index, u64::from(frames)).is_none())
+            .unwrap_or(self.events.len());
+        let events = &self.events[self.state.next_event..applied];
         let paths = events
             .iter()
             .flat_map(|event| &event.changes)
