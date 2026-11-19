@@ -884,6 +884,12 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
             resolution,
             camera_path,
         }) => {
+            export::check(&directory)?;
+            let camera_path = camera_path
+                .as_deref()
+                .map(camera_path::CameraPath::read)
+                .transpose()?;
+            encoding.check(fps, resolution)?;
             let mut loading = export::report::Loading::new(std::time::Instant::now());
             let (mut simulation, title) =
                 source.load_reporting(std::time::Duration::from_secs(1), |update| {
@@ -895,10 +901,8 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 })?;
             simulation.set_theme(theme.build());
 
-            let camera_path = camera_path
-                .as_deref()
-                .map(|path| camera_path::CameraPath::load(path, &simulation))
-                .transpose()?;
+            let camera_path =
+                camera_path.map(|path| path.bind(&simulation)).transpose()?;
             if let Some(path) = &camera_path {
                 path.pose(&simulation, 0, fps)?;
             }

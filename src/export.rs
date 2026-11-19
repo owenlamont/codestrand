@@ -32,6 +32,27 @@ pub(crate) const MANIFEST_HEADER: &str =
 mod png;
 pub(super) mod report;
 
+pub(super) fn check(directory: &Path) -> anyhow::Result<()> {
+    if fs::symlink_metadata(directory).is_ok() {
+        anyhow::bail!(
+            "export directory already exists: {} (choose a new directory)",
+            directory.display()
+        );
+    }
+    check_parent(directory)
+}
+
+pub(super) fn check_parent(path: &Path) -> anyhow::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    if !parent.is_dir() {
+        anyhow::bail!("parent is not a directory: {}", parent.display());
+    }
+    Ok(())
+}
+
 pub(super) fn prepare(directory: &Path) -> anyhow::Result<()> {
     fs::create_dir(directory)
         .with_context(|| format!("create new export directory {}", directory.display()))
@@ -1085,8 +1106,9 @@ mod pacing_tests {
         let (mut simulation, title) =
             source.load(&crate::progress::Progress::default()).unwrap();
         simulation.set_theme(theme.build());
-        let camera_path =
-            crate::camera_path::CameraPath::load(&camera, &simulation).unwrap();
+        let camera_path = crate::camera_path::CameraPath::read(&camera)
+            .and_then(|path| path.bind(&simulation))
+            .unwrap();
         let resolution = crate::resolution::Resolution::default();
         let (mut app, target) = scene::headless(simulation, title, 2, resolution);
         app.add_systems(bevy::prelude::Update, move || thread::sleep(delay));
