@@ -418,21 +418,24 @@ fn imported_deltas(event: &Value) -> BTreeMap<Vec<u8>, Delta> {
     actual
 }
 
+/// Inspection lists the first-parent commits that change the tree, oldest first.
 fn assert_history(path: &Path, commits: &[Value]) {
-    let expected_ids: BTreeSet<_> =
-        String::from_utf8(git(path, &["rev-list", "inspected"]))
-            .unwrap()
-            .lines()
-            .map(str::to_owned)
-            .collect();
-    let mut seen = BTreeSet::new();
+    let first_parents = String::from_utf8(git(
+        path,
+        &["rev-list", "--first-parent", "--reverse", "inspected"],
+    ))
+    .unwrap();
+    let empty = String::from_utf8(git(path, &["rev-parse", "inspected~3"])).unwrap();
+    let expected_ids: Vec<_> = first_parents
+        .lines()
+        .filter(|&id| id != empty.trim())
+        .map(str::to_owned)
+        .collect();
+    let mut seen = Vec::new();
     let mut all_paths = BTreeSet::new();
     for event in commits {
         let id = event["id"].as_str().unwrap();
-        for parent in event["parents"].as_array().unwrap() {
-            assert!(seen.contains(parent.as_str().unwrap()));
-        }
-        seen.insert(id.to_owned());
+        seen.push(id.to_owned());
         assert_eq!(bytes(&event["author"]["name"]), b"Raw Author");
         assert_eq!(bytes(&event["author"]["email"]), b"author@example.invalid");
         assert_eq!(bytes(&event["committer"]["name"]), b"Other Committer");
@@ -476,11 +479,6 @@ fn assert_history(path: &Path, commits: &[Value]) {
     assert!(
         commits
             .iter()
-            .any(|event| event["changes"].as_array().unwrap().is_empty())
-    );
-    assert!(
-        commits
-            .iter()
             .any(|event| event["parents"].as_array().unwrap().len() == 2)
     );
 }
@@ -504,7 +502,7 @@ fn history_matches_git_and_preserves_repository() {
     assert_eq!(refs_before, git(path, &["show-ref"]));
     assert_eq!(index_before, fs::read(path.join(".git/index")).unwrap());
     let commits = first["commits"].as_array().unwrap();
-    assert_eq!(commits.len(), 6);
+    assert_eq!(commits.len(), 4);
     assert_history(path, commits);
     let root = inspect(path, "root");
     assert_eq!(root["commits"].as_array().unwrap().len(), 1);
@@ -536,6 +534,8 @@ fn raw_signature_and_message_bytes_survive_import() {
     let scratch = tempfile::tempdir().unwrap();
     let path = scratch.path();
     git(path, &["init", "--initial-branch=main"]);
+    fs::write(path.join("file.txt"), b"raw\n").unwrap();
+    git(path, &["add", "file.txt"]);
     let tree = String::from_utf8(git(path, &["write-tree"])).unwrap();
     let mut data = format!("tree {}\n", tree.trim()).into_bytes();
     data.extend_from_slice(b"author  A\xff  < email\xfe > 1700000000 +0530\ncommitter C\xfd <c\xfc> 1700000060 -0700\n\nraw\xfb\n");
