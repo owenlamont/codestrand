@@ -1337,7 +1337,7 @@ impl LabelSpace<'_> {
             conflicts,
             ownership * 1e6
                 + foreign.map(|p| area(disk(p, self.radius))).sum::<f32>() * 100.0
-                + self.preferred[index].map_or(0.0, |(_, ring)| area(ring) * 100.0)
+                + self.preferred[index].map_or(0.0, |(_, ring)| area(ring) * 2_000.0)
                 + self
                     .obstacles
                     .iter()
@@ -2528,6 +2528,86 @@ mod tests {
     }
 
     #[test]
+    fn ring_members_name_themselves_at_their_nearest_point() {
+        let mut events = crate::timeline::synthetic();
+        events.truncate(3);
+        for event in &mut events {
+            event.author = events_author();
+            event.co_authors = ["Pair", "Codex"]
+                .map(|name| crate::timeline::Identity {
+                    name: name.as_bytes().to_vec(),
+                    email: format!("{name}@example.invalid").into_bytes(),
+                })
+                .to_vec();
+        }
+        let mut sim = Simulation::new(
+            events,
+            &Options {
+                seconds_per_day: 2.0,
+                ..Default::default()
+            },
+            &Theme::neon(),
+            &Mappings::default(),
+        );
+        let settled = sim.schedule.starts[2] + 1.5;
+        sim.advance_to(crate::model::frames_for(settled, 60).unwrap(), 60);
+        let state = &sim.state;
+        let preferred = state.name_preferences();
+        let names: Vec<_> = (0..3)
+            .map(|i| state.avatars[i].name_visibility.placement.as_ref().unwrap())
+            .collect();
+        for (index, name) in names.iter().enumerate() {
+            let (angle, _) = preferred[index].expect("each member sits in the ring");
+            let turn = labels::difference(name.angle, angle).abs();
+            // Discrete candidate angles and the label's own shape leave some turn; the
+            // author, with a free side, sits at its nearest point.
+            let tolerance = if index == 0 { 0.2 } else { 0.8 };
+            assert!(
+                turn < tolerance,
+                "name {index} turned {turn} from its nearest point"
+            );
+        }
+        let bounds: Vec<_> = names
+            .iter()
+            .map(|name| name.bounds(state.geometry.label_height))
+            .collect();
+        assert!(
+            bounds.iter().enumerate().all(|(i, a)| bounds[i + 1..]
+                .iter()
+                .all(|b| a.intersect(*b).is_empty()))
+        );
+    }
+
+    /// Every parked avatar drawn at member size sits inside its group's ring.
+    fn assert_members_ringed(sim: &Simulation, frame: u32) {
+        let state = &sim.state;
+        let scales = state.member_scales();
+        for (index, avatar) in state.avatars.iter().enumerate() {
+            let parked = avatar.presence > 0.0
+                && avatar.settle.is_none()
+                && !avatar.dismissed
+                && !sim.travel.travelling(index, state.tick);
+            if parked && scales[index] < 1.0 {
+                let inside = state.ring_of(index).is_some_and(|(centre, rim)| {
+                    avatar.position.distance(centre) < rim
+                });
+                assert!(
+                    inside,
+                    "frame {frame}: {} drawn as a member outside its ring",
+                    avatar.name
+                );
+            }
+        }
+    }
+
+    fn events_author() -> crate::timeline::Identity {
+        crate::timeline::Identity {
+            name: b"Ada".to_vec(),
+            email: b"Ada@example.invalid".to_vec(),
+        }
+    }
+
+    #[test]
     fn co_authors_gather_inside_one_ring_and_beam_from_it() {
         let co_author = |name: &str| crate::timeline::Identity {
             name: name.as_bytes().to_vec(),
@@ -2601,6 +2681,7 @@ mod tests {
                 };
                 assert!(start < 1e-3, "frame {frame}: beam starts off its ring");
             }
+            assert_members_ringed(&sim, frame);
         }
         assert_eq!(gathered.into_iter().collect::<Vec<_>>(), shared);
         validate(&mut sim);

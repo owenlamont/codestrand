@@ -383,11 +383,13 @@ impl Avatar {
             self.travelling = true;
         } else {
             let distance = self.position.distance(target);
-            if (self.travelling && offset != Vec2::ZERO || offset != self.seat)
-                && self.presence > 0.0
-                && distance > 1e-4
-                && distance < reach
-            {
+            let seated = self.travelling && offset != Vec2::ZERO || offset != self.seat;
+            if seated {
+                // A new seat chooses its name afresh, at the ring point nearest it, rather
+                // than holding the place it had before.
+                self.name_visibility.placement = None;
+            }
+            if seated && self.presence > 0.0 && distance > 1e-4 && distance < reach {
                 self.settle = Some((self.position, now));
             }
             self.position = match self.settle {
