@@ -100,7 +100,8 @@ Codestrand finds the GitHub account behind a commit email, without a contributor
 
 Unlisted emails of one account become one contributor, identified by the numeric
 account ID where known, so a renamed login stays one person. A contributors entry whose
-`github` names that login takes those emails, unless two entries name it. An email the
+`github` names any login of that account takes those emails, unless two entries do; the
+entry may list no emails, to name an account's contributor alone. An email the
 file lists always keeps its entry. A commit email can claim any noreply address, so a
 forged one merges with that account, just as GitHub attributes it.
 
@@ -131,7 +132,8 @@ overrides need no flag.
 
 Portraits and accounts live under `codestrand/avatars-v3/` in the platform cache
 directory. An account found for an email is reused for every repository; an email with
-no account is rechecked for a different remote. Images are keyed by URL. Earlier
+no account is rechecked for a different remote, and a commit GitHub does not have, such
+as an unpushed one, is rechecked next run. Images are keyed by URL. Earlier
 releases used `avatars-v2`, which Codestrand no longer reads; delete it to reclaim the
 space.
 Portraits are resized to 128-pixel PNG files beside small JSON account records.

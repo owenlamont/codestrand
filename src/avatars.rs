@@ -547,7 +547,8 @@ impl<N: Network> Resolver<N> {
         }
     }
 
-    /// The author account of `commit`, or `None` when GitHub links none.
+    /// The author account of `commit`, or `None` when GitHub links none; a commit GitHub
+    /// does not have, such as one never pushed, is unknown rather than unlinked.
     fn commit_author(
         &mut self,
         remote: &str,
@@ -560,12 +561,11 @@ impl<N: Network> Resolver<N> {
             true,
         ) {
             Response::Found(bytes) => bytes,
-            Response::Missing => return Ok(None),
+            Response::Missing | Response::Unavailable => return Err(Unknown),
             Response::RateLimited => {
                 self.limited = true;
                 return Err(Unknown);
             }
-            Response::Unavailable => return Err(Unknown),
         };
         let commits =
             serde_json::from_slice::<Vec<ApiCommit>>(&bytes).map_err(|_| Unknown)?;
@@ -1303,8 +1303,13 @@ mod tests {
     fn a_cached_miss_holds_only_for_the_remote_that_was_asked() {
         let root = crate::cache::test_directory().unwrap();
         let source = event("author@example.invalid", None);
+        let unlinked = || {
+            Response::Found(
+                format!(r#"[{{"sha":"{COMMIT}","author":null}}]"#).into_bytes(),
+            )
+        };
         let mut initial =
-            resolver(Some(root.path().to_owned()), true, vec![Response::Missing]);
+            resolver(Some(root.path().to_owned()), true, vec![unlinked()]);
         resolve(
             &mut initial,
             &mut [source.clone(), source.clone()],
@@ -1314,10 +1319,24 @@ mod tests {
         let mut same = resolver(Some(root.path().to_owned()), true, vec![]);
         resolve(&mut same, &mut [source.clone()], Some("owner/repo"));
         assert_eq!(same.network.calls.len(), 0);
-        let mut other =
-            resolver(Some(root.path().to_owned()), true, vec![Response::Missing]);
+        let mut other = resolver(Some(root.path().to_owned()), true, vec![unlinked()]);
         resolve(&mut other, &mut [source], Some("other/repo"));
         assert_eq!(other.network.calls.len(), 1);
+    }
+
+    #[test]
+    fn a_commit_github_lacks_is_retried_next_run() {
+        let root = crate::cache::test_directory().unwrap();
+        let source = event("author@example.invalid", None);
+        for reply in [Response::Missing, commit_by("found", 3)] {
+            let mut run = resolver(
+                Some(root.path().to_owned()),
+                true,
+                vec![reply, Response::Found(png())],
+            );
+            resolve(&mut run, &mut [source.clone()], Some("owner/repo"));
+            assert!(run.network.calls[0].1);
+        }
     }
 
     #[test]

@@ -97,6 +97,8 @@ pub(super) enum Error {
 #[derive(Debug, Default)]
 pub(super) struct Mappings {
     emails: HashMap<Vec<u8>, Contributor>,
+    /// The file's contributors by lowercase `github` login.
+    claims: HashMap<String, Vec<Contributor>>,
     /// Emails absent from the file, grouped by the GitHub account they belong to.
     inferred: HashMap<Vec<u8>, Contributor>,
 }
@@ -199,6 +201,7 @@ impl Mappings {
             }
         }
         let mut emails = HashMap::new();
+        let mut claims = HashMap::<String, Vec<Contributor>>::new();
         for (index, entry) in config.contributor.into_iter().enumerate() {
             let invalid = |field, reason| Error::Invalid {
                 path: path.to_owned(),
@@ -218,19 +221,25 @@ impl Mappings {
                     avatar_path(value, path).map_err(|reason| invalid("avatar", reason))
                 })
                 .transpose()?;
+            let contributor = Contributor {
+                key: Key::Config(index),
+                name: entry.name,
+                bot: entry.bot,
+                accounts: Accounts {
+                    github: entry.github,
+                    avatar,
+                },
+                portrait: None,
+            };
+            if let Some(login) = &contributor.accounts.github {
+                claims
+                    .entry(login.to_ascii_lowercase())
+                    .or_default()
+                    .push(contributor.clone());
+            }
             for email in entry.emails {
                 let key = email.as_bytes().to_ascii_lowercase();
-                let contributor = Contributor {
-                    key: Key::Config(index),
-                    name: entry.name.clone(),
-                    bot: entry.bot,
-                    accounts: Accounts {
-                        github: entry.github.clone(),
-                        avatar: avatar.clone(),
-                    },
-                    portrait: None,
-                };
-                if emails.insert(key, contributor).is_some() {
+                if emails.insert(key, contributor.clone()).is_some() {
                     return Err(Error::Duplicate {
                         path: path.to_owned(),
                         email,
@@ -240,27 +249,19 @@ impl Mappings {
         }
         Ok(Self {
             emails,
+            claims,
             inferred: HashMap::new(),
         })
     }
 
-    /// Groups emails the file does not list by their GitHub account. The file's
-    /// contributor claiming that login takes them when exactly one does; otherwise
-    /// the account's numeric ID, or its login when no ID is known, is the identity.
+    /// Groups emails the file does not list by their GitHub account: its numeric ID,
+    /// or its login when no ID is known. The file's contributor claiming any login of
+    /// that account takes the group when exactly one does.
     pub(super) fn infer(&mut self, found: &HashMap<String, crate::avatars::Account>) {
-        let mut claims = HashMap::<String, Vec<&Contributor>>::new();
-        let mut seen = std::collections::HashSet::new();
-        for contributor in self.emails.values() {
-            if let Some(login) = &contributor.accounts.github
-                && seen.insert(&contributor.key)
-            {
-                claims
-                    .entry(login.to_ascii_lowercase())
-                    .or_default()
-                    .push(contributor);
-            }
-        }
-        let mut found: Vec<_> = found.iter().collect();
+        let mut found: Vec<_> = found
+            .iter()
+            .filter(|(email, _)| !self.emails.contains_key(email.as_bytes()))
+            .collect();
         found.sort();
         let mut ids = HashMap::new();
         for (_, account) in &found {
@@ -268,29 +269,38 @@ impl Mappings {
                 ids.entry(account.login.as_str()).or_insert(id);
             }
         }
-        let mut inferred = HashMap::new();
-        for (email, account) in found {
-            if self.emails.contains_key(email.as_bytes()) {
-                continue;
+        let key = |account: &crate::avatars::Account| {
+            account
+                .id
+                .or_else(|| ids.get(account.login.as_str()).copied())
+                .map_or_else(|| Key::GitHubLogin(account.login.clone()), Key::GitHubId)
+        };
+        let mut claimants = HashMap::<Key, Vec<&Contributor>>::new();
+        for (_, account) in &found {
+            let group = claimants.entry(key(account)).or_default();
+            for claimant in self.claims.get(&account.login).into_iter().flatten() {
+                if !group.iter().any(|known| known.key == claimant.key) {
+                    group.push(claimant);
+                }
             }
-            let contributor = match claims.get(&account.login).map(Vec::as_slice) {
-                Some(&[claimant]) => claimant.clone(),
-                _ => Contributor {
-                    key: account
-                        .id
-                        .or_else(|| ids.get(account.login.as_str()).copied())
-                        .map_or_else(
-                            || Key::GitHubLogin(account.login.clone()),
-                            Key::GitHubId,
-                        ),
-                    name: String::new(),
-                    bot: None,
-                    accounts: Accounts::default(),
-                    portrait: None,
-                },
-            };
-            inferred.insert(email.as_bytes().to_vec(), contributor);
         }
+        let inferred = found
+            .iter()
+            .map(|(email, account)| {
+                let key = key(account);
+                let contributor = match claimants[&key].as_slice() {
+                    &[claimant] => claimant.clone(),
+                    _ => Contributor {
+                        key,
+                        name: String::new(),
+                        bot: None,
+                        accounts: Accounts::default(),
+                        portrait: None,
+                    },
+                };
+                (email.as_bytes().to_vec(), contributor)
+            })
+            .collect();
         self.inferred = inferred;
     }
 
@@ -761,6 +771,40 @@ emails = ["personal@example.invalid", "work@example.invalid"]
         assert_eq!(contributors[0], contributors[1]);
         assert_eq!(contributors[0].name, "Owen");
         assert_eq!(contributors[2].key, Key::GitHubLogin("twin".to_owned()));
+    }
+
+    #[test]
+    fn a_claim_needs_no_email_and_covers_every_login_of_the_account() {
+        let mut mappings = Mappings::parse(
+            "[[contributor]]
+name = 'Owen'
+emails = []
+github = 'new-login'",
+            Path::new("contributors.toml"),
+        )
+        .unwrap();
+        mappings.infer(&HashMap::from([
+            (
+                "7+old-login@users.noreply.github.com".to_owned(),
+                account("old-login", Some(7)),
+            ),
+            (
+                "7+new-login@users.noreply.github.com".to_owned(),
+                account("new-login", Some(7)),
+            ),
+        ]));
+        let mut events = events(&[
+            ("Old", "7+old-login@users.noreply.github.com"),
+            ("New", "7+new-login@users.noreply.github.com"),
+        ]);
+        mappings.apply(&mut events);
+        for event in &events {
+            let contributor = event.contributor.as_ref().unwrap();
+            assert_eq!(
+                (&contributor.key, contributor.name.as_str()),
+                (&Key::Config(0), "Owen")
+            );
+        }
     }
 
     #[test]
