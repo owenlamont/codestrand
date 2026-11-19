@@ -404,7 +404,7 @@ impl Search<'_> {
             self.areas = Areas::new(self);
         }
         let node = self.component[depth];
-        for choice in 0..self.domains[node].len() {
+        'choices: for choice in 0..self.domains[node].len() {
             let candidate = self.domains[node][choice];
             let mut next = (
                 score.0 + candidate.text_pairs,
@@ -412,6 +412,10 @@ impl Search<'_> {
                 score.2 + candidate.soft,
             );
             for neighbour in 0..self.neighbours[depth].len() {
+                // The count only grows, so the visit below would reject this choice.
+                if next.0 > self.score.0 {
+                    continue 'choices;
+                }
                 let area = self.area(depth, choice, neighbour);
                 next.0 += usize::from(area > 0.0);
                 next.1 += area;
