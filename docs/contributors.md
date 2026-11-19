@@ -133,9 +133,9 @@ overrides need no flag.
 Portraits and accounts live under `codestrand/avatars-v3/` in the platform cache
 directory. An account found for an email is reused for every repository; an email with
 no account is rechecked for a different remote, and a commit GitHub does not have, such
-as an unpushed one, is rechecked next run. Images are keyed by URL. Earlier
-releases used `avatars-v2`, which Codestrand no longer reads; delete it to reclaim the
-space.
+as an unpushed one, is rechecked next run. Images are keyed by URL. Codestrand
+deletes the `avatars-v2` directory earlier releases wrote, never following a link out of
+its cache.
 Portraits are resized to 128-pixel PNG files beside small JSON account records.
 Fetching covers only contributors in the selected playback window, with a 30-second
 total network budget; account lookups stop with 15 seconds left so portraits still
