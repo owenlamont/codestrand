@@ -56,9 +56,16 @@ All notable changes to Codestrand are documented here, following
 - History over an import budget is refused with a later `--start-date` that fits;
   `--allow-truncated-history` is removed.
   ([#194](https://github.com/owenlamont/codestrand/pull/194))
+- `--end-date` stops the import at the range's last commit, so later diffs are not
+  read. ([#199](https://github.com/owenlamont/codestrand/pull/199))
 
 ### Fixed
 
+- A date range numbers commits against the whole history again, as `7490 / 7618`
+  rather than `1 / 129`. ([#199](https://github.com/owenlamont/codestrand/pull/199))
+- Import no longer reads `HEAD`, the index or `.gitattributes` when `--revision` names
+  another commit, so a broken `HEAD` cannot stop it.
+  ([#199](https://github.com/owenlamont/codestrand/pull/199))
 - `codestrand preview` outside a repository exits with "pass --repository PATH"
   before opening a window.
   ([#187](https://github.com/owenlamont/codestrand/pull/187))
