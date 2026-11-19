@@ -2675,7 +2675,7 @@ mod tests {
             }
             for beam in sim.beams() {
                 let state = &sim.state;
-                let start = match state.ring_of(beam.author) {
+                let start = match state.beam_ring(beam.author) {
                     Some((centre, rim)) => (beam.from.distance(centre) - rim).abs(),
                     None => beam.from.distance(state.avatars[beam.author].position),
                 };

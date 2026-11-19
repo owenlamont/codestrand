@@ -2077,13 +2077,12 @@ fn sync_groups(
             .id();
         pools.groups.push(entity);
     }
-    let presence = |author: usize| simulation.avatars()[author].presence;
     for (&entity, &(author, centre, rim)) in pools.groups.iter().zip(&groups) {
         let material = palette.avatars[author % palette.avatars.len()].clone();
         world.entity_mut(entity).insert(MeshMaterial3d(material));
         if let Some(mut transform) = world.get_mut::<Transform>(entity) {
             transform.translation = centre;
-            transform.scale = Vec3::splat(rim * presence(author));
+            transform.scale = Vec3::splat(rim);
         }
         set_visible(world, entity, true);
     }

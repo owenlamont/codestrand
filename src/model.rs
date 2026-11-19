@@ -1418,7 +1418,8 @@ impl Simulation {
                 now,
                 reach,
             );
-            let ring = if avatar.group.is_some_and(|g| g.lead == index) {
+            let leads = avatar.group.is_some_and(|g| g.lead == index);
+            let ring = if leads && !avatar.travelling {
                 avatar.ring_capacity = avatar.ring_capacity.max(capacities[index]);
                 if capacities[index] > 1 {
                     avatar.ring_capacity = capacities[index];
@@ -1616,24 +1617,12 @@ impl Simulation {
         beams
     }
 
-    /// Each parked group of two or more seats: its author, its centre and the world
-    /// radius of its ring.
+    /// Each visible group ring: its author, its centre and its world radius.
     pub(super) fn groups(&self) -> Vec<(usize, Vec3, f32)> {
-        let state = &self.state;
-        let parked = |index: usize| {
-            state.avatars[index].presence > 0.0
-                && !self.travel.travelling(index, state.tick)
-        };
-        let radius = state.avatar_radius();
-        (0..state.avatars.len())
-            .filter(|&lead| parked(lead) && state.avatars[lead].ring_presence > 0.0)
+        (0..self.state.avatars.len())
             .filter_map(|lead| {
-                let avatar = &state.avatars[lead];
-                let capacity = avatar.ring_capacity;
-                let centre = avatar.slot.as_ref()?.ring_centre(capacity, radius);
-                let edge = centre + Vec2::X * slots::group_radius(capacity, radius);
-                let rim = slots::world(edge).distance(slots::world(centre));
-                Some((lead, slots::world(centre), rim * avatar.ring_presence))
+                let (centre, rim) = self.state.visible_ring(lead)?;
+                Some((lead, centre, rim))
             })
             .collect()
     }
@@ -2217,10 +2206,36 @@ impl State {
         ))
     }
 
-    /// Where an avatar's beam towards `to` starts: the point of its ring nearest `to` as
-    /// seen from the camera, or the avatar itself outside a ring.
+    /// The ring an author draws, as its world centre and radius: it grows out of the
+    /// author while forming and shrinks back into it while fading.
+    fn visible_ring(&self, lead: usize) -> Option<(Vec3, f32)> {
+        let author = &self.avatars[lead];
+        let shown = author.ring_presence * author.presence;
+        let slot = author.slot.as_ref().filter(|_| shown > 0.0)?;
+        let radius = self.avatar_radius();
+        let centre = slot.ring_centre(author.ring_capacity, radius);
+        let edge = centre + Vec2::X * slots::group_radius(author.ring_capacity, radius);
+        let rim = slots::world(edge).distance(slots::world(centre));
+        let centre = author
+            .position
+            .lerp(slots::world(centre), author.ring_presence);
+        Some((centre, rim * shown))
+    }
+
+    /// The visible ring an avatar's beams leave from: its group's, or its own.
+    fn beam_ring(&self, index: usize) -> Option<(Vec3, f32)> {
+        let lead = self.avatars[index]
+            .group
+            .map(|g| g.lead)
+            .filter(|&lead| self.in_party(index, lead))
+            .unwrap_or(index);
+        self.visible_ring(lead)
+    }
+
+    /// Where an avatar's beam towards `to` starts: the point of its visible ring nearest
+    /// `to` as seen from the camera, or the avatar itself outside a ring.
     fn beam_start(&self, author: usize, to: Vec3) -> Vec3 {
-        let Some((centre, rim)) = self.ring_of(author) else {
+        let Some((centre, rim)) = self.beam_ring(author) else {
             return self.avatars[author].position;
         };
         let view = view_direction();

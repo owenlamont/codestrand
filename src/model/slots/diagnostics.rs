@@ -403,7 +403,7 @@ impl MovingBeams {
             // A group's beams leave its camera-facing ring, so their ground track starts
             // at the ring's centre.
             let position = state
-                .ring_of(pulse.author)
+                .beam_ring(pulse.author)
                 .map_or(state.avatars[pulse.author].position, |(centre, _)| centre);
             let from = bevy::math::Vec2::new(position.x, position.z);
             let to = bevy::math::Vec2::new(to.x, to.z);
