@@ -483,7 +483,7 @@ fn load_with_limits(
     limits: Limits,
 ) -> anyhow::Result<History> {
     let mut budget = Budget::new(limits);
-    let mut resources = bounded_resources(repo, &mut budget)?;
+    let mut resources = bounded_resources(repo)?;
     let mut commits = Vec::new();
     let mut spent = Vec::new();
     for (index, link) in links.iter().enumerate().skip(skip).rev() {
@@ -738,38 +738,27 @@ fn diffed(
     record_commit(&commit, changes, budget)
 }
 
+/// A diff cache with no attributes: rename tracking matches exact object ids only and
+/// blob diffs read raw blobs, so neither HEAD, the index nor any attribute file is read.
 fn bounded_resources(
     repo: &gix::Repository,
-    budget: &mut Budget,
 ) -> anyhow::Result<gix::diff::blob::Platform> {
-    let tree = if let Some(head) = reference_id(repo, "HEAD")? {
-        let head = peel_commit(repo, head, budget)?;
-        budget.object(repo, head)?;
-        let tree = repo.find_commit(head)?.tree_id()?.detach();
-        budget.tree(repo, tree, 0)?;
-        Some(tree)
-    } else {
-        None
-    };
-    let index: gix::worktree::IndexPersistedOrInMemory = match repo.try_index()? {
-        Some(index) => index.into(),
-        None => match tree {
-            Some(tree) => repo.index_from_tree(&tree)?.into(),
-            None => gix::index::File::from_state(
-                gix::index::State::new(repo.object_hash()),
-                repo.index_path(),
-            )
-            .into(),
-        },
-    };
+    let attributes = gix::worktree::stack::state::Attributes::new(
+        gix::attrs::Search::default(),
+        None,
+        gix::worktree::stack::state::attributes::Source::IdMapping,
+        gix::attrs::search::MetadataCollection::default(),
+    );
     Ok(gix::diff::resource_cache(
         repo,
         gix::diff::blob::pipeline::Mode::ToGit,
-        repo.attributes_only(
-            &index,
-            gix::worktree::stack::state::attributes::Source::IdMapping,
-        )?
-        .detach(),
+        gix::worktree::Stack::new(
+            repo.git_dir(),
+            gix::worktree::stack::State::AttributesStack(attributes),
+            gix::glob::pattern::Case::Sensitive,
+            Vec::new(),
+            Vec::new(),
+        ),
         gix::diff::blob::pipeline::WorktreeRoots::default(),
     )?)
 }
@@ -1611,24 +1600,6 @@ mod security_tests {
     }
 
     #[test]
-    fn head_expansion_is_checked_before_diff_cache_construction() {
-        let (root, _repo, tip) = hostile_history(12, b"ok\n");
-        std::fs::write(root.path().join(".git/HEAD"), format!("{tip}\n")).unwrap();
-        let (repo, tip) = resolve(root.path(), "HEAD").unwrap();
-        assert!(
-            load_all(
-                &repo,
-                tip,
-                Limits {
-                    tree_entries: 4096,
-                    ..Limits::default()
-                }
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
     fn oversized_revision_stops_cleanly() {
         let (root, repo, _) = hostile_history(0, b"ok\n");
         let oversized = repo
@@ -1636,20 +1607,5 @@ mod security_tests {
             .unwrap()
             .detach();
         assert!(import(root.path(), &oversized.to_string()).is_err());
-    }
-
-    // Unix index paths permit invalid UTF-8, so only Windows produces this dependency error.
-    #[cfg(windows)]
-    #[test]
-    fn dependency_path_error_is_escaped() {
-        let (root, _repo, tip) = hostile_path(0, b"ok\n", b"\x1b[31mfile\xff.txt");
-        std::fs::write(root.path().join(".git/HEAD"), format!("{tip}\n")).unwrap();
-        let error = import(root.path(), &tip.to_string())
-            .err()
-            .expect("Windows rejects the index path");
-        let error = anyhow::Error::from(error);
-        let raw = format!("{error:#}");
-        assert!(raw.contains('\u{1b}'));
-        assert!(!crate::terminal_escape(&raw).contains('\u{1b}'));
     }
 }
