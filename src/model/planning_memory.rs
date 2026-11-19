@@ -15,25 +15,33 @@ pub(crate) fn available(trace: &super::Trace) -> anyhow::Result<u64> {
     let mut system = sysinfo::System::new()
         .context("cannot read available physical memory; planning stopped")?;
     system.refresh_memory_specifics(sysinfo::MemoryRefreshKind::nothing().with_ram());
-    let available =
-        validate_available(system.total_memory(), system.available_memory())?;
+    let available = validate_available(
+        system.total_memory(),
+        system.available_memory(),
+        cfg!(target_os = "macos"),
+    )?;
     if trace.on() {
         eprintln!("planning_available_memory_bytes={available}");
     }
     Ok(available)
 }
 
-/// Total RAM stands in for an available reading of zero or above the total, which
-/// a running process cannot observe; macOS runners have reported zero.
-fn validate_available(total: u64, available: u64) -> anyhow::Result<u64> {
+/// Total RAM stands in for an available reading above the total, and for zero where
+/// zero means the reading failed: sysinfo leaves macOS at zero when its VM statistics
+/// call fails, while Linux reports zero under real memory pressure.
+fn validate_available(
+    total: u64,
+    available: u64,
+    zero_is_unread: bool,
+) -> anyhow::Result<u64> {
     anyhow::ensure!(
         total > 0,
         "cannot read physical memory; planning stopped; check operating-system memory reporting and retry"
     );
-    Ok(if (1..=total).contains(&available) {
-        available
-    } else {
+    Ok(if available > total || (available == 0 && zero_is_unread) {
         total
+    } else {
+        available
     })
 }
 
@@ -348,11 +356,12 @@ mod tests {
     }
 
     #[test]
-    fn an_implausible_available_reading_falls_back_to_total_memory() {
-        assert!(validate_available(0, 0).is_err());
-        assert_eq!(validate_available(10, 0).unwrap(), 10);
-        assert_eq!(validate_available(10, 11).unwrap(), 10);
-        assert_eq!(validate_available(10, 4).unwrap(), 4);
+    fn an_unread_or_impossible_available_reading_falls_back_to_total_memory() {
+        assert!(validate_available(0, 0, true).is_err());
+        assert_eq!(validate_available(10, 0, true).unwrap(), 10);
+        assert_eq!(validate_available(10, 0, false).unwrap(), 0);
+        assert_eq!(validate_available(10, 11, false).unwrap(), 10);
+        assert_eq!(validate_available(10, 4, true).unwrap(), 4);
     }
 
     #[test]
