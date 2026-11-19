@@ -81,11 +81,6 @@ impl ConfinedFile {
         Ok(file.into_std())
     }
 
-    /// Deletes this directory and its contents; a link is removed, never followed.
-    pub(super) fn remove_dir_all(&self) -> io::Result<()> {
-        self.directory.remove_dir_all(&self.name)
-    }
-
     pub(super) fn write(
         &self,
         write: impl FnOnce(&mut cap_std::fs::File) -> io::Result<()>,

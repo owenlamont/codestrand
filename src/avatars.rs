@@ -439,12 +439,6 @@ impl<N: Network> Resolver<N> {
         fetch: bool,
         now: u64,
     ) -> Self {
-        if let Some(root) = &root
-            && let Ok(old) =
-                crate::cache::ConfinedFile::at(&root.join("avatars-v2"), false)
-        {
-            let _ = old.remove_dir_all();
-        }
         Self {
             network,
             root,
@@ -836,33 +830,6 @@ mod tests {
             },
         );
         assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
-    }
-
-    #[test]
-    fn the_old_cache_is_removed_but_a_linked_one_is_left_alone() {
-        let root = crate::cache::test_directory().unwrap();
-        let old = root.path().join("avatars-v2");
-        fs::create_dir_all(old.join("nested")).unwrap();
-        fs::write(old.join("nested/entry.json"), b"{}").unwrap();
-        resolver(Some(root.path().to_owned()), false, vec![]);
-        assert!(!old.exists());
-        let outside = crate::cache::test_directory().unwrap();
-        fs::write(outside.path().join("keep.json"), b"{}").unwrap();
-        #[cfg(windows)]
-        assert!(
-            std::process::Command::new("cmd")
-                .args(["/d", "/c", "mklink", "/J"])
-                .arg(&old)
-                .arg(outside.path())
-                .output()
-                .unwrap()
-                .status
-                .success()
-        );
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(outside.path(), &old).unwrap();
-        resolver(Some(root.path().to_owned()), false, vec![]);
-        assert!(outside.path().join("keep.json").exists());
     }
 
     #[test]
