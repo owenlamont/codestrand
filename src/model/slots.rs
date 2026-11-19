@@ -647,9 +647,9 @@ impl State {
 
     /// Row places for an author's co-authors, in rank order, and whether any had to
     /// overlap another avatar. Co-authors already parked at this dock for this commit
-    /// keep their places while they stay on the edge; a new one takes the free end of the
-    /// row nearer to where it was, or a crowded end on the edge, leaving the edge only
-    /// when the edge has no room left at either end.
+    /// keep their places while those stay free and on the edge; any other takes the
+    /// free end of the row nearer to where it was, or a crowded end on the edge,
+    /// leaving the edge only when neither end is on it.
     fn row_steps(
         &self,
         choice: &Choice<'_>,
@@ -667,7 +667,7 @@ impl State {
                     .filter(|s| s.commit == chosen.commit && s.dock == chosen.dock)
                     .map(|s| row_step(chosen.dock.edge, s.offset, radius))
                     .filter(|&step| {
-                        choice.on_edge(chosen.dock, step) && !taken.contains(&step)
+                        choice.free_cell(chosen.dock, step) && !taken.contains(&step)
                     });
                 taken.extend(step);
                 step
