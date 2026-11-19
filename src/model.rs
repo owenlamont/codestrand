@@ -1097,8 +1097,8 @@ impl Simulation {
         Ok(snapshots)
     }
     pub(super) fn duration(&self) -> Time {
-        if let Some(ready) = &self.ready_end {
-            return tick_time(ready.end);
+        if self.ready_end.is_some() {
+            return tick_time(self.end_tick());
         }
         if let Some(window) = &self.window {
             return self.clock.present(window.end);
