@@ -514,6 +514,8 @@ pub(super) struct Simulation {
     pub repository_label_plane: crate::repositories::LabelPlane,
     events: windows::Events,
     offset: usize,
+    /// Commits before `offset` that import never read, counted only in commit numbers.
+    unread_before: usize,
     total: usize,
     schedule: Schedule,
     clock: schedule::Clock,
@@ -964,7 +966,8 @@ impl Simulation {
             diff_text_distance: 1.0,
             repository_label_plane: crate::repositories::LabelPlane::default(),
             events: events.into(),
-            offset: start + options.unread.before,
+            offset: start,
+            unread_before: options.unread.before,
             total,
             clock: schedule::Clock::new(schedule.clone(), schedule.clone()),
             births: Vec::new(),
@@ -1474,7 +1477,7 @@ impl Simulation {
     }
 
     pub(super) fn commit(&self) -> usize {
-        self.offset + self.state.next_event
+        self.unread_before + self.offset + self.state.next_event
     }
 
     pub(super) fn total(&self) -> usize {
@@ -3529,6 +3532,42 @@ mod tests {
         );
         assert_eq!(sim.commit(), 6);
         assert_eq!(sim.total(), timeline::synthetic().len() + 8);
+    }
+
+    #[test]
+    fn unread_commits_leave_travel_padding_in_place() {
+        let histories = (0..2)
+            .map(|repository| {
+                let mut events = timeline::synthetic();
+                for event in &mut events {
+                    event.seconds += i64::from(repository == 1) * 86_400;
+                }
+                crate::repositories::namespace(&mut events, repository);
+                events
+            })
+            .collect();
+        let events = crate::repositories::merge(histories);
+        let unpadded = Schedule::new(&events[2..], 0.5, 1.0);
+        let plan = |before| {
+            Simulation::with_repositories(
+                events.clone(),
+                &Options {
+                    start: 2,
+                    unread: Unread {
+                        before,
+                        after: vec![0, 0],
+                    },
+                    ..Options::default()
+                },
+                &Theme::neon(),
+                &Mappings::default(),
+                &["first".into(), "second".into()],
+            )
+        };
+        let (read, unread) = (plan(0), plan(7));
+        assert_ne!(read.scheduled_starts(), unpadded.starts);
+        assert_eq!(read.scheduled_starts(), unread.scheduled_starts());
+        assert_eq!(unread.commit(), read.commit() + 7);
     }
 
     fn assert_clearance(sim: &Simulation) {

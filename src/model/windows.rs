@@ -354,6 +354,7 @@ impl Simulation {
             repository_label_plane: self.repository_label_plane,
             events,
             offset: self.offset,
+            unread_before: self.unread_before,
             total: self.total,
             schedule: self.schedule.clone(),
             clock: self.clock.clone(),
