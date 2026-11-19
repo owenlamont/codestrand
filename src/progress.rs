@@ -1,7 +1,7 @@
 use std::{
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicU32, AtomicU64, Ordering},
         mpsc,
     },
     time::{Duration, Instant},
@@ -19,7 +19,7 @@ pub(crate) enum Stage {
 }
 
 impl Stage {
-    fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Self::History => "reading history",
             Self::Directories => "planning directories",
@@ -61,7 +61,6 @@ struct Channel {
     created: Instant,
     sent_nanos: AtomicU64,
     pass: AtomicU32,
-    stderr: AtomicBool,
 }
 
 /// The sending end of planning progress; a disabled one costs a branch per report.
@@ -78,7 +77,6 @@ impl Progress {
             created: Instant::now(),
             sent_nanos: AtomicU64::new(0),
             pass: AtomicU32::new(1),
-            stderr: AtomicBool::new(false),
         };
         (Self(Some(Arc::new(channel))), receiver)
     }
@@ -86,13 +84,6 @@ impl Progress {
     pub(crate) fn pass(&self, pass: u32) {
         if let Some(channel) = &self.0 {
             channel.pass.store(pass, Ordering::Relaxed);
-        }
-    }
-
-    /// Keep export progress visible after the initial loader returns its first plan.
-    pub(crate) fn continue_on_stderr(&self) {
-        if let Some(channel) = &self.0 {
-            channel.stderr.store(true, Ordering::Relaxed);
         }
     }
 
@@ -129,12 +120,8 @@ impl Progress {
             pass: channel.pass.load(Ordering::Relaxed),
             fraction,
         };
-        if channel.stderr.load(Ordering::Relaxed) {
-            eprintln!("{update}");
-        } else {
-            // A closed receiver means nobody is watching; planning carries on.
-            let _ = channel.sender.send(update);
-        }
+        // A closed receiver means nobody is watching; planning carries on.
+        let _ = channel.sender.send(update);
     }
 }
 
