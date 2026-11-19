@@ -520,7 +520,7 @@ pub(super) struct Simulation {
     boundaries: Vec<std::sync::Arc<State>>,
     windowed: bool,
     stream: Option<std::sync::Arc<std::sync::Mutex<windows::Stream>>>,
-    ready_end: Option<(u64, bool)>,
+    ready_end: Option<streaming::Ready>,
     title_start: usize,
 }
 
@@ -1105,8 +1105,8 @@ impl Simulation {
         Ok(snapshots)
     }
     pub(super) fn duration(&self) -> Time {
-        if let Some((end, _)) = self.ready_end {
-            return tick_time(end);
+        if let Some(ready) = &self.ready_end {
+            return tick_time(ready.end);
         }
         if let Some(window) = &self.window {
             return self.clock.present(window.end);

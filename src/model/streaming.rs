@@ -67,6 +67,16 @@ struct Packet {
     generation: u64,
     simulation: Simulation,
 }
+/// How far a planned window lets playback run.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Ready {
+    /// The last tick planned.
+    pub(super) end: u64,
+    /// Whether the window reaches the end of playback.
+    pub(super) complete: bool,
+    /// Playback length without walk waits.
+    pub(super) unpadded: Time,
+}
 pub(super) struct Stream {
     receiver: mpsc::Receiver<Result<Packet, Error>>,
     reset: mpsc::SyncSender<u64>,
@@ -207,12 +217,12 @@ impl Simulation {
         self.travel.force_unrouteable();
     }
     pub(crate) fn planning_complete(&self) -> bool {
-        self.ready_end.is_none_or(|(_, complete)| complete)
+        self.ready_end.as_ref().is_none_or(|ready| ready.complete)
     }
     pub(crate) fn frame_ready(&self, frame: u32, fps: u16) -> bool {
         let tick = super::Schedule::frame_tick(frame, fps);
-        self.ready_end.is_none_or(|(end, complete)| {
-            tick >= self.initial.tick && (tick <= end || complete)
+        self.ready_end.as_ref().is_none_or(|ready| {
+            tick >= self.initial.tick && (tick <= ready.end || ready.complete)
         })
     }
     pub(crate) fn prepare_frame(
@@ -249,6 +259,34 @@ impl Simulation {
             super::tick_time(self.clock.rows(self.state.tick).1),
             self.clock.history.duration(),
         )
+    }
+
+    /// History time planned so far; playback past it waits for the next window.
+    pub(crate) fn planned_history(&self) -> Time {
+        self.ready_end
+            .as_ref()
+            .map_or(self.clock.history.duration(), |ready| {
+                super::tick_time(self.clock.rows(ready.end).1)
+            })
+    }
+
+    /// Whole playback length, exact once planning completes. Until then, the
+    /// unpadded playback plus the walk padding planned so far, scaled from the
+    /// commits planned to every commit.
+    pub(crate) fn projected_duration(&self) -> Time {
+        let Some(ready) = self.ready_end.filter(|ready| !ready.complete) else {
+            return self.duration();
+        };
+        let end = ready.end;
+        let padding = end.saturating_sub(self.clock.rows(end).1);
+        let planned = self.schedule.applied(end) as u64;
+        let commits = self.clock.history.starts.len() as u64;
+        let projected = padding
+            .saturating_mul(commits)
+            .checked_div(planned)
+            .unwrap_or(padding);
+        let unpadded = ready.unpadded.ticks(true);
+        super::tick_time(unpadded.saturating_add(projected).max(end))
     }
 }
 
@@ -382,8 +420,8 @@ pub(crate) mod tests {
             if uncapped {
                 assert_eq!(sim.travel.stats.faded, 0, "uncapped travel must not fade");
             }
-            if let Some((end, _)) = sim.ready_end {
-                boundaries.insert(end);
+            if let Some(ready) = &sim.ready_end {
+                boundaries.insert(ready.end);
             }
             sim.advance_to(frame, 60);
             diagnostic.observe(&sim);
@@ -526,7 +564,7 @@ pub(crate) mod tests {
             let mut sim =
                 fixture_with(false, Some(hook), super::super::TravelCap::None);
             sim.advance_to(30, 60);
-            let end = u32::try_from(sim.ready_end.unwrap().0 + 1).unwrap();
+            let end = u32::try_from(sim.ready_end.as_ref().unwrap().end + 1).unwrap();
             let error = sim.prepare_frame(end, 60, true).unwrap_err().to_string();
             assert!(
                 error.contains(if panic {
@@ -537,6 +575,36 @@ pub(crate) mod tests {
                 "{error}"
             );
         }
+    }
+
+    #[test]
+    fn projected_length_scales_planned_waits_and_is_exact_once_planned() {
+        let whole = fixture_with(true, None, super::super::TravelCap::None);
+        let mut stream = fixture_with(false, None, super::super::TravelCap::None);
+        let mut windows = Vec::new();
+        for frame in 0.. {
+            stream.prepare_frame(frame, 60, true).unwrap();
+            if stream.planning_complete() {
+                break;
+            }
+            if windows.last().map(|&(planned, _)| planned)
+                != Some(stream.planned_history())
+            {
+                let unpadded = stream.ready_end.unwrap().unpadded;
+                let remaining = unpadded.since(stream.planned_history());
+                let unscaled = stream.duration().after(remaining);
+                windows.push((
+                    stream.planned_history(),
+                    stream.projected_duration() > unscaled,
+                ));
+                assert!(stream.projected_duration() >= unscaled, "frame {frame}");
+            }
+        }
+        assert!(windows.len() > 1, "fixture plans several windows");
+        assert!(windows.iter().any(|&(_, scaled)| scaled), "{windows:?}");
+        assert_eq!(stream.projected_duration(), whole.duration());
+        let unpadded = stream.ready_end.unwrap().unpadded;
+        assert!(whole.duration() > unpadded, "walk waits pad the fixture");
     }
 
     #[test]

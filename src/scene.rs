@@ -668,6 +668,11 @@ pub(super) fn headless(
                 synchronous_pipeline_compilation: true,
                 ..default()
             })
+            // Adapter details would bury export progress; RUST_LOG still raises it.
+            .set(bevy::log::LogPlugin {
+                level: bevy::log::Level::WARN,
+                ..default()
+            })
             .disable::<WinitPlugin>()
             .disable::<PipelinedRenderingPlugin>(),
     );
