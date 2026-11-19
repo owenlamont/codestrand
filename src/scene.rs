@@ -2030,6 +2030,7 @@ fn sync_activity(
         attach_portrait(world, palette, entity, &avatars[index]);
         pools.avatars.push(entity);
     }
+    let scales = simulation.member_scales();
     for (index, &entity) in pools.avatars.iter().enumerate() {
         let avatar = avatars.get(index);
         let presence = avatar.map_or(0.0, |avatar| avatar.presence);
@@ -2041,7 +2042,7 @@ fn sync_activity(
                 (presence
                     * simulation.scale()
                     * simulation.avatar_disc_scale()
-                    * simulation.member_scale(index)
+                    * scales[index]
                     * avatar.projection_scale)
                     * avatar.lifecycle_scale.max(0.001),
             );

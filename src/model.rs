@@ -1451,8 +1451,8 @@ impl Simulation {
         self.state.avatar_scale
     }
 
-    pub(super) fn member_scale(&self, index: usize) -> f32 {
-        self.state.member_scale(index)
+    pub(super) fn member_scales(&self) -> Vec<f32> {
+        self.state.member_scales()
     }
 
     pub(super) fn avatar_disc_scale(&self) -> f32 {
@@ -2117,14 +2117,19 @@ impl State {
             .unwrap_or(1)
     }
 
-    /// Display scale of an avatar: smaller while packed into a group.
-    pub(super) fn member_scale(&self, index: usize) -> f32 {
-        let lead = self.avatars[index].group.map_or(index, |g| g.lead);
-        if self.in_party(index, lead) && self.capacity(lead) > 1 {
-            slots::MEMBER_SCALE
-        } else {
-            1.0
-        }
+    /// Display scale of each avatar: smaller while packed into a group.
+    pub(super) fn member_scales(&self) -> Vec<f32> {
+        let capacities = self.capacities();
+        (0..self.avatars.len())
+            .map(|index| {
+                let lead = self.avatars[index].group.map_or(index, |g| g.lead);
+                if capacities[lead] > 1 && self.in_party(index, lead) {
+                    slots::MEMBER_SCALE
+                } else {
+                    1.0
+                }
+            })
+            .collect()
     }
 
     fn point(&self, target: Target) -> Option<Vec3> {

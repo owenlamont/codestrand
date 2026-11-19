@@ -2374,7 +2374,8 @@ mod tests {
         let state = &sim.state;
         let radius = state.avatar_radius();
         let point = |i: usize| state.avatars[i].slot.as_ref().unwrap().point;
-        let size = |i: usize| radius * state.member_scale(i);
+        let scales = state.member_scales();
+        let size = |i: usize| radius * scales[i];
         let slot = state.avatars[author].slot.as_ref().unwrap();
         let centre =
             slot.centre() + ring_offset(state.capacity(author), slot.dock.edge, radius);
