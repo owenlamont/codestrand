@@ -56,8 +56,9 @@ All notable changes to Codestrand are documented here, following
 - History over an import budget is refused with a later `--start-date` that fits;
   `--allow-truncated-history` is removed.
   ([#194](https://github.com/owenlamont/codestrand/pull/194))
-- `--end-date` stops the import at the range's last commit: on a full Cargo clone, an
-  export ending in 2016 took about 4.5 s instead of 75 s. Its tiles are laid out for
+- `--end-date` stops the import at the range's last commit: on a full Cargo clone, a
+  two-frame export ending in 2016 took about 4.5 s instead of 75 s on a release build
+  without LTO. Its tiles are laid out for
   the files up to the end date, so files are larger.
   ([#199](https://github.com/owenlamont/codestrand/pull/199))
 

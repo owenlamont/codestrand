@@ -732,8 +732,11 @@ mod tests {
         let early = empty_fixture();
         fs::write(early.path().join("early.txt"), "early\n").unwrap();
         dated_commit(early.path(), "2026-05-01T00:00:00Z", &["add", "."]);
-        let fixtures = [dated_fixture("one"), dated_fixture("two"), early];
-        for chosen in [vec![0], vec![0, 1], vec![0, 2]] {
+        let late = empty_fixture();
+        fs::write(late.path().join("late.txt"), "late\n").unwrap();
+        dated_commit(late.path(), "2026-05-07T00:00:00Z", &["add", "."]);
+        let fixtures = [dated_fixture("one"), dated_fixture("two"), early, late];
+        for chosen in [vec![0], vec![0, 1], vec![0, 2], vec![0, 3]] {
             let fixtures: Vec<_> =
                 chosen.iter().map(|&index| &fixtures[index]).collect();
             let whole = merged_whole(&fixtures);
