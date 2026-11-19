@@ -26,6 +26,17 @@ requests. Servers also receive ordinary connection information such as the sourc
 IP address and the Codestrand user agent. Configured URLs can contain whatever
 information their author put in them.
 
+## What CI checks
+
+- Only Codestrand depends on `ureq`, `rustls` is reached only through `ureq`, and
+  neither `bevy_asset` nor `gix-transport` enables an HTTP feature.
+- A Linux PNG export of a small local repository, with the history cache on, runs
+  under `strace` in an empty network namespace and fails on any IP socket or Unix
+  socket connection outside an allow-list.
+
+The trace covers Linux and the code paths that export exercises. Preview, video
+encoding, avatar fetching, macOS and Windows are not traced.
+
 ## Local files and processes
 
 The history cache contains commit IDs and dates, contributor names and email

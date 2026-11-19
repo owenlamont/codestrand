@@ -214,6 +214,15 @@ pub(super) fn local_event(event: &Event, prefix: &str) -> Event {
 }
 
 pub(super) fn merge(histories: Vec<Vec<Event>>) -> Vec<Event> {
+    merge_by(histories, |event| event.seconds)
+}
+
+/// Repeatedly takes the earliest head, so merging the histories' suffixes yields the
+/// suffix of their merge.
+pub(super) fn merge_by<T>(
+    histories: Vec<Vec<T>>,
+    seconds: impl Fn(&T) -> i64,
+) -> Vec<T> {
     let mut histories: Vec<_> = histories
         .into_iter()
         .map(|history| history.into_iter().peekable())
@@ -224,7 +233,7 @@ pub(super) fn merge(histories: Vec<Vec<Event>>) -> Vec<Event> {
             .iter_mut()
             .enumerate()
             .filter_map(|(index, history)| {
-                history.peek().map(|event| (event.seconds, index))
+                history.peek().map(|event| (seconds(event), index))
             })
             .min();
         let Some((_, index)) = next else { break };
