@@ -256,7 +256,9 @@ fn setup(mut commands: Commands, camera: Single<Entity, With<AvatarCamera>>) {
                 .spawn((
                     TabList::default(),
                     Node {
+                        flex_wrap: FlexWrap::Wrap,
                         column_gap: px(6),
+                        row_gap: px(6),
                         ..default()
                     },
                 ))
