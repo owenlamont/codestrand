@@ -202,7 +202,7 @@ pub(crate) fn run(
         "All areas and coverage fractions use the fixed reference field, normalised to its full 1280x720 reference-unit rectangle; they are not rendered-frame fractions. Glass tiles are disjoint world rectangles represented in this field, inside a 24 reference-pixel margin plus the caption reservation below, separated by shared gutters. Largest empty rectangle is the exact maximum axis-aligned rectangle outside their union, including the margin. Content is the world-XZ AABB of current directory discs and file positions padded by their model footprint size, converted with the fixed affine field scale; not projected ground-plane area, glyph ink or opaque pixel occupancy. Content fill divides content-envelope area by tile area; overall fill is area weighted. The first repository owns the empty lead-in tile. Weights are live file and directory counts, held until their shares drift and then eased over two seconds; empty active repositories weigh one until archived. Files and directories count live files not leaving and live directories. Samples include every canonical 1/60 second. Content AABBs are clipped to their own tiles; actual footprints use convex outlines. Content largest-empty rectangles use fully covered cells on a 160x90 grid inside the usable tile viewport, excluding the caption reservation, with 8 reference-pixel boundary uncertainty."}),
     )?;
     writeln!(writer)?;
-    let mut frames = super::frames_for(simulation.duration(), 60)?;
+    let mut frames = simulation.frames(60)?;
     let started = std::time::Instant::now();
     let placement = simulation.packing.sample(u64::from(frames));
     let elapsed = started.elapsed().as_secs_f64();
@@ -213,7 +213,7 @@ pub(crate) fn run(
     let mut frame = 0;
     loop {
         simulation.prepare_frame(frame, 60, true)?;
-        frames = super::frames_for(simulation.duration(), 60)?;
+        frames = simulation.frames(60)?;
         if simulation.planning_complete() && frame > frames {
             break;
         }
