@@ -263,16 +263,18 @@ impl Mappings {
             .filter(|(email, _)| !self.emails.contains_key(email.as_bytes()))
             .collect();
         found.sort();
-        let mut ids = HashMap::new();
+        let mut ids = HashMap::<&str, Option<u64>>::new();
         for (_, account) in &found {
             if let Some(id) = account.id {
-                ids.entry(account.login.as_str()).or_insert(id);
+                ids.entry(account.login.as_str())
+                    .and_modify(|known| *known = known.filter(|&known| known == id))
+                    .or_insert(Some(id));
             }
         }
         let key = |account: &crate::avatars::Account| {
             account
                 .id
-                .or_else(|| ids.get(account.login.as_str()).copied())
+                .or_else(|| ids.get(account.login.as_str()).copied().flatten())
                 .map_or_else(|| Key::GitHubLogin(account.login.clone()), Key::GitHubId)
         };
         let mut claimants = HashMap::<Key, Vec<&Contributor>>::new();
@@ -771,6 +773,31 @@ emails = ["personal@example.invalid", "work@example.invalid"]
         assert_eq!(contributors[0], contributors[1]);
         assert_eq!(contributors[0].name, "Owen");
         assert_eq!(contributors[2].key, Key::GitHubLogin("twin".to_owned()));
+    }
+
+    #[test]
+    fn a_login_seen_with_two_ids_keeps_its_legacy_emails_apart() {
+        let mut mappings = Mappings::default();
+        mappings.infer(&HashMap::from([
+            (
+                "7+alice@users.noreply.github.com".to_owned(),
+                account("alice", Some(7)),
+            ),
+            (
+                "8+alice@users.noreply.github.com".to_owned(),
+                account("alice", Some(8)),
+            ),
+            (
+                "alice@users.noreply.github.com".to_owned(),
+                account("alice", None),
+            ),
+        ]));
+        let mut events = events(&[("Alice", "alice@users.noreply.github.com")]);
+        mappings.apply(&mut events);
+        assert_eq!(
+            events[0].contributor.as_ref().unwrap().key,
+            Key::GitHubLogin("alice".to_owned())
+        );
     }
 
     #[test]

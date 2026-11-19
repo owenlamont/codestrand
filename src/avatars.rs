@@ -547,8 +547,8 @@ impl<N: Network> Resolver<N> {
         }
     }
 
-    /// The author account of `commit`, or `None` when GitHub links none; a commit GitHub
-    /// does not have, such as one never pushed, is unknown rather than unlinked.
+    /// The author account of `commit`, or `None` when GitHub returns the commit with no
+    /// linked author; any other answer, such as a commit never pushed, is unknown.
     fn commit_author(
         &mut self,
         remote: &str,
@@ -569,16 +569,22 @@ impl<N: Network> Resolver<N> {
         };
         let commits =
             serde_json::from_slice::<Vec<ApiCommit>>(&bytes).map_err(|_| Unknown)?;
-        Ok(commits
+        let found = commits
             .into_iter()
             .next()
             .filter(|found| found.sha.eq_ignore_ascii_case(commit))
-            .and_then(|found| found.author)
-            .filter(|author| valid_login(&author.login))
-            .map(|author| Account {
-                login: author.login.to_ascii_lowercase(),
-                id: Some(author.id),
-            }))
+            .ok_or(Unknown)?;
+        found
+            .author
+            .map(|author| {
+                valid_login(&author.login)
+                    .then(|| Account {
+                        login: author.login.to_ascii_lowercase(),
+                        id: Some(author.id),
+                    })
+                    .ok_or(Unknown)
+            })
+            .transpose()
     }
 
     /// Sets each contributor's portrait: its `avatar` override, else the image of its
@@ -1283,19 +1289,39 @@ mod tests {
     }
 
     #[test]
-    fn a_different_commit_or_invalid_login_is_no_account() {
-        for reply in [
-            r#"[{"sha":"ffffffffffffffffffffffffffffffffffffffff","author":{"login":"other","id":1}}]"#,
-            r#"[{"sha":"0123456789012345678901234567890123456789","author":{"login":"no/slash","id":1}}]"#,
-            r#"[{"sha":"0123456789012345678901234567890123456789","author":null}]"#,
-            "[]",
+    fn only_an_unlinked_author_of_the_same_commit_is_a_cached_miss() {
+        for (reply, cached) in [
+            (
+                r#"[{"sha":"ffffffffffffffffffffffffffffffffffffffff","author":{"login":"other","id":1}}]"#,
+                false,
+            ),
+            (
+                r#"[{"sha":"0123456789012345678901234567890123456789","author":{"login":"no/slash","id":1}}]"#,
+                false,
+            ),
+            ("[]", false),
+            (
+                r#"[{"sha":"0123456789012345678901234567890123456789","author":null}]"#,
+                true,
+            ),
         ] {
-            let mut resolver =
-                resolver(None, true, vec![Response::Found(reply.as_bytes().to_vec())]);
+            let root = crate::cache::test_directory().unwrap();
+            let mut first = resolver(
+                Some(root.path().to_owned()),
+                true,
+                vec![Response::Found(reply.as_bytes().to_vec())],
+            );
             let mut events = [event("author@example.invalid", None)];
-            resolve(&mut resolver, &mut events, Some("owner/repo"));
-            assert!(resolver.found().is_empty(), "{reply}");
+            resolve(&mut first, &mut events, Some("owner/repo"));
+            assert!(first.found().is_empty(), "{reply}");
             assert!(!visible(&events[0]));
+            let mut second = resolver(
+                Some(root.path().to_owned()),
+                true,
+                vec![commit_by("linked", 4), Response::Found(png())],
+            );
+            resolve(&mut second, &mut events, Some("owner/repo"));
+            assert_eq!(second.network.calls.is_empty(), cached, "{reply}");
         }
     }
 
