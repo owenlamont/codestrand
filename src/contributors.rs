@@ -435,21 +435,17 @@ mod tests {
         identities
             .iter()
             .map(|&(name, email)| Event {
-                author: Identity {
-                    name: name.as_bytes().to_vec(),
-                    email: email.as_bytes().to_vec(),
-                },
-                repository: 0,
-                contributor: None,
-                commit: String::new(),
-                seconds: 0,
-                changes: vec![timeline::FileChange {
-                    path: email.to_owned(),
-                    kind: timeline::Kind::Modified,
-                    insertions: 1,
-                    removals: 0,
-                    samples: Vec::new(),
-                }],
+                author: Identity::new(name, email),
+                ..Event::at(
+                    0,
+                    vec![timeline::FileChange {
+                        path: email.to_owned(),
+                        kind: timeline::Kind::Modified,
+                        insertions: 1,
+                        removals: 0,
+                        samples: Vec::new(),
+                    }],
+                )
             })
             .collect()
     }

@@ -4753,28 +4753,23 @@ mod tests {
         let events: Vec<_> = paths
             .iter()
             .enumerate()
-            .map(|(index, path)| Event {
-                author: crate::timeline::Identity {
-                    name: b"Ada".to_vec(),
-                    email: b"ada@example.invalid".to_vec(),
-                },
-                repository: 0,
-                contributor: None,
-                commit: String::new(),
-                seconds: 86_400 * i64::try_from(index).expect("small fixture"),
-                changes: vec![FileChange {
-                    path: (*path).to_owned(),
-                    kind: if index == 0 {
-                        Kind::Added
-                    } else {
-                        Kind::Moved {
-                            from: paths[index - 1].to_owned(),
-                        }
-                    },
-                    insertions: 0,
-                    removals: 0,
-                    samples: Vec::new(),
-                }],
+            .map(|(index, path)| {
+                Event::at(
+                    86_400 * i64::try_from(index).expect("small fixture"),
+                    vec![FileChange {
+                        path: (*path).to_owned(),
+                        kind: if index == 0 {
+                            Kind::Added
+                        } else {
+                            Kind::Moved {
+                                from: paths[index - 1].to_owned(),
+                            }
+                        },
+                        insertions: 0,
+                        removals: 0,
+                        samples: Vec::new(),
+                    }],
+                )
             })
             .collect();
         let mut simulation = Simulation::new(
@@ -4937,33 +4932,19 @@ mod tests {
         use crate::timeline::{Event, FileChange, Kind};
 
         let events = vec![
-            Event {
-                author: crate::timeline::Identity {
-                    name: b"Ada".to_vec(),
-                    email: b"ada@example.invalid".to_vec(),
-                },
-                repository: 0,
-                contributor: None,
-                commit: String::new(),
-                seconds: 0,
-                changes: vec![FileChange {
+            Event::at(
+                0,
+                vec![FileChange {
                     path: "alpha/a.rs".to_owned(),
                     kind: Kind::Added,
                     insertions: 1,
                     removals: 0,
                     samples: Vec::new(),
                 }],
-            },
-            Event {
-                author: crate::timeline::Identity {
-                    name: b"Ada".to_vec(),
-                    email: b"ada@example.invalid".to_vec(),
-                },
-                repository: 0,
-                contributor: None,
-                commit: String::new(),
-                seconds: 86_400,
-                changes: vec![FileChange {
+            ),
+            Event::at(
+                86_400,
+                vec![FileChange {
                     path: "beta/a.rs".to_owned(),
                     kind: Kind::Moved {
                         from: "alpha/a.rs".to_owned(),
@@ -4972,7 +4953,7 @@ mod tests {
                     removals: 0,
                     samples: Vec::new(),
                 }],
-            },
+            ),
         ];
         let mut simulation = Simulation::new(
             events,

@@ -44,6 +44,31 @@ pub(super) struct Event {
     pub changes: Vec<FileChange>,
 }
 
+#[cfg(test)]
+impl Identity {
+    pub(super) fn new(name: &str, email: &str) -> Self {
+        Self {
+            name: name.as_bytes().to_vec(),
+            email: email.as_bytes().to_vec(),
+        }
+    }
+}
+
+#[cfg(test)]
+impl Event {
+    /// A commit by Ada with no email, for fixtures where only the time and changes matter.
+    pub(super) fn at(seconds: i64, changes: Vec<FileChange>) -> Self {
+        Self {
+            repository: 0,
+            author: Identity::new("Ada", ""),
+            commit: String::new(),
+            contributor: None,
+            seconds,
+            changes,
+        }
+    }
+}
+
 /// Events along the first-parent chain, whose first-parent diffs transition each
 /// playback tree to the next; side-branch work arrives with the merge that brings it in.
 /// A boundary becomes the first event, even with an empty tree, so the range starts

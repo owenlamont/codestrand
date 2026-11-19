@@ -20,7 +20,6 @@ pub(super) enum Error {
     },
 }
 
-/// Why reading a revision or its history stopped.
 #[derive(Debug, thiserror::Error)]
 pub(super) enum ReadError {
     #[error("{name} budget reached ({limit})")]
