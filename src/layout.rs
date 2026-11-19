@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use bevy::math::Vec2;
 use planner::Plan;
@@ -148,6 +148,8 @@ pub(super) struct Layout {
     dirs: Vec<Dir>,
     dir_index: HashMap<String, usize>,
     files: BTreeMap<u64, File>,
+    /// Files with a delay or fade pending; every other file is present and still.
+    fading: BTreeSet<u64>,
     file_index: HashMap<String, u64>,
     next_id: u64,
     revision: u64,
@@ -242,6 +244,7 @@ impl Layout {
             dirs: vec![Dir::new(String::new(), None, 0, 0)],
             dir_index: HashMap::from([(String::new(), 0)]),
             files: BTreeMap::new(),
+            fading: BTreeSet::new(),
             file_index: HashMap::new(),
             next_id: 0,
             revision: 0,
@@ -334,6 +337,7 @@ impl Layout {
             file.author = author;
             file.activity = 1.0;
             self.dirs[file.dir].touch_age = 0.0;
+            self.fading.insert(id);
             return id;
         }
         let dir = self.ensure_dir(parent_path(path));
@@ -362,6 +366,7 @@ impl Layout {
             },
         );
         self.file_index.insert(path.to_owned(), id);
+        self.fading.insert(id);
         id
     }
 
@@ -388,6 +393,7 @@ impl Layout {
         let file = self.files.get_mut(&id).expect("indexed files exist");
         file.state = Presence::Leaving;
         file.delay = delay;
+        self.fading.insert(id);
         file.author = author;
         file.activity = 1.0;
         self.dirs[file.dir].touch_age = 0.0;
@@ -545,11 +551,23 @@ impl Layout {
     }
 
     fn fade_files(&mut self, dt: f32) {
+        #[cfg(test)]
+        for (id, file) in &self.files {
+            assert!(
+                self.fading.contains(id)
+                    || (file.state == Presence::Present && file.delay <= 0.0),
+                "file {id} has a fade pending outside the fading set"
+            );
+        }
         let mut gone = Vec::new();
-        for (&id, file) in &mut self.files {
+        let files = &mut self.files;
+        self.fading.retain(|id| {
+            let Some(file) = files.get_mut(id) else {
+                return false;
+            };
             if file.delay > 0.0 {
                 file.delay -= dt;
-                continue;
+                return true;
             }
             match file.state {
                 Presence::Arriving => {
@@ -561,12 +579,13 @@ impl Layout {
                 Presence::Leaving => {
                     file.presence = (file.presence - dt / 1.2).max(0.0);
                     if file.presence <= 0.0 {
-                        gone.push(id);
+                        gone.push(*id);
                     }
                 }
                 Presence::Present => {}
             }
-        }
+            file.state != Presence::Present || file.delay > 0.0
+        });
         for id in gone {
             let file = self.files.remove(&id).expect("faded files exist");
             if self.file_index.get(&file.path) == Some(&id) {
