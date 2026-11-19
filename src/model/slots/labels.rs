@@ -136,14 +136,32 @@ fn tangent_offset(
     direction * radius
 }
 
-/// [`forecast_clip`] for a label resting at `angle` and steered to stay there.
+/// The rectangle enclosing every forecast body position.
+pub(super) fn bounds(future: &[bevy::math::Vec2]) -> Rect {
+    future
+        .iter()
+        .fold(Rect::EMPTY, |bounds, &point| bounds.union_point(point))
+}
+
+/// [`forecast_clip`] for a label resting at `angle` and steered to stay there, given
+/// the [`bounds`] of `future`.
 pub(super) fn resting_clip(
     angle: f32,
     size: bevy::math::Vec2,
     distance: f32,
     future: &[bevy::math::Vec2],
+    bounds: Rect,
 ) -> f32 {
     let offset = tangent_offset(size, distance, angle);
+    let half = size * 0.5;
+    let enclosing = Rect {
+        min: bounds.min + offset - half,
+        max: bounds.max + offset + half,
+    };
+    // Each resting rect lies inside this one, so each is at least as far inside.
+    if crate::model::caption::outside(enclosing, 16.0) == 0.0 {
+        return 0.0;
+    }
     future
         .iter()
         .map(|&body| {
@@ -450,7 +468,8 @@ mod tests {
         let returning: Vec<_> = leaving.iter().rev().copied().collect();
         for future in [leaving, returning] {
             for angle in [-0.0, 0.0, 0.3, std::f32::consts::PI, -2.5, 7.0, 1e-30] {
-                let resting = resting_clip(angle, size, 15.333_333, &future);
+                let resting =
+                    resting_clip(angle, size, 15.333_333, &future, bounds(&future));
                 let steered =
                     forecast_clip(angle, 0.0, angle, size, 15.333_333, &future);
                 assert_eq!(resting.to_bits(), steered.to_bits(), "angle {angle}");

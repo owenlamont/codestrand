@@ -595,6 +595,51 @@ impl State {
             })
             .collect()
     }
+    /// What one avatar's name candidates are scored against.
+    fn label_space(
+        &self,
+        index: usize,
+        body: Vec2,
+        size: Vec2,
+        bodies: &[Option<Vec2>],
+        obstacles: &[(usize, Rect)],
+        rays: &[(Vec2, Vec2)],
+    ) -> LabelSpace {
+        let radius = self.avatar_radius();
+        let margin = 4.0 / 3.0;
+        // Every candidate rect lies within this reach, so nothing outside it can
+        // touch one; the skipped terms would each have added exactly zero.
+        let reach = Rect::from_center_half_size(
+            body,
+            Vec2::splat(size.length() * 2.0 + radius + margin + 1.0),
+        );
+        let near = |rect: Rect| !reach.intersect(rect).is_empty();
+        let body_reach = reach.inflate(radius + margin + 1.0);
+        LabelSpace {
+            foreign: bodies
+                .iter()
+                .enumerate()
+                .filter(|&(other, _)| {
+                    other != index && self.avatars[other].presence > 0.0
+                })
+                .filter_map(|(_, &p)| p)
+                .filter(|&p| body_reach.contains(p))
+                .collect(),
+            obstacles: obstacles
+                .iter()
+                .copied()
+                .filter(|&(_, r)| near(r))
+                .collect(),
+            rays: rays
+                .iter()
+                .copied()
+                .filter(|&(a, b)| near(Rect::from_corners(a, b).inflate(1.0)))
+                .collect(),
+            repository: self.avatars[index].repository,
+            radius,
+            margin,
+        }
+    }
     fn label_domains(
         &self,
         bodies: &[Option<Vec2>],
@@ -606,14 +651,6 @@ impl State {
         let mut obstacles = tile_obstacles(self);
         obstacles.extend(texts.iter().map(|&rect| (usize::MAX, rect)));
         let rays = self.name_rays(bodies, travel);
-        let space = LabelSpace {
-            bodies,
-            obstacles: &obstacles,
-            rays: &rays,
-            avatars: &self.avatars,
-            radius: self.avatar_radius(),
-            margin: 4.0 / 3.0,
-        };
         let mut authors = Vec::new();
         let mut domains = Vec::new();
         for (index, avatar) in self
@@ -624,6 +661,7 @@ impl State {
         {
             let Some(body) = bodies[index] else { continue };
             let size = self.name_size(&displayed[index]);
+            let space = self.label_space(index, body, size, bodies, &obstacles, &rays);
             let previous = avatar.name_visibility.placement.as_ref();
             let velocity = previous
                 .map_or(Vec2::ZERO, |p| (body - p.body) / dt.max(1e-6))
@@ -653,6 +691,7 @@ impl State {
                 size,
                 previous,
                 future: &future,
+                future_bounds: labels::bounds(&future),
             };
             let mut targets: Vec<_> = (0..32_u8)
                 .map(|i| f32::from(i) * std::f32::consts::TAU / 32.0)
@@ -673,7 +712,7 @@ impl State {
             targets.extend(previous.map(|p| p.motion.goal));
             let scored = targets
                 .into_iter()
-                .map(|target| space.candidate(index, target, &rotation))
+                .map(|target| space.candidate(target, &rotation))
                 .collect();
             let candidates = eligible_angles(scored);
             authors.push(index);
@@ -941,6 +980,7 @@ struct Rotation<'a> {
     size: Vec2,
     previous: Option<&'a super::names::Placement>,
     future: &'a [Vec2],
+    future_bounds: Rect,
 }
 struct NameAssignment {
     authors: Vec<usize>,
@@ -949,25 +989,31 @@ struct NameAssignment {
     displayed: Vec<String>,
 }
 
-struct LabelSpace<'a> {
-    bodies: &'a [Option<Vec2>],
-    obstacles: &'a [(usize, Rect)],
-    rays: &'a [(Vec2, Vec2)],
-    avatars: &'a [super::Avatar],
+/// Other visible bodies, and the obstacles and rays near enough to touch a candidate.
+struct LabelSpace {
+    foreign: Vec<Vec2>,
+    obstacles: Vec<(usize, Rect)>,
+    rays: Vec<(Vec2, Vec2)>,
+    repository: usize,
     radius: f32,
     margin: f32,
 }
-impl LabelSpace<'_> {
+impl LabelSpace {
     fn candidate(
         &self,
-        index: usize,
         target: f32,
         motion: &Rotation<'_>,
     ) -> (labels::Candidate, [f32; 4]) {
         let distance = self.radius + self.margin;
         let rect = labels::tangent_rect(motion.body, motion.size, distance, target);
-        let cost = self.cost(index, rect);
-        let clip = labels::resting_clip(target, motion.size, distance, motion.future);
+        let cost = self.cost(rect);
+        let clip = labels::resting_clip(
+            target,
+            motion.size,
+            distance,
+            motion.future,
+            motion.future_bounds,
+        );
         let text = self.text_cost(rect);
         let soft = cost[2] * 2.0
             + clip * 1e8
@@ -997,13 +1043,8 @@ impl LabelSpace<'_> {
                 (pairs + 1, area + r.size().element_product())
             })
     }
-    fn cost(&self, index: usize, rect: Rect) -> [f32; 3] {
-        let foreign = self
-            .bodies
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| *i != index && self.avatars[*i].presence > 0.0)
-            .filter_map(|(_, p)| *p);
+    fn cost(&self, rect: Rect) -> [f32; 3] {
+        let foreign = self.foreign.iter().copied();
         let conflicts = count(
             foreign
                 .clone()
@@ -1036,9 +1077,7 @@ impl LabelSpace<'_> {
                 + self
                     .obstacles
                     .iter()
-                    .filter(|(r, _)| {
-                        *r != usize::MAX && *r != self.avatars[index].repository
-                    })
+                    .filter(|(r, _)| *r != usize::MAX && *r != self.repository)
                     .map(|(_, r)| area(*r))
                     .sum::<f32>()
                 + count(
