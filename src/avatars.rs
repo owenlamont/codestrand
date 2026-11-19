@@ -105,13 +105,12 @@ impl Account {
     }
 }
 
-/// A cached commit API answer for one email. A found account holds for every
-/// repository; a miss only for the remote that was asked.
+/// A cached commit API answer: an account found for an email holds for every
+/// repository, and a miss, stored without one, only for the remote that was asked.
 #[derive(Serialize, Deserialize)]
 struct Lookup {
     checked: u64,
     account: Option<Account>,
-    remote: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -513,35 +512,49 @@ impl<N: Network> Resolver<N> {
         remote: Option<&str>,
         commit: &str,
     ) -> Option<Account> {
-        let key = format!("account\n{email}");
-        let cached = self.read::<Lookup>(&key);
-        if let Some(record) = &cached {
-            let fresh = !self.fetch || self.now.saturating_sub(record.checked) < TTL;
-            if fresh
-                && (record.account.is_some() || Some(record.remote.as_str()) == remote)
-            {
-                return record.account.clone();
-            }
+        let fresh = |record: &Lookup| {
+            !self.fetch || self.now.saturating_sub(record.checked) < TTL
+        };
+        let found_key = format!("account\n{email}");
+        let found = self.read::<Lookup>(&found_key).filter(|record| {
+            record
+                .account
+                .as_ref()
+                .is_some_and(|account| valid_login(&account.login))
+        });
+        let stale = found.as_ref().and_then(|record| {
+            record.account.clone().map(|account| Account {
+                login: account.login.to_ascii_lowercase(),
+                id: account.id,
+            })
+        });
+        if found.as_ref().is_some_and(fresh) {
+            return stale;
         }
-        let stale = cached.and_then(|record| record.account);
-        let Some(remote) = remote.filter(|_| {
-            self.fetch
-                && !self.limited
-                && !commit.is_empty()
-                && self.network.remaining() > IMAGE_RESERVE
-        }) else {
+        let Some(remote) = remote else {
             return stale;
         };
+        let miss_key = format!("miss\n{email}\n{remote}");
+        if self.read::<Lookup>(&miss_key).as_ref().is_some_and(fresh)
+            || !self.fetch
+            || self.limited
+            || commit.is_empty()
+            || self.network.remaining() <= IMAGE_RESERVE
+        {
+            return stale;
+        }
         match self.commit_author(remote, commit) {
             Ok(account) => {
-                let _ = self.store(
-                    &key,
-                    &Lookup {
-                        checked: self.now,
-                        account: account.clone(),
-                        remote: remote.to_owned(),
-                    },
-                );
+                let record = Lookup {
+                    checked: self.now,
+                    account: account.clone(),
+                };
+                let key = if account.is_some() {
+                    &found_key
+                } else {
+                    &miss_key
+                };
+                let _ = self.store(key, &record);
                 account
             }
             Err(Unknown) => stale,
@@ -1345,8 +1358,32 @@ mod tests {
         resolve(&mut same, &mut [source.clone()], Some("owner/repo"));
         assert_eq!(same.network.calls.len(), 0);
         let mut other = resolver(Some(root.path().to_owned()), true, vec![unlinked()]);
-        resolve(&mut other, &mut [source], Some("other/repo"));
+        resolve(&mut other, &mut [source.clone()], Some("other/repo"));
         assert_eq!(other.network.calls.len(), 1);
+        let mut both = resolver(Some(root.path().to_owned()), true, vec![]);
+        both.accounts([&source], Some("owner/repo"));
+        both.accounts([&source], Some("other/repo"));
+        assert_eq!(both.network.calls.len(), 0);
+    }
+
+    #[test]
+    fn a_cached_login_that_is_not_a_login_is_ignored() {
+        let root = crate::cache::test_directory().unwrap();
+        let resolver = resolver(Some(root.path().to_owned()), false, vec![]);
+        resolver.store(
+            "account\nauthor@example.invalid",
+            &Lookup {
+                checked: 100,
+                account: Some(Account {
+                    login: "x?email=author@example.invalid&".to_owned(),
+                    id: None,
+                }),
+            },
+        );
+        let mut offline =
+            super::tests::resolver(Some(root.path().to_owned()), false, vec![]);
+        offline.accounts([&event("author@example.invalid", None)], None);
+        assert!(offline.found().is_empty());
     }
 
     #[test]
