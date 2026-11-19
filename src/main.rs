@@ -14,6 +14,8 @@
     reason = "Bevy's platform backends require incompatible transitive crate versions"
 )]
 
+#[cfg(test)]
+mod agent_skill;
 mod avatars;
 mod cache;
 mod camera;
@@ -98,52 +100,6 @@ struct Cli {
     command: Option<Command>,
 }
 
-#[cfg(test)]
-impl Cli {
-    fn try_fixture_from<I, T>(arguments: I) -> Result<Self, clap::Error>
-    where
-        I: IntoIterator<Item = T>,
-        T: Into<std::ffi::OsString> + Clone,
-    {
-        let mut arguments = arguments.into_iter().map(Into::into);
-        let mut public = Vec::new();
-        let mut start = 0;
-        let mut commits = None;
-        let mut delay = 0;
-        while let Some(argument) = arguments.next() {
-            match argument.to_str() {
-                Some("--start" | "--commits" | "--frame-delay-ms") => {
-                    let value = arguments.next().expect("fixture option value");
-                    let value = value.to_str().unwrap().parse().unwrap();
-                    match argument.to_str().unwrap() {
-                        "--start" => start = value,
-                        "--commits" => commits = Some(value),
-                        _ => delay = u16::try_from(value).unwrap(),
-                    }
-                }
-                _ => public.push(argument),
-            }
-        }
-        let mut cli = Self::try_parse_from(public)?;
-        if let Some(Command::Export { frame_delay_ms, .. }) = &mut cli.command {
-            *frame_delay_ms = delay;
-        }
-        if let Some(
-            Command::Preview { source, .. }
-            | Command::Export { source, .. }
-            | Command::LayoutQuality { source, .. },
-        ) = &mut cli.command
-        {
-            source.start = start;
-            source.commits = commits;
-            if source.repository.is_empty() && source.repositories_file.is_none() {
-                source.test_input = Some(TestInput::Synthetic);
-            }
-        }
-        Ok(cli)
-    }
-}
-
 #[derive(Clone, Copy, clap::ValueEnum)]
 enum TestInput {
     Synthetic,
@@ -197,8 +153,6 @@ enum Command {
         frames: Option<u32>,
         #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u16).range(1..=240))]
         fps: u16,
-        #[arg(skip)]
-        frame_delay_ms: u16,
         #[command(flatten)]
         encoding: encoder::Options,
     },
@@ -281,18 +235,12 @@ struct Source {
     /// Select opted-in GitLab cache entries offline; allow email lookup with --fetch-avatars.
     #[arg(long)]
     gitlab_email_avatars: bool,
-    #[arg(skip)]
-    #[serde(skip)]
-    start: usize,
     /// Begin at the first commit on or after this UTC date, inclusive; settle earlier commits.
     #[arg(long, value_name = "YYYY-MM-DD", value_parser = start_date)]
     start_date: Option<i64>,
     /// End at the last commit on or before this UTC date, inclusive of the whole day.
     #[arg(long, value_name = "YYYY-MM-DD", value_parser = start_date)]
     end_date: Option<i64>,
-    #[arg(skip)]
-    #[serde(skip)]
-    commits: Option<usize>,
     /// Canonical timeline seconds per calendar day; live speed keys leave the timeline fixed.
     #[arg(long, default_value_t = 0.5, value_parser = positive_seconds)]
     seconds_per_day: f32,
@@ -324,6 +272,9 @@ struct Source {
     /// File heat half-life in canonical playback seconds.
     #[arg(long, default_value_t = 3.0, value_parser = positive_seconds)]
     heat_half_life: f32,
+    /// Diff fragment speed relative to the default; 1 crosses a beam in about 0.9 playback seconds (0.25–2, inclusive).
+    #[arg(long, default_value_t = 1.0, value_parser = fragment_speed)]
+    fragment_speed: f32,
 }
 
 impl Source {
@@ -343,12 +294,14 @@ impl Source {
                 cache_root.filter(|_| !self.no_cache),
                 self.history,
             )?;
-            eprintln!(
-                "repository={} import_seconds={:.6} events={}",
-                terminal_escape(&repository.name()),
-                started.elapsed().as_secs_f64(),
-                events.len()
-            );
+            if self.trace.on() {
+                eprintln!(
+                    "repository={} import_seconds={:.6} events={}",
+                    terminal_escape(&repository.name()),
+                    started.elapsed().as_secs_f64(),
+                    events.len()
+                );
+            }
             if repositories.len() > 1 {
                 repositories::namespace(&mut events, index);
             }
@@ -405,6 +358,21 @@ impl Source {
         }
     }
 
+    /// The `--repository` paths, or the repository holding the current directory when
+    /// no repository, manifest or test input is named.
+    fn repositories(&self) -> anyhow::Result<Vec<PathBuf>> {
+        Ok(
+            if self.repository.is_empty()
+                && self.repositories_file.is_none()
+                && self.test_input.is_none()
+            {
+                vec![repositories::discover(&std::env::current_dir()?)?]
+            } else {
+                self.repository.clone()
+            },
+        )
+    }
+
     fn load(&self, progress: &Progress) -> anyhow::Result<(model::Simulation, String)> {
         #[cfg(not(test))]
         let available_memory = model::available_memory(&self.trace)?;
@@ -418,14 +386,7 @@ impl Source {
         progress: &Progress,
         available_memory: u64,
     ) -> anyhow::Result<(model::Simulation, String)> {
-        let paths = if self.repository.is_empty()
-            && self.repositories_file.is_none()
-            && self.test_input.is_none()
-        {
-            vec![repositories::discover(&std::env::current_dir()?)?]
-        } else {
-            self.repository.clone()
-        };
+        let paths = self.repositories()?;
         let file = self.repositories_file.as_deref();
         let repositories = if self.config.is_some()
             && self.config == self.repositories_file
@@ -467,7 +428,7 @@ impl Source {
             seconds_per_day: self.seconds_per_day,
             max_idle_seconds: self.max_idle_seconds,
             start: range.start,
-            commits: Some(range.len()),
+            commits: range.len(),
             travel_cap: self.contributor_travel.cap(),
             travel_window_seconds: None,
             #[cfg(test)]
@@ -480,6 +441,7 @@ impl Source {
             avatar_max_speed: self.avatar_max_speed,
             avatar_size: self.avatar_scale,
             gutter: self.gutter,
+            fragment_speed: self.fragment_speed,
             progress: progress.clone(),
             trace: self.trace.clone(),
         };
@@ -540,27 +502,18 @@ impl Source {
                 "inclusive date range {start_label} through {end_label} contains no commits; {last}"
             );
         }
-        let start = self
-            .start_date
-            .map_or(self.start.min(events.len()), |date| {
-                events
-                    .iter()
-                    .position(|event| event.seconds >= date)
-                    .unwrap_or(events.len())
-            });
-        let end = self.end_date.map_or_else(
-            || {
-                self.commits.map_or(events.len(), |count| {
-                    start.saturating_add(count).min(events.len())
-                })
-            },
-            |end| {
-                events
-                    .iter()
-                    .rposition(|event| event.seconds < end + 86_400)
-                    .map_or(0, |last| last + 1)
-            },
-        );
+        let start = self.start_date.map_or(0, |date| {
+            events
+                .iter()
+                .position(|event| event.seconds >= date)
+                .unwrap_or(events.len())
+        });
+        let end = self.end_date.map_or(events.len(), |end| {
+            events
+                .iter()
+                .rposition(|event| event.seconds < end + 86_400)
+                .map_or(0, |last| last + 1)
+        });
         anyhow::ensure!(
             start <= end,
             "inclusive date range {start_label} through {end_label} contains no commits"
@@ -591,35 +544,33 @@ impl Source {
         )
     }
 
-    /// Reports initial planning through `report`, then later planning to stderr,
-    /// at most once per `interval`.
+    /// Reports planning until the first window is ready through `report`, with
+    /// each update at most once per `interval` and `None` every 50 ms between them.
     fn load_reporting(
         &self,
         interval: std::time::Duration,
-        report: impl FnMut(progress::Update),
+        report: impl FnMut(Option<progress::Update>),
     ) -> anyhow::Result<(model::Simulation, String)> {
         Self::report_loading(interval, report, |progress| self.load(progress))
     }
 
     fn report_loading(
         interval: std::time::Duration,
-        mut report: impl FnMut(progress::Update),
+        mut report: impl FnMut(Option<progress::Update>),
         load: impl FnOnce(&Progress) -> anyhow::Result<(model::Simulation, String)> + Send,
     ) -> anyhow::Result<(model::Simulation, String)> {
         let (progress, updates) = Progress::channel(interval);
         std::thread::scope(|scope| {
-            let worker_progress = progress.clone();
-            let worker = scope.spawn(move || load(&worker_progress));
+            let worker = scope.spawn(move || load(&progress));
             while !worker.is_finished() {
                 match updates.recv_timeout(std::time::Duration::from_millis(50)) {
-                    Ok(update) => report(update),
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => (),
+                    Ok(update) => report(Some(update)),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => report(None),
                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                 }
             }
-            progress.continue_on_stderr();
             for update in updates.try_iter() {
-                report(update);
+                report(Some(update));
             }
             worker
                 .join()
@@ -764,12 +715,17 @@ fn avatar_size(value: &str) -> Result<f32, String> {
     between(value, 0.5, 2.0, "avatar scale")
 }
 
+fn fragment_speed(value: &str) -> Result<f32, String> {
+    let speeds = model::FRAGMENT_SPEEDS;
+    between(value, *speeds.start(), *speeds.end(), "fragment speed")
+}
+
 fn between(value: &str, low: f32, high: f32, name: &str) -> Result<f32, String> {
     value
         .parse::<f32>()
         .ok()
         .filter(|parsed| (low..=high).contains(parsed))
-        .ok_or_else(|| format!("{name} must be between {low} and {high}"))
+        .ok_or_else(|| format!("{name} must be between {low} and {high}, inclusive"))
 }
 
 fn main() -> std::process::ExitCode {
@@ -792,7 +748,9 @@ fn termination(result: anyhow::Result<()>) -> std::process::ExitCode {
 }
 
 /// Opens the preview window while a worker thread loads and plans `source`.
-fn preview(source: Source, theme: theme::ThemeName) -> anyhow::Result<()> {
+fn preview(mut source: Source, theme: theme::ThemeName) -> anyhow::Result<()> {
+    // Outside a repository, fail before a window opens.
+    source.repository = source.repositories()?;
     let (progress, updates) = Progress::channel(std::time::Duration::from_millis(50));
     let theme = theme.build();
     let worker = std::thread::spawn(move || {
@@ -868,7 +826,6 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
             source,
             frames,
             fps,
-            frame_delay_ms,
             encoding,
             resolution,
             camera_path,
@@ -879,9 +836,14 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 .map(camera_path::CameraPath::read)
                 .transpose()?;
             encoding.check(fps, resolution)?;
+            let mut loading = export::report::Loading::new(std::time::Instant::now());
             let (mut simulation, title) =
                 source.load_reporting(std::time::Duration::from_secs(1), |update| {
-                    eprintln!("{update}");
+                    if let Some(line) =
+                        loading.observe(std::time::Instant::now(), update)
+                    {
+                        eprintln!("{line}");
+                    }
                 })?;
             simulation.set_theme(theme.build());
 
@@ -897,7 +859,6 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 scene::headless(simulation, title, fps, resolution),
                 frames,
                 fps,
-                frame_delay_ms,
                 encoder,
                 camera_path.as_ref(),
             )?;
@@ -927,7 +888,7 @@ mod tests {
         ] {
             let args = [vec!["codestrand"], command].concat();
             for value in ["2026/05/01", "2026-5-01", "2026-02-30", "today"] {
-                let error = Cli::try_fixture_from(
+                let error = Cli::try_parse_from(
                     [args.clone(), vec!["--start-date", value]].concat(),
                 )
                 .err()
@@ -946,7 +907,7 @@ mod tests {
             assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
             assert!(error.to_string().contains("--start"));
             assert!(
-                Cli::try_fixture_from(
+                Cli::try_parse_from(
                     [args, vec!["--start-date", "2026-05-01"]].concat(),
                 )
                 .is_ok()
@@ -956,7 +917,7 @@ mod tests {
 
     #[test]
     fn start_date_resolves_boundaries_in_single_and_merged_history_order() {
-        let cli = Cli::try_fixture_from([
+        let cli = Cli::try_parse_from([
             "codestrand",
             "preview",
             "--start-date",
@@ -1023,7 +984,9 @@ mod tests {
                 )
                 .is_err()
             );
-            let cli = Cli::try_fixture_from(args).unwrap();
+            let cli =
+                Cli::try_parse_from([args, vec!["--test-input", "synthetic"]].concat())
+                    .unwrap();
             let (Command::Preview { source, .. } | Command::Export { source, .. }) =
                 cli.command.unwrap()
             else {
@@ -1036,13 +999,15 @@ mod tests {
 
     #[test]
     fn pacing_flags_reach_the_loaded_schedule() {
-        let cli = Cli::try_fixture_from([
+        let cli = Cli::try_parse_from([
             "codestrand",
             "preview",
             "--seconds-per-day",
             "2",
             "--max-idle-seconds",
             "5",
+            "--test-input",
+            "synthetic",
         ])
         .unwrap();
         let Some(Command::Preview { source, .. }) = cli.command else {
@@ -1070,8 +1035,14 @@ mod tests {
         let (finished, completion) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
             for window in [None, Some(2.0)] {
-                let cli =
-                    Cli::try_fixture_from(["codestrand", "export", "unused"]).unwrap();
+                let cli = Cli::try_parse_from([
+                    "codestrand",
+                    "export",
+                    "unused",
+                    "--test-input",
+                    "synthetic",
+                ])
+                .unwrap();
                 let Some(Command::Export { mut source, .. }) = cli.command else {
                     panic!("export")
                 };
@@ -1079,7 +1050,7 @@ mod tests {
                 let mut lines = Vec::new();
                 let (mut reported, title) = source
                     .load_reporting(std::time::Duration::ZERO, |update| {
-                        lines.push(update.to_string());
+                        lines.extend(update.map(|update| update.to_string()));
                     })
                     .unwrap();
                 for stage in [
@@ -1141,11 +1112,11 @@ mod tests {
     fn video_cli_requires_video_for_encoder_options() {
         for option in ["--ffmpeg=somewhere", "--ffmpeg-arg=-crf"] {
             assert!(
-                Cli::try_fixture_from(["codestrand", "export", "frames", option])
+                Cli::try_parse_from(["codestrand", "export", "frames", option])
                     .is_err()
             );
             assert!(
-                Cli::try_fixture_from([
+                Cli::try_parse_from([
                     "codestrand",
                     "export",
                     "frames",
@@ -1156,7 +1127,7 @@ mod tests {
             );
         }
         assert!(
-            Cli::try_fixture_from([
+            Cli::try_parse_from([
                 "codestrand",
                 "export",
                 "frames",
@@ -1175,18 +1146,49 @@ mod tests {
                 let mut args = vec!["codestrand"];
                 args.extend(command.clone());
                 args.extend(["--heat-half-life", value]);
-                assert!(Cli::try_fixture_from(args).is_err());
+                assert!(Cli::try_parse_from(args).is_err());
             }
             let mut args = vec!["codestrand"];
             args.extend(command);
             args.extend(["--heat-half-life", "2"]);
-            let cli = Cli::try_fixture_from(args).unwrap();
+            let cli = Cli::try_parse_from(args).unwrap();
             let (Command::Preview { source, .. } | Command::Export { source, .. }) =
                 cli.command.unwrap()
             else {
                 panic!("playback command")
             };
             assert_eq!(source.heat_half_life, 2.0);
+        }
+    }
+
+    #[test]
+    fn fragment_speed_is_shared_by_preview_and_export_within_inclusive_bounds() {
+        for command in [vec!["preview"], vec!["export", "frames"]] {
+            for (value, expected) in
+                [(None, 1.0), (Some("0.25"), 0.25), (Some("2"), 2.0)]
+            {
+                let mut args = vec!["codestrand"];
+                args.extend(command.clone());
+                args.extend(
+                    value
+                        .map(|value| ["--fragment-speed", value])
+                        .into_iter()
+                        .flatten(),
+                );
+                let cli = Cli::try_parse_from(args).unwrap();
+                let (Command::Preview { source, .. } | Command::Export { source, .. }) =
+                    cli.command.unwrap()
+                else {
+                    panic!("playback command")
+                };
+                assert_eq!(source.fragment_speed, expected);
+            }
+        }
+        for value in ["0", "0.24", "2.01", "NaN", "inf"] {
+            assert_eq!(
+                fragment_speed(value).unwrap_err(),
+                "fragment speed must be between 0.25 and 2, inclusive"
+            );
         }
     }
 
@@ -1203,7 +1205,7 @@ mod tests {
             ),
         ] {
             let args = [vec!["codestrand", "preview"], flags].concat();
-            let cli = Cli::try_fixture_from(args).unwrap();
+            let cli = Cli::try_parse_from(args).unwrap();
             let Some(Command::Preview { source, .. }) = cli.command else {
                 panic!("preview command parsed")
             };
@@ -1214,7 +1216,7 @@ mod tests {
 
     #[test]
     fn cli_combines_repeated_repositories_and_a_manifest() {
-        let cli = Cli::try_fixture_from([
+        let cli = Cli::try_parse_from([
             "codestrand",
             "preview",
             "--repository",
@@ -1259,14 +1261,14 @@ mod tests {
             ("atlas", ThemeName::Atlas),
             ("forge", ThemeName::Forge),
         ] {
-            let cli = Cli::try_fixture_from(["codestrand", "preview", "--theme", name])
+            let cli = Cli::try_parse_from(["codestrand", "preview", "--theme", name])
                 .unwrap();
             let Some(Command::Preview { theme, .. }) = cli.command else {
                 panic!("preview")
             };
             assert_eq!(theme, expected);
             assert_eq!(theme.build().name, theme);
-            let cli = Cli::try_fixture_from([
+            let cli = Cli::try_parse_from([
                 "codestrand",
                 "export",
                 "frames",
@@ -1286,9 +1288,9 @@ mod tests {
             vec!["codestrand", "preview", "--theme", "unknown"],
             vec!["codestrand", "export", "frames", "--theme", "unknown"],
         ] {
-            assert!(Cli::try_fixture_from(command).is_err());
+            assert!(Cli::try_parse_from(command).is_err());
         }
-        let cli = Cli::try_fixture_from(["codestrand", "preview"]).unwrap();
+        let cli = Cli::try_parse_from(["codestrand", "preview"]).unwrap();
         assert!(matches!(
             cli.command,
             Some(Command::Preview {
@@ -1302,20 +1304,15 @@ mod tests {
     fn minimum_idle_cap_is_accepted_by_cli() {
         let cap = model::tick_seconds().to_string();
         assert!(
-            Cli::try_fixture_from([
-                "codestrand",
-                "preview",
-                "--max-idle-seconds",
-                &cap
-            ])
-            .is_ok()
+            Cli::try_parse_from(["codestrand", "preview", "--max-idle-seconds", &cap])
+                .is_ok()
         );
     }
 
     #[test]
     fn window_length_is_not_a_cli_option() {
         assert!(
-            Cli::try_fixture_from([
+            Cli::try_parse_from([
                 "codestrand",
                 "preview",
                 "--travel-window-seconds",
@@ -1329,7 +1326,7 @@ mod tests {
     fn frame_count_uses_the_supported_frame_index_range() {
         for value in ["2", "1000001", "4294967295"] {
             assert!(
-                Cli::try_fixture_from([
+                Cli::try_parse_from([
                     "codestrand",
                     "export",
                     "unused",
@@ -1341,7 +1338,7 @@ mod tests {
         }
         for value in ["0", "1", "4294967296"] {
             assert!(
-                Cli::try_fixture_from([
+                Cli::try_parse_from([
                     "codestrand",
                     "export",
                     "unused",
@@ -1357,7 +1354,7 @@ mod tests {
     fn avatar_scale_defaults_to_two_and_accepts_the_original_size() {
         for (flags, expected) in [(vec![], 2.0), (vec!["--avatar-scale", "1"], 1.0)] {
             let cli =
-                Cli::try_fixture_from([vec!["codestrand", "preview"], flags].concat())
+                Cli::try_parse_from([vec!["codestrand", "preview"], flags].concat())
                     .unwrap();
             let Some(Command::Preview { source, .. }) = cli.command else {
                 panic!("preview")
@@ -1371,7 +1368,7 @@ mod tests {
 
     #[test]
     fn cli_accepts_walking_contributors_and_bots_without_numeric_budgets() {
-        let cli = Cli::try_fixture_from([
+        let cli = Cli::try_parse_from([
             "codestrand",
             "preview",
             "--contributor-travel",
@@ -1422,7 +1419,7 @@ mod tests {
             ("2026-05-03", "2026-05-02", None),
             ("2026-05-05", "2026-05-06", None),
         ] {
-            let cli = Cli::try_fixture_from([
+            let cli = Cli::try_parse_from([
                 "codestrand",
                 "preview",
                 "--start-date",
@@ -1442,28 +1439,5 @@ mod tests {
                 assert!(error.contains(start) && error.contains(end), "{error}");
             }
         }
-    }
-
-    #[test]
-    fn internal_settled_fixture_clamps_positions_after_history() {
-        let cli = Cli::try_fixture_from(["codestrand", "preview", "--start", "1000"])
-            .unwrap();
-        let Some(Command::Preview { source, .. }) = cli.command else {
-            panic!("preview")
-        };
-        let events = timeline::synthetic();
-        assert_eq!(
-            source.resolve_range(&events).unwrap(),
-            events.len()..events.len()
-        );
-    }
-
-    #[test]
-    #[ignore = "requires a graphics adapter and explicit fixture arguments"]
-    fn export_cli_fixture() {
-        let args: Vec<String> =
-            serde_json::from_str(&std::env::var("CODESTRAND_FIXTURE_ARGS").unwrap())
-                .unwrap();
-        dispatch(Cli::try_fixture_from(args).unwrap()).unwrap();
     }
 }

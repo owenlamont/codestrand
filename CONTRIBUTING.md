@@ -61,6 +61,9 @@ Generated `site/` and `.venv/` directories are ignored. Update the navigation wh
 adding pages, wrap Markdown prose at 88 characters and verify CLI examples against
 the current binary's help and behaviour. Stage new files before running prek.
 Prek runs the strict build and lychee link checks; CI runs the same hooks.
+`docs/llms.txt` and `docs/llms-full.txt` are generated from the pages: after a docs
+change, run `uv run --script scripts/gen_llms_txt.py`, and prek checks they are current.
+The agent skill in `skills/codestrand/` is tested against the CLI's help and parser.
 
 Cloudflare Pages deploys `main` to <https://codestrand.pages.dev/> through its Git
 integration, so the repository holds no deployment credentials or workflow. The

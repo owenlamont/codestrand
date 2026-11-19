@@ -274,8 +274,12 @@ impl Simulation {
             );
             window_index += 1;
             if let Some(publish) = &mut publish {
-                let frame =
-                    self.window_packet(events.clone(), boundary, end >= duration);
+                let ready = super::streaming::Ready {
+                    end: boundary,
+                    complete: end >= duration,
+                    unpadded: duration,
+                };
+                let frame = self.window_packet(events.clone(), ready);
                 if !publish(frame)? {
                     return Ok(self);
                 }
@@ -333,7 +337,7 @@ impl Simulation {
         }
     }
 
-    fn window_packet(&self, events: Events, boundary: u64, complete: bool) -> Self {
+    fn window_packet(&self, events: Events, ready: super::streaming::Ready) -> Self {
         let initial = self.window.as_ref().expect("planning window").state.clone();
         Self {
             file_ids: self.file_ids.clone(),
@@ -369,7 +373,7 @@ impl Simulation {
             boundaries: Vec::new(),
             windowed: true,
             stream: None,
-            ready_end: Some((boundary, complete)),
+            ready_end: Some(ready),
             title_start: self.title_start,
         }
     }
@@ -456,15 +460,26 @@ mod tests {
     }
 
     fn traced(window: Option<f32>) -> (Simulation, Vec<Report>) {
+        plan_traced(
+            super::super::tests::short_repository_history(2),
+            Options {
+                eager_windows: window.is_some(),
+                travel_window_seconds: window,
+                ..Options::default()
+            },
+        )
+    }
+
+    fn plan_traced(
+        (events, labels): (Vec<crate::timeline::Event>, Vec<String>),
+        options: Options,
+    ) -> (Simulation, Vec<Report>) {
         let trace = super::super::Trace::enabled();
-        let (events, labels) = super::super::tests::short_repository_history(2);
         let sim = Simulation::with_repositories(
             events,
             &Options {
-                eager_windows: window.is_some(),
-                travel_window_seconds: window,
                 trace: trace.clone(),
-                ..Options::default()
+                ..options
             },
             &crate::theme::Theme::neon(),
             &crate::contributors::Mappings::default(),
@@ -566,27 +581,21 @@ mod tests {
     }
 
     fn planned(
-        (events, labels): (Vec<crate::timeline::Event>, Vec<String>),
+        history: (Vec<crate::timeline::Event>, Vec<String>),
         window: f32,
         travel_cap: TravelCap,
         replay_everything: bool,
     ) -> (Simulation, Vec<Report>) {
-        let trace = super::super::Trace::enabled();
-        let sim = Simulation::with_repositories(
-            events,
-            &Options {
+        plan_traced(
+            history,
+            Options {
                 eager_windows: true,
                 travel_window_seconds: Some(window),
                 travel_cap,
                 replay_everything,
-                trace: trace.clone(),
                 ..Options::default()
             },
-            &crate::theme::Theme::neon(),
-            &crate::contributors::Mappings::default(),
-            &labels,
-        );
-        (sim, trace.reports())
+        )
     }
 
     /// One history planned with replay reuse and again with every replay run.

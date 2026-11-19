@@ -25,8 +25,12 @@ use crate::{encoder::Encoder, scene};
 
 const WAIT_LIMIT: Duration = Duration::from_secs(30);
 const MAX_PENDING_CAPTURES: usize = 4;
+const PLAN_POLL: Duration = Duration::from_millis(50);
+pub(crate) const MANIFEST_HEADER: &str =
+    "frame,seconds,commit,files,avatars,beams,glyphs,missing_glyphs";
 
 mod png;
+pub(super) mod report;
 
 pub(super) fn check(directory: &Path) -> anyhow::Result<()> {
     if fs::symlink_metadata(directory).is_ok() {
@@ -59,18 +63,15 @@ pub(super) fn render(
     (mut app, target): (App, Handle<Image>),
     frames: Option<u32>,
     fps: u16,
-    delay_ms: u16,
     mut encoder: Option<crate::encoder::Encoder>,
     camera_path: Option<&crate::camera_path::CameraPath>,
 ) -> anyhow::Result<()> {
     let mut manifest = BufWriter::new(File::create(directory.join("frames.csv"))?);
-    writeln!(
-        manifest,
-        "frame,seconds,commit,files,avatars,beams,glyphs,missing_glyphs"
-    )?;
+    writeln!(manifest, "{MANIFEST_HEADER}")?;
     initialize(&mut app, &target)?;
     let mut png = encoder.is_none().then(png::Writer::new).transpose()?;
     let started = Instant::now();
+    let mut report = report::Report::new(started, fps);
     let (mut previous_camera, mut captures) = (None, Captures::default());
     let mut index = 0;
     let rendered = (|| -> anyhow::Result<()> {
@@ -93,13 +94,7 @@ pub(super) fn render(
                 waiting,
                 update,
                 &mut write,
-                |app| {
-                    app.world_mut()
-                        .resource_mut::<scene::Playback>()
-                        .0
-                        .prepare_frame(index, fps, true)
-                        .map(|_| ())
-                },
+                |app| wait_for_plan(app, &mut report, index, fps),
             )?;
             let playback = &app.world().resource::<scene::Playback>().0;
             let planned = crate::model::frames_for(playback.duration(), fps)?;
@@ -129,12 +124,13 @@ pub(super) fn render(
                 update(&mut app)?;
                 captures.write_ready(&mut write)?;
             }
-            thread::sleep(Duration::from_millis(u64::from(delay_ms)));
-            if index % u32::from(fps) == 0
-                && frames.is_none_or(|frames| index + 1 < frames)
-            {
-                report_progress(&app, index + 1, frames, planned, started.elapsed());
-            }
+            report_progress(
+                &app,
+                &mut report,
+                captures.written,
+                frames,
+                (planned, fps),
+            );
             index += 1;
         }
         captures.finish(index, || update(&mut app), &mut write)?;
@@ -162,39 +158,47 @@ pub(super) fn render(
 
 fn report_progress(
     app: &App,
+    report: &mut report::Report,
     written: u32,
     frames: Option<u32>,
-    planned: u32,
-    elapsed: Duration,
+    (planned, fps): (u32, u16),
 ) {
     let playback = &app.world().resource::<scene::Playback>().0;
-    let total = frames.or_else(|| playback.planning_complete().then_some(planned));
-    eprintln!(
-        "{}",
-        progress_line(written, total, playback.history_progress(), elapsed)
-    );
+    let now = Instant::now();
+    report.planned(now, playback.planned_history(), written);
+    let length = match frames {
+        Some(frames) => report::Length::Requested(frames),
+        None if playback.planning_complete() => report::Length::Planned(planned),
+        // A projection past the export range only says the video is too long.
+        None => report::Length::Projected(
+            crate::model::frames_for(playback.projected_duration(), fps)
+                .unwrap_or(u32::MAX),
+        ),
+    };
+    let history = playback.history_progress();
+    if let Some(line) = report.progress(now, written, length, history) {
+        eprintln!("{line}");
+    }
 }
 
-fn progress_line(
-    written: u32,
-    frames: Option<u32>,
-    (history, total): (crate::model::Time, crate::model::Time),
-    elapsed: Duration,
-) -> String {
-    let progress = frames.map_or_else(
-        || {
-            format!(
-                "{written} frames; history {:.1}/{:.1}s",
-                history.lossy_secs_f32(),
-                total.lossy_secs_f32(),
-            )
-        },
-        |frames| format!("{written}/{frames} frames"),
-    );
-    format!(
-        "Exported {progress} ({:.1}s elapsed)",
-        elapsed.as_secs_f32()
-    )
+/// Prepares frame `index`, polling the planner so a long wait is reported as one.
+fn wait_for_plan(
+    app: &mut App,
+    report: &mut report::Report,
+    index: u32,
+    fps: u16,
+) -> anyhow::Result<()> {
+    loop {
+        let mut playback = app.world_mut().resource_mut::<scene::Playback>();
+        if playback.0.prepare_frame(index, fps, false)? {
+            return Ok(());
+        }
+        if let Some(line) = report.waiting(Instant::now(), playback.0.planned_history())
+        {
+            eprintln!("{line}");
+        }
+        thread::sleep(PLAN_POLL);
+    }
 }
 
 fn record_frame(
@@ -433,19 +437,7 @@ mod tests {
         timeline,
     };
     use bevy::{color::ColorToPacked, prelude::IntoScheduleConfigs};
-
-    #[test]
-    fn progress_does_not_present_a_window_as_the_final_frame_count() {
-        let history = (model::Time::seconds(2.0), model::Time::seconds(100.0));
-        assert_eq!(
-            progress_line(61, None, history, Duration::from_secs(3)),
-            "Exported 61 frames; history 2.0/100.0s (3.0s elapsed)"
-        );
-        assert_eq!(
-            progress_line(61, Some(3000), history, Duration::from_secs(3)),
-            "Exported 61/3000 frames (3.0s elapsed)"
-        );
-    }
+    use clap::Parser as _;
 
     #[test]
     fn captures_write_in_request_order_once() {
@@ -556,13 +548,10 @@ mod tests {
             "--repositories-file".into(),
             manifest_path,
         ];
-        if let Ok(commits) = std::env::var("CODESTRAND_SAMPLE_COMMITS") {
-            args.extend(["--commits".into(), commits]);
-        }
         if let Ok(extra) = std::env::var("CODESTRAND_SAMPLE_EXTRA_ARGS") {
             args.extend(serde_json::from_str::<Vec<String>>(&extra).unwrap());
         }
-        let cli = crate::Cli::try_fixture_from(args).unwrap();
+        let cli = crate::Cli::try_parse_from(args).unwrap();
         let Some(crate::Command::LayoutQuality { mut source, .. }) = cli.command else {
             panic!("fixture source");
         };
@@ -632,7 +621,7 @@ mod tests {
                 10,
                 "640x360".parse().unwrap(),
             );
-            let result = render(&output, app, None, 10, 0, None, None);
+            let result = render(&output, app, None, 10, None, None);
             if arm >= 3 {
                 let failure = result.unwrap_err();
                 let error = failure.to_string();
@@ -695,9 +684,8 @@ mod tests {
             resolution,
             encoding,
             frames,
-            frame_delay_ms,
             camera_path,
-        }) = crate::Cli::try_fixture_from(args).unwrap().command
+        }) = crate::Cli::try_parse_from(args).unwrap().command
         else {
             panic!("explicit export command required");
         };
@@ -705,7 +693,11 @@ mod tests {
         let available = sample_memory();
         let (mut simulation, title) = crate::Source::report_loading(
             Duration::from_secs(1),
-            |update| eprintln!("{update}"),
+            |update| {
+                if let Some(update) = update {
+                    eprintln!("{update}");
+                }
+            },
             |progress| source.load_with_memory(progress, available),
         )
         .unwrap();
@@ -730,15 +722,7 @@ mod tests {
                 }
             },
         );
-        let result = render(
-            &directory,
-            (app, target),
-            frames,
-            fps,
-            frame_delay_ms,
-            encoder,
-            None,
-        );
+        let result = render(&directory, (app, target), frames, fps, encoder, None);
         let audit = audit.lock().unwrap();
         fs::write(
             directory.join("diagnostics.json"),
@@ -925,7 +909,7 @@ mod tests {
             })
             .before(scene::animate),
         );
-        render(&output, (app, target), Some(70), 5, 0, None, None).unwrap();
+        render(&output, (app, target), Some(70), 5, None, None).unwrap();
         for index in 0..70 {
             let name = ThemeName::ALL[index / 10];
             let image = image::open(output.join(format!("frame-{index:05}.png")))
@@ -948,7 +932,13 @@ mod tests {
 
 #[cfg(test)]
 mod pacing_tests {
-    use std::{fs, path::Path};
+    use std::{fs, path::Path, thread, time::Duration};
+
+    use clap::Parser as _;
+
+    use super::{prepare, render};
+    use crate::scene;
+
     #[test]
     #[ignore = "requires a graphics adapter; repeats sibling-directory junction exports"]
     fn sibling_directory_exports_are_identical() {
@@ -991,15 +981,13 @@ mod pacing_tests {
                 repository.to_str().unwrap(),
                 "--camera-path",
                 camera.to_str().unwrap(),
-                "--start",
-                "1",
                 "--frames",
                 "24",
                 "--fps",
                 "30",
                 "--no-cache",
             ];
-            crate::dispatch(crate::Cli::try_fixture_from(args).unwrap()).unwrap();
+            crate::dispatch(crate::Cli::try_parse_from(args).unwrap()).unwrap();
         }
         for frame in 0..24 {
             let filename = format!("frame-{frame:05}.png");
@@ -1059,8 +1047,8 @@ mod pacing_tests {
         let scratch = tempfile::tempdir().expect("temporary directory is available");
         let fast = scratch.path().join("fast");
         let slow = scratch.path().join("slow");
-        export(&fast, "0");
-        export(&slow, "50");
+        export(&fast, Duration::ZERO);
+        export(&slow, Duration::from_millis(50));
         let expected: Vec<_> = (0..8)
             .map(|index| format!("frame-{index:05}.png"))
             .collect();
@@ -1098,24 +1086,41 @@ mod pacing_tests {
         assert_eq!(fast_manifest, slow_manifest);
     }
 
-    fn export(directory: &Path, delay: &str) {
+    /// Exports eight synthetic frames, sleeping `delay` in every app update.
+    fn export(directory: &Path, delay: Duration) {
         let camera = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/camera-targets.toml");
-        let args = vec![
-            "codestrand",
-            "export",
-            directory.to_str().unwrap(),
-            "--camera-path",
-            camera.to_str().unwrap(),
-            "--test-input",
-            "synthetic",
-            "--frames",
-            "8",
-            "--fps",
-            "2",
-            "--frame-delay-ms",
-            delay,
-        ];
-        crate::dispatch(crate::Cli::try_fixture_from(args).unwrap()).unwrap();
+        let Some(crate::Command::Export { source, theme, .. }) =
+            crate::Cli::try_parse_from([
+                "codestrand",
+                "export",
+                "unused",
+                "--test-input",
+                "synthetic",
+            ])
+            .unwrap()
+            .command
+        else {
+            panic!("export command");
+        };
+        let (mut simulation, title) =
+            source.load(&crate::progress::Progress::default()).unwrap();
+        simulation.set_theme(theme.build());
+        let camera_path = crate::camera_path::CameraPath::read(&camera)
+            .and_then(|path| path.bind(&simulation))
+            .unwrap();
+        let resolution = crate::resolution::Resolution::default();
+        let (mut app, target) = scene::headless(simulation, title, 2, resolution);
+        app.add_systems(bevy::prelude::Update, move || thread::sleep(delay));
+        prepare(directory).unwrap();
+        render(
+            directory,
+            (app, target),
+            Some(8),
+            2,
+            None,
+            Some(&camera_path),
+        )
+        .unwrap();
     }
 }

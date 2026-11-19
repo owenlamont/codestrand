@@ -1,5 +1,7 @@
 use std::fs;
 
+use clap::Parser as _;
+
 use super::*;
 use crate::{Cli, Command};
 
@@ -7,12 +9,14 @@ fn fixture(text: &str) -> (std::path::PathBuf, Simulation) {
     let directory = tempfile::tempdir().unwrap().keep();
     let file = directory.join("camera.toml");
     fs::write(&file, text).unwrap();
-    let cli = Cli::try_fixture_from([
+    let cli = Cli::try_parse_from([
         "codestrand",
         "export",
         "unused-output",
         "--camera-path",
         file.to_str().unwrap(),
+        "--test-input",
+        "synthetic",
     ])
     .unwrap();
     let Some(Command::Export { source, .. }) = cli.command else {
