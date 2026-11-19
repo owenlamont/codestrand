@@ -85,7 +85,13 @@ impl Simulation {
                 (i, point, parked)
             })
             .collect();
-        for &(i, point, applying) in &live {
+        #[cfg(test)]
+        let reference = every_pair(state, radius, &live, occupied, conflicted);
+        let axes = [0, 1].map(|axis| Axis::new(&live, axis));
+        let axes = &axes;
+        // Wider than every distance the exact tests below accept, so no pair is lost.
+        let reach = 2.0 * radius + 2.0;
+        for (own, &(i, point, applying)) in live.iter().enumerate() {
             if !applying {
                 continue;
             }
@@ -96,23 +102,47 @@ impl Simulation {
             let low = tile.low * HALF;
             let span = (tile.high - tile.low) * HALF;
             pairs += live.len() - 1;
-            for &(j, other, _) in &live {
-                if i == j {
-                    continue;
-                }
-                if super::committing_overlap(
-                    point,
-                    other,
-                    2.0 * radius,
-                    [true, true],
-                    [true, false],
-                ) {
+            for other in axes[0].near(point.x, reach) {
+                if other != own
+                    && super::committing_overlap(
+                        point,
+                        live[other].1,
+                        2.0 * radius,
+                        [true, true],
+                        [true, false],
+                    )
+                {
                     conflicts += 1;
                     conflicted[avatar.commit] = true;
                 }
-                reserve_other(&mut occupied[avatar.commit], low, span, other, radius);
+            }
+            let mut edges: Vec<usize> = [0, 1]
+                .into_iter()
+                .flat_map(|axis| {
+                    [low[axis], low[axis] + span[axis]]
+                        .into_iter()
+                        .flat_map(move |line| axes[axis].near(line, reach))
+                })
+                .filter(|&other| other != own)
+                .collect();
+            edges.sort_unstable();
+            edges.dedup();
+            for other in edges {
+                reserve_other(
+                    &mut occupied[avatar.commit],
+                    low,
+                    span,
+                    live[other].1,
+                    radius,
+                );
             }
         }
+        #[cfg(test)]
+        assert_eq!(
+            reference,
+            (format!("{occupied:?}"), conflicted.to_vec(), conflicts),
+            "pruned pairs reserve what every pair reserves"
+        );
         (conflicts, pairs)
     }
 
@@ -166,6 +196,75 @@ impl Simulation {
         conflicts > 0
     }
 }
+/// What comparing every live pair reserves, for checking the pruned comparison.
+#[cfg(test)]
+fn every_pair(
+    state: &crate::model::State,
+    radius: f32,
+    live: &[(usize, Vec2, bool)],
+    occupied: &[Vec<(u8, Rect)>],
+    conflicted: &[bool],
+) -> (String, Vec<bool>, usize) {
+    let mut occupied = occupied.to_vec();
+    let mut conflicted = conflicted.to_vec();
+    let mut conflicts = 0;
+    for &(i, point, applying) in live {
+        let avatar = &state.avatars[i];
+        let Some(tile) = state.layout.repositories[avatar.repository].gutter else {
+            continue;
+        };
+        if !applying {
+            continue;
+        }
+        let low = tile.low * HALF;
+        let span = (tile.high - tile.low) * HALF;
+        for &(j, other, _) in live {
+            if i == j {
+                continue;
+            }
+            if super::committing_overlap(
+                point,
+                other,
+                2.0 * radius,
+                [true, true],
+                [true, false],
+            ) {
+                conflicts += 1;
+                conflicted[avatar.commit] = true;
+            }
+            reserve_other(&mut occupied[avatar.commit], low, span, other, radius);
+        }
+    }
+    (format!("{occupied:?}"), conflicted, conflicts)
+}
+
+/// Live avatars ordered along one screen axis, to find those near a coordinate.
+struct Axis {
+    order: Vec<(f32, usize)>,
+}
+
+impl Axis {
+    fn new(live: &[(usize, Vec2, bool)], axis: usize) -> Self {
+        let mut order: Vec<_> = live
+            .iter()
+            .enumerate()
+            .map(|(index, &(_, point, _))| (point[axis], index))
+            .collect();
+        order.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+        Self { order }
+    }
+
+    /// Indices into `live` whose coordinate on this axis lies within `reach` of
+    /// `centre`, in no particular order.
+    fn near(&self, centre: f32, reach: f32) -> impl Iterator<Item = usize> + '_ {
+        let first = self.order.partition_point(|&(x, _)| x < centre - reach);
+        let last = self.order.partition_point(|&(x, _)| x <= centre + reach);
+        self.order[first..last.max(first)]
+            .iter()
+            .map(|&(_, index)| index)
+    }
+}
+
 fn reserve_other(
     row: &mut Vec<(u8, Rect)>,
     low: Vec2,
