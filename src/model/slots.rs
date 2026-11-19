@@ -164,8 +164,8 @@ impl Placement {
 }
 
 /// Cost per radian of a ring member's name turning away from the point of the ring
-/// nearest that member; above holding a name still, below a crossed beam.
-const NEAREST_NAME_WEIGHT: f32 = 60_000.0;
+/// nearest that member; below holding a name still and a crossed beam.
+const NEAREST_NAME_WEIGHT: f32 = 20_000.0;
 
 /// Space between neighbouring members packed in a group, so they touch without
 /// overlapping.
@@ -215,13 +215,11 @@ fn inward(edge: u8) -> Vec2 {
     [-Vec2::Y, -Vec2::X, Vec2::Y, Vec2::X][usize::from(edge % 4)]
 }
 
-/// A group's ring centre relative to its dock: moved into the tile until its outermost
-/// seats sit on the gutter line, so members stay where an avatar alone would fit.
+/// A group's ring centre relative to its dock: moved into the tile until the ring
+/// reaches no further out than an avatar alone would, so it stays in view wherever
+/// one fits.
 pub(super) fn ring_offset(capacity: u8, edge: u8, radius: f32) -> Vec2 {
-    let reach = (0..capacity)
-        .map(|seat| -seat_around(seat, capacity, edge, radius).dot(inward(edge)))
-        .fold(0.0, f32::max);
-    inward(edge) * reach
+    inward(edge) * (group_radius(capacity, radius) - radius)
 }
 
 /// A seat's place relative to its group's dock.
@@ -849,13 +847,17 @@ impl State {
             .collect()
     }
     /// For each avatar in a ring, the screen angle from the ring's centre through it.
-    fn name_preferences(&self) -> Vec<Option<f32>> {
+    /// For each avatar in a ring, the screen angle from the ring's centre through it and
+    /// the ring's screen disc, which its name keeps off.
+    fn name_preferences(&self) -> Vec<Option<(f32, Rect)>> {
         (0..self.avatars.len())
             .map(|index| {
-                let (centre, _) = self.ring_of(index)?;
+                let (centre, rim) = self.ring_of(index)?;
                 let from = self.screen(centre)?;
+                let edge = self.screen(centre + Vec3::X * rim)?;
                 let to = self.screen(self.avatars[index].position)?;
-                (to != from).then(|| (to - from).to_angle())
+                (to != from)
+                    .then(|| ((to - from).to_angle(), disk(from, from.distance(edge))))
             })
             .collect()
     }
@@ -959,7 +961,7 @@ impl State {
                 .map(Vec2::to_angle),
             );
             targets.extend(previous.map(|p| p.motion.goal));
-            targets.extend(preferred[index]);
+            targets.extend(preferred[index].map(|(angle, _)| angle));
             let scored = targets
                 .into_iter()
                 .map(|target| space.candidate(index, target, &rotation))
@@ -1244,8 +1246,8 @@ struct LabelSpace<'a> {
     rays: &'a [(Vec2, Vec2)],
     avatars: &'a [super::Avatar],
     /// For each avatar in a ring, the screen angle from the ring's centre through it,
-    /// where its name costs least.
-    preferred: &'a [Option<f32>],
+    /// where its name costs least, and the ring's screen disc.
+    preferred: &'a [Option<(f32, Rect)>],
     radius: f32,
     margin: f32,
 }
@@ -1268,7 +1270,7 @@ impl LabelSpace<'_> {
             + motion.previous.map_or(0.0, |p| {
                 labels::difference(target, p.angle).abs() * 55_000.0
             })
-            + self.preferred[index].map_or(0.0, |angle| {
+            + self.preferred[index].map_or(0.0, |(angle, _)| {
                 labels::difference(target, angle).abs() * NEAREST_NAME_WEIGHT
             });
         (
@@ -1335,6 +1337,7 @@ impl LabelSpace<'_> {
             conflicts,
             ownership * 1e6
                 + foreign.map(|p| area(disk(p, self.radius))).sum::<f32>() * 100.0
+                + self.preferred[index].map_or(0.0, |(_, ring)| area(ring) * 100.0)
                 + self
                     .obstacles
                     .iter()
@@ -1529,13 +1532,9 @@ impl Choice<'_> {
         let ring = group_radius(self.capacity, self.radius);
         let centre = point + ring_offset(self.capacity, dock.edge, self.radius);
         let overlaps = usize::from(
-            centre.y - ring < super::caption::BOTTOM
-                || (0..self.capacity).any(|seat| {
-                    let seat = point
-                        + seat_offset(seat, self.capacity, dock.edge, self.radius);
-                    !seat.abs().cmple(HALF - Vec2::splat(self.radius)).all()
-                        || seat.y + self.radius > super::caption::TOP
-                }),
+            !centre.abs().cmple(HALF - Vec2::splat(ring)).all()
+                || centre.y - ring < super::caption::BOTTOM
+                || centre.y + ring > super::caption::TOP,
         );
         (
             Placement {
@@ -2133,10 +2132,11 @@ mod tests {
             let seats: Vec<_> = (0..capacity)
                 .map(|s| seat_around(s, capacity, 0, 7.5))
                 .collect();
-            let out = (0..capacity)
-                .map(|s| seat_offset(s, capacity, 0, 7.5).y)
-                .fold(f32::MIN, f32::max);
-            assert!(out.abs() < 1e-3, "outermost seat on the gutter line");
+            let reach = ring_offset(capacity, 0, 7.5).y + ring;
+            assert!(
+                (reach - 7.5).abs() < 1e-3,
+                "the ring reaches out as one avatar"
+            );
             let member = 7.5 * MEMBER_SCALE;
             for (index, seat) in seats.iter().enumerate() {
                 assert!(seat.length() + member < ring);
