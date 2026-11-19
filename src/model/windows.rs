@@ -342,6 +342,7 @@ impl Simulation {
         Self {
             file_ids: self.file_ids.clone(),
             first_arrivals: self.first_arrivals.clone(),
+            finals: self.finals.clone(),
             departures: self.departures.clone(),
             repository_ends: self.repository_ends.clone(),
             caption_style: self.caption_style,

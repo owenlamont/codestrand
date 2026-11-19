@@ -400,7 +400,11 @@ impl MovingBeams {
             };
             self.missing_tile_beams +=
                 u64::from(state.layout.repositories[own].tile.is_none());
-            let position = state.beam_origin(pulse.author, pulse.commit);
+            // A group's beams leave its camera-facing ring, so their ground track starts
+            // at the ring's centre.
+            let position = state
+                .ring_of(pulse.author)
+                .map_or(state.avatars[pulse.author].position, |(centre, _)| centre);
             let from = bevy::math::Vec2::new(position.x, position.z);
             let to = bevy::math::Vec2::new(to.x, to.z);
             let footprint = match target {

@@ -23,6 +23,27 @@ pub(super) fn duration(
 }
 
 /// For each selected event, bit `rank` is set when its participant at that rank (the
+/// author first, then co-authors) takes part in no later event of the whole history.
+pub(super) fn finals(events: &[Event], selected: std::ops::Range<usize>) -> Vec<u16> {
+    let mut seen = std::collections::HashSet::new();
+    let mut finals: Vec<u16> = events
+        .iter()
+        .rev()
+        .map(|event| {
+            event
+                .participants()
+                .enumerate()
+                .filter(|(_, contributor)| seen.insert(contributor.key.clone()))
+                .fold(0, |bits, (rank, _)| bits | 1 << rank)
+        })
+        .collect();
+    finals.reverse();
+    finals.drain(selected.end..);
+    finals.drain(..selected.start);
+    finals
+}
+
+/// For each selected event, bit `rank` is set when its participant at that rank (the
 /// author first, then co-authors) appears for the first time in the whole history.
 pub(super) fn arrivals(events: &[Event], selected: std::ops::Range<usize>) -> Vec<u16> {
     let mut seen = std::collections::HashSet::new();

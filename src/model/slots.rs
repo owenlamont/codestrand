@@ -163,6 +163,10 @@ impl Placement {
     }
 }
 
+/// Cost per radian of a ring member's name turning away from the point of the ring
+/// nearest that member; above holding a name still, below a crossed beam.
+const NEAREST_NAME_WEIGHT: f32 = 60_000.0;
+
 /// Space between neighbouring members packed in a group, so they touch without
 /// overlapping.
 const GROUP_GAP: f32 = 0.5;
@@ -691,9 +695,16 @@ impl State {
             if now - avatar.last_active < super::AVATAR_IDLE {
                 continue;
             }
+            let alone =
+                avatar.group.is_some_and(|g| g.lead == index) && capacities[index] < 2;
             let Some(slot) = &mut avatar.slot else {
                 continue;
             };
+            // An author whose group has gone walks back from its seat to its dock.
+            if alone {
+                slot.point -= slot.offset;
+                slot.offset = Vec2::ZERO;
+            }
             if let Some(tile) = self.layout.repositories[avatar.repository].gutter {
                 slot.point = slot.dock.on_network(tile) + slot.offset;
             }
@@ -837,6 +848,17 @@ impl State {
             })
             .collect()
     }
+    /// For each avatar in a ring, the screen angle from the ring's centre through it.
+    fn name_preferences(&self) -> Vec<Option<f32>> {
+        (0..self.avatars.len())
+            .map(|index| {
+                let (centre, _) = self.ring_of(index)?;
+                let from = self.screen(centre)?;
+                let to = self.screen(self.avatars[index].position)?;
+                (to != from).then(|| (to - from).to_angle())
+            })
+            .collect()
+    }
     fn name_rays(
         &self,
         bodies: &[Option<Vec2>],
@@ -850,11 +872,11 @@ impl State {
                     && !travel.travelling(pulse.author, self.tick)
             })
             .flat_map(|pulse| {
-                let origin = bodies[pulse.author].and_then(|_| {
-                    self.screen(self.beam_origin(pulse.author, pulse.commit))
-                });
+                let author = pulse.author;
                 pulse.targets.iter().filter_map(move |&(target, ..)| {
-                    Some((origin?, self.screen(self.point(target)?)?))
+                    bodies[author]?;
+                    let to = self.point(target)?;
+                    Some((self.screen(self.beam_start(author, to))?, self.screen(to)?))
                 })
             })
             .collect()
@@ -870,11 +892,13 @@ impl State {
         let mut obstacles = tile_obstacles(self);
         obstacles.extend(texts.iter().map(|&rect| (usize::MAX, rect)));
         let rays = self.name_rays(bodies, travel);
+        let preferred = self.name_preferences();
         let space = LabelSpace {
             bodies,
             obstacles: &obstacles,
             rays: &rays,
             avatars: &self.avatars,
+            preferred: &preferred,
             radius: self.avatar_radius(),
             margin: 4.0 / 3.0,
         };
@@ -935,6 +959,7 @@ impl State {
                 .map(Vec2::to_angle),
             );
             targets.extend(previous.map(|p| p.motion.goal));
+            targets.extend(preferred[index]);
             let scored = targets
                 .into_iter()
                 .map(|target| space.candidate(index, target, &rotation))
@@ -1218,6 +1243,9 @@ struct LabelSpace<'a> {
     obstacles: &'a [(usize, Rect)],
     rays: &'a [(Vec2, Vec2)],
     avatars: &'a [super::Avatar],
+    /// For each avatar in a ring, the screen angle from the ring's centre through it,
+    /// where its name costs least.
+    preferred: &'a [Option<f32>],
     radius: f32,
     margin: f32,
 }
@@ -1239,6 +1267,9 @@ impl LabelSpace<'_> {
             + cost[1] * 1e6
             + motion.previous.map_or(0.0, |p| {
                 labels::difference(target, p.angle).abs() * 55_000.0
+            })
+            + self.preferred[index].map_or(0.0, |angle| {
+                labels::difference(target, angle).abs() * NEAREST_NAME_WEIGHT
             });
         (
             labels::Candidate {
@@ -2000,6 +2031,58 @@ mod tests {
     }
 
     #[test]
+    fn a_co_author_with_no_later_commit_fades_with_its_disbanding_ring() {
+        let mut events = crate::timeline::synthetic();
+        events.truncate(2);
+        events[0].co_authors = vec![crate::timeline::Identity {
+            name: b"Pair".to_vec(),
+            email: b"pair@example.invalid".to_vec(),
+        }];
+        let mut sim = Simulation::new(
+            events,
+            &Options::default(),
+            &Theme::neon(),
+            &Mappings::default(),
+        );
+        let solo = sim.schedule.starts[1];
+        let gone = crate::model::frames_for(solo + 0.5, 60).unwrap();
+        let mut last = [None::<Vec3>; 2];
+        let mut largest_step = 0.0_f32;
+        let mut ring_shown = 0.0_f32;
+        for frame in 0..=gone {
+            sim.advance_to(frame, 60);
+            ring_shown = ring_shown
+                .max(sim.state.avatars.first().map_or(0.0, |a| a.ring_presence));
+            for (index, last) in last.iter_mut().enumerate() {
+                let parked = sim.state.avatars.get(index).filter(|avatar| {
+                    avatar.presence > 0.0
+                        && !sim.travel.travelling(index, sim.state.tick)
+                });
+                let Some(avatar) = parked else {
+                    continue;
+                };
+                let step = last.map_or(0.0, |last| avatar.position.distance(last));
+                largest_step = largest_step.max(step);
+                *last = Some(avatar.position);
+            }
+        }
+        assert_eq!(ring_shown, 1.0);
+        assert!(
+            largest_step < 0.1 * sim.state.settle_reach(),
+            "an avatar jumped {largest_step}"
+        );
+        assert_eq!(
+            sim.state.avatars[0].slot.as_ref().unwrap().offset,
+            Vec2::ZERO
+        );
+        let (author, pair) = (&sim.state.avatars[0], &sim.state.avatars[1]);
+        assert!(pair.dismissed);
+        assert_eq!(pair.presence, 0.0);
+        assert_eq!(author.ring_presence, 0.0);
+        assert!(author.presence > 0.0);
+    }
+
+    #[test]
     fn a_group_never_outgrows_its_seats() {
         let mut events = crate::timeline::synthetic();
         events.truncate(1);
@@ -2499,26 +2582,24 @@ mod tests {
                 if parked.contains(&pulse.author) {
                     assert_group_clear(&sim, pulse.author, &members, &parked, frame);
                 }
-                if members.len() == 3 {
+                let seated = (0..state.avatars.len())
+                    .filter(|&i| {
+                        state.avatars[i].commit == pulse.commit
+                            && state.in_party(i, pulse.author)
+                            && !sim.travel.travelling(i, state.tick)
+                    })
+                    .count();
+                if seated == 3 {
                     gathered.insert(pulse.commit);
                 }
             }
-            let rims: Vec<_> = sim
-                .state
-                .pulses
-                .iter()
-                .map(|p| {
-                    let origin = sim.state.beam_origin(p.author, p.commit);
-                    (p.author, origin, sim.state.beam_rim(p.author, p.commit))
-                })
-                .collect();
             for beam in sim.beams() {
-                assert!(
-                    rims.iter()
-                        .any(|&(author, origin, rim)| author == beam.author
-                            && (beam.from.distance(origin) - rim).abs() < 1e-3),
-                    "frame {frame}: beam leaves off its group's ring"
-                );
+                let state = &sim.state;
+                let start = match state.ring_of(beam.author) {
+                    Some((centre, rim)) => (beam.from.distance(centre) - rim).abs(),
+                    None => beam.from.distance(state.avatars[beam.author].position),
+                };
+                assert!(start < 1e-3, "frame {frame}: beam starts off its ring");
             }
         }
         assert_eq!(gathered.into_iter().collect::<Vec<_>>(), shared);

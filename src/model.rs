@@ -67,6 +67,10 @@ const MIN_AVATAR_HEIGHT: f32 = 3.2;
 
 const AVATAR_IDLE: f32 = 5.0;
 const ARRIVAL_SCALE: f32 = 1.15;
+/// Seconds a disbanding group's ring, and the co-authors leaving with it, take to fade.
+const DISBAND: f32 = 0.4;
+/// Seconds an avatar takes to walk a short step to a new seat.
+const SETTLE_SECONDS: f32 = 0.4;
 const BEAM_LIMIT: usize = 24;
 const FRAGMENT_TARGETS: usize = 24;
 const SETTLE_TICKS: u32 = 1200;
@@ -355,6 +359,51 @@ pub(super) struct Avatar {
     slot: Option<slots::Placement>,
     slot_origin: Option<(usize, slots::Dock, Vec2)>,
     group: Option<Group>,
+    /// Left behind by a disbanding group with no later commit, so fading with its ring.
+    dismissed: bool,
+    /// How visible this author's group ring is, fading in and out over [`DISBAND`].
+    ring_presence: f32,
+    /// Seats the ring held when last shown, so a disbanding ring keeps its size.
+    ring_capacity: u8,
+    /// A short walk from a position to the avatar's place, and when it began.
+    settle: Option<(Vec3, Time)>,
+    /// The seat offset last parked at, whose change starts a settle.
+    seat: Vec2,
+    travelling: bool,
+}
+
+impl Avatar {
+    /// Moves to `target`, or along a travel route; a short step to a new seat or off the
+    /// end of a route is walked over [`SETTLE_SECONDS`] rather than jumped.
+    fn walk(&mut self, target: Vec3, route: Option<Vec3>, now: Time, reach: f32) {
+        let offset = self.slot.as_ref().map_or(Vec2::ZERO, |s| s.offset);
+        if let Some(point) = route {
+            self.position = point;
+            self.settle = None;
+            self.travelling = true;
+        } else {
+            let distance = self.position.distance(target);
+            if (self.travelling && offset != Vec2::ZERO || offset != self.seat)
+                && self.presence > 0.0
+                && distance > 1e-4
+                && distance < reach
+            {
+                self.settle = Some((self.position, now));
+            }
+            self.position = match self.settle {
+                Some((from, begun)) if now - begun < SETTLE_SECONDS => {
+                    let t = (now - begun) / SETTLE_SECONDS;
+                    from.lerp(target, t * t * (3.0 - 2.0 * t))
+                }
+                _ => {
+                    self.settle = None;
+                    target
+                }
+            };
+            self.travelling = false;
+        }
+        self.seat = offset;
+    }
 }
 
 /// The author whose group an avatar parks in, and its seat there; an author sits in
@@ -491,6 +540,9 @@ impl std::fmt::Debug for SharedState {
 pub(super) struct Simulation {
     file_ids: HashMap<String, FileIdentity>,
     first_arrivals: Vec<u16>,
+    /// Per selected event, the participants taking part in no later event, as bits by
+    /// rank.
+    finals: Vec<u16>,
     departures: Vec<Time>,
     repository_ends: Vec<Time>,
     pub caption_style: caption::Style,
@@ -937,11 +989,13 @@ impl Simulation {
         let (departures, repository_ends) =
             lifecycle::plan(&events, &schedule, options, start..end);
         let first_arrivals = lifecycle::arrivals(&events, start..end);
+        let finals = lifecycle::finals(&events, start..end);
         events.truncate(end);
         events.drain(..start);
         let mut simulation = Self {
             file_ids: file_identities(&state),
             first_arrivals,
+            finals,
             departures,
             repository_ends,
             caption_style: caption::Style::default(),
@@ -1158,13 +1212,15 @@ impl Simulation {
         let pulse = self.state.pulses.iter().rev().find(|pulse| {
             pulse.author == file.author && pulse.touched.binary_search(&id).is_ok()
         });
-        let from = pulse.map_or(avatar.position, |pulse| {
-            self.state.beam_origin(pulse.author, pulse.commit)
-        });
         let endpoint = pulse
             .filter(|pulse| pulse.aggregated)
             .and_then(|pulse| pulse.directory_target(file.dir, self.layout()))
             .and_then(|target| self.state.point(target));
+        let from = if pulse.is_some() {
+            self.state.beam_start(file.author, endpoint.unwrap_or(to))
+        } else {
+            avatar.position
+        };
         let Some(endpoint) = endpoint else {
             return self.theme.beam_style.point(from, to, file.presence);
         };
@@ -1269,7 +1325,19 @@ impl Simulation {
             let Some(start) = self.schedule.start(state.next_event, canonical) else {
                 break;
             };
+            let behind = state.left_behind(event);
             state.begin(event, start, &mut self.file_ids);
+            for member in behind {
+                let commit = state.avatars[member].commit;
+                let key = &state.avatars[member].key;
+                let rank = self.events[commit]
+                    .participants()
+                    .position(|c| &c.key == key);
+                if rank.is_some_and(|rank| self.finals[commit] & (1 << rank) != 0) {
+                    state.avatars[member].expires = start;
+                    state.avatars[member].dismissed = true;
+                }
+            }
             for (rank, contributor) in event.participants().enumerate() {
                 let Some(&author) = state.authors.get(&contributor.key) else {
                     continue;
@@ -1308,7 +1376,7 @@ impl Simulation {
         let state = &mut *self.state;
         let now = tick_time(state.tick);
         if self.windowed {
-            for avatar in &mut state.avatars {
+            for avatar in state.avatars.iter_mut().filter(|a| !a.dismissed) {
                 let expires = self.departures[avatar.commit];
                 avatar.expires = if expires - now > windows::MARGIN {
                     Time::INFINITY
@@ -1333,15 +1401,33 @@ impl Simulation {
             .iter()
             .map(|a| a.slot.as_ref().map_or(a.position, slots::Placement::world))
             .collect();
+        let capacities: Vec<_> = (0..state.avatars.len())
+            .map(|index| state.capacity(index))
+            .collect();
+        let reach = state.settle_reach();
         for (index, (avatar, target)) in
             state.avatars.iter_mut().zip(targets).enumerate()
         {
             let travel = self.travel.sample(index, state.tick);
             avatar.activity *= (-dt / 3.0).exp();
-            avatar.position = target;
-            if let Some((point, _)) = travel {
-                avatar.position = slots::world(point);
-            }
+            avatar.walk(
+                target,
+                travel.map(|(point, _)| slots::world(point)),
+                now,
+                reach,
+            );
+            let ring = if avatar.group.is_some_and(|g| g.lead == index) {
+                avatar.ring_capacity = avatar.ring_capacity.max(capacities[index]);
+                if capacities[index] > 1 {
+                    avatar.ring_capacity = capacities[index];
+                    dt / DISBAND
+                } else {
+                    -dt / DISBAND
+                }
+            } else {
+                -dt / DISBAND
+            };
+            avatar.ring_presence = (avatar.ring_presence + ring).clamp(0.0, 1.0);
             avatar.projection_scale = slots::projection_scale(avatar.position);
             let service_visible = now < avatar.expires;
             let service_fade = if service_visible { dt / 0.4 } else { -dt / 1.2 };
@@ -1349,6 +1435,8 @@ impl Simulation {
                 (avatar.slot_presence + service_fade).clamp(0.0, 1.0);
             let fade = if service_visible {
                 dt / 0.4
+            } else if avatar.dismissed {
+                -dt / DISBAND
             } else {
                 -dt / lifecycle::EXIT
             };
@@ -1511,11 +1599,9 @@ impl Simulation {
             if envelope <= 0.0 {
                 continue;
             }
-            let origin = self.state.beam_origin(pulse.author, pulse.commit);
-            let rim = self.state.beam_rim(pulse.author, pulse.commit);
             for &(target, weight, ..) in &pulse.targets {
                 if let Some(to) = self.state.point(target) {
-                    let from = origin + (to - origin).normalize_or_zero() * rim;
+                    let from = self.state.beam_start(pulse.author, to);
                     beams.push(Beam {
                         author: pulse.author,
                         from,
@@ -1536,19 +1622,16 @@ impl Simulation {
             state.avatars[index].presence > 0.0
                 && !self.travel.travelling(index, state.tick)
         };
+        let radius = state.avatar_radius();
         (0..state.avatars.len())
-            .filter(|&lead| {
-                parked(lead)
-                    && state.avatars[lead].group.is_some_and(|g| g.lead == lead)
-                    && state.capacity(lead) > 1
-            })
-            .map(|lead| {
-                let commit = state.avatars[lead].commit;
-                (
-                    lead,
-                    state.beam_origin(lead, commit),
-                    state.beam_rim(lead, commit),
-                )
+            .filter(|&lead| parked(lead) && state.avatars[lead].ring_presence > 0.0)
+            .filter_map(|lead| {
+                let avatar = &state.avatars[lead];
+                let capacity = avatar.ring_capacity;
+                let centre = avatar.slot.as_ref()?.ring_centre(capacity, radius);
+                let edge = centre + Vec2::X * slots::group_radius(capacity, radius);
+                let rim = slots::world(edge).distance(slots::world(centre));
+                Some((lead, slots::world(centre), rim * avatar.ring_presence))
             })
             .collect()
     }
@@ -1580,15 +1663,13 @@ impl Simulation {
             if envelope <= 0.0 {
                 continue;
             }
-            let origin = self.state.beam_origin(pulse.author, pulse.commit);
-            let rim = self.state.beam_rim(pulse.author, pulse.commit);
             for &(target, _, insertions, removals) in
                 pulse.targets.iter().take(FRAGMENT_TARGETS)
             {
                 let Some(to) = self.state.point(target) else {
                     continue;
                 };
-                let from = origin + (to - origin).normalize_or_zero() * rim;
+                let from = self.state.beam_start(pulse.author, to);
                 let sample_detail = match target {
                     Target::File(id) => {
                         self.layout().file(id).map_or(0.0, |file| detail(file.dir))
@@ -1895,6 +1976,12 @@ impl State {
             slot: None,
             slot_origin: None,
             group: None,
+            dismissed: false,
+            ring_presence: 0.0,
+            ring_capacity: 1,
+            settle: None,
+            seat: Vec2::ZERO,
+            travelling: false,
         });
         self.authors.insert(contributor.key.clone(), index);
         index
@@ -1976,6 +2063,7 @@ impl State {
             avatar.last_active = start;
             avatar.activity = (avatar.activity + 1.0).min(1000.0);
             avatar.group = Some(Group { lead: author, seat });
+            avatar.dismissed = false;
             let previous = self.pulses.iter().rposition(|pulse| pulse.author == member);
             let mut index = 0;
             self.pulses.retain_mut(|pulse| {
@@ -1998,6 +2086,7 @@ impl State {
             aggregated,
             samples,
         });
+        self.capacities = self.compute_capacities();
     }
 
     /// Seats for an event's participants in its author's group, after the members who
@@ -2106,34 +2195,35 @@ impl State {
         }
     }
 
-    /// Where an author's beams for `commit` start: the centre of their group while they
-    /// still serve that commit, or else the author alone.
-    fn beam_origin(&self, author: usize, commit: usize) -> Vec3 {
-        let avatar = &self.avatars[author];
-        match &avatar.slot {
-            Some(slot) if avatar.commit == commit => {
-                let centre =
-                    slot.ring_centre(self.capacity(author), self.avatar_radius());
-                avatar.position + slots::world(centre) - slots::world(slot.point)
-            }
-            _ => avatar.position,
-        }
+    /// The ring an avatar sits in now, as its world centre and radius, while its group
+    /// has two or more seats.
+    fn ring_of(&self, index: usize) -> Option<(Vec3, f32)> {
+        let lead = self.avatars[index]
+            .group
+            .map(|g| g.lead)
+            .filter(|&lead| self.in_party(index, lead))
+            .unwrap_or(index);
+        let capacity = self.capacity(lead);
+        let author = &self.avatars[lead];
+        let slot = author.slot.as_ref().filter(|_| capacity > 1)?;
+        let radius = self.avatar_radius();
+        let centre = slot.ring_centre(capacity, radius);
+        let edge = centre + Vec2::X * slots::group_radius(capacity, radius);
+        Some((
+            slots::world(centre),
+            slots::world(edge).distance(slots::world(centre)),
+        ))
     }
 
-    /// World distance from an author's group centre to its ring for `commit`, or 0 for
-    /// an author alone.
-    fn beam_rim(&self, author: usize, commit: usize) -> f32 {
-        let avatar = &self.avatars[author];
-        let capacity = self.capacity(author);
-        match &avatar.slot {
-            Some(slot) if avatar.commit == commit && capacity > 1 => {
-                let centre = slot.ring_centre(capacity, self.avatar_radius());
-                let rim = centre
-                    + Vec2::X * slots::group_radius(capacity, self.avatar_radius());
-                slots::world(rim).distance(slots::world(centre))
-            }
-            _ => 0.0,
-        }
+    /// Where an avatar's beam towards `to` starts: the point of its ring nearest `to` as
+    /// seen from the camera, or the avatar itself outside a ring.
+    fn beam_start(&self, author: usize, to: Vec3) -> Vec3 {
+        let Some((centre, rim)) = self.ring_of(author) else {
+            return self.avatars[author].position;
+        };
+        let view = view_direction();
+        let across = to - centre;
+        centre + (across - view * across.dot(view)).normalize_or_zero() * rim
     }
 
     /// Seats in an author's group, 1 for an author alone.
@@ -2141,12 +2231,38 @@ impl State {
         self.capacities.get(lead).copied().unwrap_or(1)
     }
 
-    /// Display scale of each avatar: smaller while packed into a group.
+    /// Members of the event author's group who take no part in the event.
+    fn left_behind(&self, event: &Event) -> Vec<usize> {
+        let Some(&author) = event
+            .contributor
+            .as_ref()
+            .and_then(|contributor| self.authors.get(&contributor.key))
+        else {
+            return Vec::new();
+        };
+        (0..self.avatars.len())
+            .filter(|&i| {
+                i != author
+                    && self.in_party(i, author)
+                    && event.participants().all(|c| c.key != self.avatars[i].key)
+            })
+            .collect()
+    }
+
+    /// World distance within which an avatar walks to a new seat rather than jumping.
+    fn settle_reach(&self) -> f32 {
+        let span = Vec2::X * 4.0 * self.avatar_radius();
+        slots::world(span).distance(slots::world(Vec2::ZERO))
+    }
+
+    /// Display scale of each avatar: smaller while packed into a group or fading with one.
     pub(super) fn member_scales(&self) -> Vec<f32> {
         (0..self.avatars.len())
             .map(|index| {
                 let lead = self.avatars[index].group.map_or(index, |g| g.lead);
-                if self.capacity(lead) > 1 && self.in_party(index, lead) {
+                if self.avatars[index].dismissed
+                    || self.capacity(lead) > 1 && self.in_party(index, lead)
+                {
                     slots::MEMBER_SCALE
                 } else {
                     1.0
