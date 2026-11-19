@@ -265,8 +265,9 @@ pub(super) fn solve(domains: &[Vec<Candidate>]) -> Assignment {
             selected: Vec::new(),
             best: vec![0; component.len()],
             score: (usize::MAX, f32::INFINITY, f32::INFINITY),
-            remaining: 4096,
+            remaining: BUDGET,
             exhausted: false,
+            areas: None,
         };
         let clear = search.visit((0, 0.0, 0.0));
         for (&node, &choice) in component.iter().zip(&search.best) {
@@ -276,6 +277,72 @@ pub(super) fn solve(domains: &[Vec<Candidate>]) -> Assignment {
         result.clear &= clear;
     }
     result
+}
+
+/// Visits a component search may make.
+const BUDGET: usize = 4096;
+/// Visits a search makes before it computes every overlap it may need up front.
+const AREAS_AFTER: usize = 512;
+/// The most overlaps computed up front, which bounds their memory.
+const AREAS_LIMIT: usize = 1 << 20;
+
+/// Each choice's overlap with every choice of each earlier neighbour, by depth.
+struct Areas {
+    rows: Vec<Vec<f32>>,
+    /// Per depth, the length of each choice's run within its row.
+    widths: Vec<usize>,
+    /// Per depth, where each neighbour's choices start within a choice's row.
+    columns: Vec<Vec<usize>>,
+}
+
+impl Areas {
+    fn new(search: &Search<'_>) -> Option<Self> {
+        let domain = |depth: usize| &search.domains[search.component[depth]];
+        let columns: Vec<Vec<_>> = search
+            .neighbours
+            .iter()
+            .map(|earlier| {
+                earlier
+                    .iter()
+                    .scan(0, |start, &previous| {
+                        let column = *start;
+                        *start += domain(previous).len();
+                        Some(column)
+                    })
+                    .collect()
+            })
+            .collect();
+        let widths: Vec<usize> = search
+            .neighbours
+            .iter()
+            .map(|earlier| earlier.iter().map(|&previous| domain(previous).len()).sum())
+            .collect();
+        let total = (0..search.component.len())
+            .map(|depth| domain(depth).len() * widths[depth])
+            .sum::<usize>();
+        if total > AREAS_LIMIT {
+            return None;
+        }
+        let rows = (0..search.component.len())
+            .map(|depth| {
+                domain(depth)
+                    .iter()
+                    .flat_map(|candidate| {
+                        search.neighbours[depth].iter().flat_map(|&previous| {
+                            domain(previous)
+                                .iter()
+                                .map(|other| overlap(candidate.rect, other.rect))
+                        })
+                    })
+                    .collect()
+            })
+            .collect();
+        Some(Self {
+            rows,
+            widths,
+            columns,
+        })
+    }
 }
 
 struct Search<'a> {
@@ -288,9 +355,27 @@ struct Search<'a> {
     score: (usize, f32, f32),
     remaining: usize,
     exhausted: bool,
+    /// Filled once a search runs long enough to repay it.
+    areas: Option<Areas>,
 }
 
 impl Search<'_> {
+    fn area(&self, depth: usize, choice: usize, neighbour: usize) -> f32 {
+        let previous = self.neighbours[depth][neighbour];
+        let selected = self.selected[previous];
+        match &self.areas {
+            Some(areas) => {
+                areas.rows[depth][choice * areas.widths[depth]
+                    + areas.columns[depth][neighbour]
+                    + selected]
+            }
+            None => overlap(
+                self.domains[self.component[depth]][choice].rect,
+                self.domains[self.component[previous]][selected].rect,
+            ),
+        }
+    }
+
     fn visit(&mut self, score: (usize, f32, f32)) -> bool {
         if score.0 > self.score.0 || (score.0 == self.score.0 && score.1 > self.score.1)
         {
@@ -315,6 +400,9 @@ impl Search<'_> {
             return false;
         }
         self.remaining -= 1;
+        if self.remaining == BUDGET - AREAS_AFTER {
+            self.areas = Areas::new(self);
+        }
         let node = self.component[depth];
         for choice in 0..self.domains[node].len() {
             let candidate = self.domains[node][choice];
@@ -323,12 +411,8 @@ impl Search<'_> {
                 score.1 + candidate.text_area,
                 score.2 + candidate.soft,
             );
-            for &previous in &self.neighbours[depth] {
-                let area = overlap(
-                    candidate.rect,
-                    self.domains[self.component[previous]][self.selected[previous]]
-                        .rect,
-                );
+            for neighbour in 0..self.neighbours[depth].len() {
+                let area = self.area(depth, choice, neighbour);
                 next.0 += usize::from(area > 0.0);
                 next.1 += area;
             }

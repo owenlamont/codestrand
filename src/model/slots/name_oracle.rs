@@ -702,3 +702,31 @@ fn an_overlap_that_is_not_a_number_still_reaches_the_score() {
             .collect();
     assert_eq!(labels::solve(&domains).choices, solve(&domains).choices);
 }
+
+#[test]
+fn long_searches_match_the_reference_with_and_without_stored_areas() {
+    // Sixteen names of eight choices fit the stored areas; forty of forty fit none.
+    for (names, choices) in [(16_u8, 8_u8), (40, 40)] {
+        let domains: Vec<Vec<_>> = (0..names)
+            .map(|name| {
+                (0..choices)
+                    .map(|choice| Candidate {
+                        angle: f32::from(choice),
+                        rect: Rect::from_center_size(
+                            Vec2::new(f32::from(choice) * 0.3, f32::from(name % 3)),
+                            Vec2::splat(2.0),
+                        ),
+                        text_pairs: 0,
+                        text_area: 0.0,
+                        soft: f32::from(choice),
+                    })
+                    .collect()
+            })
+            .collect();
+        let expected = solve(&domains);
+        let actual = labels::solve(&domains);
+        assert!(expected.exhausted);
+        assert_eq!(actual.choices, expected.choices);
+        assert_eq!(actual.clear, expected.clear);
+    }
+}
