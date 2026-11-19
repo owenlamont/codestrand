@@ -475,6 +475,7 @@ impl<N: Network> Resolver<N> {
             };
             let email = email_key(&event.author.email);
             if contributor.accounts.github.is_some()
+                || matches!(contributor.accounts.avatar, Some(Avatar::Remote(_)))
                 || email.is_empty()
                 || self.found.contains_key(&email)
             {
@@ -1084,12 +1085,10 @@ mod tests {
         )];
         resolve(&mut local, &mut events, Some("owner/repo"));
         assert!(visible(&events[0]));
-        let mut source = with_avatar(
+        let source = with_avatar(
             "author@example.invalid",
             Avatar::Remote("https://example.invalid/portrait.png".to_owned()),
         );
-        source.contributor.as_mut().unwrap().accounts.github =
-            Some("explicit".to_owned());
         for response in [Response::Missing, Response::Found(png())] {
             let mut remote = resolver(None, true, vec![response]);
             resolve(&mut remote, &mut [source.clone()], Some("owner/repo"));
