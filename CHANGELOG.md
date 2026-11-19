@@ -47,7 +47,7 @@ All notable changes to Codestrand are documented here, following
   Atlas shows them bare and Forge sets them in their own colours on its plates.
   Neon, Phosphor and Atlas icons are smaller, so they sit inside their round rings.
   ([#195](https://github.com/owenlamont/codestrand/pull/195),
-  [#PRNUM](https://github.com/owenlamont/codestrand/pull/PRNUM))
+  [#204](https://github.com/owenlamont/codestrand/pull/204))
 - A late `--start-date` imports only the requested range: on a full Cargo clone, the
   last seven weeks imported in 0.5 s instead of about 17 s. Playback opens on the tree
   of the commit before the range, so first frames differ.
