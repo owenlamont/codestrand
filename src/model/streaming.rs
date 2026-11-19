@@ -219,10 +219,12 @@ impl Simulation {
     pub(crate) fn planning_complete(&self) -> bool {
         self.ready_end.as_ref().is_none_or(|ready| ready.complete)
     }
+    /// Whether this packet can draw `frame`. An incomplete packet's last tick waits
+    /// for the next one, which may end playback there.
     pub(crate) fn frame_ready(&self, frame: u32, fps: u16) -> bool {
         let tick = super::Schedule::frame_tick(frame, fps);
         self.ready_end.as_ref().is_none_or(|ready| {
-            tick >= self.initial.tick && (tick <= ready.end || ready.complete)
+            tick >= self.initial.tick && (tick < ready.end || ready.complete)
         })
     }
     pub(crate) fn prepare_frame(
@@ -270,12 +272,12 @@ impl Simulation {
             })
     }
 
-    /// Whole playback length, exact once planning completes. Until then, the
-    /// unpadded playback plus the walk padding planned so far, scaled from the
+    /// The tick whole playback ends on, exact once planning completes. Until then,
+    /// the unpadded playback plus the walk padding planned so far, scaled from the
     /// commits planned to every commit.
-    pub(crate) fn projected_duration(&self) -> Time {
+    pub(crate) fn projected_end_tick(&self) -> u64 {
         let Some(ready) = self.ready_end.filter(|ready| !ready.complete) else {
-            return self.duration();
+            return self.end_tick();
         };
         let end = ready.end;
         let padding = end.saturating_sub(self.clock.rows(end).1);
@@ -286,7 +288,7 @@ impl Simulation {
             .checked_div(planned)
             .unwrap_or(padding);
         let unpadded = ready.unpadded.ticks(true);
-        super::tick_time(unpadded.saturating_add(projected).max(end))
+        unpadded.saturating_add(projected).max(end)
     }
 }
 
@@ -578,6 +580,30 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_window_ending_on_the_last_tick_leaves_that_frame_to_the_last_packet() {
+        let mut events = vec![crate::timeline::synthetic().remove(0)];
+        crate::repositories::namespace(&mut events, 0);
+        let mut sim = Simulation::with_repositories(
+            events,
+            &Options {
+                travel_window_seconds: Some(2.99),
+                ..Options::default()
+            },
+            &Theme::neon(),
+            &Mappings::default(),
+            &["one".into()],
+        );
+        sim.prepare_frame(0, 60, true).unwrap();
+        let ready = sim.ready_end.unwrap();
+        let last = u32::try_from(ready.end).unwrap();
+        assert!(!ready.complete);
+        assert!(!sim.frame_ready(last, 60));
+        sim.prepare_frame(last, 60, true).unwrap();
+        assert!(sim.planning_complete());
+        assert_eq!(sim.frames(60).unwrap(), last);
+    }
+
+    #[test]
     fn projected_length_scales_planned_waits_and_is_exact_once_planned() {
         let whole = fixture_with(true, None, super::super::TravelCap::None);
         let mut stream = fixture_with(false, None, super::super::TravelCap::None);
@@ -590,22 +616,22 @@ pub(crate) mod tests {
             if windows.last().map(|&(planned, _)| planned)
                 != Some(stream.planned_history())
             {
-                let unpadded = stream.ready_end.unwrap().unpadded;
-                let remaining = unpadded.since(stream.planned_history());
-                let unscaled = stream.duration().after(remaining);
+                let ready = stream.ready_end.unwrap();
+                let remaining =
+                    ready.unpadded.ticks(true) - stream.clock.rows(ready.end).1;
+                let unscaled = ready.end + remaining;
                 windows.push((
                     stream.planned_history(),
-                    stream.projected_duration() > unscaled,
+                    stream.projected_end_tick() > unscaled,
                 ));
-                assert!(stream.projected_duration() >= unscaled, "frame {frame}");
+                assert!(stream.projected_end_tick() >= unscaled, "frame {frame}");
             }
         }
         assert!(windows.len() > 1, "fixture plans several windows");
         assert!(windows.iter().any(|&(_, scaled)| scaled), "{windows:?}");
-        assert_eq!(
-            stream.projected_duration(),
-            super::super::tick_time(whole.duration().ticks(true))
-        );
+        assert_eq!(stream.projected_end_tick(), whole.end_tick());
+        // The eager f32 end, 12.583334 s, sits just above tick 755.
+        assert_eq!(stream.frames(240).unwrap(), whole.frames(240).unwrap());
         let unpadded = stream.ready_end.unwrap().unpadded;
         assert!(whole.duration() > unpadded, "walk waits pad the fixture");
     }

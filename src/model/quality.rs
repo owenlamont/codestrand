@@ -256,7 +256,7 @@ pub(crate) fn run(
     let mut frame = 0;
     loop {
         simulation.prepare_frame(frame, 60, true)?;
-        frames = super::frames_for(simulation.duration(), 60)?;
+        frames = simulation.frames(60)?;
         if simulation.planning_complete() && frame > frames {
             break;
         }
