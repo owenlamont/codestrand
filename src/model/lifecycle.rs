@@ -354,6 +354,25 @@ mod tests {
             plan(&events, &selected, &archived, 0..1).1,
             [Time::INFINITY]
         );
+        let later_unread = super::super::Options {
+            unread: super::super::Unread {
+                before: 0,
+                after: vec![1],
+            },
+            ..archived
+        };
+        assert_eq!(
+            plan(&events[..1], &selected, &later_unread, 0..1).1,
+            [Time::INFINITY]
+        );
+        let ended_after_unread = super::super::Options {
+            repository_ends: vec![Some(200 * 86_400)],
+            ..later_unread
+        };
+        assert_eq!(
+            plan(&events[..1], &selected, &ended_after_unread, 0..1).1,
+            [Time::INFINITY]
+        );
     }
 
     #[test]

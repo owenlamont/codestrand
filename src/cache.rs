@@ -680,6 +680,116 @@ mod tests {
         }
     }
 
+    fn preview(fixtures: &[&tempfile::TempDir], dates: &[&str]) -> crate::Source {
+        use clap::Parser;
+
+        let mut args = vec!["codestrand", "preview"];
+        args.extend(dates);
+        for repo in fixtures {
+            args.extend(["--repository", repo.path().to_str().unwrap()]);
+        }
+        let Some(crate::Command::Preview { source, .. }) =
+            crate::Cli::parse_from(args).command
+        else {
+            panic!("preview")
+        };
+        source
+    }
+
+    fn merged_whole(fixtures: &[&tempfile::TempDir]) -> Vec<timeline::Event> {
+        let mut whole: Vec<_> = fixtures
+            .iter()
+            .map(|repo| load(repo.path(), "HEAD", None).unwrap())
+            .collect();
+        if whole.len() > 1 {
+            for (index, events) in whole.iter_mut().enumerate() {
+                crate::repositories::namespace(events, index);
+            }
+        }
+        crate::repositories::merge(whole)
+    }
+
+    fn ends_before(events: &[timeline::Event], repository: usize, end: usize) -> bool {
+        events
+            .iter()
+            .rposition(|event| event.repository == repository)
+            .is_some_and(|last| last < end)
+    }
+
+    /// Imports `source`'s range twice, the second time from the cache, and compares
+    /// commit numbers and repository endings with the whole history's.
+    fn assert_numbered_as_whole(source: &crate::Source, whole: &[timeline::Event]) {
+        let repositories =
+            crate::repositories::inputs(&source.repository, None).unwrap();
+        let selected = source.resolve_range(&crate::seconds(whole)).unwrap();
+        let cache = crate::cache::test_directory().unwrap();
+        for _ in 0..2 {
+            let (events, range, unread) = source
+                .events(
+                    Some(cache.path()),
+                    &repositories,
+                    &crate::progress::Progress::default(),
+                )
+                .unwrap();
+            let after: usize = unread.after.iter().sum();
+            assert_eq!(events[range.clone()], whole[selected.clone()]);
+            assert_eq!(range.start + unread.before, selected.start);
+            assert_eq!(events.len() + unread.before + after, whole.len());
+            assert_eq!(
+                range.end == events.len() && after == 0,
+                selected.end == whole.len()
+            );
+            for (repository, &unread_after) in unread.after.iter().enumerate() {
+                assert_eq!(
+                    unread_after == 0 && ends_before(&events, repository, range.end),
+                    ends_before(whole, repository, selected.end),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn date_ranges_number_and_end_as_the_whole_history_does() {
+        let early = empty_fixture();
+        fs::write(early.path().join("early.txt"), "early\n").unwrap();
+        dated_commit(early.path(), "2026-05-01T00:00:00Z", &["add", "."]);
+        let fixtures = [dated_fixture("one"), dated_fixture("two"), early];
+        for chosen in [vec![0], vec![0, 1], vec![0, 2]] {
+            let fixtures: Vec<_> =
+                chosen.iter().map(|&index| &fixtures[index]).collect();
+            let whole = merged_whole(&fixtures);
+            for dates in [
+                &["--end-date", "2026-05-04"][..],
+                &["--start-date", "2026-05-03", "--end-date", "2026-05-04"],
+                &["--start-date", "2026-05-02", "--end-date", "2026-05-03"],
+                &["--start-date", "2026-05-03"],
+            ] {
+                assert_numbered_as_whole(&preview(&fixtures, dates), &whole);
+            }
+        }
+    }
+
+    #[test]
+    fn an_end_date_is_served_from_a_cached_whole_history() {
+        let repo = dated_fixture("one");
+        let cache = crate::cache::test_directory().unwrap();
+        let whole = load(repo.path(), "HEAD", Some(cache.path())).unwrap();
+        remove_blob(repo.path());
+        let source = preview(&[&repo], &["--end-date", "2026-05-04"]);
+        let repositories =
+            crate::repositories::inputs(&source.repository, None).unwrap();
+        let (events, range, unread) = source
+            .events(
+                Some(cache.path()),
+                &repositories,
+                &crate::progress::Progress::default(),
+            )
+            .unwrap();
+        assert_eq!(events, whole[..whole.len() - 1]);
+        assert_eq!(range, 0..events.len());
+        assert_eq!(unread.after, [1]);
+    }
+
     fn entry(root: &Path, path: &Path) -> PathBuf {
         let (repo, _) = history::resolve(path, "HEAD").expect("fixture resolves");
         entry_path(root, &repo).expect("fixture path is canonical")

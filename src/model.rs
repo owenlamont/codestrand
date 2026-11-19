@@ -3511,6 +3511,26 @@ mod tests {
         assert_eq!(sim.events[0].author.name, author);
     }
 
+    #[test]
+    fn unread_commits_keep_whole_history_numbers() {
+        let sim = Simulation::new(
+            timeline::synthetic(),
+            &Options {
+                start: 1,
+                commits: 1,
+                unread: Unread {
+                    before: 5,
+                    after: vec![3],
+                },
+                ..Options::default()
+            },
+            &Theme::neon(),
+            &Mappings::default(),
+        );
+        assert_eq!(sim.commit(), 6);
+        assert_eq!(sim.total(), timeline::synthetic().len() + 8);
+    }
+
     fn assert_clearance(sim: &Simulation) {
         nitpicks::assert_labels_and_beams(sim);
         assert_eq!(sim.view(), (Vec3::ZERO, framing::DISTANCE));
