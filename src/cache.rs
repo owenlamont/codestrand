@@ -229,8 +229,7 @@ pub(super) fn load_whole(
 }
 
 /// Loads the events of the links in `range`, led by a boundary event when it skips any;
-/// `None` loads the whole history without scanning first. A cached range that reaches
-/// further serves a shorter one.
+/// `None` loads the whole history without scanning first.
 pub(super) fn load_range(
     repo: &gix::Repository,
     tip: gix::ObjectId,
@@ -244,19 +243,11 @@ pub(super) fn load_range(
         .filter(|_| repo.objects.store_ref().replacements().next().is_none())
         .and_then(|root| entry_path(root, repo));
     let tip_text = tip.to_string();
-    if let Some(snapshot) = entry
+    if let Some(events) = entry
         .as_deref()
-        .and_then(|path| read(path, &tip_text, skip))
+        .and_then(|path| read(path, &tip_text, skip, end))
     {
-        match (range, end, snapshot.end) {
-            (_, None, None) => return Ok(snapshot.events),
-            (Some((links, range)), Some(end), stored)
-                if stored.is_none_or(|stored| stored >= end) =>
-            {
-                return Ok(played(snapshot.events, &links[range.clone()], skip > 0));
-            }
-            _ => {}
-        }
+        return Ok(events);
     }
     let scanned;
     let links = if let Some((links, range)) = range {
@@ -287,27 +278,12 @@ fn entry_path(root: &Path, repo: &gix::Repository) -> Option<PathBuf> {
     Some(root.join(namespace).join("timeline.json"))
 }
 
-/// Keeps the boundary and the events whose commits are, in order, among `links`.
-fn played(
-    mut events: Vec<timeline::Event>,
-    links: &[history::Link],
-    boundary: bool,
-) -> Vec<timeline::Event> {
-    let mut ids = links.iter().map(|link| link.id);
-    let kept = usize::from(boundary)
-        + events
-            .iter()
-            .skip(usize::from(boundary))
-            .take_while(|event| {
-                gix::ObjectId::from_hex(event.commit.as_bytes())
-                    .is_ok_and(|commit| ids.any(|id| id == commit))
-            })
-            .count();
-    events.truncate(kept);
-    events
-}
-
-fn read(path: &Path, tip: &str, skip: usize) -> Option<Snapshot> {
+fn read(
+    path: &Path,
+    tip: &str,
+    skip: usize,
+    end: Option<usize>,
+) -> Option<Vec<timeline::Event>> {
     let file = ConfinedFile::at(path, false).ok()?.open().ok()?;
     if file.metadata().ok()?.len() > MAX_SNAPSHOT_BYTES {
         return None;
@@ -321,8 +297,9 @@ fn read(path: &Path, tip: &str, skip: usize) -> Option<Snapshot> {
     }
     let snapshot: Snapshot = serde_json::from_slice(&bytes).ok()?;
     (valid_snapshot(&snapshot, tip, skip)
+        && snapshot.end == end
         && serde_json::to_vec(&snapshot).ok()? == bytes)
-        .then_some(snapshot)
+        .then_some(snapshot.events)
 }
 
 fn store(path: &Path, snapshot: &Snapshot) -> Option<()> {
@@ -468,7 +445,7 @@ mod tests {
         assert!(valid_snapshot(&snapshot, &snapshot.tip, 0));
         store(&path, &snapshot).unwrap();
         assert_eq!(
-            read(&path, &snapshot.tip, 0).unwrap().events,
+            read(&path, &snapshot.tip, 0, None).unwrap(),
             snapshot.events
         );
     }
@@ -770,24 +747,23 @@ mod tests {
     }
 
     #[test]
-    fn an_end_date_is_served_from_a_cached_whole_history() {
+    fn a_cached_range_serves_only_its_own_end() {
         let repo = dated_fixture("one");
         let cache = crate::cache::test_directory().unwrap();
-        let whole = load(repo.path(), "HEAD", Some(cache.path())).unwrap();
-        remove_blob(repo.path());
         let source = preview(&[&repo], &["--end-date", "2026-05-04"]);
         let repositories =
             crate::repositories::inputs(&source.repository, None).unwrap();
-        let (events, range, unread) = source
-            .events(
+        let ranged = || {
+            source.events(
                 Some(cache.path()),
                 &repositories,
                 &crate::progress::Progress::default(),
             )
-            .unwrap();
-        assert_eq!(events, whole[..whole.len() - 1]);
-        assert_eq!(range, 0..events.len());
-        assert_eq!(unread.after, [1]);
+        };
+        let (cold, ..) = ranged().unwrap();
+        remove_blob(repo.path());
+        assert_eq!(ranged().unwrap().0, cold);
+        assert!(load(repo.path(), "HEAD", Some(cache.path())).is_err());
     }
 
     fn entry(root: &Path, path: &Path) -> PathBuf {

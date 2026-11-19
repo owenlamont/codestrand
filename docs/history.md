@@ -74,10 +74,10 @@ hostile inputs bounded; a later start reduces the history they are charged again
 Repository playback saves the latest imported timeline, diff counts and bounded
 line samples under the platform user cache directory, inside `codestrand/`.
 Linked worktrees share a cache
-namespace based on the canonical common Git directory. A different resolved tip or
-start commit, or a later end commit, replaces the saved timeline after a complete
-import. An earlier end date or new pacing reuses the saved timeline. Contributor
-mapping edits take effect on cache hits.
+namespace based on the canonical common Git directory. A different resolved tip,
+start commit or end commit replaces the saved timeline after a complete import.
+Changing pacing reuses the imported timeline. Contributor mapping edits take effect on
+cache hits.
 
 Cache errors regenerate data without blocking playback. To bypass history and
 avatar cache reads and writes:
