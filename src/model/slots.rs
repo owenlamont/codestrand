@@ -337,7 +337,7 @@ impl Simulation {
         self.trace
             .count_replay(u64::from(frames).saturating_sub(self.state.tick));
         for _ in self.state.tick..u64::from(frames) {
-            self.tick_local_layout();
+            self.tick_local_layout(crate::layout::FileMotion::Advance);
             let now = super::tick_time(self.state.tick);
             self.state.pulses.retain(|p| now < p.end);
             if self.state.pulses.is_empty() {

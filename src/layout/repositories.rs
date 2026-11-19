@@ -277,6 +277,7 @@ impl Layout {
         regions: Vec<RepositoryRegion>,
         offsets: &[Vec2],
         scales: &[f32],
+        files: super::FileMotion,
     ) {
         self.remove_offsets();
         for dir in &mut self.dirs {
@@ -289,15 +290,17 @@ impl Layout {
             };
             dir.position = position * dir.scale + offsets[dir.repository];
         }
-        for file in self.files.values_mut() {
-            file.local_position = file.position;
-            let dir = &self.dirs[file.dir];
-            let position = if regions[dir.repository].rotated {
-                file.position.perp()
-            } else {
-                file.position
-            };
-            file.position = position * dir.scale + offsets[dir.repository];
+        if files == super::FileMotion::Advance {
+            for file in self.files.values_mut() {
+                file.local_position = file.position;
+                let dir = &self.dirs[file.dir];
+                let position = if regions[dir.repository].rotated {
+                    file.position.perp()
+                } else {
+                    file.position
+                };
+                file.position = position * dir.scale + offsets[dir.repository];
+            }
         }
         self.repositories = regions;
         self.placed = true;
@@ -370,11 +373,19 @@ mod tests {
         let placed = simulation.layout().clone();
         assert!(placed.placed);
         let mut fused = placed.clone();
-        fused.begin_tick(crate::model::tick_seconds(), 3.0);
+        fused.begin_tick(
+            crate::model::tick_seconds(),
+            3.0,
+            crate::layout::FileMotion::Advance,
+        );
         let mut separate = placed.clone();
         separate.remove_offsets();
         assert_ne!(separate.exact_state(), placed.exact_state());
-        separate.begin_tick(crate::model::tick_seconds(), 3.0);
+        separate.begin_tick(
+            crate::model::tick_seconds(),
+            3.0,
+            crate::layout::FileMotion::Advance,
+        );
         assert_eq!(fused.exact_state(), separate.exact_state());
         assert!(!fused.placed);
     }

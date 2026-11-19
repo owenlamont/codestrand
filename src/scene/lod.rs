@@ -259,7 +259,7 @@ mod tests {
         assert_eq!(lod.detail, vec![1.0; lod.detail.len()]);
         layout.heat(id, 1.0);
         for _ in 0..200 {
-            layout.begin_tick(1.0 / 60.0, 3.0);
+            layout.begin_tick(1.0 / 60.0, 3.0, crate::layout::FileMotion::Advance);
         }
         assert!(layout.file(id).unwrap().heat > 0.2);
         lod.sample(&layout, 3.64, view(10000.0));
@@ -287,7 +287,7 @@ mod tests {
                 _ => layout.touch("a/b/one.rs", 0),
             };
             for tick in 1_u16..=10 {
-                layout.begin_tick(0.25, 3.0);
+                layout.begin_tick(0.25, 3.0, crate::layout::FileMotion::Advance);
                 layout.step(0.25);
                 let seconds = f32::from(tick) * 0.25;
                 lod.sample(&layout, seconds, view(10000.0));
@@ -300,7 +300,7 @@ mod tests {
                     assert!(layout.file(id).is_none());
                 }
             }
-            layout.begin_tick(0.5, 3.0);
+            layout.begin_tick(0.5, 3.0, crate::layout::FileMotion::Advance);
             layout.step(0.5);
             lod.sample(&layout, 3.0, view(10000.0));
             assert!(lod.collapsed[1]);

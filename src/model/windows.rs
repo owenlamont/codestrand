@@ -378,6 +378,8 @@ impl Simulation {
             stream: None,
             ready_end: Some(ready),
             title_start: self.title_start,
+            #[cfg(test)]
+            travel_file_motion: self.travel_file_motion,
         }
     }
 
@@ -551,9 +553,11 @@ mod tests {
                 window.counter(&capture, Counter::StillDirectoryTicks)
                     <= window.counter(&capture, Counter::DirectoryTicks)
             );
+            assert_eq!(window.counter(&capture, Counter::FileTicks), 0);
+            let checkpoint = [Phase::CheckpointReplay];
             assert!(
-                window.counter(&capture, Counter::SteadyFileTicks)
-                    <= window.counter(&capture, Counter::FileTicks)
+                window.counter(&checkpoint, Counter::SteadyFileTicks)
+                    <= window.counter(&checkpoint, Counter::FileTicks)
             );
             replayed +=
                 window.counter(&[Phase::CheckpointReplay], Counter::TicksReplayed);

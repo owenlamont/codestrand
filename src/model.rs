@@ -8,7 +8,7 @@ use bevy::math::{Vec2, Vec3};
 
 use crate::{
     contributors::{Contributor, Key, Mappings},
-    layout::{Layout, StepPart},
+    layout::{FileMotion, Layout, StepPart},
     progress::{Progress, Stage},
     theme::{BeamStyle, Geometry, Theme},
     timeline::{Event, Kind},
@@ -513,6 +513,9 @@ pub(super) struct Simulation {
     stream: Option<std::sync::Arc<std::sync::Mutex<windows::Stream>>>,
     ready_end: Option<streaming::Ready>,
     title_start: usize,
+    /// Lets a test advance files in travel replays to compare against holding them.
+    #[cfg(test)]
+    travel_file_motion: FileMotion,
 }
 
 /// What a tick places beyond layout, slots and avatars.
@@ -964,6 +967,8 @@ impl Simulation {
             stream: None,
             ready_end: None,
             title_start: 0,
+            #[cfg(test)]
+            travel_file_motion: FileMotion::Hold,
         };
         let snapshots = simulation.plan_repositories(prior_active, options)?;
         if options.travel_window_seconds.is_none() {
@@ -1089,7 +1094,12 @@ impl Simulation {
         self.state.detail = self.packing.detail();
         self.state.lettering = self.packing.lettering();
         if let Some((regions, offsets, scales)) = self.packing.sample(0) {
-            self.state.layout.place_regions(regions, &offsets, &scales);
+            self.state.layout.place_regions(
+                regions,
+                &offsets,
+                &scales,
+                FileMotion::Advance,
+            );
         }
         self.initial = self.state.0.clone();
         self.count_tilings();
@@ -1235,18 +1245,31 @@ impl Simulation {
         )
     }
 
+    fn file_motion(&self) -> FileMotion {
+        if self.visuals != Visuals::None {
+            return FileMotion::Advance;
+        }
+        #[cfg(test)]
+        return self.travel_file_motion;
+        #[cfg(not(test))]
+        FileMotion::Hold
+    }
+
     pub(crate) fn tick_layout(&mut self) {
         self.tick_times.laps.begin(&self.trace);
         let placement = self.packing_sample(self.state.tick + 1, None);
         self.tick_times.laps.end(Phase::TickPacking);
-        self.tick_local_layout();
+        let files = self.file_motion();
+        self.tick_local_layout(files);
         if let Some((regions, offsets, scales)) = placement {
-            self.state.layout.place_regions(regions, &offsets, &scales);
+            self.state
+                .layout
+                .place_regions(regions, &offsets, &scales, files);
         }
         self.tick_times.laps.end(Phase::TickPlace);
     }
 
-    fn tick_local_layout(&mut self) {
+    fn tick_local_layout(&mut self, files: FileMotion) {
         self.tick_times.laps.begin(&self.trace);
         let canonical = self.state.tick + 1;
         let plan_time = self
@@ -1256,7 +1279,9 @@ impl Simulation {
         let state = &mut *self.state;
         state.tick = canonical;
 
-        state.layout.begin_tick(tick_seconds(), self.heat_half_life);
+        state
+            .layout
+            .begin_tick(tick_seconds(), self.heat_half_life, files);
         self.tick_times.laps.end(Phase::TickHeat);
         while let Some(event) = self.events.get(state.next_event) {
             let Some(start) = self.schedule.start(state.next_event, canonical) else {
@@ -1284,6 +1309,7 @@ impl Simulation {
         let laps = &mut self.tick_times.laps;
         state.layout.step_observed(
             dt,
+            files,
             self.trace.on().then_some(&mut self.tick_times.counts),
             |part| {
                 laps.end(match part {
@@ -3172,7 +3198,7 @@ mod tests {
         let id = apply(&mut layout, &change, 0);
         let heat = layout.file(id).unwrap().heat;
         assert_eq!(layout.file(id).unwrap().activity, 1.0);
-        layout.begin_tick(6.0, 86400.0);
+        layout.begin_tick(6.0, 86400.0, FileMotion::Advance);
         assert!(layout.file(id).unwrap().activity < 0.03);
         assert!(layout.file(id).unwrap().heat > heat * 0.99);
         change.kind = Kind::Deleted;
@@ -3180,7 +3206,7 @@ mod tests {
         apply(&mut layout, &change, 0);
         assert_eq!(layout.file(id).unwrap().heat, before);
         assert_eq!(layout.file(id).unwrap().activity, 1.0);
-        layout.begin_tick(1.0, 0.01);
+        layout.begin_tick(1.0, 0.01, FileMotion::Advance);
         assert_eq!(layout.file(id).unwrap().heat, 0.0);
         assert!(layout.file(id).unwrap().activity > 0.5);
         layout.settle(0, 0.0);

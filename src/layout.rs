@@ -179,6 +179,14 @@ pub(crate) enum StepPart {
     Files,
 }
 
+/// Whether a tick advances each file's position, heat and activity. Travel replays hold
+/// them: they read only repository tiles, directories and file existence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FileMotion {
+    Advance,
+    Hold,
+}
+
 /// File and directory visits by layout steps, and how many of them could change nothing.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct StepCounts {
@@ -195,7 +203,7 @@ pub(crate) struct StepCounts {
 }
 
 impl StepCounts {
-    fn count(&mut self, layout: &Layout, before: &[(Vec2, f32)]) {
+    fn count(&mut self, layout: &Layout, before: &[(Vec2, f32)], files: FileMotion) {
         self.directories += layout.dirs.len();
         self.still_directories += layout
             .dirs
@@ -203,6 +211,9 @@ impl StepCounts {
             .zip(before)
             .filter(|(dir, before)| (dir.position, dir.reserve) == **before)
             .count();
+        if files == FileMotion::Hold {
+            return;
+        }
         for file in layout.files.values() {
             self.files += 1;
             self.steady_files +=
@@ -422,13 +433,14 @@ impl Layout {
     }
 
     pub(super) fn step(&mut self, dt: f32) {
-        self.step_observed(dt, None, |_| ());
+        self.step_observed(dt, FileMotion::Advance, None, |_| ());
     }
 
     /// One step, calling `done` after each part and counting idle work into `counts`.
     pub(super) fn step_observed(
         &mut self,
         dt: f32,
+        files: FileMotion,
         mut counts: Option<&mut StepCounts>,
         mut done: impl FnMut(StepPart),
     ) {
@@ -444,9 +456,13 @@ impl Layout {
             .then(|| self.dirs.iter().map(|d| (d.position, d.reserve)).collect());
         self.relax(dt);
         if let (Some(counts), Some(before)) = (&mut counts, before) {
-            counts.count(self, &before);
+            counts.count(self, &before, files);
         }
         done(StepPart::Relax);
+        if files == FileMotion::Hold {
+            done(StepPart::Files);
+            return;
+        }
         for file in self.files.values_mut() {
             let target = self.dirs[file.dir].position + file.slot_offset;
             let desired =
@@ -464,7 +480,7 @@ impl Layout {
     }
 
     /// Undoes region placement, if any, and cools heat, visiting each file once.
-    pub(super) fn begin_tick(&mut self, dt: f32, half_life: f32) {
+    pub(super) fn begin_tick(&mut self, dt: f32, half_life: f32, files: FileMotion) {
         let placed = std::mem::take(&mut self.placed);
         for dir in &mut self.dirs {
             if placed {
@@ -472,6 +488,9 @@ impl Layout {
                 dir.scale = 1.0;
             }
             dir.touch_age += dt;
+        }
+        if files == FileMotion::Hold {
+            return;
         }
         let decay = (-dt / half_life).exp2();
         for file in self.files.values_mut() {

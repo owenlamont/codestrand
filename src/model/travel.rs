@@ -57,7 +57,7 @@ pub(super) struct Service {
     dock: slots::Dock,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct Capture {
     begin: u64,
     frozen: usize,
@@ -1019,6 +1019,31 @@ impl Plan {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::layout::FileMotion;
+
+    #[test]
+    fn holding_files_changes_no_capture_or_reservation() {
+        let (events, labels) = super::super::tests::short_repository_history(6);
+        let mut sim = Simulation::with_repositories(
+            events,
+            &super::super::Options {
+                travel_cap: super::super::TravelCap::None,
+                ..super::super::Options::default()
+            },
+            &crate::theme::Theme::neon(),
+            &crate::contributors::Mappings::default(),
+            &labels,
+        );
+        let planned = sim.travel.clone();
+        let [held, advanced] = [FileMotion::Hold, FileMotion::Advance].map(|files| {
+            sim.travel_file_motion = files;
+            sim.travel = planned.clone();
+            let captured = format!("{:?}", capture(&mut sim));
+            let conflicts = sim.reserve_service_slots();
+            (captured, conflicts, sim.travel.round_state(None))
+        });
+        assert_eq!(held, advanced);
+    }
 
     #[test]
     fn near_coincident_gutters_keep_route_segments_axis_aligned() {
