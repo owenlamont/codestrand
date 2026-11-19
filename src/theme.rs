@@ -335,6 +335,25 @@ impl Theme {
         transform
     }
 
+    /// Bare icons sit in round rings; framed icons in square ones.
+    pub(super) fn round_rings(&self) -> bool {
+        self.glyph_style == GlyphStyle::Language
+    }
+
+    /// Texture settings that pad a bare icon until its corners clear the inner edge of
+    /// its round ring by one ring width.
+    pub(super) fn raster_settings(&self) -> GlyphTexture {
+        let mut settings = self.glyph_texture;
+        if self.round_rings() {
+            let ring = self.membership_radii;
+            let corner = (2.0 * ring.x - ring.y) / std::f32::consts::SQRT_2;
+            let quad = self.file_glyph_transform.scale;
+            let half = 0.5 * quad.x.min(quad.y);
+            settings.padding = settings.padding.max(0.5 - 0.5 * corner / half);
+        }
+        settings
+    }
+
     pub(super) fn geometry(&self) -> Geometry {
         let pieces = [
             (self.glyph_transform(), Vec3::new(0.5, 0.5, 0.0)),
@@ -516,6 +535,27 @@ mod tests {
         assert_eq!(phosphor.floor.base_color, Color::BLACK);
         assert!(phosphor.floor.unlit);
         assert_eq!(phosphor.glyph_ink, Some([57, 255, 106]));
+    }
+
+    #[test]
+    fn icon_corners_clear_round_rings_by_a_ring_width() {
+        let round = ThemeName::ALL.map(|name| name.build().round_rings());
+        assert_eq!(round, [true, true, false, false, false, true, false]);
+        for name in ThemeName::ALL {
+            let theme = name.build();
+            let art = theme.glyph_transform().scale.truncate()
+                * (0.5 - theme.raster_settings().padding);
+            let ring = theme.membership_radii;
+            if theme.round_rings() {
+                assert!(art.length() <= ring.x - (ring.y - ring.x) + 0.000_001);
+            } else {
+                assert_eq!(
+                    theme.raster_settings().padding,
+                    theme.glyph_texture.padding
+                );
+            }
+            assert_eq!(theme.glyph_transform().scale, Vec3::new(0.48, 0.48, 1.0));
+        }
     }
 
     #[test]

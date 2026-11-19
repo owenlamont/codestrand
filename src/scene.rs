@@ -1289,7 +1289,7 @@ fn recolor_text(world: &mut World, theme: &Theme) {
 }
 
 fn themed_glyph_image(svg: &str, theme: &Theme) -> Image {
-    let mut image = glyph_image(svg, theme.glyph_texture);
+    let mut image = glyph_image(svg, theme.raster_settings());
     if let Some(ink) = theme.glyph_ink {
         let pixels = image.data.as_mut().expect("glyph pixels");
         let mut offset = 0;
