@@ -206,8 +206,8 @@ including reflog and message searches, are rejected rather than delegated to unb
 reference traversal. Revision strings are limited to 4,096 bytes and navigation to
 1,000,000 steps, with the existing object-size and work budgets applied before loading.
 Annotated tags and symbolic references have a 64-hop limit and cycle detection.
-Cyclic or excessive chains produce an error. Import reads no `.gitattributes`,
-index or worktree, so `HEAD` matters only when it is the revision. Import uses no
+Cyclic or excessive chains produce an error. Diff setup does not resolve `HEAD` or
+read the index, worktree or `.gitattributes`. Import uses no
 wall-clock deadline.
 
 ## Analysis limits

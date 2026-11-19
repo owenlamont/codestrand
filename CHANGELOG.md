@@ -65,8 +65,8 @@ All notable changes to Codestrand are documented here, following
 
 - A date range numbers commits against the whole history again instead of from 1.
   ([#199](https://github.com/owenlamont/codestrand/pull/199))
-- Import no longer reads `HEAD`, the index or `.gitattributes` when `--revision` names
-  another commit, so a broken `HEAD` cannot stop it.
+- Diff setup no longer resolves `HEAD` or reads the index or `.gitattributes`, so a
+  cyclic `HEAD` no longer stops importing another `--revision`.
   ([#199](https://github.com/owenlamont/codestrand/pull/199))
 - `codestrand preview` outside a repository exits with "pass --repository PATH"
   before opening a window.
