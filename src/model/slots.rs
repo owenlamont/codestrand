@@ -818,12 +818,23 @@ impl State {
     /// Where each avatar's name attaches: the avatar, or for a group's member a point
     /// one avatar radius inside the group's ring towards that member, so its name sits
     /// just outside the ring beside it.
+    /// Where an avatar's name is anchored: the seat it is walking to, so the name holds
+    /// still while the body steps under it.
+    fn standing(&self, index: usize) -> Vec3 {
+        let avatar = &self.avatars[index];
+        avatar
+            .slot
+            .as_ref()
+            .filter(|_| avatar.settle.is_some())
+            .map_or(avatar.position, Placement::world)
+    }
     fn name_bodies(&self) -> Vec<Option<Vec2>> {
         let radius = self.avatar_radius();
         let capacities = &self.capacities;
         (0..self.avatars.len())
             .map(|index| {
                 let avatar = &self.avatars[index];
+                let standing = self.standing(index);
                 let lead = avatar.group.map_or(index, |g| g.lead);
                 let anchor = avatar
                     .slot
@@ -839,14 +850,12 @@ impl State {
                             + ring_offset(capacity, slot.dock.edge, radius);
                         let reach = group_radius(capacity, radius) - radius;
                         let toward = (slot.point - centre).normalize_or_zero();
-                        avatar.position + world(centre + toward * reach)
-                            - world(slot.point)
+                        standing + world(centre + toward * reach) - world(slot.point)
                     });
-                self.screen(anchor.unwrap_or(avatar.position))
+                self.screen(anchor.unwrap_or(standing))
             })
             .collect()
     }
-    /// For each avatar in a ring, the screen angle from the ring's centre through it.
     /// For each avatar in a ring, the screen angle from the ring's centre through it and
     /// the ring's screen disc, which its name keeps off.
     fn name_preferences(&self) -> Vec<Option<(f32, Rect)>> {
@@ -855,7 +864,7 @@ impl State {
                 let (centre, rim) = self.ring_of(index)?;
                 let from = self.screen(centre)?;
                 let edge = self.screen(centre + Vec3::X * rim)?;
-                let to = self.screen(self.avatars[index].position)?;
+                let to = self.screen(self.standing(index))?;
                 (to != from)
                     .then(|| ((to - from).to_angle(), disk(from, from.distance(edge))))
             })
@@ -2576,6 +2585,46 @@ mod tests {
                 .iter()
                 .all(|b| a.intersect(*b).is_empty()))
         );
+    }
+
+    #[test]
+    fn names_stay_apart_while_a_ring_forms() {
+        let identity = |name: &str| crate::timeline::Identity {
+            name: name.as_bytes().to_vec(),
+            email: format!("{name}@example.invalid").into_bytes(),
+        };
+        let mut events = crate::timeline::synthetic();
+        events.truncate(3);
+        for (event, author) in events.iter_mut().zip(["Ada", "Grace", "Ada"]) {
+            event.author = identity(author);
+        }
+        events[2].co_authors = vec![identity("Grace"), identity("Codex")];
+        let mut sim = Simulation::new(
+            events,
+            &Options::default(),
+            &Theme::neon(),
+            &Mappings::default(),
+        );
+        let first = crate::model::frames_for(sim.schedule.starts[2], 60).unwrap();
+        for frame in first..first + 120 {
+            sim.advance_to(frame, 60);
+            let state = &sim.state;
+            let names: Vec<_> = state
+                .avatars
+                .iter()
+                .filter(|a| a.presence > 0.0)
+                .filter_map(|a| a.name_visibility.placement.as_ref())
+                .map(|name| (&name.text, name.bounds(state.geometry.label_height)))
+                .collect();
+            for (i, (text, rect)) in names.iter().enumerate() {
+                for (other, bounds) in &names[i + 1..] {
+                    assert!(
+                        rect.intersect(*bounds).is_empty(),
+                        "frame {frame}: {text} overlaps {other}"
+                    );
+                }
+            }
+        }
     }
 
     /// Every parked avatar drawn at member size sits inside its group's ring.
