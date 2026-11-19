@@ -620,7 +620,6 @@ impl State {
                 release(&mut occupied, retained[member]);
             }
             let capacity = capacities[index];
-            let footprint = group_radius(capacity, radius);
             let envelope = envelopes[commit].clone();
             self.slot_records.entry(commit).or_default().observations += 1;
             let Some(tile) = self.layout.repositories[avatar.repository].tile else {
@@ -671,10 +670,10 @@ impl State {
             );
             chosen.commit = commit;
             self.record_placement(&chosen);
+            let capacity = self.seat_party(&chosen, &party);
             let ring_centre =
                 chosen.point + ring_offset(capacity, chosen.dock.edge, radius);
-            occupied.push(disk(ring_centre, footprint));
-            self.seat_party(&chosen, &party, capacity);
+            occupied.push(disk(ring_centre, group_radius(capacity, radius)));
         }
         self.capacities = self.compute_capacities();
     }
@@ -706,23 +705,29 @@ impl State {
         occupied
     }
 
-    /// Seats an author's group round its chosen dock; a co-author from an earlier commit
-    /// stays put if the author has moved to another dock.
-    fn seat_party(&mut self, chosen: &Placement, party: &[usize], capacity: u8) {
+    /// Seats an author's group round its chosen dock and returns its seat count; a
+    /// co-author from an earlier commit leaves the group, staying put, if the author has
+    /// moved to another dock.
+    fn seat_party(&mut self, chosen: &Placement, party: &[usize]) -> u8 {
         let radius = self.avatar_radius();
         let author = party[0];
+        let mut seated = Vec::with_capacity(party.len());
         for &member in party {
             let avatar = &self.avatars[member];
             if avatar.commit != chosen.commit
                 && avatar.slot.as_ref().is_some_and(|s| s.dock != chosen.dock)
             {
                 self.avatars[member].group = None;
-                continue;
+            } else {
+                let seat = avatar
+                    .group
+                    .filter(|_| member != author)
+                    .map_or(0, |g| g.seat);
+                seated.push((member, seat));
             }
-            let seat = avatar
-                .group
-                .filter(|_| member != author)
-                .map_or(0, |g| g.seat);
+        }
+        let capacity = seated.iter().map(|&(_, seat)| seat + 1).max().unwrap_or(1);
+        for (member, seat) in seated {
             let offset = seat_offset(seat, capacity, chosen.dock.edge, radius);
             let place = Placement {
                 point: chosen.point + offset,
@@ -732,6 +737,7 @@ impl State {
             self.avatars[member].slot = Some(place);
             self.avatars[member].slot_origin = None;
         }
+        capacity
     }
 
     /// Active avatars, most recently active first and each author before its co-authors.
