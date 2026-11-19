@@ -280,7 +280,9 @@ impl Mappings {
         let mut claimants = HashMap::<Key, Vec<&Contributor>>::new();
         for (_, account) in &found {
             let group = claimants.entry(key(account)).or_default();
-            for claimant in self.claims.get(&account.login).into_iter().flatten() {
+            let reused = ids.get(account.login.as_str()) == Some(&None);
+            let claims = self.claims.get(&account.login).filter(|_| !reused);
+            for claimant in claims.into_iter().flatten() {
                 if !group.iter().any(|known| known.key == claimant.key) {
                     group.push(claimant);
                 }
@@ -776,8 +778,12 @@ emails = ["personal@example.invalid", "work@example.invalid"]
     }
 
     #[test]
-    fn a_login_seen_with_two_ids_keeps_its_legacy_emails_apart() {
-        let mut mappings = Mappings::default();
+    fn a_login_seen_with_two_ids_keeps_its_accounts_apart() {
+        let mut mappings = Mappings::parse(
+            "[[contributor]]\nname = 'Alice'\nemails = []\ngithub = 'alice'",
+            Path::new("contributors.toml"),
+        )
+        .unwrap();
         mappings.infer(&HashMap::from([
             (
                 "7+alice@users.noreply.github.com".to_owned(),
@@ -792,21 +798,30 @@ emails = ["personal@example.invalid", "work@example.invalid"]
                 account("alice", None),
             ),
         ]));
-        let mut events = events(&[("Alice", "alice@users.noreply.github.com")]);
+        let mut events = events(&[
+            ("Alice", "alice@users.noreply.github.com"),
+            ("Alice", "7+alice@users.noreply.github.com"),
+            ("Alice", "8+alice@users.noreply.github.com"),
+        ]);
         mappings.apply(&mut events);
+        let keys: Vec<_> = events
+            .iter()
+            .map(|event| event.contributor.as_ref().unwrap().key.clone())
+            .collect();
         assert_eq!(
-            events[0].contributor.as_ref().unwrap().key,
-            Key::GitHubLogin("alice".to_owned())
+            keys,
+            [
+                Key::GitHubLogin("alice".to_owned()),
+                Key::GitHubId(7),
+                Key::GitHubId(8)
+            ]
         );
     }
 
     #[test]
     fn a_claim_needs_no_email_and_covers_every_login_of_the_account() {
         let mut mappings = Mappings::parse(
-            "[[contributor]]
-name = 'Owen'
-emails = []
-github = 'new-login'",
+            "[[contributor]]\nname = 'Owen'\nemails = []\ngithub = 'new-login'",
             Path::new("contributors.toml"),
         )
         .unwrap();

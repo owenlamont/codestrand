@@ -549,12 +549,11 @@ impl<N: Network> Resolver<N> {
                     checked: self.now,
                     account: account.clone(),
                 };
-                let key = if account.is_some() {
-                    &found_key
-                } else {
-                    &miss_key
-                };
-                let _ = self.store(key, &record);
+                // A confirmed miss also clears the account, which GitHub no longer links.
+                let _ = self.store(&found_key, &record);
+                if account.is_none() {
+                    let _ = self.store(&miss_key, &record);
+                }
                 account
             }
             Err(Unknown) => stale,
@@ -1383,6 +1382,27 @@ mod tests {
         let mut offline =
             super::tests::resolver(Some(root.path().to_owned()), false, vec![]);
         offline.accounts([&event("author@example.invalid", None)], None);
+        assert!(offline.found().is_empty());
+    }
+
+    #[test]
+    fn a_confirmed_miss_clears_the_cached_account() {
+        let root = crate::cache::test_directory().unwrap();
+        let source = event("author@example.invalid", None);
+        let mut found = resolver(
+            Some(root.path().to_owned()),
+            true,
+            vec![commit_by("linked", 7), Response::Found(png())],
+        );
+        resolve(&mut found, &mut [source.clone()], Some("owner/repo"));
+        let unlinked = Response::Found(
+            format!(r#"[{{"sha":"{COMMIT}","author":null}}]"#).into_bytes(),
+        );
+        let mut refresh = resolver(Some(root.path().to_owned()), true, vec![unlinked]);
+        refresh.now += TTL;
+        resolve(&mut refresh, &mut [source.clone()], Some("owner/repo"));
+        let mut offline = resolver(Some(root.path().to_owned()), false, vec![]);
+        offline.accounts([&source], Some("owner/repo"));
         assert!(offline.found().is_empty());
     }
 
