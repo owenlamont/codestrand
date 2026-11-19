@@ -409,6 +409,7 @@ impl Layout {
         if let Some(previous) = self.file_index.remove(to) {
             self.release(previous);
             self.files.remove(&previous);
+            self.fading.remove(&previous);
         }
         self.dirs[self.files[&id].dir].touch_age = 0.0;
         let dir = self.ensure_dir(parent_path(to));
