@@ -319,6 +319,7 @@ impl Source {
                 &repo,
                 tip,
                 chains.get(index).map(Vec::as_slice).zip(range),
+                self.end_date,
                 cache_root.filter(|_| !self.no_cache),
             )?;
             if self.trace.on() {

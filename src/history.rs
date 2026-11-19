@@ -316,14 +316,16 @@ pub(super) fn links(
 }
 
 /// Imports the links from `skip` onwards; with `skip > 0`, the tree of the last skipped
-/// link becomes the boundary, the only state read from before the range.
+/// link becomes the boundary, the only state read from before the range. A budget
+/// refusal suggests only start dates that `end_date`, the inclusive last UTC day, allows.
 pub(super) fn import(
     repo: &gix::Repository,
     tip: gix::ObjectId,
     links: &[Link],
     skip: usize,
+    end_date: Option<i64>,
 ) -> Result<History, Error> {
-    load_with_limits(repo, tip, links, skip, Limits::default())
+    load_with_limits(repo, tip, links, skip, end_date, Limits::default())
         .map_err(|source| Error::History { tip, source })
 }
 
@@ -331,7 +333,7 @@ pub(super) fn import_all(
     repo: &gix::Repository,
     tip: gix::ObjectId,
 ) -> Result<History, Error> {
-    import(repo, tip, &links(repo, tip)?, 0)
+    import(repo, tip, &links(repo, tip)?, 0, None)
 }
 
 const MAX_REFERENCE_HOPS: usize = 64;
@@ -480,6 +482,7 @@ fn load_with_limits(
     tip: gix::ObjectId,
     links: &[Link],
     skip: usize,
+    end_date: Option<i64>,
     limits: Limits,
 ) -> anyhow::Result<History> {
     let mut budget = Budget::new(limits);
@@ -497,6 +500,7 @@ fn load_with_limits(
                     repo,
                     links,
                     (index, index),
+                    end_date,
                     budget,
                     &spent,
                     error,
@@ -511,7 +515,15 @@ fn load_with_limits(
         Some(last) => match boundary(repo, &links[last], &mut budget) {
             Ok(boundary) => Some(boundary),
             Err(error) if is_exhausted(&error) => {
-                return Err(refusal(repo, links, (last, skip), budget, &spent, error));
+                return Err(refusal(
+                    repo,
+                    links,
+                    (last, skip),
+                    end_date,
+                    budget,
+                    &spent,
+                    error,
+                ));
             }
             Err(error) => return Err(error),
         },
@@ -531,11 +543,12 @@ fn refusal(
     repo: &gix::Repository,
     links: &[Link],
     (failed, after): (usize, usize),
+    end_date: Option<i64>,
     budget: Budget,
     spent: &[Spent],
     error: anyhow::Error,
 ) -> anyhow::Error {
-    let advice = later_start(repo, links, after, budget, spent).map_or_else(
+    let advice = later_start(repo, links, after, end_date, budget, spent).map_or_else(
         || "no later --start-date fits".to_owned(),
         |date| format!("--start-date {} fits", crate::model::date(date)),
     );
@@ -555,6 +568,7 @@ fn later_start(
     repo: &gix::Repository,
     links: &[Link],
     mut after: usize,
+    end_date: Option<i64>,
     mut budget: Budget,
     spent: &[Spent],
 ) -> Option<i64> {
@@ -582,7 +596,12 @@ fn later_start(
             return None;
         }
         if fits {
-            let accepted = crate::start_date(&crate::model::date(date)) == Ok(date);
+            let accepted = crate::start_date(&crate::model::date(date)) == Ok(date)
+                && end_date.is_none_or(|end| {
+                    links[start..]
+                        .iter()
+                        .any(|link| (date..end + 86_400).contains(&link.seconds))
+                });
             return accepted.then_some(date);
         }
         latest = links[start].seconds;
@@ -1025,7 +1044,7 @@ mod security_tests {
         limits: Limits,
     ) -> anyhow::Result<History> {
         let links = scan(repo, tip, &mut Budget::new(Limits::default()))?;
-        load_with_limits(repo, tip, &links, 0, limits)
+        load_with_limits(repo, tip, &links, 0, None, limits)
     }
 
     #[test]
@@ -1376,14 +1395,14 @@ mod security_tests {
             ..Limits::default()
         };
         let links = scan(&repo, tip, &mut Budget::new(Limits::default())).unwrap();
-        let error = load_with_limits(&repo, tip, &links, 0, limits)
+        let error = load_with_limits(&repo, tip, &links, 0, None, limits)
             .err()
             .unwrap();
         let expected = format!(
             "commit {first} dated 2023-11-14 UTC exceeds the import budget; --start-date 2023-11-15 fits"
         );
         assert!(format!("{error:#}").contains(&expected), "{error:#}");
-        let fitted = load_with_limits(&repo, tip, &links, 1, limits).unwrap();
+        let fitted = load_with_limits(&repo, tip, &links, 1, None, limits).unwrap();
         assert_eq!(fitted.boundary.unwrap().id, first.to_string());
     }
 
@@ -1429,10 +1448,12 @@ mod security_tests {
             entries: 25,
             ..Limits::default()
         };
-        assert!(load_with_limits(repo, tip, links, links.len() - 1, limits).is_ok());
+        assert!(
+            load_with_limits(repo, tip, links, links.len() - 1, None, limits).is_ok()
+        );
         format!(
             "{:#}",
-            load_with_limits(repo, tip, links, skip, limits)
+            load_with_limits(repo, tip, links, skip, None, limits)
                 .err()
                 .unwrap()
         )
@@ -1459,6 +1480,25 @@ mod security_tests {
         );
         assert!(error.contains(&expected), "{error}");
     }
+
+    #[test]
+    fn a_later_start_stays_within_the_end_date() {
+        let (_root, repo, links) = daily_history(&[(1, 20), (2, 1), (3, 2)]);
+        let limits = Limits {
+            entries: 25,
+            ..Limits::default()
+        };
+        let end = crate::start_date("2023-11-16").ok();
+        let tip = links.last().unwrap().id;
+        let error = load_with_limits(&repo, tip, &links, 0, end, limits)
+            .err()
+            .unwrap();
+        assert!(
+            format!("{error:#}").contains("no later --start-date fits"),
+            "{error:#}"
+        );
+    }
+
     #[test]
     fn a_start_date_the_cli_rejects_is_not_suggested() {
         let year_10000 = 2_913_241;

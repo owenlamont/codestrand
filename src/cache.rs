@@ -225,15 +225,17 @@ pub(super) fn load_whole(
     cache_root: Option<&Path>,
 ) -> Result<Vec<timeline::Event>, history::Error> {
     let (repo, tip) = history::resolve(path, revision)?;
-    load_range(&repo, tip, None, cache_root)
+    load_range(&repo, tip, None, None, cache_root)
 }
 
 /// Loads the events of the links in `range`, led by a boundary event when it skips any;
-/// `None` loads the whole history without scanning first.
+/// `None` loads the whole history without scanning first. `end_date` only bounds the
+/// start dates a budget refusal suggests.
 pub(super) fn load_range(
     repo: &gix::Repository,
     tip: gix::ObjectId,
     range: Option<(&[history::Link], &std::ops::Range<usize>)>,
+    end_date: Option<i64>,
     cache_root: Option<&Path>,
 ) -> Result<Vec<timeline::Event>, history::Error> {
     let skip = range.map_or(0, |(_, range)| range.start);
@@ -256,7 +258,7 @@ pub(super) fn load_range(
         scanned = history::links(repo, tip)?;
         &scanned
     };
-    let history = history::import(repo, tip, links, skip)?;
+    let history = history::import(repo, tip, links, skip, end_date)?;
     let snapshot = Snapshot {
         version: timeline::CACHE_VERSION,
         tip: tip_text,
