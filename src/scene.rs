@@ -583,7 +583,8 @@ fn add_scene_systems(app: &mut App) {
                 .before(bevy::transform::TransformSystems::Propagate)
                 .run_if(resource_exists::<Playback>),
         )
-        .add_systems(PostUpdate, label_system.run_if(resource_exists::<Playback>));
+        .add_systems(PostUpdate, label_system.run_if(resource_exists::<Playback>))
+        .add_systems(Last, styling::drop_stale_font_atlases);
 }
 
 #[derive(Resource)]
