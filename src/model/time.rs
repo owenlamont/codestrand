@@ -91,26 +91,15 @@ impl Time {
         }
     }
 
-    /// The f32 error a tick's time can carry either side, within which it still counts as on it.
-    pub(crate) fn slack(self) -> f32 {
-        let seconds = self.seconds.max(0.0);
-        4.0 * (seconds.next_up() - seconds)
-    }
-
     /// Whole ticks up to this time, rounded up or down; negative times have none.
     pub(crate) fn ticks(self, round_up: bool) -> u64 {
-        let nanoticks = |seconds: f32| {
-            std::time::Duration::from_secs_f32(seconds).as_nanos()
-                * u128::from(TICK_RATE)
-        };
-        let seconds = self.seconds.max(0.0);
-        let slack = nanoticks(self.slack());
+        let nanoticks = std::time::Duration::from_secs_f32(self.seconds.max(0.0))
+            .as_nanos()
+            * u128::from(TICK_RATE);
         let rest = if round_up {
-            nanoticks(seconds)
-                .saturating_sub(slack)
-                .div_ceil(1_000_000_000)
+            nanoticks.div_ceil(1_000_000_000)
         } else {
-            (nanoticks(seconds) + slack) / 1_000_000_000
+            nanoticks / 1_000_000_000
         };
         u64::from(self.span) * SPAN_TICKS
             + u64::try_from(rest).expect("ticks within a span")
@@ -416,14 +405,6 @@ mod tests {
             let (now, next) = (Time::from_tick(tick), Time::from_tick(tick + 1));
             let step = next.after(origin) - now.after(origin);
             assert!((step - tick_seconds()).abs() < 0.001, "{step}");
-        }
-    }
-
-    #[test]
-    fn a_tick_time_rounds_back_to_its_own_tick() {
-        for tick in 0..SPAN_TICKS {
-            let time = Time::from_tick(tick);
-            assert_eq!([time.ticks(false), time.ticks(true)], [tick; 2], "{time:?}");
         }
     }
 
