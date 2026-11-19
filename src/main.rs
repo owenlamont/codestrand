@@ -297,7 +297,9 @@ impl Source {
                 chains.push(history::links(&repo, tip)?);
                 tips.push(tip.to_string());
             }
-            eprintln!("scan_seconds={:.6}", started.elapsed().as_secs_f64());
+            if self.trace.on() {
+                eprintln!("scan_seconds={:.6}", started.elapsed().as_secs_f64());
+            }
         }
         let (ranges, selected) = if chains.is_empty() {
             (Vec::new(), None)
