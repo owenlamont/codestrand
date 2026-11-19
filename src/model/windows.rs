@@ -138,7 +138,9 @@ impl Simulation {
             if pass > 32 {
                 anyhow::bail!(
                     "window travel did not converge at commit {}",
-                    self.travel.first_unresolved().unwrap_or(self.travel.frozen)
+                    self.travel
+                        .first_unresolved(options.bot_travel)
+                        .unwrap_or(self.travel.frozen)
                         + self.offset
                 );
             }
@@ -250,11 +252,12 @@ impl Simulation {
             if let Some(hook) = &options.window_hook {
                 hook(window_index, &mut self);
             }
-            if options.travel_cap == TravelCap::None {
-                anyhow::ensure!(
-                    self.travel.first_unresolved().is_none(),
+            if options.travel_cap == TravelCap::None
+                && let Some(commit) = self.travel.first_unresolved(options.bot_travel)
+            {
+                anyhow::bail!(
                     "window travel has no route for commit {}",
-                    self.travel.first_unresolved().unwrap_or(0) + self.offset
+                    commit + self.offset
                 );
             }
             let boundary = self.finish_window(end)?;
@@ -829,12 +832,35 @@ mod tests {
             &crate::contributors::Mappings::default(),
             &labels,
         );
-        assert!(sim.travel.first_unresolved().is_none());
+        assert!(sim.travel.first_unresolved(options.bot_travel).is_none());
         assert!(sim.boundaries.iter().any(|s| s.avatars.len() >= 2
             && super::super::tick_time(s.tick) - s.avatars[0].last_active > MARGIN
             && s.avatars[0].presence > 0.0));
         verify_boundaries(&mut sim);
         verify_streamed(&mut sim, events, &options, &labels);
+    }
+
+    #[test]
+    fn a_fading_bot_does_not_stop_uncapped_window_planning() {
+        let (mut events, labels) = super::super::tests::short_repository_history(2);
+        events.truncate(3);
+        events[0].author.name = b"helper[bot]".to_vec();
+        events[1].author = events[0].author.clone();
+        let options = Options {
+            eager_windows: true,
+            travel_window_seconds: Some(2.0),
+            travel_cap: TravelCap::None,
+            ..Options::default()
+        };
+        let sim = Simulation::try_with_repositories(
+            events,
+            &options,
+            &crate::theme::Theme::neon(),
+            &crate::contributors::Mappings::default(),
+            &labels,
+        )
+        .unwrap();
+        assert_eq!(sim.travel.stats.bot_fades, 1);
     }
 
     #[test]

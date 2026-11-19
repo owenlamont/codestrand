@@ -249,8 +249,13 @@ impl Plan {
     pub(super) fn trip_count(&self) -> usize {
         self.trips.len()
     }
-    pub(super) fn first_unresolved(&self) -> Option<usize> {
-        self.trips.iter().find(|t| t.fade).map(|t| t.commit)
+    /// The first commit whose trip fades although its policy walks; a bot under
+    /// `--bot-travel fade` fades by design.
+    pub(super) fn first_unresolved(&self, bots: super::BotTravel) -> Option<usize> {
+        self.trips
+            .iter()
+            .find(|t| t.fade && (!t.bot || bots == super::BotTravel::Walk))
+            .map(|t| t.commit)
     }
 
     pub(super) fn freeze_through(&mut self, tick: u64, applied: usize) {
