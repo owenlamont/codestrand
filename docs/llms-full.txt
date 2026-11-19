@@ -415,10 +415,11 @@ codestrand preview --theme outrun
 codestrand export frames --theme atlas --frames 90 --fps 30
 ```
 
-Outrun uses pink tiles, arched beams and a banded sunset. Blueprint uses hatched
-plates and construction lines. Retro Desktop uses page icons and static
-black/white dashed beams. Atlas uses survey points, paper contours and tinted
-top-level territories. Forge uses iron plates coloured by file heat.
+Every theme shows each file's type icon. Outrun frames icons in pink tiles and uses
+arched beams and a banded sunset. Blueprint frames them in outlined plates and uses
+construction lines. Retro Desktop draws them on pages and uses static black/white
+dashed beams. Atlas uses paper contours and tinted top-level territories. Forge cuts
+icons through iron plates coloured by file heat.
 Blueprint and Atlas use ink without additive glow. All grounds and dash patterns
 are steady; switching with `,` and `.` preserves playback and file positions.
 
@@ -903,9 +904,11 @@ when quoted. Install FFmpeg with `winget install Gyan.FFmpeg` on Windows,
 PNG export works without FFmpeg.
 
 The default encode uses `-c:v libx264 -pix_fmt yuv420p -crf 18 -movflags +faststart`
-for an H.264 MP4 suitable for GitHub, X, Bluesky and QuickTime. Codestrand checks
-FFmpeg and the default encoder before rendering. Install a libx264-enabled build
-if the default encoder is unavailable, or replace the encoding options:
+for an H.264 MP4 suitable for GitHub, X, Bluesky and QuickTime. Before planning,
+Codestrand runs FFmpeg and encodes one blank frame at the chosen resolution with the
+default options; custom options are not tried until the export. Install a
+libx264-enabled build if the default encoder is unavailable, or replace the encoding
+options:
 
 ```sh
 codestrand export lossless-state --video history.mkv --frames 60 \
@@ -1259,6 +1262,17 @@ Codestrand does not add source file paths, source contents or diff text to these
 requests. Servers also receive ordinary connection information such as the source
 IP address and the Codestrand user agent. Configured URLs can contain whatever
 information their author put in them.
+
+## What CI checks
+
+- Only Codestrand depends on `ureq`, `rustls` is reached only through `ureq`, and
+  neither `bevy_asset` nor `gix-transport` enables an HTTP feature.
+- A Linux PNG export of a small local repository, with the history cache on, runs
+  under `strace` in an empty network namespace and fails on any IP socket or Unix
+  socket connection outside an allow-list.
+
+The trace covers Linux and the code paths that export exercises. Preview, video
+encoding, avatar fetching, macOS and Windows are not traced.
 
 ## Local files and processes
 
