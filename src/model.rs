@@ -460,6 +460,8 @@ struct State {
     fragment_pace: FragmentPace,
     slot_records: BTreeMap<usize, slots::Record>,
     titles: BTreeMap<usize, titles::Title>,
+    /// Seats in each avatar's group as last placed, 1 for an avatar alone.
+    capacities: Vec<u8>,
 }
 
 #[derive(Clone)]
@@ -1849,6 +1851,7 @@ impl State {
             fragment_pace: options.fragment_pace(),
             slot_records: BTreeMap::new(),
             titles: BTreeMap::new(),
+            capacities: Vec::new(),
         }
     }
 
@@ -1997,29 +2000,54 @@ impl State {
         });
     }
 
-    /// Seats for an event's participants in its author's group: seat 0 for the author,
-    /// a co-author already in the group keeps its seat, and a newcomer takes the lowest
-    /// seat free of the members who stay in `repository`.
-    fn seats(&self, participants: &[usize], repository: usize) -> Vec<u8> {
+    /// Seats for an event's participants in its author's group, after the members who
+    /// cannot stay leave: those of a participant other than the author, those of the
+    /// author no longer in its group or outside `repository`, and, when the group would
+    /// outgrow its seats, every member not taking part. Seat 0 is the author's; a
+    /// co-author already in the group keeps its seat and a newcomer takes the lowest
+    /// free seat.
+    fn seats(&mut self, participants: &[usize], repository: usize) -> Vec<u8> {
         let author = participants[0];
-        let kept = |member: usize| {
-            self.in_party(member, author)
-                .then(|| self.avatars[member].group.map(|g| g.seat))
+        let mut stay = Vec::new();
+        for index in 0..self.avatars.len() {
+            let Some(group) = self.avatars[index].group else {
+                continue;
+            };
+            if group.lead == index
+                || participants.contains(&index)
+                || !participants.contains(&group.lead)
+            {
+                continue;
+            }
+            if group.lead == author
+                && self.in_party(index, author)
+                && self.avatars[index].repository == repository
+            {
+                stay.push(index);
+            } else {
+                self.avatars[index].group = None;
+            }
+        }
+        if stay.len() + participants.len() > crate::timeline::MAX_CO_AUTHORS + 1 {
+            for index in stay.drain(..) {
+                self.avatars[index].group = None;
+            }
+        }
+        let kept = |state: &Self, member: usize| {
+            state
+                .in_party(member, author)
+                .then(|| state.avatars[member].group.map(|g| g.seat))
                 .flatten()
         };
-        let mut taken: Vec<u8> = (0..self.avatars.len())
-            .filter(|&i| {
-                i != author
-                    && !participants.contains(&i)
-                    && self.avatars[i].repository == repository
-            })
-            .filter_map(kept)
+        let mut taken: Vec<u8> = stay
+            .iter()
+            .chain(&participants[1..])
+            .filter_map(|&member| kept(self, member))
             .chain(std::iter::once(0))
-            .chain(participants[1..].iter().copied().filter_map(kept))
             .collect();
         std::iter::once(0)
             .chain(participants[1..].iter().map(|&member| {
-                kept(member).unwrap_or_else(|| {
+                kept(self, member).unwrap_or_else(|| {
                     let seat = (1..=u8::MAX)
                         .find(|seat| !taken.contains(seat))
                         .expect("groups hold at most 9 members");
@@ -2110,20 +2138,15 @@ impl State {
 
     /// Seats in an author's group, 1 for an author alone.
     fn capacity(&self, lead: usize) -> u8 {
-        (0..self.avatars.len())
-            .filter(|&i| i != lead && self.in_party(i, lead))
-            .filter_map(|i| self.avatars[i].group.map(|g| g.seat + 1))
-            .max()
-            .unwrap_or(1)
+        self.capacities.get(lead).copied().unwrap_or(1)
     }
 
     /// Display scale of each avatar: smaller while packed into a group.
     pub(super) fn member_scales(&self) -> Vec<f32> {
-        let capacities = self.capacities();
         (0..self.avatars.len())
             .map(|index| {
                 let lead = self.avatars[index].group.map_or(index, |g| g.lead);
-                if capacities[lead] > 1 && self.in_party(index, lead) {
+                if self.capacity(lead) > 1 && self.in_party(index, lead) {
                     slots::MEMBER_SCALE
                 } else {
                     1.0

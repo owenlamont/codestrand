@@ -507,7 +507,7 @@ impl State {
             .collect()
     }
     fn retained_slots(&self, now: super::Time, radius: f32) -> Vec<Option<Rect>> {
-        let capacities = self.capacities();
+        let capacities = self.compute_capacities();
         (0..self.avatars.len())
             .map(|index| {
                 let avatar = &self.avatars[index];
@@ -568,7 +568,7 @@ impl State {
 
     /// Seats in each avatar's group, counting the gaps members left; 1 for an avatar
     /// without co-authors.
-    pub(super) fn capacities(&self) -> Vec<u8> {
+    pub(super) fn compute_capacities(&self) -> Vec<u8> {
         let mut capacities = vec![1_u8; self.avatars.len()];
         for (index, avatar) in self.avatars.iter().enumerate() {
             if let Some(group) = avatar.group.filter(|g| g.lead != index)
@@ -602,7 +602,7 @@ impl State {
         );
         let radius = self.avatar_radius();
         let name_scale = self.name_scale();
-        let capacities = self.capacities();
+        let capacities = self.compute_capacities();
         let mut occupied = self.hold_idle(now, &capacities, radius);
         let retained = self.retained_slots(now, radius);
         occupied.extend(retained.iter().flatten().copied());
@@ -676,6 +676,7 @@ impl State {
             occupied.push(disk(ring_centre, footprint));
             self.seat_party(&chosen, &party, capacity);
         }
+        self.capacities = self.compute_capacities();
     }
 
     /// Re-projects idle avatars onto their moving tiles and returns the space they hold.
@@ -715,6 +716,7 @@ impl State {
             if avatar.commit != chosen.commit
                 && avatar.slot.as_ref().is_some_and(|s| s.dock != chosen.dock)
             {
+                self.avatars[member].group = None;
                 continue;
             }
             let seat = avatar
@@ -803,7 +805,7 @@ impl State {
     /// just outside the ring beside it.
     fn name_bodies(&self) -> Vec<Option<Vec2>> {
         let radius = self.avatar_radius();
-        let capacities = self.capacities();
+        let capacities = &self.capacities;
         (0..self.avatars.len())
             .map(|index| {
                 let avatar = &self.avatars[index];
@@ -1989,6 +1991,50 @@ mod tests {
         assert!(near.valid());
         assert_eq!(near.dock.edge, 2);
         assert!(near.point.distance(source) < free.select(None).point.distance(source));
+    }
+
+    #[test]
+    fn a_group_never_outgrows_its_seats() {
+        let mut events = crate::timeline::synthetic();
+        events.truncate(1);
+        let template = events.remove(0);
+        let events = (0..3_u8)
+            .map(|commit| {
+                let mut event = template.clone();
+                event.seconds += i64::from(commit) * 3_600;
+                event.co_authors = (0..8)
+                    .map(|n| crate::timeline::Identity {
+                        name: format!("C{commit}-{n}").into_bytes(),
+                        email: format!("c{commit}-{n}@example.invalid").into_bytes(),
+                    })
+                    .collect();
+                event
+            })
+            .collect();
+        let mut sim = Simulation::new(
+            events,
+            &Options::default(),
+            &Theme::neon(),
+            &Mappings::default(),
+        );
+        let frames = crate::model::frames_for(sim.duration(), 60).unwrap();
+        for frame in (0..=frames).step_by(5) {
+            sim.advance_to(frame, 60);
+            let state = &sim.state;
+            assert!(state.capacities.iter().all(|&seats| seats <= 9));
+            let mut seated: Vec<_> = (0..state.avatars.len())
+                .filter_map(|i| {
+                    let group = state.avatars[i].group?;
+                    state
+                        .in_party(i, group.lead)
+                        .then_some((group.lead, group.seat))
+                })
+                .collect();
+            let all = seated.len();
+            seated.sort_unstable();
+            seated.dedup();
+            assert_eq!(seated.len(), all, "frame {frame}: two members share a seat");
+        }
     }
 
     #[test]
