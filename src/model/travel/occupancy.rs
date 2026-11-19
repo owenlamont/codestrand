@@ -369,6 +369,21 @@ mod tests {
     }
 
     #[test]
+    fn a_flat_rect_whose_margin_rounds_away_stays_apart() {
+        // At 512 the whole margin rounds away, so a flat rect meets nothing.
+        let wide = Rect::new(511.0, 0.0, 513.0, 1.0);
+        let flat = Rect::new(512.0, 0.0, 512.0, 1.0);
+        let mut row = super::Row::default();
+        let mut reference = Vec::new();
+        for rect in [wide, flat] {
+            row.merge(0, rect);
+            reference_merge(&mut reference, 0, rect);
+        }
+        assert_eq!(reference.len(), 2);
+        assert_eq!(bits(row.into_row()), bits(reference));
+    }
+
+    #[test]
     fn rows_match_a_single_list_merge_bit_for_bit() {
         let mut seed = 0x2545_f491_u32;
         let mut next = |limit: u16| {
