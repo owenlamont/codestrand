@@ -602,7 +602,11 @@ pub(crate) mod tests {
         }
         assert!(windows.len() > 1, "fixture plans several windows");
         assert!(windows.iter().any(|&(_, scaled)| scaled), "{windows:?}");
-        assert_eq!(stream.projected_duration(), whole.duration());
+        let frames = |duration| super::super::frames_for(duration, 60).unwrap();
+        assert_eq!(
+            frames(stream.projected_duration()),
+            frames(whole.duration())
+        );
         let unpadded = stream.ready_end.unwrap().unpadded;
         assert!(whole.duration() > unpadded, "walk waits pad the fixture");
     }

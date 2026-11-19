@@ -2180,7 +2180,10 @@ pub(super) fn date(seconds: i64) -> String {
     reason = "frame count is validated before conversion"
 )]
 pub(super) fn frames_for(duration: Time, fps: u16) -> anyhow::Result<u32> {
-    let frames = (duration.as_secs_f64() * f64::from(fps)).ceil();
+    let frames = ((duration.as_secs_f64() - f64::from(duration.slack()))
+        * f64::from(fps))
+    .ceil()
+    .max(0.0);
     anyhow::ensure!(
         frames.is_finite() && frames >= 0.0 && frames <= f64::from(u32::MAX),
         "whole playback exceeds the supported export range of {} frames; use --frames or reduce duration or fps",
