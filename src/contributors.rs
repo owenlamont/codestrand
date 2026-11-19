@@ -19,6 +19,8 @@ pub(super) enum Key {
     Email(Vec<u8>),
     Name(Vec<u8>),
     Config(usize),
+    GitHubId(u64),
+    GitHubLogin(String),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -40,7 +42,7 @@ impl Contributor {
             };
         }
         if crate::avatars::noreply(&String::from_utf8_lossy(email))
-            .is_some_and(|login| login.ends_with("[bot]"))
+            .is_some_and(|account| account.login.ends_with("[bot]"))
         {
             "github_noreply"
         } else if self.name.to_ascii_lowercase().ends_with("[bot]") {
@@ -61,9 +63,7 @@ impl Contributor {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(super) struct Accounts {
     pub github: Option<String>,
-    pub gitlab: Option<String>,
     pub avatar: Option<Avatar>,
-    pub gravatar: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -97,6 +97,8 @@ pub(super) enum Error {
 #[derive(Debug, Default)]
 pub(super) struct Mappings {
     emails: HashMap<Vec<u8>, Contributor>,
+    /// Emails absent from the file, grouped by the GitHub account they belong to.
+    inferred: HashMap<Vec<u8>, Contributor>,
 }
 
 #[derive(Deserialize)]
@@ -113,9 +115,7 @@ struct Entry {
     bot: Option<bool>,
     emails: Vec<String>,
     github: Option<String>,
-    gitlab: Option<String>,
     avatar: Option<String>,
-    gravatar: Option<String>,
 }
 
 pub(super) fn load(explicit: Option<&Path>) -> Result<Mappings, Error> {
@@ -179,9 +179,7 @@ impl Mappings {
             let fields = [&entry.name]
                 .into_iter()
                 .chain(entry.github.iter())
-                .chain(entry.gitlab.iter())
-                .chain(entry.avatar.iter())
-                .chain(entry.gravatar.iter());
+                .chain(entry.avatar.iter());
             let mut bytes = 0;
             for field in fields {
                 if field.len() > MAX_STRING_BYTES {
@@ -213,19 +211,6 @@ impl Mappings {
             {
                 return Err(invalid("github", "expected a GitHub login (not a URL)"));
             }
-            if let Some(username) = &entry.gitlab
-                && (username.is_empty()
-                    || username.len() > 255
-                    || !username
-                        .bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
-                    || !username.as_bytes()[0].is_ascii_alphanumeric())
-            {
-                return Err(invalid(
-                    "gitlab",
-                    "expected a GitLab username (letters, digits, _, - or .)",
-                ));
-            }
             let avatar = entry
                 .avatar
                 .as_ref()
@@ -241,9 +226,7 @@ impl Mappings {
                     bot: entry.bot,
                     accounts: Accounts {
                         github: entry.github.clone(),
-                        gitlab: entry.gitlab.clone(),
                         avatar: avatar.clone(),
-                        gravatar: entry.gravatar.clone(),
                     },
                     portrait: None,
                 };
@@ -255,30 +238,104 @@ impl Mappings {
                 }
             }
         }
-        Ok(Self { emails })
+        Ok(Self {
+            emails,
+            inferred: HashMap::new(),
+        })
+    }
+
+    /// Groups emails the file does not list by their GitHub account. The file's
+    /// contributor claiming that login takes them when exactly one does; otherwise
+    /// the account's numeric ID, or its login when no ID is known, is the identity.
+    pub(super) fn infer(&mut self, found: &HashMap<String, crate::avatars::Account>) {
+        let mut claims = HashMap::<String, Vec<&Contributor>>::new();
+        let mut seen = std::collections::HashSet::new();
+        for contributor in self.emails.values() {
+            if let Some(login) = &contributor.accounts.github
+                && seen.insert(&contributor.key)
+            {
+                claims
+                    .entry(login.to_ascii_lowercase())
+                    .or_default()
+                    .push(contributor);
+            }
+        }
+        let mut found: Vec<_> = found.iter().collect();
+        found.sort();
+        let mut ids = HashMap::new();
+        for (_, account) in &found {
+            if let Some(id) = account.id {
+                ids.entry(account.login.as_str()).or_insert(id);
+            }
+        }
+        let mut inferred = HashMap::new();
+        for (email, account) in found {
+            if self.emails.contains_key(email.as_bytes()) {
+                continue;
+            }
+            let contributor = match claims.get(&account.login).map(Vec::as_slice) {
+                Some(&[claimant]) => claimant.clone(),
+                _ => Contributor {
+                    key: account
+                        .id
+                        .or_else(|| ids.get(account.login.as_str()).copied())
+                        .map_or_else(
+                            || Key::GitHubLogin(account.login.clone()),
+                            Key::GitHubId,
+                        ),
+                    name: String::new(),
+                    bot: None,
+                    accounts: Accounts::default(),
+                    portrait: None,
+                },
+            };
+            inferred.insert(email.as_bytes().to_vec(), contributor);
+        }
+        self.inferred = inferred;
+    }
+
+    fn listed(&self, event: &Event) -> Option<&Contributor> {
+        self.emails
+            .get(&event.author.email.to_ascii_lowercase())
+            .or_else(|| {
+                self.inferred
+                    .get(crate::avatars::email_key(&event.author.email).as_bytes())
+            })
     }
 
     pub(super) fn apply(&self, events: &mut [Event]) {
+        let key = |event: &Event| match self.listed(event) {
+            Some(contributor) if !matches!(contributor.key, Key::Config(_)) => {
+                contributor.key.clone()
+            }
+            _ => unlisted_key(event),
+        };
         let mut names = HashMap::new();
         for event in events.iter() {
             names.insert(
-                unlisted_key(event),
+                key(event),
                 String::from_utf8_lossy(&event.author.name).into_owned(),
             );
         }
-        for event in events {
-            let email = event.author.email.to_ascii_lowercase();
-            event.contributor =
-                Some(self.emails.get(&email).cloned().unwrap_or_else(|| {
-                    let key = unlisted_key(event);
-                    Contributor {
-                        bot: None,
-                        name: names[&key].clone(),
-                        accounts: Accounts::default(),
-                        portrait: None,
-                        key,
-                    }
-                }));
+        for event in events.iter_mut() {
+            let contributor = match self.listed(event) {
+                Some(contributor) if matches!(contributor.key, Key::Config(_)) => {
+                    contributor.clone()
+                }
+                listed => {
+                    let mut contributor =
+                        listed.cloned().unwrap_or_else(|| Contributor {
+                            bot: None,
+                            name: String::new(),
+                            accounts: Accounts::default(),
+                            portrait: None,
+                            key: unlisted_key(event),
+                        });
+                    contributor.name.clone_from(&names[&contributor.key]);
+                    contributor
+                }
+            };
+            event.contributor = Some(contributor);
         }
     }
 }
@@ -393,7 +450,7 @@ mod tests {
             let mut history = events(&[("Author", "a@b")]);
             mappings.apply(&mut history);
             crate::avatars::Resolver::new(None::<crate::avatars::Http>, None, false, 0)
-                .resolve(&mut history, None);
+                .portraits(&mut history);
             assert!(
                 history[0].contributor.as_ref().unwrap().portrait.is_none(),
                 "{value}"
@@ -476,8 +533,6 @@ mod tests {
 name = "Owen"
 emails = ["one@example.invalid", "two@example.invalid"]
 github = "owenlamont"
-gitlab = "owen.lamont"
-gravatar = "avatar@example.invalid"
 "#,
             Path::new("contributors.toml"),
         )
@@ -489,11 +544,6 @@ gravatar = "avatar@example.invalid"
         mappings.apply(&mut events);
         let contributor = events[0].contributor.as_ref().unwrap();
         assert_eq!(contributor.accounts.github.as_deref(), Some("owenlamont"));
-        assert_eq!(contributor.accounts.gitlab.as_deref(), Some("owen.lamont"));
-        assert_eq!(
-            contributor.accounts.gravatar.as_deref(),
-            Some("avatar@example.invalid")
-        );
         assert_eq!(events[0].contributor, events[1].contributor);
     }
 
@@ -502,8 +552,6 @@ gravatar = "avatar@example.invalid"
         for (field, value) in [
             ("github", "https://github.com/alice"),
             ("github", ""),
-            ("gitlab", "alice&email=secret"),
-            ("gitlab", ""),
             ("avatar", "http://example.invalid/avatar.png"),
             ("avatar", "https://"),
             ("avatar", "https://user:password@example.invalid/a.png"),
@@ -605,6 +653,14 @@ emails = ["personal@example.invalid", "work@example.invalid"]
                 "[[contributor]]\nname = 'Alice'\nemails = []\nemials = []",
                 "emials",
             ),
+            (
+                "[[contributor]]\nname = 'Alice'\nemails = []\ngravatar = 'a@b'",
+                "gravatar",
+            ),
+            (
+                "[[contributor]]\nname = 'Alice'\nemails = []\ngitlab = 'alice'",
+                "gitlab",
+            ),
         ] {
             let error = Mappings::parse(text, Path::new("aliases.toml")).unwrap_err();
             assert!(matches!(error, Error::Parse { .. }));
@@ -626,6 +682,85 @@ emails = ["personal@example.invalid", "work@example.invalid"]
         assert_eq!(events[0].contributor.as_ref().unwrap().name, "Recent");
         assert_eq!(events[2].contributor.as_ref().unwrap().name, "Unknown");
         assert_eq!(names(&events, &Mappings::default()), ["Recent", "Unknown"]);
+    }
+
+    fn account(login: &str, id: Option<u64>) -> crate::avatars::Account {
+        crate::avatars::Account {
+            login: login.to_owned(),
+            id,
+        }
+    }
+
+    #[test]
+    fn emails_of_one_github_account_become_one_contributor() {
+        let mut mappings = Mappings::default();
+        mappings.infer(&HashMap::from([
+            ("old@example.invalid".to_owned(), account("alice", None)),
+            ("new@example.invalid".to_owned(), account("alice", Some(7))),
+            (
+                "7+renamed@users.noreply.github.com".to_owned(),
+                account("renamed", Some(7)),
+            ),
+            ("bob@example.invalid".to_owned(), account("bob", None)),
+        ]));
+        let mut events = events(&[
+            ("Alice Old", "old@example.invalid"),
+            ("Alice Renamed", "7+renamed@users.noreply.github.com"),
+            ("Alice", "NEW@example.invalid"),
+            ("Bob", "bob@example.invalid"),
+            ("Carol", "carol@example.invalid"),
+        ]);
+        mappings.apply(&mut events);
+        let keys: Vec<_> = events
+            .iter()
+            .map(|event| event.contributor.as_ref().unwrap().key.clone())
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                Key::GitHubId(7),
+                Key::GitHubId(7),
+                Key::GitHubId(7),
+                Key::GitHubLogin("bob".to_owned()),
+                Key::Email(b"carol@example.invalid".to_vec()),
+            ]
+        );
+        assert_eq!(names(&events, &mappings), ["Alice", "Bob", "Carol"]);
+    }
+
+    #[test]
+    fn the_file_overrides_and_absorbs_inferred_accounts() {
+        let mut mappings = Mappings::parse(
+            "[[contributor]]\nname = 'Owen'\nemails = ['listed@example.invalid']\ngithub = 'OwenLamont'\n\
+             [[contributor]]\nname = 'Twin A'\nemails = ['a@example.invalid']\ngithub = 'twin'\n\
+             [[contributor]]\nname = 'Twin B'\nemails = ['b@example.invalid']\ngithub = 'twin'",
+            Path::new("contributors.toml"),
+        )
+        .unwrap();
+        mappings.infer(&HashMap::from([
+            (
+                "listed@example.invalid".to_owned(),
+                account("forged", Some(1)),
+            ),
+            (
+                "work@example.invalid".to_owned(),
+                account("owenlamont", Some(2)),
+            ),
+            ("twin@example.invalid".to_owned(), account("twin", None)),
+        ]));
+        let mut events = events(&[
+            ("Owen", "listed@example.invalid"),
+            ("Owen at work", "work@example.invalid"),
+            ("Twin", "twin@example.invalid"),
+        ]);
+        mappings.apply(&mut events);
+        let contributors: Vec<_> = events
+            .iter()
+            .map(|event| event.contributor.clone().unwrap())
+            .collect();
+        assert_eq!(contributors[0], contributors[1]);
+        assert_eq!(contributors[0].name, "Owen");
+        assert_eq!(contributors[2].key, Key::GitHubLogin("twin".to_owned()));
     }
 
     #[test]

@@ -6,11 +6,11 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    contributors::{Accounts, Avatar, Key},
+    contributors::{Avatar, Key},
     timeline::Event,
 };
 
@@ -18,6 +18,9 @@ const TTL: u64 = 7 * 24 * 60 * 60;
 const MAX_BYTES: u64 = 4 * 1024 * 1024;
 const CACHE_BYTES: u64 = 128 * 1024;
 const FETCH_BUDGET: Duration = Duration::from_secs(30);
+/// Account lookups stop while this much of the fetch budget remains, so images for
+/// the accounts already found still get a share.
+const IMAGE_RESERVE: Duration = Duration::from_secs(15);
 
 pub(super) fn https_url(value: &str) -> bool {
     value.parse::<ureq::http::Uri>().is_ok_and(|uri| {
@@ -84,23 +87,53 @@ impl Portrait {
     }
 }
 
+/// The GitHub account a commit email belongs to. `login` is lowercase; `id` is the
+/// numeric account ID, which survives a rename.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub(super) struct Account {
+    pub login: String,
+    pub id: Option<u64>,
+}
+
+impl Account {
+    fn image_url(&self) -> String {
+        if let Some(id) = self.id {
+            return format!("https://avatars.githubusercontent.com/u/{id}?s=128");
+        }
+        let encoded = self.login.replace('[', "%5B").replace(']', "%5D");
+        format!("https://github.com/{encoded}.png?size=128")
+    }
+}
+
+/// A cached commit API answer for one email. A found account holds for every
+/// repository; a miss only for the remote that was asked.
 #[derive(Serialize, Deserialize)]
-struct Record {
+struct Lookup {
     checked: u64,
-    github: Option<String>,
+    account: Option<Account>,
+    remote: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Image {
+    checked: u64,
     image: bool,
 }
 
 #[derive(Deserialize)]
-struct Account {
+struct ApiAccount {
     login: String,
-    avatar_url: Option<String>,
+    id: u64,
 }
 
 #[derive(Deserialize)]
-struct CommitAccount {
-    author: Option<Account>,
+struct ApiCommit {
+    sha: String,
+    author: Option<ApiAccount>,
 }
+
+/// A lookup whose answer is not known: the network failed or was rate limited.
+struct Unknown;
 
 pub(super) enum Response {
     Found(Vec<u8>),
@@ -112,7 +145,19 @@ pub(super) enum Response {
 pub(super) trait Network {
     fn get(&mut self, url: &str, github_api: bool) -> Response;
 
-    fn summary(&self, _portraits: usize, _contributors: usize, _unsupported: bool) {}
+    /// Time left in the fetch budget.
+    fn remaining(&self) -> Duration {
+        Duration::MAX
+    }
+
+    fn summary(&self, _summary: &Summary) {}
+}
+
+pub(super) struct Summary {
+    pub contributors: usize,
+    pub portraits: usize,
+    pub unresolved: usize,
+    pub unsupported_remotes: usize,
 }
 
 pub(super) struct Http {
@@ -173,7 +218,7 @@ impl Network for Http {
             .nth(2)
             .unwrap_or_default()
             .to_ascii_lowercase();
-        let remaining = self.deadline.saturating_duration_since(Instant::now());
+        let remaining = self.remaining();
         if self.dead.contains(&host) || remaining.is_zero() {
             self.skipped += 1;
             return Response::Unavailable;
@@ -213,13 +258,20 @@ impl Network for Http {
         result
     }
 
-    fn summary(&self, portraits: usize, contributors: usize, unsupported: bool) {
+    fn remaining(&self) -> Duration {
+        self.deadline.saturating_duration_since(Instant::now())
+    }
+
+    fn summary(&self, summary: &Summary) {
         eprintln!(
-            "avatars: contributors={contributors} portraits={portraits} failures={} limited={} skipped={} unsupported_remotes={}",
+            "avatars: contributors={} portraits={} unresolved_emails={} failures={} limited={} skipped={} unsupported_remotes={}",
+            summary.contributors,
+            summary.portraits,
+            summary.unresolved,
             self.failures,
             self.limited,
             self.skipped,
-            usize::from(unsupported)
+            summary.unsupported_remotes
         );
     }
 }
@@ -230,9 +282,13 @@ impl Network for Option<Http> {
             .map_or(Response::Unavailable, |http| http.get(url, github_api))
     }
 
-    fn summary(&self, portraits: usize, contributors: usize, unsupported: bool) {
+    fn remaining(&self) -> Duration {
+        self.as_ref().map_or(Duration::ZERO, Network::remaining)
+    }
+
+    fn summary(&self, summary: &Summary) {
         if let Some(http) = self {
-            http.summary(portraits, contributors, unsupported);
+            http.summary(summary);
         }
     }
 }
@@ -255,6 +311,7 @@ fn response_body(status: u16, body: impl Read) -> Response {
     }
 }
 
+/// Names a cache file; never sent anywhere.
 fn hash(value: impl AsRef<[u8]>) -> String {
     use std::fmt::Write as _;
 
@@ -266,20 +323,25 @@ fn hash(value: impl AsRef<[u8]>) -> String {
         })
 }
 
-pub(super) fn noreply(email: &str) -> Option<String> {
-    let (local, host) = email.rsplit_once('@')?;
+/// The account in a GitHub noreply address, `<id>+<login>@users.noreply.github.com`
+/// or the older `<login>@users.noreply.github.com`.
+pub(super) fn noreply(email: &str) -> Option<Account> {
+    let (local, host) = email.trim().rsplit_once('@')?;
     if !host.eq_ignore_ascii_case("users.noreply.github.com") {
         return None;
     }
-    let login = if let Some((id, login)) = local.split_once('+') {
+    let (id, login) = if let Some((id, login)) = local.split_once('+') {
         if id.is_empty() || !id.bytes().all(|byte| byte.is_ascii_digit()) {
             return None;
         }
-        login
+        (Some(id.parse().ok()?), login)
     } else {
-        local
+        (None, local)
     };
-    valid_login(login).then(|| login.to_ascii_lowercase())
+    valid_login(login).then(|| Account {
+        login: login.to_ascii_lowercase(),
+        id,
+    })
 }
 
 pub(super) fn valid_login(login: &str) -> bool {
@@ -344,62 +406,29 @@ pub(super) fn now() -> u64 {
         .as_secs()
 }
 
-fn priority(event: &Event) -> u8 {
-    if event.contributor.as_ref().is_some_and(|contributor| {
-        let accounts = &contributor.accounts;
-        accounts.github.is_some()
-            || accounts.gitlab.is_some()
-            || accounts.avatar.is_some()
-    }) {
-        0
-    } else if noreply(&String::from_utf8_lossy(&event.author.email)).is_some() {
-        1
-    } else {
-        2
-    }
+/// The commit email as matched everywhere: trimmed and lowercased.
+pub(super) fn email_key(email: &[u8]) -> String {
+    String::from_utf8_lossy(email).trim().to_ascii_lowercase()
 }
 
-fn github_image(
-    login: &str,
-    email: &str,
-    explicit: bool,
-    avatar_url: Option<String>,
-) -> String {
-    if let Some(url) = avatar_url {
-        return format!("{}{}s=128", url, if url.contains('?') { "&" } else { "?" });
-    }
-    if !explicit
-        && noreply(email).is_some()
-        && let Some((id, _)) = email.split_once('+')
-    {
-        return format!("https://avatars.githubusercontent.com/u/{id}?s=128");
-    }
-    let encoded = login.replace('[', "%5B").replace(']', "%5D");
-    format!("https://github.com/{encoded}.png?size=128")
-}
-
-fn gitlab_email_url(email: &str) -> String {
-    let encoded: String = email
-        .bytes()
-        .flat_map(|byte| {
-            const HEX: &[u8; 16] = b"0123456789ABCDEF";
-            [
-                '%',
-                char::from(HEX[usize::from(byte >> 4)]),
-                char::from(HEX[usize::from(byte & 15)]),
-            ]
-        })
-        .collect();
-    format!("https://gitlab.com/api/v4/avatar?email={encoded}&size=128")
+/// Where one contributor's portrait comes from, best first.
+#[derive(Default)]
+struct Choice {
+    avatar: Option<Avatar>,
+    /// Rank 0 is a configured login, 1 an inferred account with a numeric ID, 2 one
+    /// without.
+    github: Option<(u8, Account)>,
 }
 
 pub(super) struct Resolver<N> {
     pub network: N,
     pub root: Option<PathBuf>,
     pub fetch: bool,
-    pub gitlab_email: bool,
     pub now: u64,
     limited: bool,
+    found: HashMap<String, Account>,
+    unresolved: HashSet<String>,
+    unsupported_remotes: usize,
     memo: HashMap<String, Option<Arc<Portrait>>>,
 }
 
@@ -414,76 +443,201 @@ impl<N: Network> Resolver<N> {
             network,
             root,
             fetch,
-            gitlab_email: false,
             now,
             limited: false,
+            found: HashMap::new(),
+            unresolved: HashSet::new(),
+            unsupported_remotes: 0,
             memo: HashMap::new(),
         }
     }
 
-    pub(super) fn resolve(&mut self, events: &mut [Event], remote: Option<&str>) {
-        let mut portraits = HashMap::<Key, Arc<Portrait>>::new();
-        let mut seen = HashSet::new();
-        let mut candidates: Vec<_> = events
-            .iter_mut()
-            .filter(|event| {
-                event.contributor.as_ref().is_some_and(|contributor| {
-                    seen.insert((
-                        contributor.key.clone(),
-                        event.author.email.to_ascii_lowercase(),
-                    ))
-                })
-            })
-            .collect();
-        candidates.sort_by_key(|event| priority(event));
-        let total = candidates.len();
-        let mut processed = 0;
-        for event in candidates {
-            let Some(contributor) = &mut event.contributor else {
+    /// The GitHub account found for each commit email so far.
+    pub(super) fn found(&self) -> &HashMap<String, Account> {
+        &self.found
+    }
+
+    /// Finds the GitHub account behind each commit email of one repository: from a
+    /// noreply address, from the cache, or, when fetching, from the commit API for a
+    /// github.com `remote`. Emails with a configured login are skipped.
+    pub(super) fn accounts<'a>(
+        &mut self,
+        events: impl IntoIterator<Item = &'a Event>,
+        remote: Option<&str>,
+    ) {
+        if remote.is_none() {
+            self.unsupported_remotes += 1;
+        }
+        let mut pending = HashMap::<String, (usize, usize, &str)>::new();
+        for (index, event) in events.into_iter().enumerate() {
+            let Some(contributor) = &event.contributor else {
                 continue;
             };
-            if portraits.contains_key(&contributor.key) {
+            let email = email_key(&event.author.email);
+            if contributor.accounts.github.is_some()
+                || email.is_empty()
+                || self.found.contains_key(&email)
+            {
                 continue;
             }
-            let email = String::from_utf8_lossy(&event.author.email)
-                .trim()
-                .to_ascii_lowercase();
-            let accounts = &contributor.accounts;
-            let key = if let Some(Avatar::Remote(url)) = &accounts.avatar {
-                format!("override\n{url}")
-            } else if accounts.gitlab.is_none()
-                && accounts.avatar.is_none()
-                && !self.gitlab_email
-            {
-                format!(
-                    "v1\n{email}\n{:?}\n{:?}\n{remote:?}",
-                    accounts.github, accounts.gravatar
-                )
+            if let Some(account) = noreply(&email) {
+                self.found.insert(email, account);
+                continue;
+            }
+            pending.entry(email).or_insert((0, index, &event.commit)).0 += 1;
+        }
+        let mut pending: Vec<_> = pending.into_iter().collect();
+        pending.sort_by_key(|(_, (commits, first, _))| (usize::MAX - commits, *first));
+        let total = pending.len();
+        for (processed, (email, (_, _, commit))) in pending.into_iter().enumerate() {
+            if self.fetch && remote.is_some() {
+                eprintln!(
+                    "avatars: looking up account {}/{total} (30s fetch budget)",
+                    processed + 1
+                );
+            }
+            let account = self.account(&email, remote, commit);
+            if let Some(account) = account {
+                self.unresolved.remove(&email);
+                self.found.insert(email, account);
             } else {
-                format!(
-                    "v2\n{email}\n{accounts:?}\n{remote:?}\n{}",
-                    self.gitlab_email
-                )
-            };
-            let portrait = if let Some(portrait) = self.memo.get(&key) {
-                portrait.clone()
-            } else {
-                processed += 1;
-                if self.fetch {
-                    eprintln!(
-                        "avatars: resolving {processed}/{total} (30s fetch budget)"
-                    );
-                }
-                let portrait = self.one(&key, &email, accounts, remote, &event.commit);
-                self.memo.insert(key, portrait.clone());
-                portrait
-            };
-            if let Some(portrait) = portrait {
-                portraits.insert(contributor.key.clone(), portrait);
+                self.unresolved.insert(email);
             }
         }
-        self.network
-            .summary(portraits.len(), seen.len(), remote.is_none());
+    }
+
+    fn account(
+        &mut self,
+        email: &str,
+        remote: Option<&str>,
+        commit: &str,
+    ) -> Option<Account> {
+        let key = format!("account\n{email}");
+        let cached = self.read::<Lookup>(&key);
+        if let Some(record) = &cached {
+            let fresh = !self.fetch || self.now.saturating_sub(record.checked) < TTL;
+            if fresh
+                && (record.account.is_some() || Some(record.remote.as_str()) == remote)
+            {
+                return record.account.clone();
+            }
+        }
+        let stale = cached.and_then(|record| record.account);
+        let Some(remote) = remote.filter(|_| {
+            self.fetch
+                && !self.limited
+                && !commit.is_empty()
+                && self.network.remaining() > IMAGE_RESERVE
+        }) else {
+            return stale;
+        };
+        match self.commit_author(remote, commit) {
+            Ok(account) => {
+                let _ = self.store(
+                    &key,
+                    &Lookup {
+                        checked: self.now,
+                        account: account.clone(),
+                        remote: remote.to_owned(),
+                    },
+                );
+                account
+            }
+            Err(Unknown) => stale,
+        }
+    }
+
+    /// The author account of `commit`, or `None` when GitHub links none.
+    fn commit_author(
+        &mut self,
+        remote: &str,
+        commit: &str,
+    ) -> Result<Option<Account>, Unknown> {
+        let bytes = match self.network.get(
+            &format!(
+                "https://api.github.com/repos/{remote}/commits?sha={commit}&per_page=1"
+            ),
+            true,
+        ) {
+            Response::Found(bytes) => bytes,
+            Response::Missing => return Ok(None),
+            Response::RateLimited => {
+                self.limited = true;
+                return Err(Unknown);
+            }
+            Response::Unavailable => return Err(Unknown),
+        };
+        let commits =
+            serde_json::from_slice::<Vec<ApiCommit>>(&bytes).map_err(|_| Unknown)?;
+        Ok(commits
+            .into_iter()
+            .next()
+            .filter(|found| found.sha.eq_ignore_ascii_case(commit))
+            .and_then(|found| found.author)
+            .filter(|author| valid_login(&author.login))
+            .map(|author| Account {
+                login: author.login.to_ascii_lowercase(),
+                id: Some(author.id),
+            }))
+    }
+
+    /// Sets each contributor's portrait: its `avatar` override, else the image of its
+    /// configured or found GitHub account.
+    pub(super) fn portraits(&mut self, events: &mut [Event]) {
+        let mut order = Vec::new();
+        let mut choices = HashMap::<Key, Choice>::new();
+        for event in events.iter() {
+            let Some(contributor) = &event.contributor else {
+                continue;
+            };
+            let choice = choices.entry(contributor.key.clone()).or_insert_with(|| {
+                order.push(contributor.key.clone());
+                Choice {
+                    avatar: contributor.accounts.avatar.clone(),
+                    github: None,
+                }
+            });
+            let candidate = if let Some(login) = &contributor.accounts.github {
+                Some((
+                    0,
+                    Account {
+                        login: login.to_ascii_lowercase(),
+                        id: None,
+                    },
+                ))
+            } else {
+                self.found
+                    .get(&email_key(&event.author.email))
+                    .map(|account| {
+                        (2 - u8::from(account.id.is_some()), account.clone())
+                    })
+            };
+            if let Some(candidate) = candidate
+                && choice
+                    .github
+                    .as_ref()
+                    .is_none_or(|best| candidate.0 < best.0)
+            {
+                choice.github = Some(candidate);
+            }
+        }
+        let total = order.len();
+        let mut portraits = HashMap::new();
+        for (processed, key) in order.into_iter().enumerate() {
+            if self.fetch {
+                eprintln!("avatars: fetching portrait {}/{total}", processed + 1);
+            }
+            let choice = &choices[&key];
+            if let Some(portrait) = self.portrait_for(choice) {
+                portraits.insert(key, portrait);
+            }
+        }
+        self.network.summary(&Summary {
+            contributors: total,
+            portraits: portraits.len(),
+            unresolved: self.unresolved.len(),
+            unsupported_remotes: self.unsupported_remotes,
+        });
         for event in events {
             if let Some(contributor) = &mut event.contributor {
                 contributor.portrait = portraits.get(&contributor.key).cloned();
@@ -491,7 +645,88 @@ impl<N: Network> Resolver<N> {
         }
     }
 
-    fn read(&self, key: &str) -> Option<Record> {
+    fn portrait_for(&mut self, choice: &Choice) -> Option<Arc<Portrait>> {
+        match &choice.avatar {
+            Some(Avatar::Remote(url)) => return self.image(url),
+            Some(Avatar::Local(path, root)) => match local_portrait(path, root) {
+                Ok(Some(portrait)) => return Some(Arc::new(portrait)),
+                Ok(None) => eprintln!(
+                    "avatars: local override {} unavailable; trying GitHub",
+                    crate::terminal_escape(&path.to_string_lossy())
+                ),
+                Err(_) => {
+                    eprintln!(
+                        "avatars: rejected local override {}; using default portrait",
+                        crate::terminal_escape(&path.to_string_lossy())
+                    );
+                    return None;
+                }
+            },
+            None => {}
+        }
+        let (_, account) = choice.github.as_ref()?;
+        self.image(&account.image_url())
+    }
+
+    fn image(&mut self, url: &str) -> Option<Arc<Portrait>> {
+        if let Some(portrait) = self.memo.get(url) {
+            return portrait.clone();
+        }
+        let key = format!("image\n{url}");
+        let cached = self.read::<Image>(&key);
+        let stale = cached
+            .as_ref()
+            .filter(|record| record.image)
+            .and_then(|_| self.cached_portrait(&key));
+        let portrait = if !self.fetch
+            || cached.as_ref().is_some_and(|record| {
+                self.now.saturating_sub(record.checked) < TTL
+                    && (!record.image || stale.is_some())
+            }) {
+            stale
+        } else {
+            self.download(&key, url, stale)
+        };
+        self.memo.insert(url.to_owned(), portrait.clone());
+        portrait
+    }
+
+    fn download(
+        &mut self,
+        key: &str,
+        url: &str,
+        stale: Option<Arc<Portrait>>,
+    ) -> Option<Arc<Portrait>> {
+        let png = match self.network.get(url, false) {
+            Response::Found(bytes) => {
+                let png = (|| {
+                    let portrait = Portrait::decode(&bytes)?;
+                    let image = image::RgbaImage::from_raw(128, 128, portrait.pixels)?;
+                    let mut png = Cursor::new(Vec::new());
+                    image.write_to(&mut png, image::ImageFormat::Png).ok()?;
+                    Some(png.into_inner())
+                })();
+                if png.is_none() && stale.is_some() {
+                    // An undecodable refresh keeps the previous portrait and retries.
+                    return stale;
+                }
+                png
+            }
+            Response::Missing => None,
+            Response::Unavailable | Response::RateLimited => return stale,
+        };
+        let record = Image {
+            checked: self.now,
+            image: png.is_some(),
+        };
+        if let Some(png) = &png {
+            let _ = self.store_png(key, png);
+        }
+        let _ = self.store(key, &record);
+        png.as_deref().and_then(Portrait::decode).map(Arc::new)
+    }
+
+    fn read<T: DeserializeOwned>(&self, key: &str) -> Option<T> {
         let path = self.path(key)?;
         let file = crate::cache::ConfinedFile::at(&path, false)
             .ok()?
@@ -504,27 +739,26 @@ impl<N: Network> Resolver<N> {
         Some(
             self.root
                 .as_ref()?
-                .join("avatars-v2")
+                .join("avatars-v3")
                 .join(format!("{}.json", hash(key))),
         )
     }
 
-    fn store(&self, key: &str, record: &Record, image: Option<&[u8]>) -> Option<()> {
-        let path = self.path(key)?;
-        if let Some(image) = image {
-            crate::cache::ConfinedFile::at(&path.with_extension("png"), true)
-                .ok()?
-                .write(|file| file.write_all(image))
-                .ok()?;
-        }
-        crate::cache::ConfinedFile::at(&path, true)
+    fn store(&self, key: &str, record: &impl Serialize) -> Option<()> {
+        crate::cache::ConfinedFile::at(&self.path(key)?, true)
             .ok()?
             .write(|file| Ok(serde_json::to_writer(file, record)?))
-            .ok()?;
-        Some(())
+            .ok()
     }
 
-    fn portrait(&self, key: &str) -> Option<Arc<Portrait>> {
+    fn store_png(&self, key: &str, png: &[u8]) -> Option<()> {
+        crate::cache::ConfinedFile::at(&self.path(key)?.with_extension("png"), true)
+            .ok()?
+            .write(|file| file.write_all(png))
+            .ok()
+    }
+
+    fn cached_portrait(&self, key: &str) -> Option<Arc<Portrait>> {
         let path = self.path(key)?.with_extension("png");
         let file = crate::cache::ConfinedFile::at(&path, false)
             .ok()?
@@ -550,283 +784,6 @@ impl<N: Network> Resolver<N> {
             })
         })
     }
-
-    fn one(
-        &mut self,
-        key: &str,
-        email: &str,
-        accounts: &Accounts,
-        remote: Option<&str>,
-        commit: &str,
-    ) -> Option<Arc<Portrait>> {
-        if let Some(Avatar::Local(path, root)) = &accounts.avatar {
-            let portrait = local_portrait(path, root);
-            if portrait.is_err() {
-                eprintln!(
-                    "avatars: rejected local override {}; using default portrait",
-                    crate::terminal_escape(&path.to_string_lossy())
-                );
-                return None;
-            }
-            if let Ok(Some(portrait)) = portrait {
-                return Some(Arc::new(portrait));
-            }
-            eprintln!(
-                "avatars: local override {} unavailable; trying account lookups",
-                crate::terminal_escape(&path.to_string_lossy())
-            );
-        }
-        let cached = self.read(key);
-        let stale = cached
-            .as_ref()
-            .filter(|record| record.image)
-            .and_then(|_| self.portrait(key));
-        if !self.fetch
-            || cached.as_ref().is_some_and(|record| {
-                self.now.saturating_sub(record.checked) < TTL
-                    && (!record.image || stale.is_some())
-            })
-        {
-            return stale;
-        }
-        let mut complete = true;
-        if let Some(Avatar::Remote(url)) = &accounts.avatar {
-            return self.remote_override(key, url, stale);
-        }
-        let github = accounts.github.as_deref();
-        let mut image =
-            self.explicit_accounts(accounts, email, &mut complete, stale.is_some());
-        let mut login = github
-            .filter(|login| valid_login(login))
-            .map(str::to_owned)
-            .or_else(|| noreply(email))
-            .or_else(|| {
-                cached
-                    .as_ref()
-                    .and_then(|record| record.github.clone())
-                    .filter(|login| valid_login(login))
-            });
-        let mut avatar_url = None;
-        if image.is_none()
-            && login.is_none()
-            && let Some(remote) = remote
-            && !commit.is_empty()
-            && let Some(account) = self.account(remote, commit, &mut complete)
-        {
-            login = Some(account.login);
-            avatar_url = account.avatar_url;
-        }
-        if image.is_none()
-            && github.is_none()
-            && let Some(login) = &login
-        {
-            let url = github_image(login, email, false, avatar_url);
-            image = self.image(&url, &mut complete, stale.is_some());
-        }
-        if image.is_none() && self.gitlab_email && !email.is_empty() {
-            image = self.gitlab(
-                &gitlab_email_url(email),
-                None,
-                &mut complete,
-                stale.is_some(),
-            );
-        }
-        let email = accounts
-            .gravatar
-            .as_deref()
-            .unwrap_or(email)
-            .trim()
-            .to_ascii_lowercase();
-        if image.is_none() && !email.is_empty() {
-            image = self.image(
-                &format!(
-                    "https://www.gravatar.com/avatar/{}?s=128&d=404",
-                    hash(email)
-                ),
-                &mut complete,
-                stale.is_some(),
-            );
-        }
-        self.settle(key, login, image.as_deref(), complete, stale)
-    }
-
-    fn settle(
-        &self,
-        key: &str,
-        github: Option<String>,
-        image: Option<&[u8]>,
-        complete: bool,
-        stale: Option<Arc<Portrait>>,
-    ) -> Option<Arc<Portrait>> {
-        let portrait = image.and_then(Portrait::decode).map(Arc::new);
-        if complete {
-            let record = Record {
-                checked: self.now,
-                github,
-                image: image.is_some(),
-            };
-            let _ = self.store(key, &record, image);
-            portrait
-        } else {
-            stale.or(portrait)
-        }
-    }
-
-    fn remote_override(
-        &mut self,
-        key: &str,
-        url: &str,
-        stale: Option<Arc<Portrait>>,
-    ) -> Option<Arc<Portrait>> {
-        let mut complete = true;
-        let image = self.image(url, &mut complete, stale.is_some());
-        self.settle(key, None, image.as_deref(), complete, stale)
-    }
-
-    fn explicit_accounts(
-        &mut self,
-        accounts: &Accounts,
-        email: &str,
-        complete: &mut bool,
-        has_stale: bool,
-    ) -> Option<Vec<u8>> {
-        if let Some(login) = &accounts.github
-            && let Some(image) =
-                self.image(&github_image(login, email, true, None), complete, has_stale)
-        {
-            return Some(image);
-        }
-        let username = accounts.gitlab.as_deref()?;
-        self.gitlab(
-            &format!("https://gitlab.com/api/v4/users?username={username}"),
-            Some(username),
-            complete,
-            has_stale,
-        )
-    }
-
-    fn gitlab(
-        &mut self,
-        url: &str,
-        username: Option<&str>,
-        complete: &mut bool,
-        has_stale: bool,
-    ) -> Option<Vec<u8>> {
-        #[derive(Deserialize)]
-        struct User {
-            username: String,
-            avatar_url: Option<String>,
-        }
-        #[derive(Deserialize)]
-        struct Avatar {
-            avatar_url: Option<String>,
-        }
-        let bytes = match self.network.get(url, false) {
-            Response::Found(bytes) => bytes,
-            Response::Missing => return None,
-            Response::Unavailable | Response::RateLimited => {
-                *complete = false;
-                return None;
-            }
-        };
-        let avatar = if let Some(username) = username {
-            serde_json::from_slice::<Vec<User>>(&bytes).map(|users| {
-                users
-                    .into_iter()
-                    .find(|user| user.username.eq_ignore_ascii_case(username))
-                    .and_then(|user| user.avatar_url)
-            })
-        } else {
-            serde_json::from_slice::<Avatar>(&bytes).map(|avatar| avatar.avatar_url)
-        };
-        let url = avatar.ok().flatten()?;
-        if !https_url(&url) {
-            return None;
-        }
-        let host = url
-            .parse::<ureq::http::Uri>()
-            .ok()?
-            .host()?
-            .to_ascii_lowercase();
-        if host == "gravatar.com" || host.ends_with(".gravatar.com") {
-            return None;
-        }
-        self.image(&url, complete, has_stale)
-    }
-
-    fn account(
-        &mut self,
-        remote: &str,
-        commit: &str,
-        complete: &mut bool,
-    ) -> Option<Account> {
-        if self.limited {
-            *complete = false;
-            return None;
-        }
-        match self.network.get(
-            &format!(
-                "https://api.github.com/repos/{remote}/commits?sha={commit}&per_page=1"
-            ),
-            true,
-        ) {
-            Response::Found(bytes) => {
-                let Ok(response) = serde_json::from_slice::<Vec<CommitAccount>>(&bytes)
-                else {
-                    *complete = false;
-                    return None;
-                };
-                response
-                    .into_iter()
-                    .next()
-                    .and_then(|commit| commit.author)
-                    .filter(|account| valid_login(&account.login))
-                    .map(|mut account| {
-                        account.avatar_url = account.avatar_url.filter(|url| {
-                            url.starts_with("https://avatars.githubusercontent.com/")
-                        });
-                        account
-                    })
-            }
-            Response::Missing => None,
-            Response::RateLimited => {
-                self.limited = true;
-                *complete = false;
-                None
-            }
-            Response::Unavailable => {
-                *complete = false;
-                None
-            }
-        }
-    }
-    fn image(
-        &mut self,
-        url: &str,
-        complete: &mut bool,
-        has_stale: bool,
-    ) -> Option<Vec<u8>> {
-        match self.network.get(url, false) {
-            Response::Found(bytes) => {
-                let encoded = (|| {
-                    let portrait = Portrait::decode(&bytes)?;
-                    let image = image::RgbaImage::from_raw(128, 128, portrait.pixels)?;
-                    let mut png = Cursor::new(Vec::new());
-                    image.write_to(&mut png, image::ImageFormat::Png).ok()?;
-                    Some(png.into_inner())
-                })();
-                if encoded.is_none() && has_stale {
-                    *complete = false;
-                }
-                encoded
-            }
-            Response::Missing => None,
-            Response::Unavailable | Response::RateLimited => {
-                *complete = false;
-                None
-            }
-        }
-    }
 }
 
 #[cfg(test)]
@@ -836,6 +793,9 @@ mod tests {
     use super::*;
     use crate::contributors::{Accounts, Contributor};
 
+    const COMMIT: &str = "0123456789012345678901234567890123456789";
+    const EXPLICIT: &str = "https://github.com/explicit.png?size=128";
+
     #[test]
     fn linked_avatar_cache_does_not_write_outside() {
         let root = crate::cache::test_directory().unwrap();
@@ -844,7 +804,7 @@ mod tests {
         assert!(
             std::process::Command::new("cmd")
                 .args(["/d", "/c", "mklink", "/J"])
-                .arg(root.path().join("avatars-v2"))
+                .arg(root.path().join("avatars-v3"))
                 .arg(outside.path())
                 .output()
                 .unwrap()
@@ -852,17 +812,15 @@ mod tests {
                 .success()
         );
         #[cfg(unix)]
-        std::os::unix::fs::symlink(outside.path(), root.path().join("avatars-v2"))
+        std::os::unix::fs::symlink(outside.path(), root.path().join("avatars-v3"))
             .unwrap();
         let resolver = resolver(Some(root.path().to_owned()), false, vec![]);
         resolver.store(
             "test",
-            &Record {
+            &Image {
                 checked: 0,
-                github: None,
                 image: false,
             },
-            None,
         );
         assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
     }
@@ -875,10 +833,10 @@ mod tests {
         );
     }
 
-    #[derive(Default)]
     struct Fake {
         replies: VecDeque<Response>,
         calls: Vec<(String, bool)>,
+        remaining: Duration,
     }
 
     impl Network for Fake {
@@ -887,6 +845,10 @@ mod tests {
             self.replies
                 .pop_front()
                 .expect("each network call has a scripted response")
+        }
+
+        fn remaining(&self) -> Duration {
+            self.remaining
         }
     }
 
@@ -955,6 +917,15 @@ mod tests {
         bytes.into_inner()
     }
 
+    fn commit_by(login: &str, id: u64) -> Response {
+        Response::Found(
+            format!(
+                r#"[{{"sha":"{COMMIT}","author":{{"login":"{login}","id":{id}}}}}]"#
+            )
+            .into_bytes(),
+        )
+    }
+
     fn event(email: &str, github: Option<&str>) -> Event {
         Event {
             author: crate::timeline::Identity {
@@ -972,10 +943,16 @@ mod tests {
                 },
                 portrait: None,
             }),
-            commit: "0123456789012345678901234567890123456789".to_owned(),
+            commit: COMMIT.to_owned(),
             seconds: 0,
             changes: vec![],
         }
+    }
+
+    fn with_avatar(email: &str, avatar: Avatar) -> Event {
+        let mut source = event(email, None);
+        source.contributor.as_mut().unwrap().accounts.avatar = Some(avatar);
+        source
     }
 
     fn resolver(
@@ -987,11 +964,22 @@ mod tests {
             Fake {
                 replies: replies.into(),
                 calls: vec![],
+                remaining: Duration::MAX,
             },
             root,
             fetch,
             100,
         )
+    }
+
+    /// Account lookup then portraits, without merging contributors.
+    fn resolve<N: Network>(
+        resolver: &mut Resolver<N>,
+        events: &mut [Event],
+        remote: Option<&str>,
+    ) {
+        resolver.accounts(events.iter(), remote);
+        resolver.portraits(events);
     }
 
     fn visible(event: &Event) -> bool {
@@ -1004,7 +992,7 @@ mod tests {
         clippy::disallowed_methods,
         reason = "exercise the avatar HTTP client against a local test server"
     )]
-    fn gitlab_lookup_over_local_http_keeps_tokens_off_all_requests() {
+    fn token_reaches_only_the_github_api_over_local_http() {
         struct Local {
             http: Http,
             base: String,
@@ -1022,20 +1010,21 @@ mod tests {
         listener.set_nonblocking(true).unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let server = std::thread::spawn(move || {
-            let users = serve_body(&listener, 200, b"[]");
-            let email = serve_body(
+            let api = serve_body(
                 &listener,
                 200,
-                br#"{"avatar_url":"https://gitlab.com/uploads/a.png"}"#,
+                format!(
+                    r#"[{{"sha":"{COMMIT}","author":{{"login":"alice","id":5}}}}]"#
+                )
+                .as_bytes(),
             );
             let image = serve_body(&listener, 200, &png());
-            assert!(users.starts_with("GET /api/v4/users?username=alice "));
-            assert!(email.starts_with("GET /api/v4/avatar?email=%61%40%62&size=128 "));
-            assert!(image.starts_with("GET /uploads/a.png "));
-            for request in [users, email, image] {
-                assert!(!request.to_ascii_lowercase().contains("authorization:"));
-                assert!(!request.contains("secret-token"));
-            }
+            assert!(api.starts_with(&format!(
+                "GET /repos/owner/repo/commits?sha={COMMIT}&per_page=1 "
+            )));
+            assert!(api.contains("secret-token"));
+            assert!(image.starts_with("GET /u/5?s=128 "));
+            assert!(!image.to_ascii_lowercase().contains("authorization:"));
         });
         let mut http = Http::new();
         http.token = Some("secret-token".to_owned());
@@ -1046,124 +1035,34 @@ mod tests {
             .build()
             .into();
         let mut resolver = Resolver::new(Local { http, base }, None, true, 100);
-        resolver.gitlab_email = true;
         let mut events = [event("a@b", None)];
-        events[0].contributor.as_mut().unwrap().accounts.gitlab =
-            Some("alice".to_owned());
-        resolver.resolve(&mut events, None);
+        resolve(&mut resolver, &mut events, Some("owner/repo"));
         server.join().unwrap();
         assert!(visible(&events[0]));
     }
 
     #[test]
-    fn gitlab_username_precedes_inferred_github_and_reuses_cache() {
-        let root = crate::cache::test_directory().unwrap();
-        let mut source =
-            event("123+inferred@users.noreply.github.com", Some("explicit"));
-        source.contributor.as_mut().unwrap().accounts.gitlab = Some("Alice".to_owned());
-        let mut initial = resolver(Some(root.path().to_owned()), true, vec![
-            Response::Missing,
-            Response::Found(br#"[{"username":"alice","avatar_url":"https://gitlab.com/uploads/alice.png"}]"#.to_vec()),
-            Response::Found(png()),
-        ]);
-        let mut events = [source.clone()];
-        initial.resolve(&mut events, Some("owner/repo"));
-        assert!(visible(&events[0]));
-        assert_eq!(
-            initial.network.calls,
-            [
-                ("https://github.com/explicit.png?size=128".to_owned(), false),
-                (
-                    "https://gitlab.com/api/v4/users?username=Alice".to_owned(),
-                    false
-                ),
-                ("https://gitlab.com/uploads/alice.png".to_owned(), false),
-            ]
-        );
-        for (fetch, now) in [(true, 100), (false, 100 + TTL)] {
-            let mut cached = resolver(Some(root.path().to_owned()), fetch, vec![]);
-            cached.now = now;
-            cached.resolve(&mut events, Some("owner/repo"));
-            assert!(visible(&events[0]));
-            assert_eq!(cached.network.calls.len(), 0);
-        }
-        let mut expired = resolver(
-            Some(root.path().to_owned()),
-            true,
-            vec![Response::Missing, Response::Unavailable, Response::Missing],
-        );
-        expired.now += TTL;
-        expired.resolve(&mut [source], Some("owner/repo"));
-        assert_eq!(expired.network.calls.len(), 3);
-    }
-
-    #[test]
-    fn configured_gitlab_precedes_github_noreply() {
-        let mut events = [event("123+inferred@users.noreply.github.com", None)];
-        events[0].contributor.as_mut().unwrap().accounts.gitlab =
-            Some("alice".to_owned());
-        let mut resolver = resolver(None, true, vec![
-            Response::Found(br#"[{"username":"alice","avatar_url":"https://gitlab.com/uploads/a.png"}]"#.to_vec()),
-            Response::Found(png()),
-        ]);
-        resolver.resolve(&mut events, Some("owner/repo"));
-        assert!(visible(&events[0]));
-        assert_eq!(resolver.network.calls.len(), 2);
-        assert_eq!(
-            resolver.network.calls[0].0,
-            "https://gitlab.com/api/v4/users?username=alice"
-        );
-    }
-
-    #[test]
-    fn gitlab_email_requires_separate_opt_in_and_encodes_commit_email() {
-        let root = crate::cache::test_directory().unwrap();
-        let source = event("A+tag&x@example.invalid", None);
-        let mut ordinary =
-            resolver(Some(root.path().to_owned()), true, vec![Response::Missing]);
-        ordinary.resolve(&mut [source.clone()], None);
-        assert!(
-            ordinary.network.calls[0]
-                .0
-                .starts_with("https://www.gravatar.com/")
-        );
-        let mut opted = resolver(
-            Some(root.path().to_owned()),
+    fn no_request_carries_an_email_or_its_hash() {
+        let emails = ["first@example.invalid", "second@example.invalid"];
+        let mut events: Vec<_> =
+            emails.iter().map(|email| event(email, None)).collect();
+        let mut resolver = resolver(
+            None,
             true,
             vec![
-                Response::Found(
-                    br#"{"avatar_url":"https://gitlab.com/uploads/a.png"}"#.to_vec(),
-                ),
+                commit_by("first", 1),
+                Response::Missing,
                 Response::Found(png()),
             ],
         );
-        opted.gitlab_email = true;
-        opted.resolve(&mut [source.clone()], None);
-        assert_eq!(opted.network.calls[0], ("https://gitlab.com/api/v4/avatar?email=%61%2B%74%61%67%26%78%40%65%78%61%6D%70%6C%65%2E%69%6E%76%61%6C%69%64&size=128".to_owned(), false));
-        let mut offline = resolver(Some(root.path().to_owned()), false, vec![]);
-        offline.gitlab_email = true;
-        let mut events = [source];
-        offline.resolve(&mut events, None);
-        assert!(visible(&events[0]));
-        assert_eq!(offline.network.calls.len(), 0);
-    }
-
-    #[test]
-    fn gitlab_misses_invalid_responses_and_failures_fall_back() {
-        for response in [
-            Response::Missing, Response::Unavailable, Response::RateLimited,
-            Response::Found(b"invalid".to_vec()),
-            Response::Found(b"[]".to_vec()),
-            Response::Found(br#"[{"username":"other","avatar_url":"https://example.invalid/wrong.png"}]"#.to_vec()),
-            Response::Found(br#"[{"username":"alice","avatar_url":"http://example.invalid/unsafe.png"}]"#.to_vec()),
-        ] {
-            let mut events = [event("alice@example.invalid", None)];
-            events[0].contributor.as_mut().unwrap().accounts.gitlab = Some("alice".to_owned());
-            let mut resolver = resolver(None, true, vec![response, Response::Found(png())]);
-            resolver.resolve(&mut events, None);
-            assert!(visible(&events[0]));
-            assert_eq!(resolver.network.calls.len(), 2);
-            assert!(resolver.network.calls[1].0.starts_with("https://www.gravatar.com/"));
+        resolve(&mut resolver, &mut events, Some("owner/repo"));
+        assert_eq!(resolver.network.calls.len(), 3);
+        for (url, _) in &resolver.network.calls {
+            for email in emails {
+                for secret in [email.to_owned(), hash(email)] {
+                    assert!(!url.contains(&secret), "{url}");
+                }
+            }
         }
     }
 
@@ -1172,22 +1071,22 @@ mod tests {
         let root = crate::cache::test_directory().unwrap();
         let path = root.path().join("portrait.png");
         fs::write(&path, png()).unwrap();
-        let mut source = event("author@example.invalid", Some("explicit"));
-        source.contributor.as_mut().unwrap().accounts.avatar = Some(Avatar::Local(
-            path.clone(),
-            path.parent().unwrap().to_owned(),
-        ));
         let mut local = resolver(None, false, vec![]);
-        let mut events = [source.clone()];
-        local.resolve(&mut events, Some("owner/repo"));
+        let mut events = [with_avatar(
+            "author@example.invalid",
+            Avatar::Local(path.clone(), path.parent().unwrap().to_owned()),
+        )];
+        resolve(&mut local, &mut events, Some("owner/repo"));
         assert!(visible(&events[0]));
-        source.contributor.as_mut().unwrap().accounts.avatar = Some(Avatar::Remote(
-            "https://example.invalid/portrait.png".to_owned(),
-        ));
+        let mut source = with_avatar(
+            "author@example.invalid",
+            Avatar::Remote("https://example.invalid/portrait.png".to_owned()),
+        );
+        source.contributor.as_mut().unwrap().accounts.github =
+            Some("explicit".to_owned());
         for response in [Response::Missing, Response::Found(png())] {
             let mut remote = resolver(None, true, vec![response]);
-            remote.gitlab_email = true;
-            remote.resolve(&mut [source.clone()], Some("owner/repo"));
+            resolve(&mut remote, &mut [source.clone()], Some("owner/repo"));
             assert_eq!(
                 remote.network.calls,
                 [("https://example.invalid/portrait.png".to_owned(), false)]
@@ -1198,107 +1097,61 @@ mod tests {
     #[test]
     fn remote_override_cache_refresh_retains_failures_and_clears_confirmed_misses() {
         let root = crate::cache::test_directory().unwrap();
-        let mut source = event("a@example.invalid", None);
-        source.contributor.as_mut().unwrap().accounts.avatar = Some(Avatar::Remote(
-            "https://example.invalid/portrait.png".to_owned(),
-        ));
+        let url = "https://example.invalid/portrait.png";
+        let source = with_avatar("a@example.invalid", Avatar::Remote(url.to_owned()));
         let mut initial = resolver(
             Some(root.path().to_owned()),
             true,
             vec![Response::Found(png())],
         );
-        initial.resolve(&mut [source.clone()], None);
-        let mut events = [source];
-        let accounts = &mut events[0].contributor.as_mut().unwrap().accounts;
-        accounts.github = Some("changed".to_owned());
-        accounts.gitlab = Some("changed".to_owned());
-        accounts.gravatar = Some("changed@example.invalid".to_owned());
-        events[0].author.email = b"changed@example.invalid".to_vec();
+        resolve(&mut initial, &mut [source.clone()], None);
+        let mut events = [with_avatar(
+            "changed@example.invalid",
+            Avatar::Remote(url.to_owned()),
+        )];
         let mut offline = resolver(Some(root.path().to_owned()), false, vec![]);
-        offline.gitlab_email = true;
         offline.now += TTL;
-        offline.resolve(&mut events, Some("changed/repository"));
+        resolve(&mut offline, &mut events, Some("changed/repository"));
         assert!(visible(&events[0]));
         let mut failed = resolver(
             Some(root.path().to_owned()),
             true,
             vec![Response::Unavailable],
         );
-        failed.gitlab_email = true;
         failed.now += TTL;
-        failed.resolve(&mut events, None);
+        resolve(&mut failed, &mut events, None);
         assert!(visible(&events[0]));
         let mut missing =
             resolver(Some(root.path().to_owned()), true, vec![Response::Missing]);
-        missing.gitlab_email = true;
         missing.now += TTL;
-        missing.resolve(&mut events, None);
+        resolve(&mut missing, &mut events, None);
         assert!(!visible(&events[0]));
         let mut cached = resolver(Some(root.path().to_owned()), true, vec![]);
-        cached.gitlab_email = true;
         cached.now += TTL;
-        cached.resolve(&mut events, None);
+        resolve(&mut cached, &mut events, None);
         assert!(!visible(&events[0]));
         assert_eq!(cached.network.calls.len(), 0);
     }
 
     #[test]
-    fn gitlab_gravatar_and_invalid_responses_are_cached_misses() {
-        for payload in [
-            br#"{"avatar_url":"https://www.gravatar.com/avatar/md5?d=identicon"}"#
-                .as_slice(),
-            br#"{"avatar_url":"https://GRAVATAR.COM/avatar/md5?d=identicon"}"#,
-            br#"{"avatar_url":"https://secure.gravatar.com/avatar/md5"}"#,
-            br#"{"avatar_url":"http://gitlab.com/avatar.png"}"#,
-            b"invalid",
-        ] {
-            let root = crate::cache::test_directory().unwrap();
-            let mut source = event("commit@example.invalid", None);
-            source.contributor.as_mut().unwrap().accounts.gravatar =
-                Some("configured@example.invalid".to_owned());
-            let mut initial = resolver(
-                Some(root.path().to_owned()),
-                true,
-                vec![Response::Found(payload.to_vec()), Response::Missing],
-            );
-            initial.gitlab_email = true;
-            initial.resolve(&mut [source.clone()], None);
-            assert_eq!(initial.network.calls.len(), 2);
-            assert_eq!(
-                initial.network.calls[1].0,
-                format!(
-                    "https://www.gravatar.com/avatar/{}?s=128&d=404",
-                    hash("configured@example.invalid")
-                )
-            );
-            let mut cached = resolver(Some(root.path().to_owned()), true, vec![]);
-            cached.gitlab_email = true;
-            cached.resolve(&mut [source], None);
-            assert_eq!(cached.network.calls.len(), 0);
-        }
-    }
-
-    #[test]
-    fn missing_and_undecodable_local_overrides_fall_back() {
+    fn missing_and_undecodable_local_overrides_fall_back_to_github() {
         let root = crate::cache::test_directory().unwrap();
         let path = root.path().join("portrait.png");
         for bytes in [None, Some(b"invalid".as_slice())] {
             if let Some(bytes) = bytes {
                 fs::write(&path, bytes).unwrap();
             }
-            let mut source = event("commit@example.invalid", Some("explicit"));
-            source.contributor.as_mut().unwrap().accounts.avatar = Some(Avatar::Local(
-                path.clone(),
-                path.parent().unwrap().to_owned(),
-            ));
+            let mut source = with_avatar(
+                "commit@example.invalid",
+                Avatar::Local(path.clone(), path.parent().unwrap().to_owned()),
+            );
+            source.contributor.as_mut().unwrap().accounts.github =
+                Some("explicit".to_owned());
             let mut resolver = resolver(None, true, vec![Response::Found(png())]);
             let mut events = [source];
-            resolver.resolve(&mut events, None);
+            resolve(&mut resolver, &mut events, None);
             assert!(visible(&events[0]));
-            assert_eq!(
-                resolver.network.calls[0].0,
-                "https://github.com/explicit.png?size=128"
-            );
+            assert_eq!(resolver.network.calls[0].0, EXPLICIT);
         }
     }
 
@@ -1310,47 +1163,41 @@ mod tests {
         let filename = std::ffi::OsString::from_wide(&[0xD800, 0x2E, 0x70, 0x6E, 0x67]);
         let path = root.path().join(filename);
         fs::write(&path, png()).unwrap();
-        let mut source = event("commit@example.invalid", None);
-        source.contributor.as_mut().unwrap().accounts.avatar = Some(Avatar::Local(
-            path.clone(),
-            path.parent().unwrap().to_owned(),
-        ));
         let mut resolver = resolver(None, false, vec![]);
-        let mut events = [source];
-        resolver.resolve(&mut events, None);
+        let mut events = [with_avatar(
+            "commit@example.invalid",
+            Avatar::Local(path.clone(), path.parent().unwrap().to_owned()),
+        )];
+        resolve(&mut resolver, &mut events, None);
         assert!(visible(&events[0]));
         assert_eq!(resolver.network.calls.len(), 0);
     }
 
     #[test]
-    fn explicit_gitlab_and_override_have_first_priority() {
-        let inferred = event("123+inferred@users.noreply.github.com", None);
-        let mut gitlab = event("gitlab@example.invalid", None);
-        gitlab.contributor.as_mut().unwrap().accounts.gitlab = Some("alice".to_owned());
-        let mut avatar = event("avatar@example.invalid", None);
-        avatar.contributor.as_mut().unwrap().accounts.avatar =
-            Some(Avatar::Remote("https://example.invalid/a.png".to_owned()));
-        assert!(priority(&gitlab) < priority(&inferred));
-        assert!(priority(&avatar) < priority(&inferred));
-    }
-
-    #[test]
     fn parses_both_noreply_formats_and_bots() {
         for (email, expected) in [
-            ("123+Octocat@users.noreply.github.com", Some("octocat")),
-            ("octocat@USERS.NOREPLY.GITHUB.COM", Some("octocat")),
+            (
+                "123+Octocat@users.noreply.github.com",
+                Some(("octocat", Some(123))),
+            ),
+            ("octocat@USERS.NOREPLY.GITHUB.COM", Some(("octocat", None))),
             (
                 "42+dependabot[bot]@users.noreply.github.com",
-                Some("dependabot[bot]"),
+                Some(("dependabot[bot]", Some(42))),
             ),
             ("octocat@example.com", None),
             ("abc+octocat@users.noreply.github.com", None),
             ("+octocat@users.noreply.github.com", None),
             ("123+@users.noreply.github.com", None),
+            ("99999999999999999999+a@users.noreply.github.com", None),
             ("@users.noreply.github.com", None),
             ("a/b@users.noreply.github.com", None),
         ] {
-            assert_eq!(noreply(email).as_deref(), expected, "{email}");
+            let expected = expected.map(|(login, id)| Account {
+                login: login.to_owned(),
+                id,
+            });
+            assert_eq!(noreply(email), expected, "{email}");
         }
     }
 
@@ -1382,99 +1229,170 @@ mod tests {
             Some("explicit"),
         )];
         let mut resolver = resolver(None, true, vec![Response::Found(png())]);
-        resolver.resolve(&mut events, Some("owner/repo"));
+        resolve(&mut resolver, &mut events, Some("owner/repo"));
+        assert!(visible(&events[0]));
+        assert_eq!(resolver.network.calls, [(EXPLICIT.to_owned(), false)]);
+    }
+
+    #[test]
+    fn noreply_uses_the_account_id_without_an_api_request() {
+        let mut events = vec![event(
+            "49699333+dependabot[bot]@users.noreply.github.com",
+            None,
+        )];
+        let mut resolver = resolver(None, true, vec![Response::Found(png())]);
+        resolve(&mut resolver, &mut events, Some("owner/repo"));
         assert!(visible(&events[0]));
         assert_eq!(
             resolver.network.calls,
-            [("https://github.com/explicit.png?size=128".to_owned(), false)]
+            [(
+                "https://avatars.githubusercontent.com/u/49699333?s=128".to_owned(),
+                false
+            )]
         );
     }
 
     #[test]
-    fn noreply_precedes_commit_api() {
-        let mut events = vec![event("123+inferred@users.noreply.github.com", None)];
-        let mut resolver = resolver(None, true, vec![Response::Found(png())]);
-        resolver.resolve(&mut events, Some("owner/repo"));
-        assert!(visible(&events[0]));
-        assert!(resolver.network.calls[0].0.contains("/u/123?s=128"));
-        assert_eq!(resolver.network.calls.len(), 1);
-    }
-
-    #[test]
-    fn commit_api_resolves_once_per_email_and_caches_identity() {
+    fn commit_api_resolves_once_per_email_and_caches_the_account() {
         let root = crate::cache::test_directory().unwrap();
         let mut events = vec![event("author@example.invalid", None); 3];
         let mut resolver = resolver(
             Some(root.path().to_owned()),
             true,
-            vec![
-                Response::Found(br#"[{"author":{"login":"linked"}}]"#.to_vec()),
-                Response::Found(png()),
-            ],
+            vec![commit_by("Linked", 9), Response::Found(png())],
         );
-        resolver.resolve(&mut events, Some("owner/repo"));
+        resolve(&mut resolver, &mut events, Some("owner/repo"));
         assert!(events.iter().all(visible));
         assert_eq!(resolver.network.calls.len(), 2);
         assert!(resolver.network.calls[0].1);
-        let entry = fs::read_dir(root.path().join("avatars-v2"))
-            .unwrap()
-            .map(Result::unwrap)
-            .find(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
-            .unwrap();
-        let record: Record =
-            serde_json::from_slice(&fs::read(entry.path()).unwrap()).unwrap();
-        assert_eq!(record.github.as_deref(), Some("linked"));
-        assert!(resolver.network.calls[0].0.ends_with("&per_page=1"));
-        let mut refreshed = self::resolver(
-            Some(root.path().to_owned()),
-            true,
-            vec![Response::Found(png())],
+        assert_eq!(
+            resolver.found()["author@example.invalid"],
+            Account {
+                login: "linked".to_owned(),
+                id: Some(9)
+            }
         );
-        refreshed.now = 100 + TTL;
-        refreshed.resolve(&mut events, Some("owner/repo"));
-        assert_eq!(refreshed.network.calls.len(), 1);
-        assert!(!refreshed.network.calls[0].1);
-        assert!(refreshed.network.calls[0].0.contains("/linked.png"));
+        for (fetch, remote) in [(false, None), (true, Some("other/repo"))] {
+            let mut cached =
+                super::tests::resolver(Some(root.path().to_owned()), fetch, vec![]);
+            let mut events = [event("author@example.invalid", None)];
+            resolve(&mut cached, &mut events, remote);
+            assert!(visible(&events[0]));
+            assert_eq!(cached.network.calls.len(), 0);
+        }
     }
 
     #[test]
-    fn unlinked_author_falls_back_to_gravatar_without_placeholder() {
-        let mut events = vec![event(" MyEmailAddress@example.com ", None)];
+    fn a_different_commit_or_invalid_login_is_no_account() {
+        for reply in [
+            r#"[{"sha":"ffffffffffffffffffffffffffffffffffffffff","author":{"login":"other","id":1}}]"#,
+            r#"[{"sha":"0123456789012345678901234567890123456789","author":{"login":"no/slash","id":1}}]"#,
+            r#"[{"sha":"0123456789012345678901234567890123456789","author":null}]"#,
+            "[]",
+        ] {
+            let mut resolver =
+                resolver(None, true, vec![Response::Found(reply.as_bytes().to_vec())]);
+            let mut events = [event("author@example.invalid", None)];
+            resolve(&mut resolver, &mut events, Some("owner/repo"));
+            assert!(resolver.found().is_empty(), "{reply}");
+            assert!(!visible(&events[0]));
+        }
+    }
+
+    #[test]
+    fn a_cached_miss_holds_only_for_the_remote_that_was_asked() {
+        let root = crate::cache::test_directory().unwrap();
+        let source = event("author@example.invalid", None);
+        let mut initial =
+            resolver(Some(root.path().to_owned()), true, vec![Response::Missing]);
+        resolve(
+            &mut initial,
+            &mut [source.clone(), source.clone()],
+            Some("owner/repo"),
+        );
+        assert_eq!(initial.network.calls.len(), 1);
+        let mut same = resolver(Some(root.path().to_owned()), true, vec![]);
+        resolve(&mut same, &mut [source.clone()], Some("owner/repo"));
+        assert_eq!(same.network.calls.len(), 0);
+        let mut other =
+            resolver(Some(root.path().to_owned()), true, vec![Response::Missing]);
+        resolve(&mut other, &mut [source], Some("other/repo"));
+        assert_eq!(other.network.calls.len(), 1);
+    }
+
+    #[test]
+    fn rate_limit_stops_api_lookups_and_images_still_load() {
+        let mut events = vec![
+            event("one@example.invalid", None),
+            event("two@example.invalid", None),
+            event("three@example.invalid", Some("explicit")),
+        ];
         let mut resolver = resolver(
             None,
             true,
-            vec![
-                Response::Found(br#"[{"author":null}]"#.to_vec()),
-                Response::Missing,
-            ],
+            vec![Response::RateLimited, Response::Found(png())],
         );
-        resolver.resolve(&mut events, Some("owner/repo"));
-        assert!(!visible(&events[0]));
-        assert!(
-            resolver.network.calls[1]
-                .0
-                .contains("84059b07d4be67b806386c0aad8070a23f18836bbaae342275dc0a83414c32ee?s=128&d=404")
+        resolve(&mut resolver, &mut events, Some("owner/repo"));
+        assert!(!visible(&events[0]) && !visible(&events[1]) && visible(&events[2]));
+        assert_eq!(
+            resolver.network.calls.iter().filter(|call| call.1).count(),
+            1
         );
+        assert_eq!(resolver.unresolved.len(), 2);
     }
 
     #[test]
-    fn explicit_gravatar_email_is_used_for_fallback() {
-        let mut events = vec![event("unrelated@example.invalid", None)];
-        events[0].contributor.as_mut().unwrap().accounts.gravatar =
-            Some("MyEmailAddress@example.com".to_owned());
-        let mut resolver = resolver(None, true, vec![Response::Found(png())]);
-        resolver.resolve(&mut events, None);
-        assert!(visible(&events[0]));
-        assert!(resolver.network.calls[0].0.contains(
-            "84059b07d4be67b806386c0aad8070a23f18836bbaae342275dc0a83414c32ee"
-        ));
+    fn account_lookups_leave_the_image_reserve() {
+        let mut resolver = resolver(None, true, vec![]);
+        resolver.network.remaining = IMAGE_RESERVE;
+        let mut events = [event("author@example.invalid", None)];
+        resolve(&mut resolver, &mut events, Some("owner/repo"));
+        assert_eq!(resolver.network.calls.len(), 0);
+        assert_eq!(resolver.unresolved.len(), 1);
+    }
+
+    #[test]
+    fn busiest_emails_are_looked_up_first() {
+        let mut events = [
+            event("rare@example.invalid", None),
+            event("busy@example.invalid", None),
+            event("busy@example.invalid", None),
+        ];
+        events[1].commit = "f".repeat(40);
+        let mut resolver = resolver(None, true, vec![Response::RateLimited]);
+        resolver.accounts(events.iter(), Some("owner/repo"));
+        assert_eq!(resolver.network.calls.len(), 1);
+        assert!(resolver.network.calls[0].0.contains(&"f".repeat(40)));
+    }
+
+    #[test]
+    fn one_contributor_takes_the_best_account_of_its_emails() {
+        let mut events = vec![
+            event("old@example.invalid", None),
+            event("old@users.noreply.github.com", None),
+            event("123+inferred@users.noreply.github.com", None),
+        ];
+        for event in &mut events {
+            event.contributor.as_mut().unwrap().key = Key::Config(0);
+        }
+        let mut resolver =
+            resolver(None, true, vec![Response::Missing, Response::Found(png())]);
+        resolve(&mut resolver, &mut events, Some("owner/repo"));
+        assert!(events.iter().all(visible));
+        assert_eq!(
+            resolver.network.calls[1],
+            (
+                "https://avatars.githubusercontent.com/u/123?s=128".to_owned(),
+                false
+            )
+        );
     }
 
     #[test]
     fn offline_miss_does_not_call_network() {
         let mut events = vec![event("author@example.invalid", Some("explicit"))];
         let mut resolver = resolver(None, false, vec![]);
-        resolver.resolve(&mut events, Some("owner/repo"));
+        resolve(&mut resolver, &mut events, Some("owner/repo"));
         assert!(!visible(&events[0]));
         assert_eq!(resolver.network.calls.len(), 0);
     }
@@ -1488,99 +1406,34 @@ mod tests {
             true,
             vec![Response::Found(png())],
         );
-        initial.resolve(&mut [source.clone()], None);
+        resolve(&mut initial, &mut [source.clone()], None);
         for (fetch, now) in [(true, 100 + TTL - 1), (false, 100 + TTL + 1)] {
             let mut cached = resolver(Some(root.path().to_owned()), fetch, vec![]);
             cached.now = now;
             let mut events = vec![source.clone()];
-            cached.resolve(&mut events, None);
+            resolve(&mut cached, &mut events, None);
             assert!(visible(&events[0]));
             assert_eq!(cached.network.calls.len(), 0);
         }
         let mut expired = resolver(
             Some(root.path().to_owned()),
             true,
-            vec![Response::Unavailable, Response::Unavailable],
+            vec![Response::Unavailable],
         );
         expired.now = 100 + TTL;
         let mut events = vec![source];
-        expired.resolve(&mut events, None);
+        resolve(&mut expired, &mut events, None);
         assert!(visible(&events[0]));
-        assert_eq!(expired.network.calls.len(), 2);
+        assert_eq!(expired.network.calls.len(), 1);
     }
 
-    #[test]
-    fn negative_cache_and_duplicate_emails_avoid_requests() {
-        let root = crate::cache::test_directory().unwrap();
-        let source = event("author@example.invalid", None);
-        let mut initial = resolver(
-            Some(root.path().to_owned()),
-            true,
-            vec![Response::Missing, Response::Missing],
-        );
-        initial.resolve(&mut [source.clone(), source.clone()], Some("owner/repo"));
-        assert_eq!(initial.network.calls.len(), 2);
-        let mut cached = resolver(Some(root.path().to_owned()), true, vec![]);
-        cached.resolve(&mut [source], Some("owner/repo"));
-        assert_eq!(cached.network.calls.len(), 0);
-    }
-
-    #[test]
-    fn rate_limit_stops_subsequent_api_calls_and_keeps_fallback() {
-        let mut events = vec![
-            event("one@example.invalid", None),
-            event("two@example.invalid", None),
-        ];
-        let mut resolver = resolver(
-            None,
-            true,
-            vec![
-                Response::RateLimited,
-                Response::Missing,
-                Response::Found(png()),
-            ],
-        );
-        resolver.resolve(&mut events, Some("owner/repo"));
-        assert!(!visible(&events[0]));
-        assert!(visible(&events[1]));
-        assert_eq!(
-            resolver.network.calls.iter().filter(|call| call.1).count(),
-            1
-        );
-    }
-
-    #[test]
-    fn corrupt_image_uses_sphere_and_aliases_share_resolved_portrait() {
-        let mut events = vec![
-            event("one@example.invalid", Some("one")),
-            event("two@example.invalid", Some("one")),
-        ];
-        for event in &mut events {
-            event.contributor.as_mut().unwrap().key = Key::Config(0);
-        }
-        let mut resolver = resolver(
-            None,
-            true,
-            vec![
-                Response::Found(b"invalid".to_vec()),
-                Response::Missing,
-                Response::Found(png()),
-            ],
-        );
-        resolver.resolve(&mut events, None);
-        assert!(events.iter().all(visible));
-        assert_eq!(resolver.network.calls.len(), 3);
-    }
     #[test]
     fn expired_miss_retries_and_authoritative_removal_clears_portrait() {
         let root = crate::cache::test_directory().unwrap();
         let source = event("author@example.invalid", Some("explicit"));
-        let mut missing = resolver(
-            Some(root.path().to_owned()),
-            true,
-            vec![Response::Missing, Response::Missing],
-        );
-        missing.resolve(&mut [source.clone()], None);
+        let mut missing =
+            resolver(Some(root.path().to_owned()), true, vec![Response::Missing]);
+        resolve(&mut missing, &mut [source.clone()], None);
         let mut renewed = resolver(
             Some(root.path().to_owned()),
             true,
@@ -1588,142 +1441,59 @@ mod tests {
         );
         renewed.now += TTL;
         let mut events = vec![source.clone()];
-        renewed.resolve(&mut events, None);
+        resolve(&mut renewed, &mut events, None);
         assert!(visible(&events[0]));
-        let mut removed = resolver(
-            Some(root.path().to_owned()),
-            true,
-            vec![Response::Missing, Response::Missing],
-        );
+        let mut removed =
+            resolver(Some(root.path().to_owned()), true, vec![Response::Missing]);
         removed.now += 2 * TTL;
-        removed.resolve(&mut events, None);
+        resolve(&mut removed, &mut events, None);
         assert!(!visible(&events[0]));
         let mut offline = resolver(Some(root.path().to_owned()), false, vec![]);
-        offline.resolve(&mut events, None);
+        resolve(&mut offline, &mut events, None);
         assert!(!visible(&events[0]));
-    }
-
-    #[test]
-    fn numeric_bot_noreply_uses_avatar_id_without_api_request() {
-        let mut events = vec![event(
-            "49699333+dependabot[bot]@users.noreply.github.com",
-            None,
-        )];
-        let mut resolver = resolver(None, true, vec![Response::Found(png())]);
-        resolver.resolve(&mut events, Some("owner/repo"));
-        assert!(visible(&events[0]));
-        assert_eq!(
-            resolver.network.calls,
-            [(
-                "https://avatars.githubusercontent.com/u/49699333?s=128".to_owned(),
-                false
-            )]
-        );
-    }
-    #[test]
-    fn noreply_alias_precedes_an_earlier_unresolved_email() {
-        let mut events = vec![
-            event("old@example.invalid", None),
-            event("123+inferred@users.noreply.github.com", None),
-        ];
-        for event in &mut events {
-            event.contributor.as_mut().unwrap().key = Key::Config(0);
-        }
-        let mut resolver = resolver(None, true, vec![Response::Found(png())]);
-        resolver.resolve(&mut events, Some("owner/repo"));
-        assert!(events.iter().all(visible));
-        assert_eq!(
-            resolver.network.calls,
-            [(
-                "https://avatars.githubusercontent.com/u/123?s=128".to_owned(),
-                false
-            )]
-        );
-    }
-
-    #[test]
-    fn incomplete_refresh_does_not_replace_cached_github_portrait() {
-        let root = crate::cache::test_directory().unwrap();
-        let source = event("author@example.invalid", None);
-        let mut initial = resolver(
-            Some(root.path().to_owned()),
-            true,
-            vec![
-                Response::Found(br#"[{"author":{"login":"linked"}}]"#.to_vec()),
-                Response::Found(png()),
-            ],
-        );
-        initial.resolve(&mut [source.clone()], Some("owner/repo"));
-        let key = initial.memo.keys().next().unwrap().clone();
-        let original = fs::read(initial.path(&key).unwrap()).unwrap();
-        let mut partial = resolver(
-            Some(root.path().to_owned()),
-            true,
-            vec![Response::Unavailable, Response::Found(png())],
-        );
-        partial.now += TTL;
-        let mut events = [source.clone()];
-        partial.resolve(&mut events, Some("owner/repo"));
-        assert!(visible(&events[0]));
-        assert_eq!(fs::read(partial.path(&key).unwrap()).unwrap(), original);
-        let mut offline = resolver(Some(root.path().to_owned()), false, vec![]);
-        offline.resolve(&mut [source], Some("owner/repo"));
-        assert_eq!(
-            offline.read(&key).unwrap().github.as_deref(),
-            Some("linked")
-        );
-        assert_eq!(offline.read(&key).unwrap().checked, 100);
     }
 
     #[test]
     fn undecodable_refresh_keeps_stale_portrait_offline_and_retries() {
-        for replies in [
-            vec![Response::Found(b"invalid".to_vec()), Response::Missing],
-            vec![Response::Missing, Response::Found(b"invalid".to_vec())],
-        ] {
-            let root = crate::cache::test_directory().unwrap();
-            let source = event("author@example.invalid", Some("explicit"));
-            let mut initial = resolver(
-                Some(root.path().to_owned()),
-                true,
-                vec![Response::Found(png())],
-            );
-            let mut events = [source.clone()];
-            initial.resolve(&mut events, None);
-            let original_portrait =
-                events[0].contributor.as_ref().unwrap().portrait.clone();
-            let key = initial.memo.keys().next().unwrap().clone();
-            let path = initial.path(&key).unwrap();
-            let original_record = fs::read(&path).unwrap();
-            let original_png = fs::read(path.with_extension("png")).unwrap();
-            let mut expired = resolver(Some(root.path().to_owned()), true, replies);
-            expired.now += TTL;
-            expired.resolve(&mut events, None);
-            assert_eq!(
-                events[0].contributor.as_ref().unwrap().portrait,
-                original_portrait
-            );
-            assert_eq!(fs::read(&path).unwrap(), original_record);
-            assert_eq!(fs::read(path.with_extension("png")).unwrap(), original_png);
-            let mut offline = resolver(Some(root.path().to_owned()), false, vec![]);
-            offline.now += TTL;
-            let mut events = [source.clone()];
-            offline.resolve(&mut events, None);
-            assert_eq!(
-                events[0].contributor.as_ref().unwrap().portrait,
-                original_portrait
-            );
-            let mut retry = resolver(
-                Some(root.path().to_owned()),
-                true,
-                vec![Response::Found(png())],
-            );
-            retry.now += TTL + 1;
-            retry.resolve(&mut [source], None);
-            assert_eq!(retry.network.calls.len(), 1);
-            assert_eq!(retry.read(&key).unwrap().checked, retry.now);
-        }
+        let root = crate::cache::test_directory().unwrap();
+        let source = event("author@example.invalid", Some("explicit"));
+        let key = format!("image\n{EXPLICIT}");
+        let mut initial = resolver(
+            Some(root.path().to_owned()),
+            true,
+            vec![Response::Found(png())],
+        );
+        let mut events = [source.clone()];
+        resolve(&mut initial, &mut events, None);
+        let original_portrait =
+            events[0].contributor.as_ref().unwrap().portrait.clone();
+        let path = initial.path(&key).unwrap();
+        let original_record = fs::read(&path).unwrap();
+        let original_png = fs::read(path.with_extension("png")).unwrap();
+        let mut expired = resolver(
+            Some(root.path().to_owned()),
+            true,
+            vec![Response::Found(b"invalid".to_vec())],
+        );
+        expired.now += TTL;
+        resolve(&mut expired, &mut events, None);
+        assert_eq!(
+            events[0].contributor.as_ref().unwrap().portrait,
+            original_portrait
+        );
+        assert_eq!(fs::read(&path).unwrap(), original_record);
+        assert_eq!(fs::read(path.with_extension("png")).unwrap(), original_png);
+        let mut retry = resolver(
+            Some(root.path().to_owned()),
+            true,
+            vec![Response::Found(png())],
+        );
+        retry.now += TTL + 1;
+        resolve(&mut retry, &mut [source], None);
+        assert_eq!(retry.network.calls.len(), 1);
+        assert_eq!(retry.read::<Image>(&key).unwrap().checked, retry.now);
     }
+
     #[test]
     fn first_undecodable_success_is_a_cached_terminal_miss() {
         let root = crate::cache::test_directory().unwrap();
@@ -1731,12 +1501,12 @@ mod tests {
         let mut initial = resolver(
             Some(root.path().to_owned()),
             true,
-            vec![Response::Found(b"not an image".to_vec()), Response::Missing],
+            vec![Response::Found(b"not an image".to_vec())],
         );
-        initial.resolve(&mut [source.clone()], None);
+        resolve(&mut initial, &mut [source.clone()], None);
         let mut cached = resolver(Some(root.path().to_owned()), true, vec![]);
         let mut events = [source];
-        cached.resolve(&mut events, None);
+        resolve(&mut cached, &mut events, None);
         assert!(!visible(&events[0]));
         assert_eq!(cached.network.calls.len(), 0);
     }
@@ -1754,10 +1524,9 @@ mod tests {
             vec![Response::Found(gif.into_inner())],
         );
         let mut events = [event("author@example.invalid", Some("explicit"))];
-        resolver.resolve(&mut events, None);
+        resolve(&mut resolver, &mut events, None);
         assert!(visible(&events[0]));
-        let key = resolver.memo.keys().next().unwrap();
-        let path = resolver.path(key).unwrap();
+        let path = resolver.path(&format!("image\n{EXPLICIT}")).unwrap();
         assert!(fs::metadata(&path).unwrap().len() < 4096);
         let png = fs::read(path.with_extension("png")).unwrap();
         assert!(u64::try_from(png.len()).unwrap() < CACHE_BYTES);

@@ -33,15 +33,14 @@ lists crates.io and release ZIPs too.
 
 Nothing, by default: import, planning and rendering run locally and nothing is
 uploaded. `--fetch-avatars` is the only option that makes network requests, to find
-contributor portraits. It can send:
+contributor portraits and the GitHub accounts behind commit emails. It can send:
 
 - the repository's GitHub owner and name and a commit hash to `api.github.com`,
   authenticated with `GH_TOKEN` or `GITHUB_TOKEN` when set;
 - GitHub account names or numeric IDs to GitHub's avatar servers;
-- a SHA-256 hash of a contributor's email address to Gravatar;
-- configured GitLab usernames to GitLab, and raw email addresses only when
-  `--gitlab-email-avatars` is also given;
-- a request to any HTTPS image URL GitLab returns or the contributors file sets.
+- a request to any HTTPS image URL the contributors file sets.
+
+It never sends an email address, email hash or author name.
 
 Codestrand adds no source paths, contents or diffs to these requests; a configured URL
 carries whatever its author put in it. Do not add `--fetch-avatars` unless the user
