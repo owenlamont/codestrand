@@ -23,12 +23,18 @@ pub(crate) fn available(trace: &super::Trace) -> anyhow::Result<u64> {
     Ok(available)
 }
 
+/// Total RAM stands in for an available reading of zero or above the total, which
+/// a running process cannot observe; macOS runners have reported zero.
 fn validate_available(total: u64, available: u64) -> anyhow::Result<u64> {
     anyhow::ensure!(
-        total > 0 && available <= total,
-        "cannot read available physical memory; planning stopped; check operating-system memory reporting and retry"
+        total > 0,
+        "cannot read physical memory; planning stopped; check operating-system memory reporting and retry"
     );
-    Ok(available)
+    Ok(if (1..=total).contains(&available) {
+        available
+    } else {
+        total
+    })
 }
 
 pub(super) fn check(
@@ -342,11 +348,10 @@ mod tests {
     }
 
     #[test]
-    fn unavailable_reading_stops_planning_but_zero_available_is_valid() {
+    fn an_implausible_available_reading_falls_back_to_total_memory() {
         assert!(validate_available(0, 0).is_err());
-        assert!(validate_available(10, 11).is_err());
-        assert_eq!(validate_available(10, 0).unwrap(), 0);
-        assert!(check_bytes(1, 0).is_err());
+        assert_eq!(validate_available(10, 0).unwrap(), 10);
+        assert_eq!(validate_available(10, 11).unwrap(), 10);
         assert_eq!(validate_available(10, 4).unwrap(), 4);
     }
 

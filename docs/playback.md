@@ -374,7 +374,8 @@ free-camera controls remain independent.
 
 Planning snapshots the machine's available physical memory before importing history.
 Swap does not count. An estimate above that snapshot is refused, with both values
-reported in bytes and MiB. If memory information cannot be read, planning stops.
+reported in bytes and MiB. An available reading of zero or above total RAM is
+implausible, so total RAM stands in for it. If total RAM cannot be read, planning stops.
 The estimate uses the actual selected schedule, repository samples, contributor
 first arrivals, imported changes, path bytes and directory samples. Variable allocation
 sizes are estimates, so the figure is not a process-memory ceiling. Each padded schedule
