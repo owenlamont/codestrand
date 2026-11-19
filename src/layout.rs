@@ -479,7 +479,8 @@ impl Layout {
         file.heat = (file.heat + amount).min(1.0);
     }
 
-    /// Undoes region placement, if any, and cools heat, visiting each file once.
+    /// Undoes region placement, if any, and cools heat when files advance, visiting each
+    /// file once.
     pub(super) fn begin_tick(&mut self, dt: f32, half_life: f32, files: FileMotion) {
         let placed = std::mem::take(&mut self.placed);
         for dir in &mut self.dirs {
