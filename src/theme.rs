@@ -431,11 +431,17 @@ mod tests {
         assert_eq!(theme.heat_color(2.0), theme.heat_color(1.0));
         let midpoint = Srgba::from(theme.heat_color(0.15));
         assert!((midpoint.red - 81.0 / 255.0).abs() < 0.000_001);
-        assert!(theme.heat_emissive(0.3).red < 1.0);
+        let plate = LinearRgba::from(candidates::color(candidates::IRON_PLATE)).red;
+        let plate_glow = |heat| theme.heat_emissive(heat).red * plate;
+        assert!(
+            (plate_glow(0.0) - LinearRgba::from(theme.heat_color(0.0)).red).abs()
+                < 1e-6
+        );
+        assert!(plate_glow(0.3) < 1.0);
         let threshold = theme.bloom().unwrap().prefilter.threshold;
-        assert!(theme.heat_emissive(0.29).red < threshold);
-        assert!(theme.heat_emissive(0.31).red > threshold);
-        assert!(theme.heat_emissive(0.9).red > 1.0);
+        assert!(plate_glow(0.29) < threshold);
+        assert!(plate_glow(0.31) > threshold);
+        assert!(plate_glow(0.9) > 1.0);
     }
 
     #[test]
