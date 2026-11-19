@@ -179,9 +179,10 @@ codestrand inspect /path/to/repository --revision HEAD
 ```
 
 Inspection reads a complete local working or bare repository without modifying
-history. The experimental JSON includes parent-before-child commits, raw author
-identities and paths, and first-parent file changes. Merge changes compare against
-the first parent. Avoid treating the experimental schema as a stable contract.
+history. The experimental JSON lists the first-parent commits that change the tree,
+oldest first, with raw author identities and paths and their file changes. Merge
+changes compare against the first parent. Avoid treating the experimental schema as a
+stable contract.
 
 ## Choose history for playback
 
@@ -191,8 +192,11 @@ codestrand preview --repository /path/to/repository --revision HEAD
 
 Preview and export use the selected revision's first-parent timeline. Revision
 defaults to `HEAD`. Codestrand does not clone or fetch a remote repository: obtain
-a complete local repository first. Inspection includes reachable commits, while
-playback follows the first-parent sequence.
+a complete local repository first.
+
+With `--start-date`, import scans commit headers to find the range, then reads one
+tree, the commit before the range, and the diffs inside the range. Earlier diffs are
+not read, and import budgets apply to the range read.
 
 Revisions accept reference names, full or unambiguous abbreviated object IDs, and
 `HEAD` (also `@`). Parent selectors `^N` and first-parent ancestor selectors `~N` can
@@ -206,22 +210,19 @@ during diff setup. Import uses no wall-clock deadline.
 
 ## Analysis limits
 
-Import stops at fixed safety limits and refuses incomplete history by default.
-`--allow-truncated-history` accepts completed commits and prints the exhausted budget
-and the inclusive last complete first-parent commit, when known. Inspection sets
-`truncated` in JSON. Playback uses that first-parent prefix, which can be empty;
-commits with no file changes are not shown. Partial imports are never cached;
-later runs retry analysis.
+Import refuses a history that exceeds a fixed safety limit, naming the budget and
+the commit that exceeded it. Import reads the range newest first, so the refusal also
+names a later `--start-date` whose range fits, or says that none does.
 
 Blob size, diff input and per-diff comparison limits skip line detail only. Inspection
 records the path, change kind and rename with diff kind `skipped`, without line counts
 or samples. Playback retains the file event with zero line counts and no samples;
 touch heat still applies. Skipped blobs still consume global work units. Once the
-aggregate byte or line allowance is spent, later diffs also omit line detail.
+aggregate byte or line allowance is spent, older diffs also omit line detail.
 
 | Budget | Limit |
 | --- | --- |
-| Reachable commits and pending parent references | 1,000,000 each |
+| First-parent commits | 1,000,000 |
 | Expanded entries per tree and retained changes overall | 2,000,000 each |
 | Expanded path bytes per tree | 64 MiB |
 | Tree depth and individual path bytes | 256 levels; 16,384 bytes |
@@ -236,16 +237,17 @@ Tree summaries count repeated subtrees at every expanded location before diffing
 Object headers are checked before loading data; lines are counted before interning.
 The storage budget accounts for payloads and overhead, rather than measuring process
 RSS; dependency buffers and rendering need additional memory. Limits are fixed to keep
-hostile inputs bounded; playback selection does not increase limits.
+hostile inputs bounded; a later start reduces the history they are charged against.
 
 ## Cache
 
 Repository playback saves the latest imported timeline, diff counts and bounded
 line samples under the platform user cache directory, inside `codestrand/`.
 Linked worktrees share a cache
-namespace based on the canonical common Git directory. A different resolved tip
-replaces the saved timeline after a full import. Changing range or pacing reuses
-the imported timeline. Contributor mapping edits take effect on cache hits.
+namespace based on the canonical common Git directory. A different resolved tip or
+start commit replaces the saved timeline after a complete import. Changing the end
+date or pacing reuses the imported timeline. Contributor mapping edits take effect on
+cache hits.
 
 Cache errors regenerate data without blocking playback. To bypass history and
 avatar cache reads and writes:
@@ -667,7 +669,7 @@ remains available throughout playback. This does not bound total process memory.
 To inspect a smaller interval, use inclusive `--start-date` and `--end-date`.
 
 Playback memory and duration checks use the range selected by `--start-date` and `--end-date`;
-the layout estimate also includes the imported history needed to settle that range.
+the layout estimate also includes the files present when the range starts.
 
 To choose visual treatments, use
 `--repository-boundary none|glass` and `--repository-label-plane files|raised`.
@@ -677,13 +679,9 @@ Both options apply to preview and export, including single repositories.
 
 ## Range and pacing
 
-Import refuses truncated history by default, before planning or rendering. The error
-names the exhausted budget. `--allow-truncated-history` accepts completed commits only
-and prints the reason; the incomplete result is never cached. The option applies
-to `inspect`, `preview` and `export`. When a playback prefix was read, both messages
-name its last complete first-parent commit, position and UTC author date, inclusive.
-Commits with no file changes are not shown. If import stopped before completing a
-playback commit, the message says so.
+Import refuses a history over budget before planning or rendering. The error names
+the exhausted budget, the commit and its UTC author date, and a later `--start-date`
+whose range fits, or says that none does.
 
 Import budgets are 1,000,000 commits, 2,000,000 changed entries, 20,000,000 diff input
 lines and 512 MiB of retained-input accounting per repository.
@@ -692,12 +690,8 @@ Single-object and single-tree limits stay fixed, including 16 MiB objects, 2,000
 expanded tree entries, depth 256, 16,384-byte paths and 64 MiB of expanded path bytes.
 The 32 GiB cumulative work ceiling, 8 GiB blob-detail budget and per-diff work limits
 also stay fixed. Oversized or expensive blob diffs keep file changes but omit detail;
-exhausting the cumulative line budget also omits detail. Playback range options do not
-reduce import work: the reachable history is checked before selecting the playback range.
-
-```sh
-codestrand inspect /path/to/repository --allow-truncated-history
-```
+exhausting the cumulative line budget also omits detail. A start date reduces import
+work: diffs before the range are not read.
 
 ```sh
 codestrand preview --repository /path/to/repository --start-date 2026-05-01 --end-date 2026-05-31 \
@@ -705,7 +699,7 @@ codestrand preview --repository /path/to/repository --start-date 2026-05-01 --en
 ```
 
 - `--start-date YYYY-MM-DD`: first commit in merged order authored on or after
-  00:00 UTC that day, inclusive; preceding commits are settled before playback.
+  00:00 UTC that day, inclusive; playback opens on the tree of the commit before it.
 - `--end-date YYYY-MM-DD`: last commit in merged order authored on or before that
   UTC day, inclusive of the whole day. Omitted bounds use the beginning or end of
   history. A reversed range or one containing no commits reports both bounds.
@@ -1307,9 +1301,8 @@ codestrand inspect /path/to/repository --revision HEAD
 ```
 
 For stale or damaged playback cache data, retry with `--no-cache`. Inspection
-always reads directly from Git. An inclusive `--start-date` / `--end-date` range
-limits playback but
-still imports the history; the first load of a large repository can take time.
+always reads directly from Git. A later inclusive `--start-date` reads less history;
+the first load of a large repository can take time.
 
 ## Graphics window or export fails
 
