@@ -20,6 +20,13 @@ pub(crate) fn available(trace: &super::Trace) -> anyhow::Result<u64> {
         system.available_memory(),
         cfg!(target_os = "macos"),
     )?;
+    if available != system.available_memory() {
+        eprintln!(
+            "Available memory reads {} bytes, which cannot be right; planning is checked against total RAM, {} MiB",
+            system.available_memory(),
+            available / (1024 * 1024)
+        );
+    }
     if trace.on() {
         eprintln!("planning_available_memory_bytes={available}");
     }

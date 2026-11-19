@@ -375,8 +375,8 @@ free-camera controls remain independent.
 Planning snapshots the machine's available physical memory before importing history.
 Swap does not count. An estimate above that snapshot is refused, with both values
 reported in bytes and MiB. Total RAM stands in for an available reading above it, and
-on macOS for a reading of zero, which means the reading failed. If total RAM cannot be
-read, planning stops.
+on macOS for a reading of zero, which means the reading failed; a stderr line says so.
+If total RAM cannot be read, planning stops.
 The estimate uses the actual selected schedule, repository samples, contributor
 first arrivals, imported changes, path bytes and directory samples. Variable allocation
 sizes are estimates, so the figure is not a process-memory ceiling. Each padded schedule
