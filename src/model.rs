@@ -125,6 +125,8 @@ pub(super) struct Options {
     #[cfg(test)]
     pub eager_windows: bool,
     #[cfg(test)]
+    pub advance_all_files: bool,
+    #[cfg(test)]
     pub window_hook: Option<streaming::WindowHook>,
     /// Runs every replay even where its result is already held; tests compare against it.
     pub replay_everything: bool,
@@ -215,6 +217,8 @@ impl Default for Options {
             travel_window_seconds: None,
             #[cfg(test)]
             eager_windows: false,
+            #[cfg(test)]
+            advance_all_files: false,
             #[cfg(test)]
             window_hook: None,
             replay_everything: false,
@@ -513,9 +517,9 @@ pub(super) struct Simulation {
     stream: Option<std::sync::Arc<std::sync::Mutex<windows::Stream>>>,
     ready_end: Option<streaming::Ready>,
     title_start: usize,
-    /// Lets a test advance files in travel replays to compare against holding them.
+    /// Lets a test advance every file in every replay, to compare against holding them.
     #[cfg(test)]
-    travel_file_motion: FileMotion,
+    advance_all_files: bool,
 }
 
 /// What a tick places beyond layout, slots and avatars.
@@ -968,7 +972,7 @@ impl Simulation {
             ready_end: None,
             title_start: 0,
             #[cfg(test)]
-            travel_file_motion: FileMotion::Hold,
+            advance_all_files: options.advance_all_files,
         };
         let snapshots = simulation.plan_repositories(prior_active, options)?;
         if options.travel_window_seconds.is_none() {
@@ -1245,21 +1249,27 @@ impl Simulation {
         )
     }
 
-    fn file_motion(&self) -> FileMotion {
-        if self.visuals != Visuals::None {
+    #[cfg_attr(
+        not(test),
+        expect(clippy::unused_self, reason = "only tests override the needed motion")
+    )]
+    fn file_motion(&self, needed: FileMotion) -> FileMotion {
+        #[cfg(test)]
+        if self.advance_all_files {
             return FileMotion::Advance;
         }
-        #[cfg(test)]
-        return self.travel_file_motion;
-        #[cfg(not(test))]
-        FileMotion::Hold
+        needed
     }
 
     pub(crate) fn tick_layout(&mut self) {
         self.tick_times.laps.begin(&self.trace);
         let placement = self.packing_sample(self.state.tick + 1, None);
         self.tick_times.laps.end(Phase::TickPacking);
-        let files = self.file_motion();
+        let files = self.file_motion(match self.visuals {
+            Visuals::None => FileMotion::Hold,
+            Visuals::Titles => FileMotion::Glide,
+            Visuals::All => FileMotion::Advance,
+        });
         self.tick_local_layout(files);
         if let Some((regions, offsets, scales)) = placement {
             self.state

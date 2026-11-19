@@ -179,11 +179,14 @@ pub(crate) enum StepPart {
     Files,
 }
 
-/// Whether a tick advances each file's position, heat and activity. Travel replays hold
-/// them: they read only repository tiles, directories and file existence.
+/// What a tick advances for each file. Only drawn frames read heat and activity, and
+/// travel replays read only repository tiles, directories and file existence.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FileMotion {
+    /// Position, heat and activity.
     Advance,
+    /// Position only.
+    Glide,
     Hold,
 }
 
@@ -211,7 +214,7 @@ impl StepCounts {
             .zip(before)
             .filter(|(dir, before)| (dir.position, dir.reserve) == **before)
             .count();
-        if files == FileMotion::Hold {
+        if files != FileMotion::Advance {
             return;
         }
         for file in layout.files.values() {
@@ -490,8 +493,17 @@ impl Layout {
             }
             dir.touch_age += dt;
         }
-        if files == FileMotion::Hold {
-            return;
+        match files {
+            FileMotion::Hold => return,
+            FileMotion::Glide => {
+                if placed {
+                    for file in self.files.values_mut() {
+                        file.position = file.local_position;
+                    }
+                }
+                return;
+            }
+            FileMotion::Advance => {}
         }
         let decay = (-dt / half_life).exp2();
         for file in self.files.values_mut() {

@@ -290,7 +290,7 @@ impl Layout {
             };
             dir.position = position * dir.scale + offsets[dir.repository];
         }
-        if files == super::FileMotion::Advance {
+        if files != super::FileMotion::Hold {
             for file in self.files.values_mut() {
                 file.local_position = file.position;
                 let dir = &self.dirs[file.dir];

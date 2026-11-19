@@ -1019,7 +1019,6 @@ impl Plan {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layout::FileMotion;
 
     #[test]
     fn holding_files_changes_no_capture_or_reservation() {
@@ -1035,8 +1034,8 @@ mod tests {
             &labels,
         );
         let planned = sim.travel.clone();
-        let [held, advanced] = [FileMotion::Hold, FileMotion::Advance].map(|files| {
-            sim.travel_file_motion = files;
+        let [held, advanced] = [false, true].map(|advance| {
+            sim.advance_all_files = advance;
             sim.travel = planned.clone();
             let captured = format!("{:?}", capture(&mut sim));
             let conflicts = sim.reserve_service_slots();

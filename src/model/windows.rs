@@ -379,7 +379,7 @@ impl Simulation {
             ready_end: Some(ready),
             title_start: self.title_start,
             #[cfg(test)]
-            travel_file_motion: self.travel_file_motion,
+            advance_all_files: self.advance_all_files,
         }
     }
 
@@ -651,6 +651,34 @@ mod tests {
                 "layout at tick {frame}"
             );
         }
+    }
+
+    #[test]
+    fn holding_files_outside_drawn_frames_changes_no_plan_or_playback() {
+        let history = crowded_history(4, 12, 5, 20_000);
+        let [mut held, mut advanced] = [false, true].map(|advance_all_files| {
+            plan_traced(
+                history.clone(),
+                Options {
+                    eager_windows: true,
+                    travel_window_seconds: Some(5.0),
+                    travel_cap: TravelCap::None,
+                    advance_all_files,
+                    ..Options::default()
+                },
+            )
+            .0
+        });
+        assert_eq!(held.envelopes, advanced.envelopes);
+        assert_eq!(held.title_plan, advanced.title_plan);
+        let layouts = |sim: &Simulation| -> Vec<_> {
+            sim.boundaries
+                .iter()
+                .map(|s| s.layout.exact_state())
+                .collect()
+        };
+        assert_eq!(layouts(&held), layouts(&advanced));
+        assert_same_playback(&mut held, &mut advanced);
     }
 
     #[test]
