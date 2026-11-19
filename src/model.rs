@@ -55,8 +55,11 @@ const TAIL: f32 = 2.5;
 // all48 prefix (971 vs 1026 s), with first frames at 24/136 s rather than 19/112 s.
 const WINDOW_SECONDS: f32 = 60.0;
 const PULSE_SECONDS: f32 = 1.3;
+/// Beam crossings per second at the default `--fragment-speed` of 1.
 const FRAGMENT_SPEED: f32 = 1.1;
-const FRAGMENT_FLIGHT: f32 = 1.0 / FRAGMENT_SPEED;
+/// Accepted `--fragment-speed` values. The slowest pulse still ends before its avatar
+/// goes idle and gives up its slot.
+pub(crate) const FRAGMENT_SPEEDS: std::ops::RangeInclusive<f32> = 0.25..=2.0;
 const ADD_DELAY: f32 = 0.2;
 const AGGREGATED_ARRIVAL_FLIGHT: f32 = 0.8;
 const DELETE_DELAY: f32 = 0.0;
@@ -79,9 +82,31 @@ fn check_travel_pass(pass: u32) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// When a pulse starting at `start` ends unless its author's next commit cuts it short.
-fn pulse_end(start: Time) -> Time {
-    start + PULSE_SECONDS + FRAGMENT_FLIGHT
+/// How fast diff fragments cross their beams, which sets how long a pulse lasts.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct FragmentPace {
+    /// Beam crossings per second.
+    speed: f32,
+}
+
+impl FragmentPace {
+    /// The pace at `scale` times the default speed.
+    pub(super) fn new(scale: f32) -> Self {
+        Self {
+            speed: FRAGMENT_SPEED * scale,
+        }
+    }
+
+    /// Seconds one fragment takes to cross its beam.
+    fn flight(self) -> f32 {
+        1.0 / self.speed
+    }
+
+    /// When a pulse starting at `start` ends unless its author's next commit cuts it
+    /// short.
+    fn pulse_end(self, start: Time) -> Time {
+        start + PULSE_SECONDS + self.flight()
+    }
 }
 
 #[derive(Clone)]
@@ -94,7 +119,7 @@ pub(super) struct Options {
     pub seconds_per_day: f32,
     pub max_idle_seconds: f32,
     pub start: usize,
-    pub commits: Option<usize>,
+    pub commits: usize,
     pub travel_cap: TravelCap,
     pub travel_window_seconds: Option<f32>,
     #[cfg(test)]
@@ -109,6 +134,8 @@ pub(super) struct Options {
     pub avatar_max_speed: f32,
     pub avatar_size: f32,
     pub gutter: f32,
+    /// Diff fragment speed relative to the default.
+    pub fragment_speed: f32,
     pub progress: Progress,
     pub trace: Trace,
 }
@@ -154,19 +181,20 @@ impl Options {
         );
         let (_, endings) =
             lifecycle::plan(events, &history, self, self.selected_range(events.len()));
-        let duration = lifecycle::duration(&history, &endings);
+        let duration = lifecycle::duration(&history, &endings, self.fragment_pace());
         self.travel_window_seconds = (duration
             > Time::seconds(WINDOW_SECONDS + windows::MARGIN))
         .then_some(WINDOW_SECONDS);
         duration
     }
 
+    fn fragment_pace(&self) -> FragmentPace {
+        FragmentPace::new(self.fragment_speed)
+    }
+
     fn selected_range(&self, events: usize) -> Range<usize> {
         let start = self.start.min(events);
-        let end = self
-            .commits
-            .map_or(events, |count| start.saturating_add(count).min(events));
-        start..end
+        start..start.saturating_add(self.commits).min(events)
     }
 }
 
@@ -182,7 +210,7 @@ impl Default for Options {
             seconds_per_day: 0.5,
             max_idle_seconds: 1.0,
             start: 0,
-            commits: None,
+            commits: usize::MAX,
             travel_cap: TravelCap::Seconds(0.4),
             travel_window_seconds: None,
             #[cfg(test)]
@@ -195,6 +223,7 @@ impl Default for Options {
             avatar_max_speed: 480.0,
             avatar_size: 2.0,
             gutter: 4.0,
+            fragment_speed: 1.0,
             progress: Progress::default(),
             trace: Trace::default(),
         }
@@ -238,20 +267,26 @@ impl Pulse {
         beam: (BeamStyle, Vec3, Vec3),
         target: Target,
         change: (u32, bool),
+        pace: FragmentPace,
     ) -> impl Iterator<Item = Fragment> {
         let (lines, rising) = change;
-        diff_fragments(age, envelope, beam, lines, rising)
+        diff_fragments(age, envelope, beam, (lines, rising), pace)
             .enumerate()
-            .filter(move |(piece, _)| self.fragment_arrives(age, *piece, lines))
+            .filter(move |(piece, _)| self.fragment_arrives(age, *piece, lines, pace))
             .map(move |(_, fragment)| fragment.with_beam(self.author, target))
     }
-    fn fragment_arrives(&self, age: f32, piece: usize, lines: u32) -> bool {
+    fn fragment_arrives(
+        &self,
+        age: f32,
+        piece: usize,
+        lines: u32,
+        pace: FragmentPace,
+    ) -> bool {
         let pieces = lines.bit_width().min(3);
         let offset = count_u32(u32::try_from(piece).expect("three fragments"))
             / count_u32(pieces);
-        let launch =
-            ((age * FRAGMENT_SPEED + offset).floor() - offset) / FRAGMENT_SPEED;
-        launch + FRAGMENT_FLIGHT <= self.end - self.start - 0.3 + 0.00001
+        let launch = ((age * pace.speed + offset).floor() - offset) / pace.speed;
+        launch + pace.flight() <= self.end - self.start - 0.3 + 0.00001
     }
     fn samples_for(
         &self,
@@ -413,6 +448,7 @@ struct State {
     avatar_size: f32,
     avatar_max_speed: f32,
     gutter: f32,
+    fragment_pace: FragmentPace,
     slot_records: BTreeMap<usize, slots::Record>,
     titles: BTreeMap<usize, titles::Title>,
 }
@@ -475,7 +511,7 @@ pub(super) struct Simulation {
     boundaries: Vec<std::sync::Arc<State>>,
     windowed: bool,
     stream: Option<std::sync::Arc<std::sync::Mutex<windows::Stream>>>,
-    ready_end: Option<(u64, bool)>,
+    ready_end: Option<streaming::Ready>,
     title_start: usize,
 }
 
@@ -556,7 +592,7 @@ impl Simulation {
             options,
             options.selected_range(events.len()),
         );
-        let duration = lifecycle::duration(schedule, &endings);
+        let duration = lifecycle::duration(schedule, &endings, options.fragment_pace());
         planning_memory::check(events, options, repositories, schedule, duration)?;
         Ok(())
     }
@@ -859,35 +895,17 @@ impl Simulation {
         let Range { start, end } = options.selected_range(events.len());
         let (schedule, layout_starts) =
             Self::build_schedules(&events, options, padding);
-        let mut state = State {
-            region_depth: 0.0,
-            detail: 1.0,
-            lettering: 1.0,
-            tick: 0,
-            layout: {
-                let _phase = options.trace.phase(Phase::ScheduledLayout);
-                Self::scheduled_layout(
-                    &events,
-                    &layout_starts.starts,
-                    repositories,
-                    layout_cache,
-                    &options.progress,
-                )
-            },
-            avatars: Vec::new(),
-            authors: HashMap::new(),
-            next_event: 0,
-            pulses: VecDeque::new(),
-            focus: Vec3::ZERO,
-            distance: framing::DISTANCE,
-            geometry: theme.geometry(),
-            avatar_scale: 1.0,
-            avatar_size: options.avatar_size,
-            avatar_max_speed: options.avatar_max_speed,
-            gutter: options.gutter,
-            slot_records: BTreeMap::new(),
-            titles: BTreeMap::new(),
+        let layout = {
+            let _phase = options.trace.phase(Phase::ScheduledLayout);
+            Self::scheduled_layout(
+                &events,
+                &layout_starts.starts,
+                repositories,
+                layout_cache,
+                &options.progress,
+            )
         };
+        let mut state = State::new(layout, theme.geometry(), options);
         state.apply_history(&events[..start]);
         if start > 0 {
             state.layout.plan_time(
@@ -1004,8 +1022,8 @@ impl Simulation {
                     .min(arrival),
             );
         }
-        let mut snapshots =
-            (!self.windowed).then(|| slots::Snapshots::new(&self.events));
+        let mut snapshots = (!self.windowed)
+            .then(|| slots::Snapshots::new(&self.events, self.state.fragment_pace));
         for (_, file) in self.layout().files() {
             active[self.layout().dir(file.dir).repository] = true;
         }
@@ -1078,13 +1096,17 @@ impl Simulation {
         Ok(snapshots)
     }
     pub(super) fn duration(&self) -> Time {
-        if let Some((end, _)) = self.ready_end {
-            return tick_time(end);
+        if let Some(ready) = &self.ready_end {
+            return tick_time(ready.end);
         }
         if let Some(window) = &self.window {
             return self.clock.present(window.end);
         }
-        lifecycle::duration(&self.schedule, &self.repository_ends)
+        lifecycle::duration(
+            &self.schedule,
+            &self.repository_ends,
+            self.state.fragment_pace,
+        )
     }
 
     pub(super) fn repository_effect(&self, repository: usize) -> (f32, f32, f32) {
@@ -1549,6 +1571,7 @@ impl Simulation {
                             (self.theme.beam_style, from, to),
                             target,
                             (count, rising),
+                            self.state.fragment_pace,
                         ),
                         pulse.samples_for(target, rising).filter(|_| current),
                         &mut remaining,
@@ -1768,6 +1791,30 @@ fn file_identities(state: &State) -> HashMap<String, FileIdentity> {
 }
 
 impl State {
+    fn new(layout: Layout, geometry: Geometry, options: &Options) -> Self {
+        Self {
+            region_depth: 0.0,
+            detail: 1.0,
+            lettering: 1.0,
+            tick: 0,
+            layout,
+            avatars: Vec::new(),
+            authors: HashMap::new(),
+            next_event: 0,
+            pulses: VecDeque::new(),
+            focus: Vec3::ZERO,
+            distance: framing::DISTANCE,
+            geometry,
+            avatar_scale: 1.0,
+            avatar_size: options.avatar_size,
+            avatar_max_speed: options.avatar_max_speed,
+            gutter: options.gutter,
+            fragment_pace: options.fragment_pace(),
+            slot_records: BTreeMap::new(),
+            titles: BTreeMap::new(),
+        }
+    }
+
     fn apply_history(&mut self, events: &[Event]) {
         for event in events {
             let author = self.author(
@@ -1884,12 +1931,13 @@ impl State {
         }
         avatar.last_active = start;
         avatar.activity = (avatar.activity + 1.0).min(1000.0);
+        let flight = self.fragment_pace.flight();
         let previous = self.pulses.iter().rposition(|pulse| pulse.author == author);
         let mut index = 0;
         self.pulses.retain_mut(|pulse| {
             let keep = pulse.author != author || Some(index) == previous;
             if pulse.author == author {
-                pulse.end = pulse.end.min(start + FRAGMENT_FLIGHT + 0.3);
+                pulse.end = pulse.end.min(start + flight + 0.3);
             }
             index += 1;
             keep
@@ -1899,7 +1947,7 @@ impl State {
             repository: event.repository,
             touched: self.avatars[author].touched.clone(),
             start,
-            end: pulse_end(start),
+            end: self.fragment_pace.pulse_end(start),
             author,
             targets,
             aggregated,
@@ -2034,13 +2082,13 @@ fn diff_fragments(
     age: f32,
     envelope: f32,
     beam: (BeamStyle, Vec3, Vec3),
-    lines: u32,
-    rising: bool,
+    change: (u32, bool),
+    pace: FragmentPace,
 ) -> impl Iterator<Item = Fragment> {
+    let (lines, rising) = change;
     let pieces = lines.bit_width().min(3);
     (0..pieces).map(move |piece| {
-        let phase =
-            (age * FRAGMENT_SPEED + count_u32(piece) / count_u32(pieces)).fract();
+        let phase = (age * pace.speed + count_u32(piece) / count_u32(pieces)).fract();
         let (style, from, to) = beam;
         let position = style.point(from, to, if rising { 1.0 - phase } else { phase });
         Fragment {
@@ -2246,8 +2294,14 @@ mod tests {
 
     #[test]
     fn a_pulse_is_live_for_at_most_the_snapshot_tick_capacity() {
-        let capacity = u64::try_from(slots::Snapshots::pulse_ticks()).unwrap();
-        let lifetime = pulse_end(Time::ZERO) - Time::ZERO;
+        for scale in [*FRAGMENT_SPEEDS.start(), 1.0, *FRAGMENT_SPEEDS.end()] {
+            assert_pulses_fit_snapshot_capacity(FragmentPace::new(scale));
+        }
+    }
+
+    fn assert_pulses_fit_snapshot_capacity(pace: FragmentPace) {
+        let capacity = u64::try_from(slots::Snapshots::pulse_ticks(pace)).unwrap();
+        let lifetime = pace.pulse_end(Time::ZERO) - Time::ZERO;
         let assert_bounded = |near: Time, mut first: u64| {
             for start in [near.next_down(), near, near.next_up()] {
                 while first > 0 && tick_time(first - 1) >= start {
@@ -2257,7 +2311,7 @@ mod tests {
                     first += 1;
                 }
                 assert!(
-                    tick_time(first + capacity) >= pulse_end(start),
+                    tick_time(first + capacity) >= pace.pulse_end(start),
                     "a pulse starting at {start} outlives {capacity} ticks"
                 );
             }
@@ -2273,6 +2327,12 @@ mod tests {
             assert_bounded(ending, begun);
             assert_bounded(ending.next_up().next_up(), begun);
         }
+    }
+
+    #[test]
+    fn the_slowest_fragment_pulse_ends_before_its_avatar_goes_idle() {
+        let slowest = FragmentPace::new(*FRAGMENT_SPEEDS.start());
+        assert!(slowest.pulse_end(Time::ZERO) - Time::ZERO < AVATAR_IDLE);
     }
 
     #[test]
@@ -2317,9 +2377,10 @@ mod tests {
 
     #[test]
     fn fragments_follow_beam_curve_for_every_style() {
-        for (name, frame) in crate::theme::ThemeName::ALL
+        for ((name, frame), scale) in crate::theme::ThemeName::ALL
             .into_iter()
             .flat_map(|name| [35, 45, 55].map(move |frame| (name, frame)))
+            .flat_map(|run| [1.0, 0.5].map(move |scale| (run, scale)))
         {
             let mut events = crate::timeline::synthetic();
             events.truncate(1);
@@ -2335,14 +2396,17 @@ mod tests {
             let theme = name.build();
             let mut sim = super::Simulation::new(
                 events,
-                &super::Options::default(),
+                &super::Options {
+                    fragment_speed: scale,
+                    ..Default::default()
+                },
                 &theme,
                 &crate::contributors::Mappings::default(),
             );
             sim.advance_to(frame, 60);
             let beam = &sim.beams()[0];
             let age = sim.seconds() - sim.state.pulses[0].start;
-            let phase = (age * super::FRAGMENT_SPEED).fract();
+            let phase = (age * super::FRAGMENT_SPEED * scale).fract();
             let fragments = sim.fragments();
             assert_eq!(fragments.len(), 2);
             for fragment in &fragments {
@@ -2495,8 +2559,8 @@ mod tests {
                         super::Vec3::Y * 4.0,
                         super::Vec3::ZERO,
                     ),
-                    1,
-                    true,
+                    (1, true),
+                    super::FragmentPace::new(1.0),
                 )
                 .next()
                 .unwrap()
@@ -2638,7 +2702,7 @@ mod tests {
             let options = Options {
                 repository_ends: vec![Some(ending), None],
                 start,
-                commits: Some(1),
+                commits: 1,
                 ..Options::default()
             };
             let result = Simulation::try_with_repositories(
@@ -3007,7 +3071,7 @@ mod tests {
             })
             .collect();
         let names = ["First".to_owned(), "Second".to_owned()];
-        for (start, commits) in [(0, Some(1)), (1, None), (2, None)] {
+        for (start, commits) in [(0, 1), (1, usize::MAX), (2, usize::MAX)] {
             let options = Options {
                 start,
                 commits,
@@ -3379,7 +3443,7 @@ mod tests {
         assert_eq!(sim.state.pulses.len(), 2);
         assert!(
             sim.state.pulses[0].end
-                <= sim.state.pulses[1].start + FRAGMENT_FLIGHT + 0.3
+                <= sim.state.pulses[1].start + sim.state.fragment_pace.flight() + 0.3
         );
     }
 
@@ -3412,7 +3476,7 @@ mod tests {
             events,
             &Options {
                 start: 1,
-                commits: Some(1),
+                commits: 1,
                 ..Options::default()
             },
             &Theme::neon(),
@@ -3647,7 +3711,7 @@ mod tests {
     fn starting_mid_history_shows_prior_files_settled() {
         let options = Options {
             start: 8,
-            commits: Some(2),
+            commits: 2,
             ..Options::default()
         };
         let sim = Simulation::new(
@@ -3668,7 +3732,7 @@ mod tests {
         events[0].changes.clear();
         let options = Options {
             start: 1,
-            commits: Some(1),
+            commits: 1,
             ..Options::default()
         };
         let sim = Simulation::new(

@@ -916,7 +916,6 @@ impl Packing {
         activation: Option<&[u32]>,
         threads: usize,
     ) -> Result<Self, CapacityError> {
-        let started = std::time::Instant::now();
         let Inputs {
             labels,
             rows: regions,
@@ -985,12 +984,6 @@ impl Packing {
             })
             .collect();
         let rotated = rotations(&nodes, &regions, &samples, space);
-        eprintln!(
-            "treemap_plan_seconds={:.6} samples={} repositories={} detail={detail}",
-            started.elapsed().as_secs_f64(),
-            regions.len(),
-            first.len()
-        );
         drop(files);
         Ok(Self {
             gutter_scale,

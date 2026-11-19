@@ -5,6 +5,13 @@ All notable changes to Codestrand are documented here, following
 
 ## Unreleased
 
+### Added
+
+- An agent skill, installed with
+  `gh skill install owenlamont/codestrand codestrand`, and `llms.txt` and
+  `llms-full.txt` on the docs site, so coding agents can run Codestrand.
+  ([#158](https://github.com/owenlamont/codestrand/issues/158))
+
 ### Changed
 
 - Planning is faster: on thirty repositories, about 35% less time per window and 40%
@@ -44,6 +51,9 @@ All notable changes to Codestrand are documented here, following
 
 ### Fixed
 
+- `codestrand preview` outside a repository exits with "pass --repository PATH"
+  before opening a window.
+  ([#187](https://github.com/owenlamont/codestrand/pull/187))
 - Camera path files are limited to 1 MiB like the other TOML inputs, and every TOML
   input names a FIFO or device as not a regular file instead of waiting on it.
   ([#184](https://github.com/owenlamont/codestrand/pull/184))
