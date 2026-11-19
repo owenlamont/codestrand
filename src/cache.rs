@@ -750,19 +750,22 @@ mod tests {
     fn a_cached_range_serves_only_its_own_end() {
         let repo = dated_fixture("one");
         let cache = crate::cache::test_directory().unwrap();
-        let source = preview(&[&repo], &["--end-date", "2026-05-04"]);
-        let repositories =
-            crate::repositories::inputs(&source.repository, None).unwrap();
-        let ranged = || {
-            source.events(
-                Some(cache.path()),
-                &repositories,
-                &crate::progress::Progress::default(),
-            )
+        let ranged = |end| {
+            let source = preview(&[&repo], &["--end-date", end]);
+            let repositories =
+                crate::repositories::inputs(&source.repository, None).unwrap();
+            source
+                .events(
+                    Some(cache.path()),
+                    &repositories,
+                    &crate::progress::Progress::default(),
+                )
+                .map(|(events, ..)| events)
         };
-        let (cold, ..) = ranged().unwrap();
-        remove_blob(repo.path());
-        assert_eq!(ranged().unwrap().0, cold);
+        let wider = ranged("2026-05-04").unwrap();
+        remove_object(repo.path(), "HEAD:moved/one.txt");
+        assert_eq!(ranged("2026-05-04").unwrap(), wider);
+        assert!(ranged("2026-05-01").is_err());
         assert!(load(repo.path(), "HEAD", Some(cache.path())).is_err());
     }
 
@@ -772,9 +775,17 @@ mod tests {
     }
 
     fn remove_blob(path: &Path) {
-        let blob = git(path, &["rev-parse", "HEAD:file.txt"]);
-        fs::remove_file(path.join(".git/objects").join(&blob[..2]).join(&blob[2..]))
-            .expect("fixture blob is loose");
+        remove_object(path, "HEAD:file.txt");
+    }
+
+    fn remove_object(path: &Path, revision: &str) {
+        let object = git(path, &["rev-parse", revision]);
+        fs::remove_file(
+            path.join(".git/objects")
+                .join(&object[..2])
+                .join(&object[2..]),
+        )
+        .expect("fixture object is loose");
     }
 
     #[test]
