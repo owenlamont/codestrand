@@ -385,6 +385,7 @@ impl Avatar {
         if let Some(point) = route {
             self.position = point;
             self.settle = None;
+            self.settled = 1.0;
             self.leaving_name = None;
             self.travelling = true;
         } else {
