@@ -336,6 +336,40 @@ impl Simulation {
         self.restart();
         self.trace
             .count_replay(u64::from(frames).saturating_sub(self.state.tick));
+        // Envelopes read only the files of live pulses, so files no pulse in this
+        // replay can reach keep still.
+        let events = &self.events[self.state.next_event
+            ..self
+                .schedule
+                .applied(u64::from(frames))
+                .max(self.state.next_event)];
+        let paths = events
+            .iter()
+            .flat_map(|event| &event.changes)
+            .flat_map(|change| {
+                let from = match &change.kind {
+                    crate::timeline::Kind::Moved { from } => Some(from.as_str()),
+                    _ => None,
+                };
+                std::iter::once(change.path.as_str()).chain(from)
+            });
+        let live: Vec<_> = self
+            .state
+            .pulses
+            .iter()
+            .flat_map(|pulse| {
+                let targets =
+                    pulse
+                        .targets
+                        .iter()
+                        .filter_map(|&(target, ..)| match target {
+                            Target::File(id) => Some(id),
+                            Target::Dir(_) => None,
+                        });
+                pulse.touched.iter().copied().chain(targets)
+            })
+            .collect();
+        self.state.layout.glide_only(paths, live);
         for _ in self.state.tick..u64::from(frames) {
             let files = self.file_motion(crate::layout::FileMotion::Glide);
             self.tick_local_layout(files);

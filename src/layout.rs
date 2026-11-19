@@ -157,6 +157,15 @@ pub(super) struct Layout {
     pub repositories: Vec<RepositoryRegion>,
     placed: bool,
     reserve_fixed_points: Vec<Option<u32>>,
+    /// The only files a position-only step moves, when a replay reads no others.
+    gliding: Option<Gliding>,
+}
+
+/// Files a replay may read, and where the ids of files it creates start.
+#[derive(Clone, Debug)]
+struct Gliding {
+    files: BTreeSet<u64>,
+    created: u64,
 }
 
 /// How much of a file shows, from its presence and how far inside its directory disc it sits.
@@ -252,6 +261,7 @@ impl Layout {
             repositories: Vec::new(),
             placed: false,
             reserve_fixed_points: Vec::new(),
+            gliding: None,
         }
     }
 
@@ -288,6 +298,13 @@ impl Layout {
     }
 
     pub(super) fn file(&self, id: u64) -> Option<&File> {
+        #[cfg(test)]
+        if let Some(gliding) = &self.gliding {
+            assert!(
+                gliding.files.contains(&id) || id >= gliding.created,
+                "file {id} read while it keeps still"
+            );
+        }
         self.files.get(&id)
     }
 
@@ -442,6 +459,25 @@ impl Layout {
         format!("{:?}{:?}{:?}", self.dirs, self.files, self.repositories)
     }
 
+    /// Moves only the named paths' files, the given ids and files created from now on
+    /// in later position-only steps, for a replay that reads no other file.
+    pub(super) fn glide_only<'a>(
+        &mut self,
+        paths: impl IntoIterator<Item = &'a str>,
+        ids: impl IntoIterator<Item = u64>,
+    ) {
+        let mut files: BTreeSet<_> = ids.into_iter().collect();
+        files.extend(
+            paths
+                .into_iter()
+                .filter_map(|path| self.file_index.get(path)),
+        );
+        self.gliding = Some(Gliding {
+            files,
+            created: self.next_id,
+        });
+    }
+
     pub(super) fn step(&mut self, dt: f32) {
         self.step_observed(dt, FileMotion::Advance, None, |_| ());
     }
@@ -473,13 +509,26 @@ impl Layout {
             done(StepPart::Files);
             return;
         }
-        for file in self.files.values_mut() {
+        let glide = |file: &mut File| {
             let target = self.dirs[file.dir].position + file.slot_offset;
             let desired =
                 ((target - file.position) * FILE_EASE).clamp_length_max(MAX_SPEED);
             file.velocity +=
                 (desired - file.velocity).clamp_length_max(MAX_ACCELERATION * dt);
             file.position += file.velocity * dt;
+        };
+        match &self.gliding {
+            Some(gliding) if files == FileMotion::Glide => {
+                for id in &gliding.files {
+                    if let Some(file) = self.files.get_mut(id) {
+                        glide(file);
+                    }
+                }
+                self.files
+                    .range_mut(gliding.created..)
+                    .for_each(|(_, file)| glide(file));
+            }
+            _ => self.files.values_mut().for_each(glide),
         }
         done(StepPart::Files);
     }
