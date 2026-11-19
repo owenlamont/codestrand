@@ -345,7 +345,7 @@ fn planning_trace_lines_follow_the_environment_variable() {
     };
     let lines = [
         "planning_trace window=global",
-        "planning_available_memory_bytes=",
+        "planning_memory_limit_bytes=",
         "planning_memory_parts ",
         "travel_capture_seconds=",
         "travel_replan ",
