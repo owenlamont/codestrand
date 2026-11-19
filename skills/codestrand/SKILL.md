@@ -67,7 +67,8 @@ codestrand preview --repository /path/to/first --repository /path/to/second --th
 ```
 
 Preview loops until the window closes (Escape). Both date bounds are UTC and inclusive:
-`--end-date` includes the whole named day. `--seconds-per-day` and `--max-idle-seconds`
+`--end-date` includes the whole named day. A start date opens on the tree of the commit
+before it and reads no earlier diffs. `--seconds-per-day` and `--max-idle-seconds`
 set pacing. `codestrand preview --help` lists the themes and every default.
 
 ## Export
@@ -145,8 +146,8 @@ bots; see [contributors](https://codestrand.pages.dev/contributors/).
 
 ## Common failures
 
-- **History budget exhausted**: import refuses truncated history. Retry with
-  `--allow-truncated-history` to play the completed prefix.
+- **History budget exhausted**: the error names the commit and a later `--start-date`
+  that fits, or says none does; retry with that start date.
 - **Export directory exists**: choose a new directory name.
 - **FFmpeg missing or no libx264**: install FFmpeg, or export PNGs.
 - **Revision or repository unreadable**: check the path is a local, complete clone and

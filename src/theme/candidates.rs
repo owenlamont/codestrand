@@ -7,9 +7,8 @@ pub(crate) enum GlyphStyle {
     #[default]
     Language,
     Outline,
-    Hatched,
+    Plate,
     Page,
-    Survey,
     Iron,
 }
 
@@ -97,7 +96,7 @@ pub(super) fn build(name: ThemeName) -> Theme {
             )
         }
         ThemeName::Blueprint => {
-            t.glyph_style = GlyphStyle::Hatched;
+            t.glyph_style = GlyphStyle::Plate;
             t.beam_style = BeamStyle::Construction;
             t.avatar_style = AvatarStyle::Reticle;
             t.font = FontStyle::Tech;
@@ -125,7 +124,6 @@ pub(super) fn build(name: ThemeName) -> Theme {
             )
         }
         ThemeName::Atlas => {
-            t.glyph_style = GlyphStyle::Survey;
             t.beam_style = BeamStyle::Ink;
             t.avatar_style = AvatarStyle::Pin;
             t.font = FontStyle::Serif;
@@ -310,18 +308,31 @@ impl Theme {
         })
     }
 
-    pub(crate) fn glyph_svg(&self, source: &str, kind: usize) -> String {
-        let art = match self.glyph_style {
+    /// The file icon `source` inside this theme's frame, if it has one.
+    pub(crate) fn glyph_svg(&self, source: &str) -> String {
+        let (frame, placement) = match self.glyph_style {
             GlyphStyle::Language => return source.to_owned(),
-            GlyphStyle::Outline => r##"<rect x="3" y="3" width="26" height="26" rx="2" fill="#310b39" stroke="#ff3fa4" stroke-width="2"/><path d="M7 24V8h18M7 26h18" fill="none" stroke="#ff8dce"/>"##.to_owned(),
-            GlyphStyle::Hatched => r#"<defs><pattern id="h" width="5" height="5" patternUnits="userSpaceOnUse"><path d="M0 5L5 0" stroke="white" stroke-width=".6"/></pattern></defs><rect x="3" y="3" width="26" height="26" fill="url(#h)" stroke="white" stroke-width="1.5"/>"#.to_owned(),
-            GlyphStyle::Page => {
-                let tint = ["#b7410e", "#3776ab", "#e6b800", "#764abc", "#00843d", "#c04389"][kind % 6];
-                format!(r##"<path d="M5 2H21L28 9V30H5Z" fill="white" stroke="#202020"/><path d="M21 2V9H28" fill="#c0c0c0" stroke="#202020"/><path d="M7 13H25V18H7Z" fill="{tint}"/><path d="M8 22H23M8 25H20" stroke="#808080"/>"##)
-            }
-            GlyphStyle::Survey => r##"<circle cx="16" cy="16" r="8" fill="#eceee6" stroke="#28352f" stroke-width="2"/><circle cx="16" cy="16" r="2" fill="#28352f"/><path d="M16 2V8M16 24V30M2 16H8M24 16H30" stroke="#28352f" stroke-width="1.5"/>"##.to_owned(),
-            GlyphStyle::Iron => r##"<rect x="2" y="3" width="28" height="26" rx="2" fill="white"/><path d="M4 27V5H28" fill="none" stroke="#999999" stroke-width="2"/><path d="M6 8H8M24 8H26M6 24H8M24 24H26" stroke="#333333" stroke-width="2"/>"##.to_owned(),
+            GlyphStyle::Outline => (
+                r##"<rect x="3" y="3" width="26" height="26" rx="2" fill="#310b39" stroke="#ff3fa4" stroke-width="2"/>{icon}"##,
+                r#"x="6" y="6" width="20" height="20""#,
+            ),
+            GlyphStyle::Plate => (
+                r##"<rect x="3" y="3" width="26" height="26" fill="#0d3a73" stroke="white" stroke-width="1.5"/>{icon}"##,
+                r#"x="6" y="6" width="20" height="20""#,
+            ),
+            GlyphStyle::Page => (
+                r##"<path d="M5 2H21L28 9V30H5Z" fill="white" stroke="#202020"/><path d="M21 2V9H28" fill="#c0c0c0" stroke="#202020"/>{icon}"##,
+                r#"x="7" y="10" width="19" height="19""#,
+            ),
+            // Forge plates show only their glow, which would hide any icon colour, so
+            // the icon is cut through the plate as a stencil instead.
+            GlyphStyle::Iron => (
+                r#"<mask id="icon" mask-type="alpha">{icon}</mask><mask id="stencil"><rect width="32" height="32" fill="white"/><rect width="32" height="32" mask="url(#icon)"/></mask><rect x="2" y="3" width="28" height="26" rx="2" fill="white" mask="url(#stencil)"/>"#,
+                r#"x="6" y="6" width="20" height="20""#,
+            ),
         };
+        let icon = source.replacen("<svg", &format!("<svg {placement}"), 1);
+        let art = frame.replace("{icon}", &icon);
         format!(
             r#"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">{art}</svg>"#
         )

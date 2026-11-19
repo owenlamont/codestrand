@@ -217,13 +217,7 @@ pub(super) fn avatar_mesh(theme: &Theme) -> Mesh {
 }
 
 pub(super) fn ring_mesh(theme: &Theme, radii: Vec2) -> Mesh {
-    if !matches!(
-        theme.glyph_style,
-        crate::theme::GlyphStyle::Outline
-            | crate::theme::GlyphStyle::Hatched
-            | crate::theme::GlyphStyle::Page
-            | crate::theme::GlyphStyle::Iron
-    ) {
+    if theme.round_rings() {
         return Annulus::new(radii.x, radii.y).into();
     }
     let width = radii.y - radii.x;
