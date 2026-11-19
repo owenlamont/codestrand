@@ -92,11 +92,13 @@ impl Simulation {
             let span = (tile.high - tile.low) * HALF;
             pairs += live.len() - 1;
             // A group parks around its author's dock, so its author makes room for it.
-            let owner = avatar.group.map_or(i, |group| group.lead);
+            let owner = avatar
+                .group
+                .map(|group| group.lead)
+                .filter(|&lead| state.in_party(i, lead))
+                .unwrap_or(i);
             for &(j, other, _) in &live {
-                let teammate = state.avatars[j].commit == avatar.commit
-                    && state.avatars[j].group.is_some_and(|g| g.lead == owner);
-                if i == j || teammate {
+                if i == j || state.in_party(j, owner) {
                     continue;
                 }
                 if super::committing_overlap(

@@ -144,7 +144,7 @@ impl Palette {
         let ring = styling::ring_mesh(theme, theme.membership_radii);
         let membership_mesh = meshes.add(ring.clone());
         let activity_mesh = meshes.add(styling::ring_mesh(theme, theme.activity_radii));
-        let group_ring = meshes.add(Annulus::new(0.78, 1.0));
+        let group_ring = meshes.add(Annulus::new(0.9, 1.0));
         // Export sorts opaque mesh bins, but instances within a bin retain insertion order.
         let root_cube = meshes.add(Cuboid::default());
         let [avatar_spheres, avatar_discs, segment_beams] =
@@ -2041,6 +2041,7 @@ fn sync_activity(
                 (presence
                     * simulation.scale()
                     * simulation.avatar_disc_scale()
+                    * simulation.member_scale(index)
                     * avatar.projection_scale)
                     * avatar.lifecycle_scale.max(0.001),
             );
@@ -2055,24 +2056,15 @@ fn sync_activity(
     sync_fragments(world, palette, pools, simulation);
 }
 
-/// Rings every member of a gathered group in its author's colour, so the touching
-/// rings link the commit's contributors into one chain.
+/// Rings each parked group of a commit's contributors in its author's colour.
 fn sync_groups(
     world: &mut World,
     palette: &Palette,
     pools: &mut Pools,
     simulation: &Simulation,
 ) {
-    let avatars = simulation.avatars();
-    let rings: Vec<_> = simulation
-        .groups()
-        .into_iter()
-        .flat_map(|(author, _, members)| members.into_iter().map(move |m| (author, m)))
-        .collect();
-    let disc = simulation.theme().avatar_radius
-        * simulation.scale()
-        * simulation.avatar_disc_scale();
-    while pools.groups.len() < rings.len() {
+    let groups = simulation.groups();
+    while pools.groups.len() < groups.len() {
         let entity = world
             .spawn((
                 Mesh3d(palette.group_ring.clone()),
@@ -2085,22 +2077,17 @@ fn sync_groups(
             .id();
         pools.groups.push(entity);
     }
-    for (&entity, &(author, member)) in pools.groups.iter().zip(&rings) {
-        let avatar = &avatars[member];
+    let presence = |author: usize| simulation.avatars()[author].presence;
+    for (&entity, &(author, centre, rim)) in pools.groups.iter().zip(&groups) {
         let material = palette.avatars[author % palette.avatars.len()].clone();
         world.entity_mut(entity).insert(MeshMaterial3d(material));
         if let Some(mut transform) = world.get_mut::<Transform>(entity) {
-            transform.translation = avatar.position;
-            transform.scale = Vec3::splat(
-                1.6 * disc
-                    * avatar.presence
-                    * avatar.projection_scale
-                    * avatar.lifecycle_scale.max(0.001),
-            );
+            transform.translation = centre;
+            transform.scale = Vec3::splat(rim * presence(author));
         }
         set_visible(world, entity, true);
     }
-    hide_rest(world, &pools.groups, rings.len());
+    hide_rest(world, &pools.groups, groups.len());
 }
 
 fn sync_fragments(

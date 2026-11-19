@@ -58,8 +58,6 @@ pub(super) struct Service {
     radius: f32,
     bot: bool,
     dock: slots::Dock,
-    /// The avatar's place within its group at that dock.
-    offset: Vec2,
 }
 
 #[derive(Default)]
@@ -436,12 +434,12 @@ fn replay(simulation: &mut Simulation, frames: u32) -> Capture {
         for (index, avatar) in state.avatars.iter().enumerate() {
             if let Some(slot) = &avatar.slot
                 && capture.poses[index].last().is_none_or(|last| {
-                    last.point != slot.point || last.dock != slot.dock
+                    last.point != slot.centre() || last.dock != slot.dock
                 })
             {
                 capture.poses[index].push(Pose {
                     tick: state.tick,
-                    point: slot.point,
+                    point: slot.centre(),
                     dock: slot.dock,
                 });
             }
@@ -471,11 +469,10 @@ fn replay(simulation: &mut Simulation, frames: u32) -> Capture {
                         .slot
                         .as_ref()
                         .expect("tile exists before service")
-                        .point,
+                        .centre(),
                     radius: state.avatar_radius(),
                     bot: contributor.is_bot(),
                     dock: avatar.slot.as_ref().expect("service slot").dock,
-                    offset: avatar.slot.as_ref().expect("service slot").offset,
                 });
             }
         }

@@ -1095,9 +1095,10 @@ authors and repository history remain unchanged.
 Each `Co-authored-by: Name <email>` trailer in a commit message's final trailer block
 makes that person a contributor of the commit, as on GitHub. Co-authors match by email
 like authors, so a co-author shares the avatar of their own commits. A commit's
-contributors gather in a row of touching avatars beside the author, each ringed in the
-author's colour, and one set of beams leaves the middle of the row. The author's colour
-marks the files and the caption names the author. Codestrand reads at most 8 co-authors
+contributors pack, slightly smaller, inside one ring in the author's colour, with each
+name outside the ring, and one set of beams leaves the ring. Co-authors stay in the ring
+until they leave for a commit of their own. The author's colour marks the files and the
+caption names the author. Codestrand reads at most 8 co-authors
 per commit, none from a message over 64 KiB, and ignores a trailer without an email or
 with a name or email over 4,096 bytes.
 

@@ -357,12 +357,12 @@ pub(super) struct Avatar {
     group: Option<Group>,
 }
 
-/// An avatar's place among the author and co-authors of its current commit.
+/// The author whose group an avatar parks in, and its seat there; an author sits in
+/// seat 0 of its own group.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct Group {
     pub lead: usize,
-    pub rank: u8,
-    pub size: u8,
+    pub seat: u8,
 }
 
 impl Avatar {
@@ -1451,6 +1451,10 @@ impl Simulation {
         self.state.avatar_scale
     }
 
+    pub(super) fn member_scale(&self, index: usize) -> f32 {
+        self.state.member_scale(index)
+    }
+
     pub(super) fn avatar_disc_scale(&self) -> f32 {
         self.state.avatar_scale * self.state.avatar_size * self.state.detail
     }
@@ -1505,9 +1509,11 @@ impl Simulation {
             if envelope <= 0.0 {
                 continue;
             }
-            let from = self.state.beam_origin(pulse.author, pulse.commit);
+            let origin = self.state.beam_origin(pulse.author, pulse.commit);
+            let rim = self.state.beam_rim(pulse.author, pulse.commit);
             for &(target, weight, ..) in &pulse.targets {
                 if let Some(to) = self.state.point(target) {
+                    let from = origin + (to - origin).normalize_or_zero() * rim;
                     beams.push(Beam {
                         author: pulse.author,
                         from,
@@ -1520,34 +1526,29 @@ impl Simulation {
         beams
     }
 
-    /// Each gathered group of two or more parked members: its author, the centre its
-    /// beams start from, and its members.
-    pub(super) fn groups(&self) -> Vec<(usize, Vec3, Vec<usize>)> {
+    /// Each parked group of two or more seats: its author, its centre and the world
+    /// radius of its ring.
+    pub(super) fn groups(&self) -> Vec<(usize, Vec3, f32)> {
         let state = &self.state;
         let parked = |index: usize| {
             state.avatars[index].presence > 0.0
                 && !self.travel.travelling(index, state.tick)
         };
-        let mut groups: Vec<(usize, Vec3, Vec<usize>)> = Vec::new();
-        for (index, avatar) in state.avatars.iter().enumerate() {
-            let Some(group) = avatar.group else {
-                continue;
-            };
-            let lead = &state.avatars[group.lead];
-            if avatar.commit != lead.commit || !parked(index) || !parked(group.lead) {
-                continue;
-            }
-            match groups.iter_mut().find(|(author, ..)| *author == group.lead) {
-                Some((.., members)) => members.push(index),
-                None => groups.push((
-                    group.lead,
-                    state.beam_origin(group.lead, lead.commit),
-                    vec![index],
-                )),
-            }
-        }
-        groups.retain(|(.., members)| members.len() > 1);
-        groups
+        (0..state.avatars.len())
+            .filter(|&lead| {
+                parked(lead)
+                    && state.avatars[lead].group.is_some_and(|g| g.lead == lead)
+                    && state.capacity(lead) > 1
+            })
+            .map(|lead| {
+                let commit = state.avatars[lead].commit;
+                (
+                    lead,
+                    state.beam_origin(lead, commit),
+                    state.beam_rim(lead, commit),
+                )
+            })
+            .collect()
     }
 
     fn pulse_beams_visible(&self, pulse: &Pulse) -> bool {
@@ -1577,13 +1578,15 @@ impl Simulation {
             if envelope <= 0.0 {
                 continue;
             }
-            let from = self.state.beam_origin(pulse.author, pulse.commit);
+            let origin = self.state.beam_origin(pulse.author, pulse.commit);
+            let rim = self.state.beam_rim(pulse.author, pulse.commit);
             for &(target, _, insertions, removals) in
                 pulse.targets.iter().take(FRAGMENT_TARGETS)
             {
                 let Some(to) = self.state.point(target) else {
                     continue;
                 };
+                let from = origin + (to - origin).normalize_or_zero() * rim;
                 let sample_detail = match target {
                     Target::File(id) => {
                         self.layout().file(id).map_or(0.0, |file| detail(file.dir))
@@ -1948,9 +1951,9 @@ impl State {
             .filter_map(|&(target, ..)| self.destination(target))
             .fold((Vec2::ZERO, 0.0), |(sum, n), point| (sum + point, n + 1.0));
         let touched: Vec<u64> = touched.into_keys().collect();
-        let size = u8::try_from(participants.len()).expect("co-authors are bounded");
+        let seats = self.seats(&participants, event.repository);
         let flight = self.fragment_pace.flight();
-        for (rank, &member) in participants.iter().enumerate() {
+        for (&member, seat) in participants.iter().zip(seats) {
             let avatar = &mut self.avatars[member];
             if avatar.repository != event.repository {
                 avatar.slot_origin = avatar
@@ -1969,11 +1972,7 @@ impl State {
             }
             avatar.last_active = start;
             avatar.activity = (avatar.activity + 1.0).min(1000.0);
-            avatar.group = (size > 1).then(|| Group {
-                lead: author,
-                rank: u8::try_from(rank).expect("co-authors are bounded"),
-                size,
-            });
+            avatar.group = Some(Group { lead: author, seat });
             let previous = self.pulses.iter().rposition(|pulse| pulse.author == member);
             let mut index = 0;
             self.pulses.retain_mut(|pulse| {
@@ -1996,6 +1995,39 @@ impl State {
             aggregated,
             samples,
         });
+    }
+
+    /// Seats for an event's participants in its author's group: seat 0 for the author,
+    /// a co-author already in the group keeps its seat, and a newcomer takes the lowest
+    /// seat free of the members who stay in `repository`.
+    fn seats(&self, participants: &[usize], repository: usize) -> Vec<u8> {
+        let author = participants[0];
+        let kept = |member: usize| {
+            self.in_party(member, author)
+                .then(|| self.avatars[member].group.map(|g| g.seat))
+                .flatten()
+        };
+        let mut taken: Vec<u8> = (0..self.avatars.len())
+            .filter(|&i| {
+                i != author
+                    && !participants.contains(&i)
+                    && self.avatars[i].repository == repository
+            })
+            .filter_map(kept)
+            .chain(std::iter::once(0))
+            .chain(participants[1..].iter().copied().filter_map(kept))
+            .collect();
+        std::iter::once(0)
+            .chain(participants[1..].iter().map(|&member| {
+                kept(member).unwrap_or_else(|| {
+                    let seat = (1..=u8::MAX)
+                        .find(|seat| !taken.contains(seat))
+                        .expect("groups hold at most 9 members");
+                    taken.push(seat);
+                    seat
+                })
+            }))
+            .collect()
     }
 
     fn aggregate(
@@ -2046,28 +2078,53 @@ impl State {
         }
     }
 
-    /// Where an author's beams for `commit` start: the middle of their group's parking
-    /// row while they still serve that commit, or else the author alone.
+    /// Where an author's beams for `commit` start: the centre of their group while they
+    /// still serve that commit, or else the author alone.
     fn beam_origin(&self, author: usize, commit: usize) -> Vec3 {
         let avatar = &self.avatars[author];
-        let (Some(slot), Some(group)) = (&avatar.slot, avatar.group) else {
-            return avatar.position;
-        };
-        if group.lead != author || avatar.commit != commit {
-            return avatar.position;
+        match &avatar.slot {
+            Some(slot) if avatar.commit == commit => {
+                let centre =
+                    slot.ring_centre(self.capacity(author), self.avatar_radius());
+                avatar.position + slots::world(centre) - slots::world(slot.point)
+            }
+            _ => avatar.position,
         }
-        let (sum, count) = self
-            .avatars
-            .iter()
-            .filter(|member| {
-                member.commit == avatar.commit
-                    && member.group.is_some_and(|g| g.lead == author)
-            })
-            .filter_map(|member| member.slot.as_ref())
-            .fold((Vec2::ZERO, 0.0), |(sum, count), member| {
-                (sum + member.point, count + 1.0)
-            });
-        avatar.position + slots::world(sum / count) - slots::world(slot.point)
+    }
+
+    /// World distance from an author's group centre to its ring for `commit`, or 0 for
+    /// an author alone.
+    fn beam_rim(&self, author: usize, commit: usize) -> f32 {
+        let avatar = &self.avatars[author];
+        let capacity = self.capacity(author);
+        match &avatar.slot {
+            Some(slot) if avatar.commit == commit && capacity > 1 => {
+                let centre = slot.ring_centre(capacity, self.avatar_radius());
+                let rim = centre
+                    + Vec2::X * slots::group_radius(capacity, self.avatar_radius());
+                slots::world(rim).distance(slots::world(centre))
+            }
+            _ => 0.0,
+        }
+    }
+
+    /// Seats in an author's group, 1 for an author alone.
+    fn capacity(&self, lead: usize) -> u8 {
+        (0..self.avatars.len())
+            .filter(|&i| i != lead && self.in_party(i, lead))
+            .filter_map(|i| self.avatars[i].group.map(|g| g.seat + 1))
+            .max()
+            .unwrap_or(1)
+    }
+
+    /// Display scale of an avatar: smaller while packed into a group.
+    pub(super) fn member_scale(&self, index: usize) -> f32 {
+        let lead = self.avatars[index].group.map_or(index, |g| g.lead);
+        if self.in_party(index, lead) && self.capacity(lead) > 1 {
+            slots::MEMBER_SCALE
+        } else {
+            1.0
+        }
     }
 
     fn point(&self, target: Target) -> Option<Vec3> {

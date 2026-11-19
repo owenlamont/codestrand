@@ -153,35 +153,76 @@ impl Placement {
     pub fn world(&self) -> Vec3 {
         world(self.point)
     }
+    /// The dock's own point, where travel routes end and a group's ring is centred.
+    pub fn centre(&self) -> Vec2 {
+        self.point - self.offset
+    }
+    /// The centre of the ring round a group of `capacity` seats parked here.
+    pub fn ring_centre(&self, capacity: u8, radius: f32) -> Vec2 {
+        self.centre() + ring_offset(capacity, self.dock.edge, radius)
+    }
 }
 
-/// Space between neighbouring discs in a group, so they touch without overlapping.
+/// Space between neighbouring members packed in a group, so they touch without
+/// overlapping.
 const GROUP_GAP: f32 = 0.5;
+/// Space between a group's members and its containing ring.
+const RING_GAP: f32 = 2.0;
+/// A group's members are drawn this much smaller than an avatar alone.
+pub(crate) const MEMBER_SCALE: f32 = 0.75;
 
-/// Co-authors park in a row of touching places along their author's edge, on the
-/// gutter network that routes follow; `step` counts places from the author.
-fn row_offset(edge: u8, step: i8, radius: f32) -> Vec2 {
-    let axis = if edge.is_multiple_of(2) {
-        Vec2::X
-    } else {
-        Vec2::Y
-    };
-    axis * f32::from(step) * 2.0 * (radius + GROUP_GAP)
+/// Distance from a group's centre to each seat: seats sit evenly round a circle just
+/// wide enough for neighbouring members to touch.
+fn seat_spread(capacity: u8, radius: f32) -> f32 {
+    if capacity < 2 {
+        return 0.0;
+    }
+    (radius * MEMBER_SCALE + GROUP_GAP)
+        / (std::f32::consts::PI / f32::from(capacity)).sin()
 }
 
-/// The step of a row offset, the inverse of [`row_offset`].
-fn row_step(edge: u8, offset: Vec2, radius: f32) -> i8 {
-    let along = if edge.is_multiple_of(2) {
-        offset.x
+/// Radius of the ring containing a group with `capacity` seats; one seat is an avatar
+/// alone.
+pub(super) fn group_radius(capacity: u8, radius: f32) -> f32 {
+    if capacity < 2 {
+        radius
     } else {
-        offset.y
+        seat_spread(capacity, radius) + radius * MEMBER_SCALE + RING_GAP
+    }
+}
+
+/// A seat's place relative to its group's ring centre at a dock on `edge`: seat 0
+/// faces into the tile, and the seats turn so a flat side, not a seat, faces out of it.
+fn seat_around(seat: u8, capacity: u8, edge: u8, radius: f32) -> Vec2 {
+    let capacity = capacity.max(1);
+    let turn = if capacity.is_multiple_of(2) {
+        std::f32::consts::PI / f32::from(capacity)
+    } else {
+        0.0
     };
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "rows hold at most 9 places"
-    )]
-    let step = (along / (2.0 * (radius + GROUP_GAP))).round() as i8;
-    step
+    let angle = inward(edge).to_angle()
+        + turn
+        + std::f32::consts::TAU * f32::from(seat) / f32::from(capacity);
+    Vec2::from_angle(angle) * seat_spread(capacity, radius)
+}
+
+/// The direction from a dock on `edge` into its tile.
+fn inward(edge: u8) -> Vec2 {
+    [-Vec2::Y, -Vec2::X, Vec2::Y, Vec2::X][usize::from(edge % 4)]
+}
+
+/// A group's ring centre relative to its dock: moved into the tile until its outermost
+/// seats sit on the gutter line, so members stay where an avatar alone would fit.
+pub(super) fn ring_offset(capacity: u8, edge: u8, radius: f32) -> Vec2 {
+    let reach = (0..capacity)
+        .map(|seat| -seat_around(seat, capacity, edge, radius).dot(inward(edge)))
+        .fold(0.0, f32::max);
+    inward(edge) * reach
+}
+
+/// A seat's place relative to its group's dock.
+fn seat_offset(seat: u8, capacity: u8, edge: u8, radius: f32) -> Vec2 {
+    ring_offset(capacity, edge, radius) + seat_around(seat, capacity, edge, radius)
 }
 
 pub(super) fn world(point: Vec2) -> Vec3 {
@@ -466,17 +507,87 @@ impl State {
             .collect()
     }
     fn retained_slots(&self, now: super::Time, radius: f32) -> Vec<Option<Rect>> {
-        self.avatars
-            .iter()
-            .map(|avatar| {
+        let capacities = self.capacities();
+        (0..self.avatars.len())
+            .map(|index| {
+                let avatar = &self.avatars[index];
                 if now >= avatar.expires {
                     return None;
                 }
                 let slot = avatar.slot.as_ref()?;
                 let tile = self.layout.repositories[avatar.repository].gutter?;
-                Some(disk(slot.dock.on_network(tile) + slot.offset, radius))
+                let point = slot.dock.on_network(tile) + slot.offset;
+                self.held_space(index, point, &capacities, radius)
             })
             .collect()
+    }
+
+    /// The space an avatar parked at `point` holds: its group's ring for an author, none
+    /// for a co-author inside that ring, else its own disc.
+    fn held_space(
+        &self,
+        index: usize,
+        point: Vec2,
+        capacities: &[u8],
+        radius: f32,
+    ) -> Option<Rect> {
+        let avatar = &self.avatars[index];
+        let lead = avatar.group.map_or(index, |g| g.lead);
+        if lead != index && self.in_party(index, lead) {
+            return None;
+        }
+        let capacity = capacities[index];
+        let centre = avatar
+            .slot
+            .as_ref()
+            .filter(|_| capacity > 1)
+            .map_or(point, |s| {
+                point - s.offset + ring_offset(capacity, s.dock.edge, radius)
+            });
+        Some(disk(centre, group_radius(capacity, radius)))
+    }
+
+    /// Whether `index` parks in `lead`'s group: the author itself, or a co-author who
+    /// joined it and has not since left for another commit, repository or dock.
+    pub(super) fn in_party(&self, index: usize, lead: usize) -> bool {
+        if index == lead {
+            return true;
+        }
+        let (member, author) = (&self.avatars[index], &self.avatars[lead]);
+        member.group.is_some_and(|g| g.lead == lead)
+            && author.group.is_some_and(|g| g.lead == lead)
+            && member.repository == author.repository
+            && super::tick_time(self.tick) < member.expires
+            && (member.commit == author.commit
+                || member
+                    .slot
+                    .as_ref()
+                    .zip(author.slot.as_ref())
+                    .is_some_and(|(m, a)| m.dock == a.dock))
+    }
+
+    /// Seats in each avatar's group, counting the gaps members left; 1 for an avatar
+    /// without co-authors.
+    pub(super) fn capacities(&self) -> Vec<u8> {
+        let mut capacities = vec![1_u8; self.avatars.len()];
+        for (index, avatar) in self.avatars.iter().enumerate() {
+            if let Some(group) = avatar.group.filter(|g| g.lead != index)
+                && self.in_party(index, group.lead)
+            {
+                let seats = &mut capacities[group.lead];
+                *seats = (*seats).max(group.seat + 1);
+            }
+        }
+        capacities
+    }
+
+    /// An author's group in seat order, the author first.
+    fn party(&self, lead: usize) -> Vec<usize> {
+        let mut party: Vec<_> = (0..self.avatars.len())
+            .filter(|&i| self.in_party(i, lead))
+            .collect();
+        party.sort_by_key(|&i| (i != lead, self.avatars[i].group.map(|g| g.seat)));
+        party
     }
     pub(super) fn place_slots_planned(
         &mut self,
@@ -491,39 +602,32 @@ impl State {
         );
         let radius = self.avatar_radius();
         let name_scale = self.name_scale();
-        let mut occupied: Vec<Rect> = Vec::new();
-        for avatar in &mut self.avatars {
-            if now - avatar.last_active >= super::AVATAR_IDLE
-                && let Some(slot) = &mut avatar.slot
-            {
-                if let Some(tile) = self.layout.repositories[avatar.repository].gutter {
-                    slot.point = slot.dock.on_network(tile) + slot.offset;
-                }
-                if avatar.slot_presence > 0.0 || avatar.presence > 0.0 {
-                    occupied.push(disk(slot.point, radius));
-                }
-            }
-        }
+        let capacities = self.capacities();
+        let mut occupied = self.hold_idle(now, &capacities, radius);
         let retained = self.retained_slots(now, radius);
         occupied.extend(retained.iter().flatten().copied());
         for index in self.placing_order(now) {
             let avatar = &self.avatars[index];
             let commit = avatar.commit;
             if let Some(group) = avatar.group.filter(|g| g.lead != index) {
-                self.hold_place(index, group, &mut occupied);
+                if !self.in_party(index, group.lead) {
+                    self.hold_place(index, &mut occupied);
+                }
                 continue;
             }
-            let followers = self.followers(index);
-            for member in std::iter::once(index).chain(followers.iter().copied()) {
+            let party = self.party(index);
+            for &member in &party {
                 release(&mut occupied, retained[member]);
             }
+            let capacity = capacities[index];
+            let footprint = group_radius(capacity, radius);
             let envelope = envelopes[commit].clone();
             self.slot_records.entry(commit).or_default().observations += 1;
             let Some(tile) = self.layout.repositories[avatar.repository].tile else {
                 let record = self.slot_records.entry(commit).or_default();
                 record.least_bad = true;
                 record.missing_tile = true;
-                for member in std::iter::once(index).chain(followers.iter().copied()) {
+                for &member in &party {
                     self.avatars[member].slot = None;
                 }
                 continue;
@@ -542,7 +646,7 @@ impl State {
                 gutter: self.layout.repositories[avatar.repository].gutter,
                 gap,
                 radius,
-                row: u8::try_from(followers.len()).expect("co-authors are bounded"),
+                capacity,
                 beams: &beams,
                 peers: &peers,
                 future: &future,
@@ -566,21 +670,65 @@ impl State {
                 !plan.replanning || commit < plan.frozen,
             );
             chosen.commit = commit;
-            let (steps, crowded) = self.row_steps(&choice, &chosen, &followers);
-            self.record_placement(&chosen, crowded);
-            let seats =
-                std::iter::once((index, 0)).chain(followers.into_iter().zip(steps));
-            for (member, step) in seats {
-                let offset = row_offset(chosen.dock.edge, step, radius);
-                let place = Placement {
-                    point: chosen.point + offset,
-                    offset,
-                    ..chosen.clone()
-                };
-                occupied.push(disk(place.point, radius));
-                self.avatars[member].slot = Some(place);
-                self.avatars[member].slot_origin = None;
+            self.record_placement(&chosen);
+            let ring_centre =
+                chosen.point + ring_offset(capacity, chosen.dock.edge, radius);
+            occupied.push(disk(ring_centre, footprint));
+            self.seat_party(&chosen, &party, capacity);
+        }
+    }
+
+    /// Re-projects idle avatars onto their moving tiles and returns the space they hold.
+    fn hold_idle(
+        &mut self,
+        now: super::Time,
+        capacities: &[u8],
+        radius: f32,
+    ) -> Vec<Rect> {
+        let mut occupied = Vec::new();
+        for index in 0..self.avatars.len() {
+            let avatar = &mut self.avatars[index];
+            if now - avatar.last_active < super::AVATAR_IDLE {
+                continue;
             }
+            let Some(slot) = &mut avatar.slot else {
+                continue;
+            };
+            if let Some(tile) = self.layout.repositories[avatar.repository].gutter {
+                slot.point = slot.dock.on_network(tile) + slot.offset;
+            }
+            let point = slot.point;
+            if avatar.slot_presence > 0.0 || avatar.presence > 0.0 {
+                occupied.extend(self.held_space(index, point, capacities, radius));
+            }
+        }
+        occupied
+    }
+
+    /// Seats an author's group round its chosen dock; a co-author from an earlier commit
+    /// stays put if the author has moved to another dock.
+    fn seat_party(&mut self, chosen: &Placement, party: &[usize], capacity: u8) {
+        let radius = self.avatar_radius();
+        let author = party[0];
+        for &member in party {
+            let avatar = &self.avatars[member];
+            if avatar.commit != chosen.commit
+                && avatar.slot.as_ref().is_some_and(|s| s.dock != chosen.dock)
+            {
+                continue;
+            }
+            let seat = avatar
+                .group
+                .filter(|_| member != author)
+                .map_or(0, |g| g.seat);
+            let offset = seat_offset(seat, capacity, chosen.dock.edge, radius);
+            let place = Placement {
+                point: chosen.point + offset,
+                offset,
+                ..chosen.clone()
+            };
+            self.avatars[member].slot = Some(place);
+            self.avatars[member].slot_origin = None;
         }
     }
 
@@ -589,7 +737,7 @@ impl State {
         let mut order: Vec<_> = (0..self.avatars.len())
             .filter(|&i| now - self.avatars[i].last_active < super::AVATAR_IDLE)
             .collect();
-        let rank = |avatar: &super::Avatar| avatar.group.map_or(0, |g| g.rank);
+        let rank = |avatar: &super::Avatar| avatar.group.map_or(0, |g| g.seat);
         order.sort_by(|&a, &b| {
             self.avatars[b]
                 .last_active
@@ -600,118 +748,26 @@ impl State {
         order
     }
 
-    fn record_placement(&mut self, chosen: &Placement, crowded: bool) {
+    fn record_placement(&mut self, chosen: &Placement) {
         let record = self.slot_records.entry(chosen.commit).or_default();
         record.fallback |= chosen.dock.edge != 0;
-        record.least_bad |= !chosen.valid() || crowded;
+        record.least_bad |= !chosen.valid();
         record.half_plane_failures += u32::from(!chosen.half_plane);
         record.max_crossings = record.max_crossings.max(chosen.crossings);
         record.max_overlaps = record.max_overlaps.max(chosen.overlaps);
     }
 
-    /// An author's co-authors in its current commit, in rank order.
-    fn followers(&self, author: usize) -> Vec<usize> {
-        let commit = self.avatars[author].commit;
-        let mut followers: Vec<_> = (0..self.avatars.len())
-            .filter(|&i| {
-                i != author
-                    && self.avatars[i].commit == commit
-                    && self.avatars[i].group.is_some_and(|g| g.lead == author)
-            })
-            .collect();
-        followers.sort_by_key(|&i| self.avatars[i].group.map(|g| g.rank));
-        followers
-    }
-
-    /// A co-author is placed with its author, unless the author has moved on to another
-    /// commit, when it holds its place as the tile moves.
-    fn hold_place(
-        &mut self,
-        index: usize,
-        group: super::Group,
-        occupied: &mut Vec<Rect>,
-    ) {
+    /// A co-author who has left its group holds its place as the tile moves.
+    fn hold_place(&mut self, index: usize, occupied: &mut Vec<Rect>) {
         let radius = self.avatar_radius();
-        let moved_on = self.avatars[group.lead].commit != self.avatars[index].commit;
         let avatar = &mut self.avatars[index];
-        if moved_on
-            && let (Some(tile), Some(slot)) = (
-                self.layout.repositories[avatar.repository].gutter,
-                avatar.slot.as_mut(),
-            )
-        {
+        if let (Some(tile), Some(slot)) = (
+            self.layout.repositories[avatar.repository].gutter,
+            avatar.slot.as_mut(),
+        ) {
             slot.point = slot.dock.on_network(tile) + slot.offset;
             occupied.push(disk(slot.point, radius));
         }
-    }
-
-    /// Row places for an author's co-authors, in rank order, and whether any had to
-    /// overlap another avatar. Co-authors already parked at this dock for this commit
-    /// keep their places while those stay free and on the edge; any other takes the
-    /// free end of the row nearer to where it was, or a crowded end on the edge,
-    /// leaving the edge only when neither end is on it.
-    fn row_steps(
-        &self,
-        choice: &Choice<'_>,
-        chosen: &Placement,
-        followers: &[usize],
-    ) -> (Vec<i8>, bool) {
-        let radius = choice.radius;
-        let mut taken = vec![0_i8];
-        let kept: Vec<_> = followers
-            .iter()
-            .map(|&follower| {
-                let step = self.avatars[follower]
-                    .slot
-                    .as_ref()
-                    .filter(|s| s.commit == chosen.commit && s.dock == chosen.dock)
-                    .map(|s| row_step(chosen.dock.edge, s.offset, radius))
-                    .filter(|&step| {
-                        choice.free_cell(chosen.dock, step) && !taken.contains(&step)
-                    });
-                taken.extend(step);
-                step
-            })
-            .collect();
-        let mut crowded = false;
-        let steps = followers
-            .iter()
-            .zip(kept)
-            .map(|(&follower, kept)| {
-                kept.unwrap_or_else(|| {
-                    let ends = [
-                        taken.iter().max().copied().unwrap_or(0) + 1,
-                        taken.iter().min().copied().unwrap_or(0) - 1,
-                    ];
-                    let avatar = &self.avatars[follower];
-                    let towards = avatar
-                        .slot
-                        .as_ref()
-                        .filter(|_| avatar.repository == choice.repository)
-                        .map(|s| {
-                            row_step(chosen.dock.edge, s.point - chosen.point, radius)
-                        });
-                    let order = if towards.is_some_and(|step| step < 0) {
-                        [ends[1], ends[0]]
-                    } else {
-                        ends
-                    };
-                    let step = order
-                        .into_iter()
-                        .find(|&step| choice.free_cell(chosen.dock, step))
-                        .unwrap_or_else(|| {
-                            crowded = true;
-                            order
-                                .into_iter()
-                                .find(|&step| choice.on_edge(chosen.dock, step))
-                                .unwrap_or(order[0])
-                        });
-                    taken.push(step);
-                    step
-                })
-            })
-            .collect();
-        (steps, crowded)
     }
 }
 
@@ -742,10 +798,35 @@ impl State {
         .size()
     }
 
+    /// Where each avatar's name attaches: the avatar, or for a group's member a point
+    /// one avatar radius inside the group's ring towards that member, so its name sits
+    /// just outside the ring beside it.
     fn name_bodies(&self) -> Vec<Option<Vec2>> {
-        self.avatars
-            .iter()
-            .map(|a| self.screen(a.position))
+        let radius = self.avatar_radius();
+        let capacities = self.capacities();
+        (0..self.avatars.len())
+            .map(|index| {
+                let avatar = &self.avatars[index];
+                let lead = avatar.group.map_or(index, |g| g.lead);
+                let anchor = avatar
+                    .slot
+                    .as_ref()
+                    .filter(|s| {
+                        capacities[lead] > 1
+                            && self.in_party(index, lead)
+                            && s.offset != Vec2::ZERO
+                    })
+                    .map(|slot| {
+                        let capacity = capacities[lead];
+                        let centre = slot.centre()
+                            + ring_offset(capacity, slot.dock.edge, radius);
+                        let reach = group_radius(capacity, radius) - radius;
+                        let toward = (slot.point - centre).normalize_or_zero();
+                        avatar.position + world(centre + toward * reach)
+                            - world(slot.point)
+                    });
+                self.screen(anchor.unwrap_or(avatar.position))
+            })
             .collect()
     }
     fn name_rays(
@@ -1173,11 +1254,18 @@ impl LabelSpace<'_> {
             })
     }
     fn cost(&self, index: usize, rect: Rect) -> [f32; 3] {
+        // A group's names all attach round its ring, so members' anchors do not
+        // compete; their names still keep apart through the joint assignment.
+        let lead = |i: usize| self.avatars[i].group.map(|g| g.lead);
         let foreign = self
             .bodies
             .iter()
             .enumerate()
-            .filter(|(i, _)| *i != index && self.avatars[*i].presence > 0.0)
+            .filter(|(i, _)| {
+                *i != index
+                    && self.avatars[*i].presence > 0.0
+                    && (lead(*i).is_none() || lead(*i) != lead(index))
+            })
             .filter_map(|(_, p)| *p);
         let conflicts = count(
             foreign
@@ -1239,8 +1327,9 @@ struct Choice<'a> {
     gutter: Option<Tile>,
     gap: Vec2,
     radius: f32,
-    /// Co-authors who park in a row beside this avatar.
-    row: u8,
+    /// Seats in the avatar's group, whose ring is kept clear of other avatars and the
+    /// caption bar and whose members stay in view; 1 for an avatar alone.
+    capacity: u8,
     beams: &'a [(usize, Rect)],
     occupied: &'a [Rect],
     peers: &'a [(Vec2, u8, Vec2)],
@@ -1281,10 +1370,14 @@ impl Choice<'_> {
             }
         }
         let occupied_origin = previous
-            .filter(|s| s.commit != commit && self.dock_cost(s.dock) > 0.001)
+            .filter(|s| {
+                s.commit != commit && self.avatar_cost(self.point(s.dock)) > 0.001
+            })
             .map(|s| self.point(s.dock));
         let previous = previous
-            .filter(|s| s.commit == commit || self.dock_cost(s.dock) <= 0.001)
+            .filter(|s| {
+                s.commit == commit || self.avatar_cost(self.point(s.dock)) <= 0.001
+            })
             .map(|s| s.dock);
         origin
             .or(occupied_origin)
@@ -1319,8 +1412,8 @@ impl Choice<'_> {
                 (slot, cost)
             })
             .min_by(|a, b| {
-                self.dock_cost(a.0.dock)
-                    .total_cmp(&self.dock_cost(b.0.dock))
+                self.avatar_cost(a.0.point)
+                    .total_cmp(&self.avatar_cost(b.0.point))
                     .then(a.1.total_cmp(&b.1))
                     .then(
                         a.0.point
@@ -1334,50 +1427,13 @@ impl Choice<'_> {
         self.occupied
             .iter()
             .map(|r| {
-                (self.radius + r.half_size().x - point.distance(r.center())).max(0.0)
+                (group_radius(self.capacity, self.radius) + r.half_size().x
+                    - point.distance(r.center()))
+                .max(0.0)
             })
             .sum::<f32>()
             + self.reserved_cost(point)
     }
-    /// The avatar cost of parking at `dock`, plus one radius for each co-author the row
-    /// beside it has no free place for.
-    fn dock_cost(&self, dock: Dock) -> f32 {
-        let (mut low, mut high, mut missing) = (0_i8, 0_i8, 0_u8);
-        for _ in 0..self.row {
-            if self.free_cell(dock, high + 1) {
-                high += 1;
-            } else if self.free_cell(dock, low - 1) {
-                low -= 1;
-            } else {
-                missing += 1;
-            }
-        }
-        self.avatar_cost(self.point(dock)) + f32::from(missing) * self.radius
-    }
-
-    /// Whether the row place `step` beside `dock` lies on the dock's edge and is clear
-    /// of other avatars.
-    fn free_cell(&self, dock: Dock, step: i8) -> bool {
-        self.on_edge(dock, step)
-            && self.avatar_cost(
-                self.point(dock) + row_offset(dock.edge, step, self.radius),
-            ) <= 0.001
-    }
-
-    /// Whether the row place `step` beside `dock` lies on the dock's edge.
-    fn on_edge(&self, dock: Dock, step: i8) -> bool {
-        let [start, end] = [0.0, 1.0].map(|fraction| {
-            self.point(Dock {
-                edge: dock.edge,
-                fraction,
-            })
-        });
-        let cell = self.point(dock) + row_offset(dock.edge, step, self.radius);
-        let along =
-            (cell - start).dot(end - start) / end.distance_squared(start).max(1e-6);
-        (0.0..=1.0).contains(&along)
-    }
-
     fn reserved_cost(&self, point: Vec2) -> f32 {
         self.future
             .iter()
@@ -1431,10 +1487,16 @@ impl Choice<'_> {
                     && swept_crosses(point, &corners, rect.inflate(0.02))
             })
             .count();
+        let ring = group_radius(self.capacity, self.radius);
+        let centre = point + ring_offset(self.capacity, dock.edge, self.radius);
         let overlaps = usize::from(
-            !point.abs().cmple(HALF - Vec2::splat(self.radius)).all()
-                || point.y - self.radius < super::caption::BOTTOM
-                || point.y + self.radius > super::caption::TOP,
+            centre.y - ring < super::caption::BOTTOM
+                || (0..self.capacity).any(|seat| {
+                    let seat = point
+                        + seat_offset(seat, self.capacity, dock.edge, self.radius);
+                    !seat.abs().cmple(HALF - Vec2::splat(self.radius)).all()
+                        || seat.y + self.radius > super::caption::TOP
+                }),
         );
         (
             Placement {
@@ -1520,8 +1582,8 @@ impl Choice<'_> {
                 (a.1.0, a.1.1, a.1.2)
                     .cmp(&(b.1.0, b.1.1, b.1.2))
                     .then(
-                        self.dock_cost(a.0.dock)
-                            .total_cmp(&self.dock_cost(b.0.dock)),
+                        self.avatar_cost(a.0.point)
+                            .total_cmp(&self.avatar_cost(b.0.point)),
                     )
                     .then(crowding(&a.0).total_cmp(&crowding(&b.0)))
                     .then(a.1.3.cmp(&b.1.3))
@@ -1836,7 +1898,7 @@ mod tests {
             },
             gap: Vec2::new(16.0, 32.0),
             radius: 7.5,
-            row: 0,
+            capacity: 1,
             occupied,
             peers: &[],
             future: &[],
@@ -1930,22 +1992,27 @@ mod tests {
     }
 
     #[test]
-    fn co_author_rows_stay_on_the_edge_and_cost_their_missing_places() {
-        let corner = Dock {
-            edge: 0,
-            fraction: 1.0,
-        };
-        let open = choice(&[], &[]);
-        assert!(!open.on_edge(corner, 1));
-        assert!(open.on_edge(corner, -1));
-        let inside = open.point(corner) + row_offset(0, -1, 7.5);
-        let neighbour = [disk(inside, 7.5)];
-        let blocked = Choice {
-            row: 2,
-            ..choice(&[], &neighbour)
-        };
-        assert_eq!(blocked.dock_cost(corner), 15.0);
-        assert_eq!(blocked.dock_cost(Dock::new(0, 0.5)), 0.0);
+    fn group_seats_touch_inside_their_ring() {
+        for capacity in 2..=9 {
+            let ring = group_radius(capacity, 7.5);
+            let seats: Vec<_> = (0..capacity)
+                .map(|s| seat_around(s, capacity, 0, 7.5))
+                .collect();
+            let out = (0..capacity)
+                .map(|s| seat_offset(s, capacity, 0, 7.5).y)
+                .fold(f32::MIN, f32::max);
+            assert!(out.abs() < 1e-3, "outermost seat on the gutter line");
+            let member = 7.5 * MEMBER_SCALE;
+            for (index, seat) in seats.iter().enumerate() {
+                assert!(seat.length() + member < ring);
+                let next = seats[(index + 1) % seats.len()];
+                assert!(
+                    (seat.distance(next) - 2.0 * (member + GROUP_GAP)).abs() < 1e-3
+                );
+            }
+        }
+        assert_eq!(group_radius(1, 7.5), 7.5);
+        assert_eq!(seat_offset(0, 1, 0, 7.5), Vec2::ZERO);
     }
 
     #[test]
@@ -2032,6 +2099,7 @@ mod tests {
         let old = state.avatars[0].slot.as_ref().unwrap().dock;
         let mut newcomer = state.avatars[0].clone();
         newcomer.slot = None;
+        newcomer.group = None;
         newcomer.last_active = sim.seconds();
         state.avatars.push(newcomer);
         state.place_slots(&sim.envelopes, sim.seconds());
@@ -2288,17 +2356,17 @@ mod tests {
             .iter()
             .copied()
             .filter(|&i| {
-                let avatar = &sim.state.avatars[i];
-                avatar.commit == pulse.commit
-                    && avatar.group.is_some_and(|g| g.lead == pulse.author)
+                sim.state.avatars[i].commit == pulse.commit
+                    && sim.state.in_party(i, pulse.author)
             })
             .collect()
     }
 
-    /// Group members park clear of every other parked avatar, and a whole group parks
-    /// as a row of touching neighbours.
+    /// A group's members sit inside its ring, clear of each other and of every other
+    /// parked avatar.
     fn assert_group_clear(
         sim: &Simulation,
+        author: usize,
         members: &[usize],
         parked: &[usize],
         frame: u32,
@@ -2306,33 +2374,25 @@ mod tests {
         let state = &sim.state;
         let radius = state.avatar_radius();
         let point = |i: usize| state.avatars[i].slot.as_ref().unwrap().point;
-        for (&member, &other) in members
-            .iter()
-            .flat_map(|m| parked.iter().filter(move |&o| o != m).map(move |o| (m, o)))
-        {
-            let distance = point(member).distance(point(other));
-            assert!(
-                distance >= 2.0 * radius,
-                "frame {frame}: avatars {member} and {other} overlap"
-            );
-        }
-        let size = members
-            .first()
-            .and_then(|&m| state.avatars[m].group)
-            .map(|g| g.size);
-        if size != Some(u8::try_from(members.len()).unwrap()) {
-            return;
-        }
-        let mut row: Vec<_> = members.iter().map(|&i| point(i)).collect();
-        row.sort_by(|a, b| (a.x + a.y).total_cmp(&(b.x + b.y)));
-        for pair in row.windows(2) {
-            let touching = 2.0 * (radius + GROUP_GAP);
-            assert!((pair[0].distance(pair[1]) - touching).abs() < 0.01);
+        let size = |i: usize| radius * state.member_scale(i);
+        let slot = state.avatars[author].slot.as_ref().unwrap();
+        let centre =
+            slot.centre() + ring_offset(state.capacity(author), slot.dock.edge, radius);
+        let ring = group_radius(state.capacity(author), radius);
+        for &member in members {
+            assert!(point(member).distance(centre) + size(member) < ring + 0.01);
+            for &other in parked.iter().filter(|&&o| o != member) {
+                let distance = point(member).distance(point(other));
+                assert!(
+                    distance >= size(member) + size(other) - 0.01,
+                    "frame {frame}: avatars {member} and {other} overlap"
+                );
+            }
         }
     }
 
     #[test]
-    fn co_authors_gather_around_their_author_and_beam_once() {
+    fn co_authors_gather_inside_one_ring_and_beam_from_it() {
         let co_author = |name: &str| crate::timeline::Identity {
             name: name.as_bytes().to_vec(),
             email: format!("{name}@example.invalid").into_bytes(),
@@ -2383,21 +2443,28 @@ mod tests {
                 .collect();
             for pulse in state.pulses.iter().filter(|p| sim.pulse_beams_visible(p)) {
                 let members = parked_group(&sim, pulse, &parked);
-                assert_group_clear(&sim, &members, &parked, frame);
+                if parked.contains(&pulse.author) {
+                    assert_group_clear(&sim, pulse.author, &members, &parked, frame);
+                }
                 if members.len() == 3 {
                     gathered.insert(pulse.commit);
                 }
             }
-            let origins: Vec<_> = sim
+            let rims: Vec<_> = sim
                 .state
                 .pulses
                 .iter()
-                .map(|p| sim.state.beam_origin(p.author, p.commit))
+                .map(|p| {
+                    let origin = sim.state.beam_origin(p.author, p.commit);
+                    (p.author, origin, sim.state.beam_rim(p.author, p.commit))
+                })
                 .collect();
             for beam in sim.beams() {
                 assert!(
-                    origins.contains(&beam.from),
-                    "frame {frame}: beam off its origin"
+                    rims.iter()
+                        .any(|&(author, origin, rim)| author == beam.author
+                            && (beam.from.distance(origin) - rim).abs() < 1e-3),
+                    "frame {frame}: beam leaves off its group's ring"
                 );
             }
         }
