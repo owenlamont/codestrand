@@ -298,7 +298,18 @@ struct Areas {
 impl Areas {
     fn new(search: &Search<'_>) -> Option<Self> {
         let domain = |depth: usize| &search.domains[search.component[depth]];
-        let columns: Vec<Vec<_>> = search
+        let widths: Vec<usize> = search
+            .neighbours
+            .iter()
+            .map(|earlier| earlier.iter().map(|&previous| domain(previous).len()).sum())
+            .collect();
+        let total = (0..search.component.len())
+            .map(|depth| domain(depth).len() * widths[depth])
+            .sum::<usize>();
+        if total > AREAS_LIMIT {
+            return None;
+        }
+        let columns = search
             .neighbours
             .iter()
             .map(|earlier| {
@@ -312,29 +323,19 @@ impl Areas {
                     .collect()
             })
             .collect();
-        let widths: Vec<usize> = search
-            .neighbours
-            .iter()
-            .map(|earlier| earlier.iter().map(|&previous| domain(previous).len()).sum())
-            .collect();
-        let total = (0..search.component.len())
-            .map(|depth| domain(depth).len() * widths[depth])
-            .sum::<usize>();
-        if total > AREAS_LIMIT {
-            return None;
-        }
         let rows = (0..search.component.len())
             .map(|depth| {
-                domain(depth)
-                    .iter()
-                    .flat_map(|candidate| {
-                        search.neighbours[depth].iter().flat_map(|&previous| {
+                let mut row = Vec::with_capacity(domain(depth).len() * widths[depth]);
+                for candidate in domain(depth) {
+                    for &previous in &search.neighbours[depth] {
+                        row.extend(
                             domain(previous)
                                 .iter()
-                                .map(|other| overlap(candidate.rect, other.rect))
-                        })
-                    })
-                    .collect()
+                                .map(|other| overlap(candidate.rect, other.rect)),
+                        );
+                    }
+                }
+                row
             })
             .collect();
         Some(Self {
