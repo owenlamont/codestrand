@@ -120,6 +120,7 @@ pub(super) struct Options {
     pub max_idle_seconds: f32,
     pub start: usize,
     pub commits: usize,
+    pub unread: Unread,
     pub travel_cap: TravelCap,
     pub travel_window_seconds: Option<f32>,
     #[cfg(test)]
@@ -138,6 +139,26 @@ pub(super) struct Options {
     pub fragment_speed: f32,
     pub progress: Progress,
     pub trace: Trace,
+}
+
+/// Commits a header scan counted that import never read, so commit numbers and
+/// repository endings describe the whole history rather than the events.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(super) struct Unread {
+    /// Commits before the selection beyond the boundary events that settle them.
+    pub before: usize,
+    /// Commits after the selection, per repository.
+    pub after: Vec<usize>,
+}
+
+impl Unread {
+    fn after(&self, repository: usize) -> usize {
+        self.after.get(repository).copied().unwrap_or(0)
+    }
+
+    fn total(&self) -> usize {
+        self.before + self.after.iter().sum::<usize>()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize)]
@@ -211,6 +232,7 @@ impl Default for Options {
             max_idle_seconds: 1.0,
             start: 0,
             commits: usize::MAX,
+            unread: Unread::default(),
             travel_cap: TravelCap::Seconds(0.4),
             travel_window_seconds: None,
             #[cfg(test)]
@@ -921,7 +943,7 @@ impl Simulation {
             state.avatars.clear();
             state.authors.clear();
         }
-        let total = events.len();
+        let total = events.len() + options.unread.total();
         let prior_active = prior_activity(&events[..start], repositories.len());
         let (departures, repository_ends) =
             lifecycle::plan(&events, &schedule, options, start..end);
@@ -942,7 +964,7 @@ impl Simulation {
             diff_text_distance: 1.0,
             repository_label_plane: crate::repositories::LabelPlane::default(),
             events: events.into(),
-            offset: start,
+            offset: start + options.unread.before,
             total,
             clock: schedule::Clock::new(schedule.clone(), schedule.clone()),
             births: Vec::new(),

@@ -301,7 +301,7 @@ pub(super) fn resolve(
 /// A first-parent commit whose tree differs from its first parent's, so playback shows
 /// it; commits that leave the tree unchanged are not links.
 pub(super) struct Link {
-    id: gix::ObjectId,
+    pub(super) id: gix::ObjectId,
     tree: gix::ObjectId,
     pub(super) seconds: i64,
 }

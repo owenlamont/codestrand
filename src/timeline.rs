@@ -3,7 +3,7 @@ use std::fmt::Write;
 use crate::history::{BlobDiff, ChangeKind, Commit, History};
 
 // Bump when the snapshot format, history import policies or timeline conversion change.
-pub(super) const CACHE_VERSION: u32 = 7;
+pub(super) const CACHE_VERSION: u32 = 9;
 
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(super) enum Kind {

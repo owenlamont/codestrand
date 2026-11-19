@@ -56,13 +56,15 @@ pub(super) fn plan(
         .enumerate()
         .map(|(repository, &archived)| {
             archived
+                && options.unread.after(repository) == 0
                 && events
                     .iter()
                     .rposition(|event| event.repository == repository)
                     .is_some_and(|last| last < selected.end)
         })
         .collect();
-    let complete = selected.end == events.len();
+    let complete =
+        selected.end == events.len() && options.unread.after.iter().all(|&n| n == 0);
     let events = &events[selected];
     (
         departures(

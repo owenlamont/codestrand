@@ -118,6 +118,8 @@ struct Snapshot {
     tip: String,
     /// Links settled into the boundary event; each repository caches one range.
     skip: usize,
+    /// Links read, oldest first; `None` reads through the tip.
+    end: Option<usize>,
     events: Vec<timeline::Event>,
 }
 
@@ -226,28 +228,39 @@ pub(super) fn load_whole(
     load_range(&repo, tip, None, cache_root)
 }
 
-/// Loads the events from `start`'s link onwards, led by a boundary event when it skips
-/// any; `None` loads the whole history without scanning first.
+/// Loads the events of the links in `range`, led by a boundary event when it skips any;
+/// `None` loads the whole history without scanning first. A cached range that reaches
+/// further serves a shorter one.
 pub(super) fn load_range(
     repo: &gix::Repository,
     tip: gix::ObjectId,
-    start: Option<(&[history::Link], usize)>,
+    range: Option<(&[history::Link], &std::ops::Range<usize>)>,
     cache_root: Option<&Path>,
 ) -> Result<Vec<timeline::Event>, history::Error> {
-    let skip = start.map_or(0, |(_, skip)| skip);
+    let skip = range.map_or(0, |(_, range)| range.start);
+    let end =
+        range.and_then(|(links, range)| (range.end < links.len()).then_some(range.end));
     let entry = cache_root
         .filter(|_| repo.objects.store_ref().replacements().next().is_none())
         .and_then(|root| entry_path(root, repo));
     let tip_text = tip.to_string();
-    if let Some(events) = entry
+    if let Some(snapshot) = entry
         .as_deref()
         .and_then(|path| read(path, &tip_text, skip))
     {
-        return Ok(events);
+        match (range, end, snapshot.end) {
+            (_, None, None) => return Ok(snapshot.events),
+            (Some((links, range)), Some(end), stored)
+                if stored.is_none_or(|stored| stored >= end) =>
+            {
+                return Ok(played(snapshot.events, &links[range.clone()], skip > 0));
+            }
+            _ => {}
+        }
     }
     let scanned;
-    let links = if let Some((links, _)) = start {
-        links
+    let links = if let Some((links, range)) = range {
+        &links[..range.end]
     } else {
         scanned = history::links(repo, tip)?;
         &scanned
@@ -257,6 +270,7 @@ pub(super) fn load_range(
         version: timeline::CACHE_VERSION,
         tip: tip_text,
         skip,
+        end,
         events: timeline::from_history(&history),
     };
     if let Some(path) = entry {
@@ -273,7 +287,27 @@ fn entry_path(root: &Path, repo: &gix::Repository) -> Option<PathBuf> {
     Some(root.join(namespace).join("timeline.json"))
 }
 
-fn read(path: &Path, tip: &str, skip: usize) -> Option<Vec<timeline::Event>> {
+/// Keeps the boundary and the events whose commits are, in order, among `links`.
+fn played(
+    mut events: Vec<timeline::Event>,
+    links: &[history::Link],
+    boundary: bool,
+) -> Vec<timeline::Event> {
+    let mut ids = links.iter().map(|link| link.id);
+    let kept = usize::from(boundary)
+        + events
+            .iter()
+            .skip(usize::from(boundary))
+            .take_while(|event| {
+                gix::ObjectId::from_hex(event.commit.as_bytes())
+                    .is_ok_and(|commit| ids.any(|id| id == commit))
+            })
+            .count();
+    events.truncate(kept);
+    events
+}
+
+fn read(path: &Path, tip: &str, skip: usize) -> Option<Snapshot> {
     let file = ConfinedFile::at(path, false).ok()?.open().ok()?;
     if file.metadata().ok()?.len() > MAX_SNAPSHOT_BYTES {
         return None;
@@ -288,7 +322,7 @@ fn read(path: &Path, tip: &str, skip: usize) -> Option<Vec<timeline::Event>> {
     let snapshot: Snapshot = serde_json::from_slice(&bytes).ok()?;
     (valid_snapshot(&snapshot, tip, skip)
         && serde_json::to_vec(&snapshot).ok()? == bytes)
-        .then_some(snapshot.events)
+        .then_some(snapshot)
 }
 
 fn store(path: &Path, snapshot: &Snapshot) -> Option<()> {
@@ -354,6 +388,7 @@ mod tests {
                 version: timeline::CACHE_VERSION,
                 tip: git(repo.path(), &["rev-parse", "HEAD"]),
                 skip: 0,
+                end: None,
                 events,
             })
             .unwrap(),
@@ -432,7 +467,10 @@ mod tests {
         change.samples.clear();
         assert!(valid_snapshot(&snapshot, &snapshot.tip, 0));
         store(&path, &snapshot).unwrap();
-        assert_eq!(read(&path, &snapshot.tip, 0).unwrap(), snapshot.events);
+        assert_eq!(
+            read(&path, &snapshot.tip, 0).unwrap().events,
+            snapshot.events
+        );
     }
 
     #[test]
@@ -616,7 +654,7 @@ mod tests {
             let selected = source.resolve_range(&crate::seconds(&whole)).unwrap();
             let cache = crate::cache::test_directory().unwrap();
             for _ in 0..2 {
-                let (events, range) = source
+                let (events, range, _) = source
                     .events(
                         Some(cache.path()),
                         &repositories,
@@ -838,6 +876,7 @@ emails = ["author@example.invalid"]
             version: timeline::CACHE_VERSION,
             tip: history.tip.clone(),
             skip: 0,
+            end: None,
             events: timeline::from_history(&history),
         };
         let after = serde_json::to_vec(&snapshot).unwrap();

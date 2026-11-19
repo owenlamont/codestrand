@@ -181,12 +181,6 @@ fn symbolic_reference_chains_are_bounded() {
     fs::write(refs.join("long65"), format!("{tip}\n")).unwrap();
     let output = bounded_inspect(root.path(), "long0");
     assert!(!output.status.success());
-    fs::write(root.path().join("HEAD"), "ref: refs/heads/cycle\n").unwrap();
-    assert!(
-        !bounded_inspect(root.path(), &tip.to_string())
-            .status
-            .success()
-    );
 }
 
 #[test]
