@@ -4,26 +4,96 @@ use crate::model::{
     trace::{Counter, Phase},
 };
 
-fn merge(row: &mut Vec<(u8, Rect)>, edge: u8, mut rect: Rect) {
-    loop {
-        let before = row.len();
-        row.retain(|(side, r)| {
-            if *side != edge || r.intersect(rect.inflate(0.00001)).is_empty() {
-                return true;
-            }
-            rect = Rect::from_corners(rect.min.min(r.min), rect.max.max(r.max));
-            false
-        });
-        if before == row.len() {
-            break;
-        }
-    }
-    row.push((edge, rect));
+/// How far apart two reserved rects on one edge must stay to remain separate.
+const TOUCH: f32 = 0.00001;
+
+/// One reserved rect on an edge, stamped with when it was last merged.
+#[derive(Clone, Copy, Debug)]
+struct Reserved {
+    rect: Rect,
+    stamp: u64,
+    /// No other rect on its edge meets its margin, so merging a rect inside it changes
+    /// nothing but its stamp.
+    alone: bool,
 }
+
+/// One commit's reservations as they accumulate, kept apart per edge. The stamps
+/// restore the order a single list holds when each merge moves its result to the back.
+#[derive(Clone, Debug, Default)]
+struct Row {
+    stamp: u64,
+    edges: [Vec<Reserved>; 4],
+}
+
+impl Row {
+    /// Joins `rect` with every rect on its edge that it meets, transitively, and moves
+    /// the joined rect to the back.
+    fn merge(&mut self, edge: u8, mut rect: Rect) {
+        self.stamp += 1;
+        let stamp = self.stamp;
+        let rects = &mut self.edges[usize::from(edge)];
+        // Nothing else meets an alone rect's margin, so it absorbs one inside it and
+        // meets nothing more.
+        if let Some(index) = rects.iter().position(|kept| {
+            kept.alone
+                && rect.min.cmplt(rect.max).all()
+                && kept.rect.min.cmple(rect.min).all()
+                && rect.max.cmple(kept.rect.max).all()
+        }) {
+            let mut kept = rects.remove(index);
+            kept.rect = Rect::from_corners(
+                rect.min.min(kept.rect.min),
+                rect.max.max(kept.rect.max),
+            );
+            kept.stamp = stamp;
+            rects.push(kept);
+            return;
+        }
+        loop {
+            let before = rects.len();
+            rects.retain(|kept| {
+                let r = kept.rect;
+                if r.intersect(rect.inflate(TOUCH)).is_empty() {
+                    return true;
+                }
+                rect = Rect::from_corners(rect.min.min(r.min), rect.max.max(r.max));
+                false
+            });
+            if before == rects.len() {
+                break;
+            }
+        }
+        for kept in &mut *rects {
+            kept.alone &= rect.intersect(kept.rect.inflate(TOUCH)).is_empty();
+        }
+        rects.push(Reserved {
+            rect,
+            stamp,
+            alone: true,
+        });
+    }
+
+    fn into_row(self) -> Vec<(u8, Rect)> {
+        let mut stamped: Vec<_> = (0_u8..)
+            .zip(self.edges)
+            .flat_map(|(edge, rects)| {
+                rects
+                    .into_iter()
+                    .map(move |kept| (kept.stamp, edge, kept.rect))
+            })
+            .collect();
+        stamped.sort_unstable_by_key(|&(stamp, ..)| stamp);
+        stamped
+            .into_iter()
+            .map(|(_, edge, rect)| (edge, rect))
+            .collect()
+    }
+}
+
 fn anticipate_service_reservations(
     events: &[crate::timeline::Event],
     starts: &[crate::model::Time],
-    occupied: &mut [Vec<(u8, Rect)>],
+    occupied: &mut [Row],
     conflicted: &mut [bool],
 ) {
     let observed = conflicted.to_vec();
@@ -31,7 +101,7 @@ fn anticipate_service_reservations(
         if !conflict {
             continue;
         }
-        let future = occupied[commit].clone();
+        let future = occupied[commit].clone().into_row();
         let author = events[commit]
             .contributor
             .as_ref()
@@ -55,7 +125,7 @@ fn anticipate_service_reservations(
             }
             conflicted[prior] = true;
             for &(edge, rect) in &future {
-                merge(&mut occupied[prior], edge, rect);
+                occupied[prior].merge(edge, rect);
             }
         }
     }
@@ -64,7 +134,7 @@ fn anticipate_service_reservations(
 impl Simulation {
     fn reserve_frame(
         &self,
-        occupied: &mut [Vec<(u8, Rect)>],
+        occupied: &mut [Row],
         conflicted: &mut [bool],
     ) -> (usize, usize) {
         let mut conflicts = 0;
@@ -120,7 +190,7 @@ impl Simulation {
         let _phase = self.trace.phase(Phase::Reserve);
         let mut previous = std::mem::take(&mut self.travel.occupancy);
         previous.resize_with(self.events.len(), Vec::new);
-        let mut occupied = vec![Vec::new(); self.events.len()];
+        let mut occupied = vec![Row::default(); self.events.len()];
         let mut conflicted = vec![false; self.events.len()];
         let visuals = std::mem::replace(&mut self.visuals, crate::model::Visuals::None);
         self.restart();
@@ -156,7 +226,7 @@ impl Simulation {
         );
         for (index, row) in occupied.into_iter().enumerate() {
             if conflicted[index] && index >= self.travel.frozen {
-                previous[index] = row;
+                previous[index] = row.into_row();
             }
         }
         self.travel.occupancy = previous;
@@ -166,13 +236,7 @@ impl Simulation {
         conflicts > 0
     }
 }
-fn reserve_other(
-    row: &mut Vec<(u8, Rect)>,
-    low: Vec2,
-    span: Vec2,
-    other: Vec2,
-    radius: f32,
-) {
+fn reserve_other(row: &mut Row, low: Vec2, span: Vec2, other: Vec2, radius: f32) {
     let rect = Rect::from_corners(
         (other - Vec2::splat(2.0 * radius + 1.0) - low) / span,
         (other + Vec2::splat(2.0 * radius + 1.0) - low) / span,
@@ -181,7 +245,7 @@ fn reserve_other(
         let axis = usize::from(edge % 2 == 0);
         let coordinate = if edge < 2 { 1.0 } else { 0.0 };
         if ((other - low)[axis] - coordinate * span[axis]).abs() <= 2.0 * radius + 1.0 {
-            merge(row, edge, rect);
+            row.merge(edge, rect);
         }
     }
 }
@@ -259,6 +323,79 @@ impl Simulation {
 
 #[cfg(test)]
 mod tests {
+    use super::{Rect, Vec2};
+
+    /// The merge as first shipped, one list scanned whole, which [`super::Row`] must
+    /// reproduce bit for bit.
+    fn reference_merge(row: &mut Vec<(u8, Rect)>, edge: u8, mut rect: Rect) {
+        loop {
+            let before = row.len();
+            row.retain(|(side, r)| {
+                if *side != edge || r.intersect(rect.inflate(super::TOUCH)).is_empty() {
+                    return true;
+                }
+                rect = Rect::from_corners(rect.min.min(r.min), rect.max.max(r.max));
+                false
+            });
+            if before == row.len() {
+                break;
+            }
+        }
+        row.push((edge, rect));
+    }
+
+    fn bits(row: Vec<(u8, Rect)>) -> Vec<(u8, [u32; 4])> {
+        row.into_iter()
+            .map(|(edge, r)| {
+                (edge, [r.min.x, r.min.y, r.max.x, r.max.y].map(f32::to_bits))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_margin_that_rounds_one_way_only_still_joins_both_rects() {
+        // At 256 the margin rounds away above the edge but not below it, so the
+        // second rect meets the first one's margin while the first misses its own.
+        let first = Rect::new(256.0, 0.0, 257.0, 1.0);
+        let second = Rect::new(255.0, 0.0, 256.0, 1.0);
+        let mut row = super::Row::default();
+        let mut reference = Vec::new();
+        for rect in [first, second, first] {
+            row.merge(0, rect);
+            reference_merge(&mut reference, 0, rect);
+        }
+        assert_eq!(reference, [(0, Rect::new(255.0, 0.0, 257.0, 1.0))]);
+        assert_eq!(bits(row.into_row()), bits(reference));
+    }
+
+    #[test]
+    fn rows_match_a_single_list_merge_bit_for_bit() {
+        let mut seed = 0x2545_f491_u32;
+        let mut next = |limit: u16| {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            usize::try_from((seed >> 8) % u32::from(limit)).unwrap()
+        };
+        // Gaps just inside and just outside the margin, and none at all.
+        let nudges = [0.0, super::TOUCH * 0.5, super::TOUCH * 2.0];
+        for _ in 0..400 {
+            let mut row = super::Row::default();
+            let mut reference = Vec::new();
+            for _ in 0..60 {
+                // Few edges and a coarse grid, so rects repeat, nest, abut and chain.
+                let edge = [0, 1, 3][next(3)];
+                let nudge = Vec2::new(nudges[next(3)], nudges[next(3)]);
+                let mut grid =
+                    |limit| f32::from(u8::try_from(next(limit)).unwrap()) / 8.0;
+                let corner = Vec2::new(grid(24), grid(24)) + nudge;
+                let size = Vec2::new(grid(3), grid(3)) + 0.125;
+                let rect = Rect::from_corners(corner, corner + size);
+                row.merge(edge, rect);
+                reference_merge(&mut reference, edge, rect);
+                assert_eq!(bits(row.clone().into_row()), bits(reference.clone()));
+            }
+        }
+    }
+
     #[test]
     fn reservations_reach_the_stationary_commits_before_a_delayed_service() {
         let mut events = crate::timeline::synthetic();
@@ -274,7 +411,8 @@ mod tests {
             0,
             super::Rect::from_center_size(super::Vec2::ZERO, super::Vec2::ONE),
         );
-        let mut rows = vec![vec![], vec![], vec![], vec![reservation]];
+        let mut rows = vec![super::Row::default(); 4];
+        rows[3].merge(reservation.0, reservation.1);
         let mut flags = vec![false, false, false, true];
         super::anticipate_service_reservations(
             &events,
@@ -283,9 +421,10 @@ mod tests {
             &mut flags,
         );
         assert!(flags.iter().all(|f| *f));
-        assert!(rows.iter().all(|row| row.as_slice() == [reservation]));
+        assert!(rows.into_iter().all(|row| row.into_row() == [reservation]));
 
-        let mut rows = vec![vec![], vec![], vec![], vec![reservation]];
+        let mut rows = vec![super::Row::default(); 4];
+        rows[3].merge(reservation.0, reservation.1);
         let mut flags = vec![false, false, false, true];
         super::anticipate_service_reservations(
             &events,
@@ -297,7 +436,7 @@ mod tests {
     }
     #[test]
     fn reservations_include_both_future_radii_before_the_discs_grow() {
-        let mut row = Vec::new();
+        let mut row = super::Row::default();
         super::reserve_other(
             &mut row,
             super::Vec2::ZERO,
@@ -305,6 +444,7 @@ mod tests {
             super::Vec2::ZERO,
             14.0,
         );
+        let row = row.into_row();
         assert!(row.iter().any(|(_, r)| r.contains(super::Vec2::X * 0.27)));
         assert!(!row.iter().any(|(_, r)| r.contains(super::Vec2::X * 0.30)));
     }
