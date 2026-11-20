@@ -10,7 +10,7 @@ mod held;
 mod reflow;
 mod zoom;
 
-const BOUND: f32 = 2.5;
+const BOUND: f32 = 3.5;
 pub(crate) const MINIMUM: Vec2 = Vec2::new(144.0, 64.0);
 pub(crate) const BIRTH_TICKS: u32 = 45;
 /// Ticks whose zoom is fitted together; fixed so counts do not depend on the thread count.
@@ -1033,7 +1033,9 @@ impl Packing {
                         }
                     })
                     .collect();
-                let weights = held.step(tick, &items[tick], &shown);
+                let future = held::target_tick(tick).min(items.len() - 1);
+                let weights =
+                    held.step_towards(tick, &items[tick], &items[future], &shown);
                 if let Some(target) = held.target_at_start(tick)
                     && shown.iter().enumerate().all(|(i, &p)| {
                         let fade = fading

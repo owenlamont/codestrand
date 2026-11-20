@@ -50,10 +50,21 @@ impl Weights {
 
     /// The weights on `tick`, given each repository's live item count and presence; ticks
     /// must arrive in order.
+    #[cfg(test)]
     pub(super) fn step(
         &mut self,
         tick: usize,
         items: &[f32],
+        presence: &[f32],
+    ) -> Vec<f32> {
+        self.step_towards(tick, items, items, presence)
+    }
+
+    pub(super) fn step_towards(
+        &mut self,
+        tick: usize,
+        items: &[f32],
+        future: &[f32],
         presence: &[f32],
     ) -> Vec<f32> {
         let targets: Vec<_> = items.iter().map(|&count| count.max(1.0)).collect();
@@ -78,7 +89,7 @@ impl Weights {
         }
         if tick >= self.next && self.drifted(&targets, presence) {
             self.from = self.at(tick);
-            self.to = targets;
+            self.to = future.iter().map(|&count| count.max(1.0)).collect();
             self.start = tick;
             self.next = tick + span(self.policy.reflow + self.policy.hold);
         }
@@ -119,6 +130,11 @@ impl Weights {
 
 pub(super) fn reflow_ticks() -> usize {
     span(POLICY.reflow)
+}
+
+/// Aim at the midpoint of the next hold, after the ease has ended.
+pub(super) fn target_tick(tick: usize) -> usize {
+    tick + span(POLICY.reflow + POLICY.hold / 2)
 }
 
 pub(super) fn reflow_spacing() -> usize {
@@ -184,6 +200,24 @@ mod tests {
         assert_eq!(
             weights.step(2 * reflow + 1, &[1000.0, 100.0], &BOTH)[1],
             100.0
+        );
+    }
+
+    #[test]
+    fn a_reflow_eases_towards_the_counts_in_the_middle_of_the_hold() {
+        let mut weights = Weights::new(2);
+        weights.step(0, &[100.0, 100.0], &BOTH);
+        assert_eq!(
+            weights.step_towards(1, &[100.0, 100.0], &[100.0, 400.0], &BOTH),
+            [100.0, 100.0],
+        );
+        assert_eq!(
+            weights.step_towards(2, &[100.0, 200.0], &[100.0, 400.0], &BOTH),
+            [100.0, 100.0],
+        );
+        assert_eq!(
+            weights.step(2 + reflow_ticks(), &[100.0, 300.0], &BOTH),
+            [100.0, 400.0,]
         );
     }
 

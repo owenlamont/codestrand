@@ -265,8 +265,9 @@ room for elevated portraits. Preview orbit changes the projection, not the packi
 Shared gutters separate neighbouring tiles, with no contributor band. Each tile's weight
 comes from its live file and directory count. A reflow starts when the ratio between a
 tile's held and live shares exceeds 1.5 in either direction, or when more than 5% of the
-total weight would need to shift between tiles. The weights ease over two seconds, with
-at least six seconds between reflow starts. Empty active repositories weigh as one item.
+total weight would need to shift between tiles. The weights ease over two seconds towards
+the counts in the middle of the next hold, with at least six seconds between reflow
+starts. Empty active repositories weigh as one item.
 The split tree, size floors and aspect limits also affect each tile's area.
 Each repository keeps file identity,
 local layout and one uniform scale, with a fixed quarter-turn chosen for its history.
@@ -289,7 +290,7 @@ A newcomer splits one existing tile or subtree. Other repositories retain their
 relative order. A reflow can change the split tree between repository arrivals and exits.
 Tiles and their contents ease together when the new tree improves area shares and
 the gutters stay connected throughout the move.
-Splits clamp to a ground-aspect range of 1:2.5 to 2.5:1, inclusive,
+Splits clamp to a ground-aspect range of 1:3.5 to 3.5:1, inclusive,
 and a 144-by-64 reference-pixel floor at full detail. Births ease for up to 0.75
 playback seconds before their first commit; births near the lead-in use the available
 lead-in time. Aspect and size clamps scale with presence during the transition.
