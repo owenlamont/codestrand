@@ -32,8 +32,9 @@ like authors, so a co-author shares the avatar of their own commits. A commit's
 contributors pack, slightly smaller, inside one ring in the author's colour, with each
 name outside the ring nearest its member, and every beam leaves from the ring's edge. A
 co-author stays in the ring while the author keeps its place, then walks to its own
-next commit; when the author moves on, a co-author with no later commit fades out with
-the ring. The author's colour marks the files and the caption names the author.
+next commit; when the author moves on, a co-author fades out with the ring unless it
+commits again within `--contributor-inactivity-days`. The author's colour marks the
+files and the caption names the author.
 Codestrand reads at most 8 co-authors per commit, none from a message over 64 KiB, and
 ignores a trailer without an email or with a name or email over 4,096 bytes.
 

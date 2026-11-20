@@ -22,24 +22,24 @@ pub(super) fn duration(
         })
 }
 
-/// For each selected event, bit `rank` is set when its participant at that rank (the
-/// author first, then co-authors) takes part in no later event of the whole history.
-pub(super) fn finals(events: &[Event], selected: std::ops::Range<usize>) -> Vec<u16> {
-    let mut seen = std::collections::HashSet::new();
-    let mut finals: Vec<u16> = events
-        .iter()
-        .rev()
-        .map(|event| {
-            event
-                .participants()
-                .enumerate()
-                .filter(|(_, contributor)| seen.insert(contributor.key.clone()))
-                .fold(0, |bits, (rank, _)| bits | 1 << rank)
-        })
-        .collect();
-    finals.reverse();
-    finals.drain(selected.end..);
-    finals.drain(..selected.start);
+/// For each played event, bit `rank` is set when its participant at that rank (the author
+/// first, then co-authors) takes part in no later played event before its departure, so
+/// a co-author left behind fades with its group's ring rather than waiting alone.
+pub(super) fn finals(
+    events: &[Event],
+    starts: &[Time],
+    departures: &[Time],
+) -> Vec<u16> {
+    let mut next = std::collections::HashMap::new();
+    let mut finals = vec![0; events.len()];
+    for (index, event) in events.iter().enumerate().rev() {
+        for (rank, contributor) in event.participants().enumerate() {
+            let later = next.insert(contributor.key.clone(), index);
+            if later.is_none_or(|later| starts[later] >= departures[index]) {
+                finals[index] |= 1 << rank;
+            }
+        }
+    }
     finals
 }
 

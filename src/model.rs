@@ -1030,7 +1030,8 @@ impl Simulation {
         let (departures, repository_ends) =
             lifecycle::plan(&events, &schedule, options, start..end);
         let first_arrivals = lifecycle::arrivals(&events, start..end);
-        let finals = lifecycle::finals(&events, start..end);
+        let finals =
+            lifecycle::finals(&events[start..end], &schedule.starts, &departures);
         events.truncate(end);
         events.drain(..start);
         let mut simulation = Self {

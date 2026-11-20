@@ -2097,6 +2097,36 @@ mod tests {
         assert!(author.presence > 0.0);
     }
 
+    /// Whether a co-author left behind by its author's next commit fades with the ring,
+    /// when its own next commit comes `days` later under a ten-day inactivity horizon.
+    fn left_behind_fades(days: i64) -> bool {
+        let mut events = crate::timeline::synthetic();
+        events.truncate(3);
+        let pair = crate::timeline::Identity::new("Pair", "pair@example.invalid");
+        events[0].co_authors = vec![pair.clone()];
+        events[1].seconds = events[0].seconds + 3_600;
+        events[2].seconds = events[0].seconds + days * 86_400;
+        events[2].author = pair;
+        let mut sim = Simulation::new(
+            events,
+            &Options {
+                contributor_inactivity_days: 10,
+                ..Default::default()
+            },
+            &Theme::neon(),
+            &Mappings::default(),
+        );
+        let solo = sim.schedule.starts[1];
+        sim.advance_to(crate::model::frames_for(solo + 0.1, 60).unwrap(), 60);
+        sim.state.avatars[1].dismissed
+    }
+
+    #[test]
+    fn a_co_author_waits_with_its_author_only_for_a_commit_within_its_horizon() {
+        assert!(!left_behind_fades(5));
+        assert!(left_behind_fades(30));
+    }
+
     #[test]
     fn a_group_never_outgrows_its_seats() {
         let mut events = crate::timeline::synthetic();
