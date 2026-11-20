@@ -274,27 +274,21 @@ fn compatible(from: &[Option<Tile>], to: &[Option<Tile>]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::super::{Input, Packing, Sample, outline};
     use super::*;
     use bevy::math::Vec2;
 
     #[test]
     fn a_grid_can_change_its_outer_axis_to_follow_weights() {
+        let split = |axis, first, second| Node::Split {
+            axis,
+            first,
+            second,
+        };
         let nodes = [
-            Node::Split {
-                axis: 0,
-                first: 1,
-                second: 2,
-            },
-            Node::Split {
-                axis: 1,
-                first: 3,
-                second: 4,
-            },
-            Node::Split {
-                axis: 1,
-                first: 5,
-                second: 6,
-            },
+            split(0, 1, 2),
+            split(1, 3, 4),
+            split(1, 5, 6),
             Node::Repository(0),
             Node::Repository(1),
             Node::Repository(2),
@@ -309,15 +303,43 @@ mod tests {
         let unchanged = tiles(&nodes, &target, &presence, space).unwrap();
         assert!(mismatch(&change.to.tiles, &target) < mismatch(&unchanged, &target));
         let end = 12 + held::reflow_ticks();
-        let middle = change.sample(12 + held::reflow_ticks() / 2).unwrap();
-        let mut previous = change.from.tiles.clone();
+        let mid = 12 + held::reflow_ticks() / 2;
+        let content = Input {
+            low: Vec2::ZERO,
+            high: Vec2::ONE,
+            outline: outline::rectangle(Vec2::ZERO, Vec2::ONE).into(),
+            height: 0.0,
+            live: true,
+        };
+        let samples: Vec<_> = (0..=end)
+            .map(|tick| Sample {
+                weights: if tick < end { weights } else { target }.to_vec(),
+                presence: presence.to_vec(),
+            })
+            .collect();
+        let packing = Packing {
+            gutter_scale: 4.0,
+            detail: 1.0,
+            nodes: nodes.to_vec(),
+            reflows: vec![change.clone()].into(),
+            labels: ["a", "b", "c", "d"].map(str::to_owned).to_vec().into(),
+            inputs: vec![vec![content; 4]; end + 1].into(),
+            samples: samples.into(),
+            rotated: vec![false; 4],
+            ..Packing::default()
+        };
+        let sample = |tick| {
+            let (regions, _, _) = packing.sample(u64::try_from(tick).unwrap()).unwrap();
+            Layout {
+                tiles: regions.iter().map(|r| r.tile).collect(),
+                gutters: regions.iter().map(|r| r.gutter).collect(),
+            }
+        };
+        let middle = sample(mid);
+        let mut previous = sample(11).tiles;
+        assert_eq!(previous, change.from.tiles);
         for tick in 12..=end {
-            let current = change.sample(tick).unwrap_or_else(|| {
-                Layout::new(
-                    &change.nodes,
-                    tiles(&change.nodes, &target, &presence, space).unwrap(),
-                )
-            });
+            let current = sample(tick);
             for (a, b) in previous
                 .iter()
                 .flatten()
@@ -326,7 +348,7 @@ mod tests {
                 assert!(a.low.distance(b.low) < 0.015);
                 assert!(a.high.distance(b.high) < 0.015);
             }
-            if tick == 12 || tick == end || tick == 12 + held::reflow_ticks() / 2 {
+            if [12, mid, end].contains(&tick) {
                 crate::model::assert_gutter_routes(
                     current.gutters.iter().flatten().copied(),
                 );
@@ -334,7 +356,7 @@ mod tests {
             previous = current.tiles;
         }
         assert_eq!(previous, change.to.tiles);
-        let replay = change.sample(12 + held::reflow_ticks() / 2).unwrap();
+        let replay = sample(mid);
         assert_eq!(middle.tiles, replay.tiles);
         assert_eq!(middle.gutters, replay.gutters);
     }
