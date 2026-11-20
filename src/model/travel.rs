@@ -1,4 +1,7 @@
-use std::{cmp::Reverse, collections::BinaryHeap};
+use std::{
+    cmp::Reverse,
+    collections::{BTreeMap, BinaryHeap},
+};
 
 use bevy::math::{Rect, Vec2};
 use serde::Serialize;
@@ -232,10 +235,12 @@ pub(super) struct Statistics {
 #[derive(Clone, Default)]
 pub(super) struct Plan {
     trips: Vec<Trip>,
-    pub(super) docks: Vec<Option<slots::Dock>>,
+    /// Planned docks by commit and avatar.
+    pub(super) docks: BTreeMap<(usize, usize), slots::Dock>,
     pub(super) replanning: bool,
     pub(super) frozen: usize,
-    pub(super) occupancy: Vec<Vec<(u8, Rect)>>,
+    /// Reserved gutter spans by commit and avatar.
+    pub(super) occupancy: BTreeMap<(usize, usize), Vec<(u8, Rect)>>,
     pub stats: Statistics,
 }
 
@@ -429,49 +434,47 @@ fn replay(simulation: &mut Simulation, frames: u32) -> Capture {
         for (index, avatar) in state.avatars.iter().enumerate() {
             if let Some(slot) = &avatar.slot
                 && capture.poses[index].last().is_none_or(|last| {
-                    last.point != slot.point || last.dock != slot.dock
+                    last.point != slot.centre() || last.dock != slot.dock
                 })
             {
                 capture.poses[index].push(Pose {
                     tick: state.tick,
-                    point: slot.point,
+                    point: slot.centre(),
                     dock: slot.dock,
                 });
             }
         }
         for event in seen..state.next_event {
-            let contributor = simulation.events[event]
-                .contributor
-                .as_ref()
-                .expect("resolved contributor");
-            let author = state.authors[&contributor.key];
-            let avatar = &state.avatars[author];
-            capture.services.push(Service {
-                commit: event,
-                author,
-                repository: avatar.repository,
-                tick: state.tick,
-                release: frames_for(
-                    state
-                        .pulses
-                        .iter()
-                        .find(|p| p.commit == event)
-                        .expect("new pulse")
-                        .end
-                        - 0.3,
-                    60,
-                )
-                .expect("bounded pulse")
-                .into(),
-                point: avatar
-                    .slot
-                    .as_ref()
-                    .expect("tile exists before service")
-                    .point,
-                radius: state.avatar_radius(),
-                bot: contributor.is_bot(&simulation.events[event].author.email),
-                dock: avatar.slot.as_ref().expect("service slot").dock,
-            });
+            for contributor in simulation.events[event].participants() {
+                let author = state.authors[&contributor.key];
+                let avatar = &state.avatars[author];
+                capture.services.push(Service {
+                    commit: event,
+                    author,
+                    repository: avatar.repository,
+                    tick: state.tick,
+                    release: frames_for(
+                        state
+                            .pulses
+                            .iter()
+                            .find(|p| p.commit == event)
+                            .expect("new pulse")
+                            .end
+                            - 0.3,
+                        60,
+                    )
+                    .expect("bounded pulse")
+                    .into(),
+                    point: avatar
+                        .slot
+                        .as_ref()
+                        .expect("tile exists before service")
+                        .centre(),
+                    radius: state.avatar_radius(),
+                    bot: contributor.is_bot(),
+                    dock: avatar.slot.as_ref().expect("service slot").dock,
+                });
+            }
         }
         seen = state.next_event;
     }
@@ -545,6 +548,8 @@ impl Simulation {
         let _phase = self.trace.phase(Phase::AdjustPadding);
         let mut result = padding.to_vec();
         let cap = options.travel_cap.ticks();
+        // Co-authors of one commit share its padding, so it covers the largest deficit.
+        let mut deficits = std::collections::BTreeMap::<usize, u32>::new();
         for trip in self.travel.trips.iter().filter(|t| {
             t.commit >= self.travel.frozen
                 && (!t.bot || options.bot_travel == super::BotTravel::Walk)
@@ -569,10 +574,13 @@ impl Simulation {
             if needed == 0 {
                 continue;
             }
-            let commit = self.offset + trip.commit;
+            let deficit = deficits.entry(self.offset + trip.commit).or_default();
+            *deficit = (*deficit).max(needed);
+        }
+        for (commit, needed) in deficits {
             if let Some((_, ticks)) = result.iter_mut().find(|(i, _)| *i == commit) {
                 *ticks = ticks.saturating_add(needed).min(cap);
-            } else if needed > 0 {
+            } else {
                 result.push((commit, needed));
             }
         }
@@ -586,20 +594,29 @@ impl Simulation {
     ) -> Vec<(usize, u32)> {
         let _phase = self.trace.phase(Phase::CompactPadding);
         let mut result = padding.to_vec();
+        // Only slack every trip of a commit can spare is reclaimed; a faded trip has none.
+        let mut slack = std::collections::BTreeMap::<usize, u32>::new();
         for trip in self
             .travel
             .trips
             .iter()
-            .filter(|t| !t.fade && t.commit >= self.travel.frozen)
+            .filter(|t| t.commit >= self.travel.frozen)
         {
-            let ready =
-                trip.departure + u64::from(seconds_ticks(trip.route.duration, true));
-            let surplus = u32::try_from(trip.arrival.saturating_sub(ready))
-                .expect("bounded slack");
-            if let Some((_, ticks)) = result
-                .iter_mut()
-                .find(|(i, _)| *i == self.offset + trip.commit)
-            {
+            let surplus = if trip.fade {
+                0
+            } else {
+                let ready = trip.departure
+                    + u64::from(seconds_ticks(trip.route.duration, true));
+                u32::try_from(trip.arrival.saturating_sub(ready))
+                    .expect("bounded slack")
+            };
+            slack
+                .entry(self.offset + trip.commit)
+                .and_modify(|spare| *spare = (*spare).min(surplus))
+                .or_insert(surplus);
+        }
+        for (commit, surplus) in slack {
+            if let Some((_, ticks)) = result.iter_mut().find(|(i, _)| *i == commit) {
                 *ticks = ticks.saturating_sub(surplus);
             }
         }
@@ -621,7 +638,9 @@ impl Simulation {
         let mut padding = Vec::new();
         let mut routes = routes.iter().peekable();
         for commit in 0..self.events.len() {
-            if let Some(trip) = routes.peek().filter(|t| t.commit == commit) {
+            // Co-authors of one commit travel together, so it waits for the slowest.
+            let mut slowest = None;
+            while let Some(trip) = routes.next_if(|t| t.commit == commit) {
                 let departure_event = self
                     .schedule
                     .starts
@@ -644,9 +663,11 @@ impl Simulation {
                     )
                     .min(cap)
                 };
-                padding.push((self.offset + trip.commit, needed));
+                slowest = slowest.max(Some(needed));
+            }
+            if let Some(needed) = slowest {
+                padding.push((self.offset + commit, needed));
                 extra += u64::from(needed);
-                routes.next();
             }
             shifts[commit] = extra;
         }
@@ -724,9 +745,9 @@ impl Simulation {
                 .sum(),
         };
         let mut docks = self.travel.docks.clone();
-        docks.resize(self.events.len(), None);
+        docks.retain(|&(commit, _), _| commit < self.events.len());
         for service in &capture.services {
-            docks[service.commit] = Some(service.dock);
+            docks.insert((service.commit, service.author), service.dock);
         }
         if let Some(window) = &mut self.window {
             window.captured.clone_from(&capture.services);
@@ -998,16 +1019,10 @@ impl Plan {
     ) {
         self.trips.retain(|trip| trip.arrival > boundary);
         self.trips.shrink_to_fit();
-        for (commit, dock) in self.docks.iter_mut().enumerate() {
-            if commit < next && !keep.contains(&commit) {
-                *dock = None;
-            }
-        }
-        for (commit, row) in self.occupancy.iter_mut().enumerate() {
-            if commit < next && !keep.contains(&commit) {
-                *row = Vec::new();
-            }
-        }
+        let kept =
+            |&(commit, _): &(usize, usize)| commit >= next || keep.contains(&commit);
+        self.docks.retain(|key, _| kept(key));
+        self.occupancy.retain(|key, _| kept(key));
     }
 }
 

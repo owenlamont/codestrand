@@ -342,6 +342,7 @@ impl Simulation {
         Self {
             file_ids: self.file_ids.clone(),
             first_arrivals: self.first_arrivals.clone(),
+            finals: self.finals.clone(),
             departures: self.departures.clone(),
             repository_ends: self.repository_ends.clone(),
             caption_style: self.caption_style,
@@ -993,7 +994,7 @@ mod tests {
                     boundary.titles,
                     boundary.pulses,
                     &sim.schedule.starts[..count],
-                    &sim.travel.docks[..count],
+                    sim.travel.docks.range(..(count, 0)).collect::<Vec<_>>(),
                     trips,
                     titles,
                     caption::frozen(&sim.caption_plan, boundary.tick)

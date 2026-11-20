@@ -238,7 +238,7 @@ pub(super) struct Commit {
     pub(super) parents: Vec<String>,
     pub(super) author: Identity,
     committer: Identity,
-    message: Vec<u8>,
+    pub(super) message: Vec<u8>,
     pub(super) changes: Vec<Change>,
 }
 

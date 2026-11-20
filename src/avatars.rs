@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    contributors::{Accounts, Avatar, Key},
+    contributors::{Accounts, Avatar, Contributor, Key},
     timeline::Event,
 };
 
@@ -344,15 +344,14 @@ pub(super) fn now() -> u64 {
         .as_secs()
 }
 
-fn priority(event: &Event) -> u8 {
-    if event.contributor.as_ref().is_some_and(|contributor| {
-        let accounts = &contributor.accounts;
-        accounts.github.is_some()
-            || accounts.gitlab.is_some()
-            || accounts.avatar.is_some()
-    }) {
+fn priority(contributor: &Contributor) -> u8 {
+    let accounts = &contributor.accounts;
+    if accounts.github.is_some()
+        || accounts.gitlab.is_some()
+        || accounts.avatar.is_some()
+    {
         0
-    } else if noreply(&String::from_utf8_lossy(&event.author.email)).is_some() {
+    } else if noreply(&String::from_utf8_lossy(&contributor.email)).is_some() {
         1
     } else {
         2
@@ -424,31 +423,43 @@ impl<N: Network> Resolver<N> {
     pub(super) fn resolve(&mut self, events: &mut [Event], remote: Option<&str>) {
         let mut portraits = HashMap::<Key, Arc<Portrait>>::new();
         let mut seen = HashSet::new();
-        let mut candidates: Vec<_> = events
-            .iter_mut()
-            .filter(|event| {
-                event.contributor.as_ref().is_some_and(|contributor| {
-                    seen.insert((
-                        contributor.key.clone(),
-                        event.author.email.to_ascii_lowercase(),
-                    ))
-                })
+        // Only an author's own commit can identify their GitHub account, so a co-author
+        // is looked up with no commit.
+        // Authored commits are taken first, so an email seen as a co-author before its
+        // own commit keeps that commit for the account lookup.
+        let mut candidates: Vec<(&Contributor, &str)> = events
+            .iter()
+            .flat_map(|event| {
+                event.contributor.iter().map(|c| (c, event.commit.as_str()))
+            })
+            .chain(
+                events
+                    .iter()
+                    .flat_map(|event| event.co_contributors.iter().map(|c| (c, ""))),
+            )
+            .filter(|(contributor, _)| {
+                seen.insert((
+                    contributor.key.clone(),
+                    contributor.email.to_ascii_lowercase(),
+                ))
             })
             .collect();
-        candidates.sort_by_key(|event| priority(event));
+        candidates.sort_by_key(|&(contributor, commit)| {
+            (priority(contributor), commit.is_empty())
+        });
         let total = candidates.len();
         let mut processed = 0;
-        for event in candidates {
-            let Some(contributor) = &mut event.contributor else {
-                continue;
-            };
+        for (contributor, commit) in candidates {
             if portraits.contains_key(&contributor.key) {
                 continue;
             }
-            let email = String::from_utf8_lossy(&event.author.email)
+            let email = String::from_utf8_lossy(&contributor.email)
                 .trim()
                 .to_ascii_lowercase();
             let accounts = &contributor.accounts;
+            // Without a commit no account lookup runs, so the result is cached as if
+            // there were no remote, apart from a later authored commit's lookup.
+            let remote = remote.filter(|_| !commit.is_empty());
             let key = if let Some(Avatar::Remote(url)) = &accounts.avatar {
                 format!("override\n{url}")
             } else if accounts.gitlab.is_none()
@@ -474,7 +485,7 @@ impl<N: Network> Resolver<N> {
                         "avatars: resolving {processed}/{total} (30s fetch budget)"
                     );
                 }
-                let portrait = self.one(&key, &email, accounts, remote, &event.commit);
+                let portrait = self.one(&key, &email, accounts, remote, commit);
                 self.memo.insert(key, portrait.clone());
                 portrait
             };
@@ -485,7 +496,11 @@ impl<N: Network> Resolver<N> {
         self.network
             .summary(portraits.len(), seen.len(), remote.is_none());
         for event in events {
-            if let Some(contributor) = &mut event.contributor {
+            for contributor in event
+                .contributor
+                .iter_mut()
+                .chain(&mut event.co_contributors)
+            {
                 contributor.portrait = portraits.get(&contributor.key).cloned();
             }
         }
@@ -834,7 +849,7 @@ mod tests {
     use std::{collections::VecDeque, fs};
 
     use super::*;
-    use crate::contributors::{Accounts, Contributor};
+    use crate::contributors::Accounts;
 
     #[test]
     fn linked_avatar_cache_does_not_write_outside() {
@@ -966,12 +981,15 @@ mod tests {
                 bot: None,
                 key: Key::Email(email.as_bytes().to_vec()),
                 name: "Author".to_owned(),
+                email: email.as_bytes().to_vec(),
                 accounts: Accounts {
                     github: github.map(str::to_owned),
                     ..Accounts::default()
                 },
                 portrait: None,
             }),
+            co_authors: Vec::new(),
+            co_contributors: Vec::new(),
             commit: "0123456789012345678901234567890123456789".to_owned(),
             seconds: 0,
             changes: vec![],
@@ -1053,6 +1071,64 @@ mod tests {
         resolver.resolve(&mut events, None);
         server.join().unwrap();
         assert!(visible(&events[0]));
+    }
+
+    #[test]
+    fn co_authors_get_portraits_without_borrowing_the_commit_account() {
+        let mut source = event("lead@example.invalid", Some("lead"));
+        let co_author = event("pair@example.invalid", None).contributor.unwrap();
+        source.co_contributors = vec![co_author];
+        let mut events = [source];
+        let mut resolver = resolver(
+            None,
+            true,
+            vec![Response::Found(png()), Response::Found(png())],
+        );
+        resolver.resolve(&mut events, Some("owner/repo"));
+        assert!(visible(&events[0]));
+        assert!(events[0].co_contributors[0].portrait.is_some());
+        let urls: Vec<_> = resolver.network.calls.iter().map(|(url, _)| url).collect();
+        assert_eq!(urls[0], "https://github.com/lead.png?size=128");
+        assert!(urls[1].starts_with("https://www.gravatar.com/avatar/"));
+        assert_eq!(urls.len(), 2);
+    }
+
+    #[test]
+    fn a_cached_co_author_miss_leaves_their_later_commit_lookup() {
+        let root = crate::cache::test_directory().unwrap();
+        let cached = || {
+            resolver(
+                Some(root.path().to_owned()),
+                true,
+                (0..4).map(|_| Response::Missing).collect(),
+            )
+        };
+        let mut lead = event("lead@example.invalid", Some("lead"));
+        let pair = event("pair@example.invalid", None);
+        lead.co_contributors = vec![pair.contributor.clone().unwrap()];
+        cached().resolve(&mut [lead], Some("owner/repo"));
+        let mut later = cached();
+        later.resolve(&mut [pair], Some("owner/repo"));
+        assert!(later.network.calls[0].0.contains("/commits?sha="));
+    }
+
+    #[test]
+    fn a_co_author_who_later_commits_is_looked_up_by_their_commit() {
+        let mut first = event("lead@example.invalid", Some("lead"));
+        let pair = event("pair@example.invalid", None);
+        first.co_contributors = vec![pair.contributor.clone().unwrap()];
+        let mut events = [first, pair];
+        let mut resolver = resolver(
+            None,
+            true,
+            vec![
+                Response::Found(png()),
+                Response::Missing,
+                Response::Found(png()),
+            ],
+        );
+        resolver.resolve(&mut events, Some("owner/repo"));
+        assert!(resolver.network.calls[1].0.contains("/commits?sha="));
     }
 
     #[test]
@@ -1330,8 +1406,14 @@ mod tests {
         let mut avatar = event("avatar@example.invalid", None);
         avatar.contributor.as_mut().unwrap().accounts.avatar =
             Some(Avatar::Remote("https://example.invalid/a.png".to_owned()));
-        assert!(priority(&gitlab) < priority(&inferred));
-        assert!(priority(&avatar) < priority(&inferred));
+        assert!(
+            priority(gitlab.contributor.as_ref().unwrap())
+                < priority(inferred.contributor.as_ref().unwrap())
+        );
+        assert!(
+            priority(avatar.contributor.as_ref().unwrap())
+                < priority(inferred.contributor.as_ref().unwrap())
+        );
     }
 
     #[test]

@@ -168,6 +168,12 @@ fn valid_snapshot(snapshot: &Snapshot, tip: &str, skip: usize) -> bool {
             || !commits.insert(&event.commit)
             || event.author.name.len() > 4096
             || event.author.email.len() > 4096
+            || event.co_authors.len() > timeline::MAX_CO_AUTHORS
+            || event.co_authors.iter().any(|identity| {
+                identity.email.is_empty()
+                    || identity.email.len() > timeline::MAX_IDENTITY_BYTES
+                    || identity.name.len() > timeline::MAX_IDENTITY_BYTES
+            })
             || !(-62_135_596_800..=253_402_300_799).contains(&event.seconds)
         {
             return false;
@@ -483,6 +489,19 @@ mod tests {
                 !valid_snapshot(&serde_json::from_value(value).unwrap(), &tip, 0),
                 "{pointer}"
             );
+        }
+        let identity = |name: usize, email: usize| serde_json::json!({"name": vec![b'n'; name], "email": vec![b'e'; email]});
+        for (co_authors, valid) in [
+            (vec![identity(1, 1); timeline::MAX_CO_AUTHORS], true),
+            (vec![identity(1, 1); timeline::MAX_CO_AUTHORS + 1], false),
+            (vec![identity(1, 0)], false),
+            (vec![identity(timeline::MAX_IDENTITY_BYTES + 1, 1)], false),
+            (vec![identity(1, timeline::MAX_IDENTITY_BYTES + 1)], false),
+        ] {
+            let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            value["events"][0]["co_authors"] = co_authors.into();
+            let snapshot = serde_json::from_value(value).unwrap();
+            assert_eq!(valid_snapshot(&snapshot, &tip, 0), valid);
         }
     }
 
