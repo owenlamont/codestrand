@@ -22,9 +22,10 @@ Preview and export use the selected revision's first-parent timeline. Revision
 defaults to `HEAD`. Codestrand does not clone or fetch a remote repository: obtain
 a complete local repository first.
 
-With `--start-date`, import scans commit headers to find the range, then reads one
-tree, the commit before the range, and the diffs inside the range. Earlier diffs are
-not read, and import budgets apply to the range read.
+With `--start-date` or `--end-date`, import scans commit headers to find the range,
+then reads one tree, the commit before the range, and the diffs inside the range.
+Diffs before or after the range are not read, and import budgets apply to the range
+read.
 
 Revisions accept reference names, full or unambiguous abbreviated object IDs, and
 `HEAD` (also `@`). Parent selectors `^N` and first-parent ancestor selectors `~N` can
@@ -33,8 +34,9 @@ including reflog and message searches, are rejected rather than delegated to unb
 reference traversal. Revision strings are limited to 4,096 bytes and navigation to
 1,000,000 steps, with the existing object-size and work budgets applied before loading.
 Annotated tags and symbolic references have a 64-hop limit and cycle detection.
-Cyclic or excessive chains produce an error, including when encountered through HEAD
-during diff setup. Import uses no wall-clock deadline.
+Cyclic or excessive chains produce an error. Diff setup does not resolve `HEAD` or
+read the index, worktree or `.gitattributes`. Import uses no
+wall-clock deadline.
 
 ## Analysis limits
 
@@ -72,9 +74,9 @@ hostile inputs bounded; a later start reduces the history they are charged again
 Repository playback saves the latest imported timeline, diff counts and bounded
 line samples under the platform user cache directory, inside `codestrand/`.
 Linked worktrees share a cache
-namespace based on the canonical common Git directory. A different resolved tip or
-start commit replaces the saved timeline after a complete import. Changing the end
-date or pacing reuses the imported timeline. Contributor mapping edits take effect on
+namespace based on the canonical common Git directory. A different resolved tip,
+start commit or end commit replaces the saved timeline after a complete import.
+Changing pacing reuses the imported timeline. Contributor mapping edits take effect on
 cache hits.
 
 Cache errors regenerate data without blocking playback. To bypass history and

@@ -423,23 +423,16 @@ mod tests {
     #[test]
     fn static_inline_history_has_zero_movement_and_repeats_byte_for_byte() {
         use crate::{contributors::Mappings, model::Options, theme::Theme, timeline};
-        let events = vec![timeline::Event {
-            author: timeline::Identity {
-                name: b"Ada".to_vec(),
-                email: Vec::new(),
-            },
-            repository: 0,
-            contributor: None,
-            commit: String::new(),
-            seconds: 0,
-            changes: vec![timeline::FileChange {
+        let events = vec![timeline::Event::at(
+            0,
+            vec![timeline::FileChange {
                 path: "a.rs".to_owned(),
                 kind: timeline::Kind::Added,
                 insertions: 1,
                 removals: 0,
                 samples: Vec::new(),
             }],
-        }];
+        )];
         let mut simulation = Simulation::new(
             events,
             &Options::default(),

@@ -122,6 +122,7 @@ struct Palette {
     membership_mesh: Handle<Mesh>,
     directory_rings: Vec<Vec<Handle<Mesh>>>,
     activity_mesh: Handle<Mesh>,
+    group_ring: Handle<Mesh>,
     tile: Option<(Handle<StandardMaterial>, Transform)>,
     glyph_mesh: Handle<Mesh>,
     glyphs: Vec<Handle<StandardMaterial>>,
@@ -143,6 +144,7 @@ impl Palette {
         let ring = styling::ring_mesh(theme, theme.membership_radii);
         let membership_mesh = meshes.add(ring.clone());
         let activity_mesh = meshes.add(styling::ring_mesh(theme, theme.activity_radii));
+        let group_ring = meshes.add(Annulus::new(0.9, 1.0));
         // Export sorts opaque mesh bins, but instances within a bin retain insertion order.
         let root_cube = meshes.add(Cuboid::default());
         let [avatar_spheres, avatar_discs, segment_beams] =
@@ -223,6 +225,7 @@ impl Palette {
             membership_mesh,
             directory_rings,
             activity_mesh,
+            group_ring,
             tile,
             glyph_mesh,
             glyphs,
@@ -313,6 +316,7 @@ fn glyph_material(
 ) -> StandardMaterial {
     let mut material = StandardMaterial {
         base_color_texture: Some(texture.clone()),
+        emissive_texture: theme.blackbody.then(|| texture.clone()),
         ..theme.glyph_material.clone()
     };
     if bucket > 0 {
@@ -392,6 +396,7 @@ struct Pools {
     directories: Vec<Entity>,
     hues: DirectoryHues,
     avatars: Vec<Entity>,
+    groups: Vec<Entity>,
     grid: Vec<Entity>,
 }
 
@@ -2025,6 +2030,7 @@ fn sync_activity(
         attach_portrait(world, palette, entity, &avatars[index]);
         pools.avatars.push(entity);
     }
+    let scales = simulation.member_scales();
     for (index, &entity) in pools.avatars.iter().enumerate() {
         let avatar = avatars.get(index);
         let presence = avatar.map_or(0.0, |avatar| avatar.presence);
@@ -2036,6 +2042,7 @@ fn sync_activity(
                 (presence
                     * simulation.scale()
                     * simulation.avatar_disc_scale()
+                    * scales[index]
                     * avatar.projection_scale)
                     * avatar.lifecycle_scale.max(0.001),
             );
@@ -2045,8 +2052,42 @@ fn sync_activity(
             fade(world, entity, avatar.grey, presence);
         }
     }
+    sync_groups(world, palette, pools, simulation);
     styling::beams(world, palette, pools, simulation);
     sync_fragments(world, palette, pools, simulation);
+}
+
+/// Rings each parked group of a commit's contributors in its author's colour.
+fn sync_groups(
+    world: &mut World,
+    palette: &Palette,
+    pools: &mut Pools,
+    simulation: &Simulation,
+) {
+    let groups = simulation.groups();
+    while pools.groups.len() < groups.len() {
+        let entity = world
+            .spawn((
+                Mesh3d(palette.group_ring.clone()),
+                MeshMaterial3d(palette.avatars[0].clone()),
+                Transform::default(),
+                Visibility::Hidden,
+                RenderLayers::layer(AVATAR_LAYER),
+                PortraitDisc,
+            ))
+            .id();
+        pools.groups.push(entity);
+    }
+    for (&entity, &(author, centre, rim)) in pools.groups.iter().zip(&groups) {
+        let material = palette.avatars[author % palette.avatars.len()].clone();
+        world.entity_mut(entity).insert(MeshMaterial3d(material));
+        if let Some(mut transform) = world.get_mut::<Transform>(entity) {
+            transform.translation = centre;
+            transform.scale = Vec3::splat(rim);
+        }
+        set_visible(world, entity, true);
+    }
+    hide_rest(world, &pools.groups, groups.len());
 }
 
 fn sync_fragments(
@@ -3680,6 +3721,7 @@ mod tests {
             bot: None,
             key: crate::contributors::Key::Config(0),
             name: "Portrait".to_owned(),
+            email: Vec::new(),
             accounts: default(),
             portrait: Some(std::sync::Arc::new(crate::avatars::Portrait {
                 pixels: vec![255; 128 * 128 * 4],
@@ -4430,7 +4472,7 @@ mod tests {
     }
 
     #[test]
-    fn every_theme_shows_the_file_type_and_forge_cuts_it_through_the_plate() {
+    fn every_theme_shows_the_file_type_and_forge_shows_its_colours() {
         let glyph = |theme: &Theme, file| {
             let svg = theme.glyph_svg(theme.glyphs[theme.glyph_kind(file)].svg);
             themed_glyph_image(&svg, theme).data.expect("glyph pixels")
@@ -4444,12 +4486,43 @@ mod tests {
             );
         }
         let forge = crate::theme::ThemeName::Forge.build();
-        let alpha =
-            |pixels: Vec<u8>| pixels.into_iter().skip(3).step_by(4).collect::<Vec<_>>();
-        assert_ne!(
-            alpha(glyph(&forge, "main.rs")),
-            alpha(glyph(&forge, "main.py"))
-        );
+        let colours = |pixels: Vec<u8>| {
+            pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|pixel| [pixel[0], pixel[1], pixel[2]])
+                .collect::<Vec<_>>()
+        };
+        for (left, right) in [("App.jsx", "App.tsx"), ("main.go", "go.mod")] {
+            assert_ne!(
+                colours(glyph(&forge, left)),
+                colours(glyph(&forge, right)),
+                "{left} and {right}"
+            );
+        }
+    }
+
+    #[test]
+    fn cold_forge_glyphs_stay_below_the_bloom_threshold() {
+        let forge = crate::theme::ThemeName::Forge.build();
+        let threshold = forge.bloom().expect("Forge blooms").prefilter.threshold;
+        let glow = forge.glyph_material.emissive;
+        let brightest = forge
+            .glyphs
+            .iter()
+            .flat_map(|glyph| {
+                let image = themed_glyph_image(&forge.glyph_svg(glyph.svg), &forge);
+                let pixels = image.data.expect("glyph pixels");
+                let colours = pixels.as_chunks::<4>().0.iter();
+                colours
+                    .flat_map(|pixel| pixel[..3].to_vec())
+                    .collect::<Vec<_>>()
+            })
+            .max()
+            .expect("glyph pixels");
+        let texel = LinearRgba::from(Color::srgb_u8(brightest, brightest, brightest));
+        assert!(texel.red * glow.red.max(glow.green).max(glow.blue) < threshold);
     }
 
     #[test]
@@ -4753,28 +4826,23 @@ mod tests {
         let events: Vec<_> = paths
             .iter()
             .enumerate()
-            .map(|(index, path)| Event {
-                author: crate::timeline::Identity {
-                    name: b"Ada".to_vec(),
-                    email: b"ada@example.invalid".to_vec(),
-                },
-                repository: 0,
-                contributor: None,
-                commit: String::new(),
-                seconds: 86_400 * i64::try_from(index).expect("small fixture"),
-                changes: vec![FileChange {
-                    path: (*path).to_owned(),
-                    kind: if index == 0 {
-                        Kind::Added
-                    } else {
-                        Kind::Moved {
-                            from: paths[index - 1].to_owned(),
-                        }
-                    },
-                    insertions: 0,
-                    removals: 0,
-                    samples: Vec::new(),
-                }],
+            .map(|(index, path)| {
+                Event::at(
+                    86_400 * i64::try_from(index).expect("small fixture"),
+                    vec![FileChange {
+                        path: (*path).to_owned(),
+                        kind: if index == 0 {
+                            Kind::Added
+                        } else {
+                            Kind::Moved {
+                                from: paths[index - 1].to_owned(),
+                            }
+                        },
+                        insertions: 0,
+                        removals: 0,
+                        samples: Vec::new(),
+                    }],
+                )
             })
             .collect();
         let mut simulation = Simulation::new(
@@ -4937,33 +5005,19 @@ mod tests {
         use crate::timeline::{Event, FileChange, Kind};
 
         let events = vec![
-            Event {
-                author: crate::timeline::Identity {
-                    name: b"Ada".to_vec(),
-                    email: b"ada@example.invalid".to_vec(),
-                },
-                repository: 0,
-                contributor: None,
-                commit: String::new(),
-                seconds: 0,
-                changes: vec![FileChange {
+            Event::at(
+                0,
+                vec![FileChange {
                     path: "alpha/a.rs".to_owned(),
                     kind: Kind::Added,
                     insertions: 1,
                     removals: 0,
                     samples: Vec::new(),
                 }],
-            },
-            Event {
-                author: crate::timeline::Identity {
-                    name: b"Ada".to_vec(),
-                    email: b"ada@example.invalid".to_vec(),
-                },
-                repository: 0,
-                contributor: None,
-                commit: String::new(),
-                seconds: 86_400,
-                changes: vec![FileChange {
+            ),
+            Event::at(
+                86_400,
+                vec![FileChange {
                     path: "beta/a.rs".to_owned(),
                     kind: Kind::Moved {
                         from: "alpha/a.rs".to_owned(),
@@ -4972,7 +5026,7 @@ mod tests {
                     removals: 0,
                     samples: Vec::new(),
                 }],
-            },
+            ),
         ];
         let mut simulation = Simulation::new(
             events,

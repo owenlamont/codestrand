@@ -22,22 +22,40 @@ pub(super) fn duration(
         })
 }
 
-pub(super) fn arrivals(
+/// For each played event, bit `rank` is set when its participant at that rank (the author
+/// first, then co-authors) takes part in no later played event before its departure, so
+/// a co-author left behind fades with its group's ring rather than waiting alone.
+pub(super) fn finals(
     events: &[Event],
-    selected: std::ops::Range<usize>,
-) -> Vec<bool> {
+    starts: &[Time],
+    departures: &[Time],
+) -> Vec<u16> {
+    let mut next = std::collections::HashMap::new();
+    let mut finals = vec![0; events.len()];
+    for (index, event) in events.iter().enumerate().rev() {
+        for (rank, contributor) in event.participants().enumerate() {
+            let later = next.insert(contributor.key.clone(), index);
+            if later.is_none_or(|later| starts[later] >= departures[index]) {
+                finals[index] |= 1 << rank;
+            }
+        }
+    }
+    finals
+}
+
+/// For each selected event, bit `rank` is set when its participant at that rank (the
+/// author first, then co-authors) appears for the first time in the whole history.
+pub(super) fn arrivals(events: &[Event], selected: std::ops::Range<usize>) -> Vec<u16> {
     let mut seen = std::collections::HashSet::new();
     events
         .iter()
         .map(|event| {
-            seen.insert(
-                event
-                    .contributor
-                    .as_ref()
-                    .expect("resolved contributor")
-                    .key
-                    .clone(),
-            )
+            assert!(event.contributor.is_some(), "resolved contributor");
+            event
+                .participants()
+                .enumerate()
+                .filter(|(_, contributor)| seen.insert(contributor.key.clone()))
+                .fold(0, |bits, (rank, _)| bits | 1 << rank)
         })
         .skip(selected.start)
         .take(selected.len())
@@ -56,13 +74,15 @@ pub(super) fn plan(
         .enumerate()
         .map(|(repository, &archived)| {
             archived
+                && options.unread.after(repository) == 0
                 && events
                     .iter()
                     .rposition(|event| event.repository == repository)
                     .is_some_and(|last| last < selected.end)
         })
         .collect();
-    let complete = selected.end == events.len();
+    let complete =
+        selected.end == events.len() && options.unread.after.iter().all(|&n| n == 0);
     let events = &events[selected];
     (
         departures(
@@ -340,8 +360,8 @@ mod tests {
             ends[0],
             schedule.starts[0] + (schedule.starts[1] - schedule.starts[0]) * 0.5
         );
-        assert_eq!(arrivals(&events, 0..2), [true, false]);
-        assert_eq!(arrivals(&events, 1..2), [false]);
+        assert_eq!(arrivals(&events, 0..2), [1, 0]);
+        assert_eq!(arrivals(&events, 1..2), [0]);
         let archived = super::super::Options {
             repository_ends: vec![None],
             repository_archived: vec![true],
@@ -350,6 +370,25 @@ mod tests {
         let selected = Schedule::new(&events[..1], 0.5, 1.0);
         assert_eq!(
             plan(&events, &selected, &archived, 0..1).1,
+            [Time::INFINITY]
+        );
+        let later_unread = super::super::Options {
+            unread: super::super::Unread {
+                before: 0,
+                after: vec![1],
+            },
+            ..archived
+        };
+        assert_eq!(
+            plan(&events[..1], &selected, &later_unread, 0..1).1,
+            [Time::INFINITY]
+        );
+        let ended_after_unread = super::super::Options {
+            repository_ends: vec![Some(200 * 86_400)],
+            ..later_unread
+        };
+        assert_eq!(
+            plan(&events[..1], &selected, &ended_after_unread, 0..1).1,
             [Time::INFINITY]
         );
     }

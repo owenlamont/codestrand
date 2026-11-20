@@ -149,13 +149,16 @@ fn excessive_tag_chain_is_rejected() {
 }
 
 #[test]
-fn diff_setup_rejects_cyclic_head_even_for_another_revision() {
+fn a_cyclic_head_does_not_affect_another_revision() {
     let (root, repo, tip) = tag_fixture();
     let fake = cyclic_tag(root.path(), &repo);
     fs::write(root.path().join("HEAD"), format!("{fake}\n")).unwrap();
     let output = bounded_inspect(root.path(), &tip.to_string());
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("cycle"));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
@@ -178,12 +181,6 @@ fn symbolic_reference_chains_are_bounded() {
     fs::write(refs.join("long65"), format!("{tip}\n")).unwrap();
     let output = bounded_inspect(root.path(), "long0");
     assert!(!output.status.success());
-    fs::write(root.path().join("HEAD"), "ref: refs/heads/cycle\n").unwrap();
-    assert!(
-        !bounded_inspect(root.path(), &tip.to_string())
-            .status
-            .success()
-    );
 }
 
 #[test]

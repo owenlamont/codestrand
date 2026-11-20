@@ -270,7 +270,7 @@ impl Anchor {
             for contributor in simulation
                 .camera_events()
                 .iter()
-                .filter_map(|event| event.contributor.as_ref())
+                .flat_map(crate::timeline::Event::participants)
             {
                 if &contributor.name == name && !matches.contains(&contributor.key) {
                     matches.push(contributor.key.clone());

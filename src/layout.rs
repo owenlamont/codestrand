@@ -266,6 +266,8 @@ impl Layout {
             },
             repository: 0,
             contributor: None,
+            co_authors: Vec::new(),
+            co_contributors: Vec::new(),
             commit: String::new(),
             changes: paths
                 .iter()

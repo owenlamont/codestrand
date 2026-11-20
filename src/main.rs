@@ -274,34 +274,38 @@ struct Source {
 
 impl Source {
     /// Imports the selected range of every repository, led by the boundary events that
-    /// settle the state before it, and returns where the selection lies.
+    /// settle the state before it, and returns where the selection lies and what the
+    /// import left unread.
     fn events(
         &self,
         cache_root: Option<&std::path::Path>,
         repositories: &[repositories::Repository],
         progress: &Progress,
-    ) -> anyhow::Result<(Vec<timeline::Event>, std::ops::Range<usize>)> {
+    ) -> anyhow::Result<(Vec<timeline::Event>, std::ops::Range<usize>, model::Unread)>
+    {
         if repositories.is_empty() {
             let events = timeline::synthetic();
             let range = self.resolve_range(&seconds(&events))?;
-            return Ok((events, range));
+            return Ok((events, range, model::Unread::default()));
         }
         let mut tips = Vec::new();
         let mut chains = Vec::new();
-        if self.start_date.is_some() {
+        if self.start_date.is_some() || self.end_date.is_some() {
             let started = std::time::Instant::now();
             for repository in repositories {
                 let (repo, tip) = history::resolve(&repository.path, &self.revision)?;
                 chains.push(history::links(&repo, tip)?);
                 tips.push(tip.to_string());
             }
-            eprintln!("scan_seconds={:.6}", started.elapsed().as_secs_f64());
+            if self.trace.on() {
+                eprintln!("scan_seconds={:.6}", started.elapsed().as_secs_f64());
+            }
         }
-        let (skips, selected) = if chains.is_empty() {
-            (vec![0; repositories.len()], None)
+        let (ranges, selected) = if chains.is_empty() {
+            (Vec::new(), None)
         } else {
-            let (skips, range) = self.select(&chains)?;
-            (skips, Some(range))
+            let (ranges, range) = self.select(&chains)?;
+            (ranges, Some(range))
         };
         let mut boundaries = Vec::new();
         let mut histories = Vec::new();
@@ -310,12 +314,12 @@ impl Source {
             let started = std::time::Instant::now();
             let revision = tips.get(index).unwrap_or(&self.revision);
             let (repo, tip) = history::resolve(&repository.path, revision)?;
+            let range = ranges.get(index);
             let mut events = cache::load_range(
                 &repo,
                 tip,
-                chains
-                    .get(index)
-                    .map(|links| (links.as_slice(), skips[index])),
+                chains.get(index).map(Vec::as_slice).zip(range),
+                self.end_date,
                 cache_root.filter(|_| !self.no_cache),
             )?;
             if self.trace.on() {
@@ -334,7 +338,7 @@ impl Source {
                     change.samples.clear();
                 }
             }
-            if skips[index] > 0 && !events.is_empty() {
+            if range.is_some_and(|range| range.start > 0) && !events.is_empty() {
                 boundaries.push(events.remove(0));
             }
             histories.push(events);
@@ -347,19 +351,29 @@ impl Source {
         } else {
             events.extend(repositories::merge(histories));
         }
-        let range = match selected {
-            Some(range) => settled..(settled + range.len()).min(events.len()),
-            None => self.resolve_range(&seconds(&events))?,
+        let Some(selected) = selected else {
+            let range = self.resolve_range(&seconds(&events))?;
+            return Ok((events, range, model::Unread::default()));
         };
-        Ok((events, range))
+        let unread = model::Unread {
+            before: selected.start - settled,
+            after: chains
+                .iter()
+                .zip(&ranges)
+                .map(|(links, range)| links.len() - range.end)
+                .collect(),
+        };
+        let range = settled..(settled + selected.len()).min(events.len());
+        Ok((events, range, unread))
     }
 
     /// Chooses the range from commit headers alone, the way `resolve_range` chooses it
-    /// from imported events, and counts the links each repository settles before it.
+    /// from imported events, and returns the links of each repository it covers,
+    /// starting after the ones settled before it.
     fn select(
         &self,
         chains: &[Vec<history::Link>],
-    ) -> anyhow::Result<(Vec<usize>, std::ops::Range<usize>)> {
+    ) -> anyhow::Result<(Vec<std::ops::Range<usize>>, std::ops::Range<usize>)> {
         let merged = repositories::merge_by(
             chains
                 .iter()
@@ -372,11 +386,14 @@ impl Source {
         );
         let seconds: Vec<_> = merged.iter().map(|&(seconds, _)| seconds).collect();
         let range = self.resolve_range(&seconds)?;
-        let mut skips = vec![0; chains.len()];
-        for &(_, index) in &merged[..range.start] {
-            skips[index] += 1;
+        let mut ranges = vec![0..0; chains.len()];
+        for (position, &(_, index)) in merged[..range.end].iter().enumerate() {
+            ranges[index].end += 1;
+            if position < range.start {
+                ranges[index].start += 1;
+            }
         }
-        Ok((skips, range))
+        Ok((ranges, range))
     }
 
     fn resolve_avatars(
@@ -454,7 +471,7 @@ impl Source {
             repositories::inputs(&paths, file)?
         };
         let mappings = contributors::load(self.contributors.as_deref())?;
-        let (mut events, range) =
+        let (mut events, range, unread) =
             self.events(cache::root().as_deref(), &repositories, progress)?;
         mappings.apply(&mut events);
         self.resolve_avatars(&mut events, &repositories, range.clone());
@@ -486,6 +503,7 @@ impl Source {
             max_idle_seconds: self.max_idle_seconds,
             start: range.start,
             commits: range.len(),
+            unread,
             travel_cap: self.contributor_travel.cap(),
             travel_window_seconds: None,
             #[cfg(test)]

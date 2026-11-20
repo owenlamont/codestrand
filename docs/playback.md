@@ -421,8 +421,9 @@ Single-object and single-tree limits stay fixed, including 16 MiB objects, 2,000
 expanded tree entries, depth 256, 16,384-byte paths and 64 MiB of expanded path bytes.
 The 32 GiB cumulative work ceiling, 8 GiB blob-detail budget and per-diff work limits
 also stay fixed. Oversized or expensive blob diffs keep file changes but omit detail;
-exhausting the cumulative line budget also omits detail. A start date reduces import
-work: diffs before the range are not read.
+exhausting the cumulative line budget also omits detail. Date bounds reduce import
+work: diffs outside the range are not read. The caption still numbers commits
+against the whole first-parent history.
 
 ```sh
 codestrand preview --repository /path/to/repository --start-date 2026-05-01 --end-date 2026-05-31 \

@@ -104,9 +104,19 @@ pub(super) fn check(
         .flat_map(|event| &event.changes)
         .map(|change| change.path.len() as u128)
         .sum::<u128>();
+    let co_authors = events
+        .iter()
+        .flat_map(|event| &event.co_authors)
+        .map(|identity| {
+            (size_of::<crate::timeline::Identity>()
+                + size_of::<crate::contributors::Contributor>()
+                + 2 * (identity.name.len() + identity.email.len())) as u128
+        })
+        .sum::<u128>();
     let input = changes * size_of::<FileChange>() as u128
         + events.len() as u128 * size_of::<Event>() as u128
-        + paths;
+        + paths
+        + co_authors;
     let (layout, layout_peak, directories) =
         layout_bytes(events, options, &history, repositories.len());
     let files = events
@@ -196,20 +206,26 @@ fn checkpoint_bytes(events: &[Event], repositories: usize) -> u128 {
         + std::mem::size_of::<super::State>() as u128
 }
 
+type Person<'a> = (
+    Option<&'a crate::contributors::Key>,
+    Option<(&'a Vec<u8>, &'a Vec<u8>)>,
+);
+
+/// The author and co-authors of an event, by resolved key or, before contributors are
+/// resolved, by raw identity.
+fn people(event: &Event) -> Vec<Person<'_>> {
+    if event.contributor.is_some() {
+        event.participants().map(|c| (Some(&c.key), None)).collect()
+    } else {
+        std::iter::once(&event.author)
+            .chain(&event.co_authors)
+            .map(|identity| (None, Some((&identity.name, &identity.email))))
+            .collect()
+    }
+}
+
 fn author_count(events: &[Event]) -> u128 {
-    events
-        .iter()
-        .map(|event| {
-            let identity = event.contributor.as_ref().map(|c| &c.key);
-            (
-                identity,
-                identity
-                    .is_none()
-                    .then_some((&event.author.name, &event.author.email)),
-            )
-        })
-        .collect::<HashSet<_>>()
-        .len() as u128
+    events.iter().flat_map(people).collect::<HashSet<_>>().len() as u128
 }
 
 fn check_bytes(bytes: u128, available: u64) -> anyhow::Result<()> {
@@ -231,17 +247,10 @@ fn pose_count(
     let mut seen = HashSet::new();
     let mut poses = 0;
     for (event, &start) in events.iter().zip(&schedule.starts) {
-        let identity = event
-            .contributor
-            .as_ref()
-            .map(|contributor| &contributor.key);
-        if seen.insert((
-            identity,
-            identity
-                .is_none()
-                .then_some((&event.author.name, &event.author.email)),
-        )) {
-            poses += frames.saturating_sub(u128::from(frames_for(start, 60)?));
+        for person in people(event) {
+            if seen.insert(person) {
+                poses += frames.saturating_sub(u128::from(frames_for(start, 60)?));
+            }
         }
     }
     Ok(poses)
