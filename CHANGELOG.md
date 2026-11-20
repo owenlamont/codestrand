@@ -39,9 +39,37 @@ All notable changes to Codestrand are documented here, following
   [#181](https://github.com/owenlamont/codestrand/pull/181))
 - The `bevelled-desktop` theme is now `retro-desktop`, titled "Retro Desktop"; the old
   name is no longer accepted. ([#185](https://github.com/owenlamont/codestrand/pull/185))
+- Export checks its output directory, camera path syntax and video encoder before
+  planning, so a typo fails at once rather than after planning; the default `--video`
+  encoder is tried on one frame at the chosen resolution first.
+  ([#193](https://github.com/owenlamont/codestrand/pull/193))
+- Every theme shows file type icons: Outrun, Blueprint and Retro Desktop frame them,
+  Atlas shows them bare and Forge sets them in their own colours on its plates.
+  Neon, Phosphor and Atlas icons are smaller, so they sit inside their round rings.
+  ([#195](https://github.com/owenlamont/codestrand/pull/195),
+  [#204](https://github.com/owenlamont/codestrand/pull/204))
+- A late `--start-date` imports only the requested range: on a full Cargo clone, the
+  last seven weeks imported in 0.5 s instead of about 17 s. Playback opens on the tree
+  of the commit before the range, so first frames differ.
+  ([#194](https://github.com/owenlamont/codestrand/pull/194))
+- Import and `inspect` read first-parent commits that change the tree; side-branch
+  commits are no longer read. ([#194](https://github.com/owenlamont/codestrand/pull/194))
+- History over an import budget is refused with a later `--start-date` that fits;
+  `--allow-truncated-history` is removed.
+  ([#194](https://github.com/owenlamont/codestrand/pull/194))
+- `--end-date` stops the import at the range's last commit: on a full Cargo clone, a
+  two-frame export ending in 2016 took about 4.5 s instead of 75 s on a release build
+  without LTO. Its tiles are laid out for
+  the files up to the end date, so files are larger.
+  ([#199](https://github.com/owenlamont/codestrand/pull/199))
 
 ### Fixed
 
+- A date range numbers commits against the whole history again instead of from 1.
+  ([#199](https://github.com/owenlamont/codestrand/pull/199))
+- Diff setup no longer resolves `HEAD` or reads the index or `.gitattributes`, so a
+  cyclic `HEAD` no longer stops importing another `--revision`.
+  ([#199](https://github.com/owenlamont/codestrand/pull/199))
 - `codestrand preview` outside a repository exits with "pass --repository PATH"
   before opening a window.
   ([#187](https://github.com/owenlamont/codestrand/pull/187))

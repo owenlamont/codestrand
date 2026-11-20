@@ -27,6 +27,7 @@ struct Seen {
     texts: u32,
     planned_forecasts: u32,
     fallback_forecasts: u32,
+    rings: u32,
 }
 
 thread_local! {
@@ -140,6 +141,7 @@ struct Space<'a> {
     obstacles: &'a [(usize, Rect)],
     rays: &'a [(Vec2, Vec2)],
     avatars: &'a [crate::model::Avatar],
+    preferred: &'a [Option<(f32, Rect)>],
     radius: f32,
     margin: f32,
 }
@@ -234,11 +236,14 @@ fn label_domains(
         seen.rays += u32::from(!rays.is_empty());
         seen.texts += u32::from(!texts.is_empty());
     });
+    let preferred = state.name_preferences();
+    seen(|seen| seen.rings += u32::from(preferred.iter().any(Option::is_some)));
     let space = Space {
         bodies,
         obstacles: &obstacles,
         rays: &rays,
         avatars: &state.avatars,
+        preferred: &preferred,
         radius: state.avatar_radius(),
         margin: 4.0 / 3.0,
     };
@@ -305,6 +310,7 @@ fn label_domains(
             .map(Vec2::to_angle),
         );
         targets.extend(previous.map(|p| p.motion.goal));
+        targets.extend(preferred[index].map(|(angle, _)| angle));
         let scored = targets
             .into_iter()
             .map(|target| space.candidate(index, target, &turn))
@@ -337,6 +343,9 @@ impl Space<'_> {
                     .rem_euclid(std::f32::consts::TAU)
                     - std::f32::consts::PI;
                 distance.abs() * 55_000.0
+            })
+            + self.preferred[index].map_or(0.0, |(angle, _)| {
+                labels::difference(target, angle).abs() * super::NEAREST_NAME_WEIGHT
             });
         (
             Candidate {
@@ -366,7 +375,12 @@ impl Space<'_> {
             .bodies
             .iter()
             .enumerate()
-            .filter(|(i, _)| *i != index && self.avatars[*i].presence > 0.0)
+            .filter(|(i, _)| {
+                let lead = |i: usize| self.avatars[i].group.map(|g| g.lead);
+                *i != index
+                    && self.avatars[*i].presence > 0.0
+                    && (lead(*i).is_none() || lead(*i) != lead(index))
+            })
             .filter_map(|(_, p)| *p);
         let conflicts = count(
             foreign
@@ -397,6 +411,7 @@ impl Space<'_> {
             conflicts,
             ownership * 1e6
                 + foreign.map(|p| area(disk(p, self.radius))).sum::<f32>() * 100.0
+                + self.preferred[index].map_or(0.0, |(_, ring)| area(ring) * 2_000.0)
                 + self
                     .obstacles
                     .iter()
@@ -589,6 +604,15 @@ fn crowd() -> crate::model::Simulation {
                     event.author.email =
                         format!("author{author}@example.org").into_bytes();
                     event.seconds = i64::try_from(commit * 3 + repository).unwrap();
+                    // Some commits are paired, so their authors share a ring.
+                    if commit % 4 == 1 {
+                        let partner = repository * 10 + (commit + 3) * 7 % 10;
+                        event.co_authors = vec![crate::timeline::Identity {
+                            name: format!("Contributor Number {partner} Of The Crowd")
+                                .into_bytes(),
+                            email: format!("author{partner}@example.org").into_bytes(),
+                        }];
+                    }
                     event
                 })
                 .collect();
@@ -678,6 +702,7 @@ fn name_assignment_matches_the_reference_on_every_tick() {
         seen.planned_forecasts > 0 && seen.fallback_forecasts > 0,
         "{seen:?}"
     );
+    assert!(seen.rings > 0, "{seen:?}");
 }
 
 #[test]
@@ -701,4 +726,32 @@ fn an_overlap_that_is_not_a_number_still_reaches_the_score() {
             })
             .collect();
     assert_eq!(labels::solve(&domains).choices, solve(&domains).choices);
+}
+
+#[test]
+fn long_searches_match_the_reference_with_and_without_stored_areas() {
+    // Sixteen names of eight choices fit the stored areas; forty of forty fit none.
+    for (names, choices) in [(16_u8, 8_u8), (40, 40)] {
+        let domains: Vec<Vec<_>> = (0..names)
+            .map(|name| {
+                (0..choices)
+                    .map(|choice| Candidate {
+                        angle: f32::from(choice),
+                        rect: Rect::from_center_size(
+                            Vec2::new(f32::from(choice) * 0.3, f32::from(name % 3)),
+                            Vec2::splat(2.0),
+                        ),
+                        text_pairs: 0,
+                        text_area: 0.0,
+                        soft: f32::from(choice),
+                    })
+                    .collect()
+            })
+            .collect();
+        let expected = solve(&domains);
+        let actual = labels::solve(&domains);
+        assert!(expected.exhausted);
+        assert_eq!(actual.choices, expected.choices);
+        assert_eq!(actual.clear, expected.clear);
+    }
 }

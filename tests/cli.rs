@@ -85,7 +85,7 @@ fn omitted_repository_plays_the_repository_holding_the_current_directory() {
 }
 
 #[test]
-fn camera_targets_fail_before_output_or_encoder_starts() {
+fn camera_targets_fail_before_output_is_created() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("camera.toml");
     let output = directory.path().join("frames");
@@ -100,12 +100,6 @@ fn camera_targets_fail_before_output_or_encoder_starts() {
             .args(["--test-input", "synthetic"])
             .arg("--camera-path")
             .arg(&path)
-            .args([
-                "--video",
-                "unused.mkv",
-                "--ffmpeg",
-                "missing-camera-test-ffmpeg",
-            ])
             .output()
             .unwrap();
         let error = String::from_utf8_lossy(&result.stderr);
@@ -260,21 +254,56 @@ fn invalid_timing_is_rejected_before_creating_output() {
 }
 
 #[test]
-fn export_refuses_an_existing_directory() {
-    let output = Command::new(env!("CARGO_BIN_EXE_codestrand"))
-        .args([
-            "export",
-            env!("CARGO_MANIFEST_DIR"),
-            "--test-input",
-            "synthetic",
-        ])
-        .output()
-        .expect("CLI can start");
-    assert!(!output.status.success());
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("create new export directory")
-    );
-    assert_eq!(output.stdout, [] as [u8; 0]);
+fn export_options_are_checked_before_history_loads() {
+    let scratch = tempfile::tempdir().unwrap();
+    let root = scratch.path();
+    std::fs::write(root.join("unparsed.toml"), "fps = [").unwrap();
+    std::fs::write(
+        root.join("two-targets.toml"),
+        "fps=30
+[[key]]
+frame=0
+eye={point=[0,6,8],avatar='A'}
+focus={point=[0,0,0]}
+",
+    )
+    .unwrap();
+    for (arguments, expected) in [
+        (
+            &[".", "--resolution", "64x64"][..],
+            "export directory already exists",
+        ),
+        (&["missing/frames"], "parent is not a directory: missing"),
+        (
+            &["frames", "--video", "missing/out.mkv"],
+            "parent is not a directory: missing",
+        ),
+        (
+            &["frames", "--camera-path", "unparsed.toml"],
+            "parse camera path",
+        ),
+        (
+            &["frames", "--camera-path", "two-targets.toml"],
+            "frame 0 eye: choose a point, avatar, file or directory",
+        ),
+        (
+            &["frames", "--video", "out.mkv", "--ffmpeg", "missing-ffmpeg"],
+            "cannot run FFmpeg",
+        ),
+        (&["frames"], "open local repository"),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_codestrand"))
+            .current_dir(root)
+            .arg("export")
+            .args(arguments)
+            .args(["--repository", "."])
+            .output()
+            .unwrap();
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success());
+        assert!(error.contains(expected), "{arguments:?}: {error}");
+        assert!(!root.join("frames").exists());
+    }
 }
 
 #[test]
@@ -316,7 +345,7 @@ fn planning_trace_lines_follow_the_environment_variable() {
     };
     let lines = [
         "planning_trace window=global",
-        "planning_available_memory_bytes=",
+        "planning_memory_limit_bytes=",
         "planning_memory_parts ",
         "travel_capture_seconds=",
         "travel_replan ",

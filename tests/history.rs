@@ -149,13 +149,16 @@ fn excessive_tag_chain_is_rejected() {
 }
 
 #[test]
-fn diff_setup_rejects_cyclic_head_even_for_another_revision() {
+fn a_cyclic_head_does_not_affect_another_revision() {
     let (root, repo, tip) = tag_fixture();
     let fake = cyclic_tag(root.path(), &repo);
     fs::write(root.path().join("HEAD"), format!("{fake}\n")).unwrap();
     let output = bounded_inspect(root.path(), &tip.to_string());
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("cycle"));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
@@ -178,12 +181,6 @@ fn symbolic_reference_chains_are_bounded() {
     fs::write(refs.join("long65"), format!("{tip}\n")).unwrap();
     let output = bounded_inspect(root.path(), "long0");
     assert!(!output.status.success());
-    fs::write(root.path().join("HEAD"), "ref: refs/heads/cycle\n").unwrap();
-    assert!(
-        !bounded_inspect(root.path(), &tip.to_string())
-            .status
-            .success()
-    );
 }
 
 #[test]
@@ -418,21 +415,24 @@ fn imported_deltas(event: &Value) -> BTreeMap<Vec<u8>, Delta> {
     actual
 }
 
+/// Inspection lists the first-parent commits that change the tree, oldest first.
 fn assert_history(path: &Path, commits: &[Value]) {
-    let expected_ids: BTreeSet<_> =
-        String::from_utf8(git(path, &["rev-list", "inspected"]))
-            .unwrap()
-            .lines()
-            .map(str::to_owned)
-            .collect();
-    let mut seen = BTreeSet::new();
+    let first_parents = String::from_utf8(git(
+        path,
+        &["rev-list", "--first-parent", "--reverse", "inspected"],
+    ))
+    .unwrap();
+    let empty = String::from_utf8(git(path, &["rev-parse", "inspected~3"])).unwrap();
+    let expected_ids: Vec<_> = first_parents
+        .lines()
+        .filter(|&id| id != empty.trim())
+        .map(str::to_owned)
+        .collect();
+    let mut seen = Vec::new();
     let mut all_paths = BTreeSet::new();
     for event in commits {
         let id = event["id"].as_str().unwrap();
-        for parent in event["parents"].as_array().unwrap() {
-            assert!(seen.contains(parent.as_str().unwrap()));
-        }
-        seen.insert(id.to_owned());
+        seen.push(id.to_owned());
         assert_eq!(bytes(&event["author"]["name"]), b"Raw Author");
         assert_eq!(bytes(&event["author"]["email"]), b"author@example.invalid");
         assert_eq!(bytes(&event["committer"]["name"]), b"Other Committer");
@@ -476,11 +476,6 @@ fn assert_history(path: &Path, commits: &[Value]) {
     assert!(
         commits
             .iter()
-            .any(|event| event["changes"].as_array().unwrap().is_empty())
-    );
-    assert!(
-        commits
-            .iter()
             .any(|event| event["parents"].as_array().unwrap().len() == 2)
     );
 }
@@ -504,7 +499,7 @@ fn history_matches_git_and_preserves_repository() {
     assert_eq!(refs_before, git(path, &["show-ref"]));
     assert_eq!(index_before, fs::read(path.join(".git/index")).unwrap());
     let commits = first["commits"].as_array().unwrap();
-    assert_eq!(commits.len(), 6);
+    assert_eq!(commits.len(), 4);
     assert_history(path, commits);
     let root = inspect(path, "root");
     assert_eq!(root["commits"].as_array().unwrap().len(), 1);
@@ -536,6 +531,8 @@ fn raw_signature_and_message_bytes_survive_import() {
     let scratch = tempfile::tempdir().unwrap();
     let path = scratch.path();
     git(path, &["init", "--initial-branch=main"]);
+    fs::write(path.join("file.txt"), b"raw\n").unwrap();
+    git(path, &["add", "file.txt"]);
     let tree = String::from_utf8(git(path, &["write-tree"])).unwrap();
     let mut data = format!("tree {}\n", tree.trim()).into_bytes();
     data.extend_from_slice(b"author  A\xff  < email\xfe > 1700000000 +0530\ncommitter C\xfd <c\xfc> 1700000060 -0700\n\nraw\xfb\n");
@@ -583,6 +580,87 @@ fn attributes_and_commands_cannot_change_raw_blob_results() {
     let converted = git(path, &["show", "--textconv", "inspected:renamed.txt"]);
     assert!(converted.starts_with(b"git version"));
     assert_eq!(baseline, inspect(path, "inspected"));
+}
+
+#[test]
+fn filter_and_textconv_drivers_never_run() {
+    let scratch = tempfile::tempdir().unwrap();
+    let path = scratch.path();
+    fixture(path);
+    fs::write(
+        path.join(".gitattributes"),
+        b"* filter=probe diff=probe
+",
+    )
+    .unwrap();
+    commit(path, "drivers");
+    fs::write(
+        path.join("renamed.txt"),
+        b"changed under drivers
+",
+    )
+    .unwrap();
+    commit(path, "driven");
+    let sentinels = tempfile::tempdir().unwrap();
+    let sentinel = |driver: &str| sentinels.path().join(driver);
+    let record = |driver: &str| {
+        let target = sentinel(driver).to_string_lossy().replace('\\', "/");
+        format!("echo ran >> '{target}'; cat")
+    };
+    // Each control proves Git itself runs the driver; process replaces clean and smudge.
+    git(
+        path,
+        &["config", "diff.probe.textconv", &record("textconv")],
+    );
+    git(path, &["config", "filter.probe.clean", &record("clean")]);
+    git(path, &["config", "filter.probe.smudge", &record("smudge")]);
+    let controls: [(&str, &[&str]); 3] = [
+        ("textconv", &["show", "--textconv", "HEAD:renamed.txt"]),
+        ("clean", &["add", "--renormalize", "renamed.txt"]),
+        ("smudge", &["checkout", "HEAD~1", "--", "renamed.txt"]),
+    ];
+    for (driver, arguments) in controls {
+        git(path, arguments);
+        assert!(sentinel(driver).exists(), "Git did not run {driver}");
+    }
+    git(
+        path,
+        &["config", "filter.probe.process", &record("process")],
+    );
+    fs::write(
+        path.join("renamed.txt"),
+        b"process control
+",
+    )
+    .unwrap();
+    let _ = Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(["add", "renamed.txt"])
+        .output()
+        .unwrap();
+    assert!(sentinel("process").exists(), "Git did not run process");
+    for entry in fs::read_dir(sentinels.path()).unwrap() {
+        fs::remove_file(entry.unwrap().path()).unwrap();
+    }
+
+    inspect(path, "HEAD");
+    let quality = scratch.path().join("quality.jsonl");
+    let output = Command::new(env!("CARGO_BIN_EXE_codestrand"))
+        .arg("layout-quality")
+        .arg(&quality)
+        .arg("--repository")
+        .arg(path)
+        .arg("--no-cache")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let ran: Vec<_> = fs::read_dir(sentinels.path()).unwrap().collect();
+    assert!(ran.is_empty(), "{ran:?}");
 }
 
 #[test]

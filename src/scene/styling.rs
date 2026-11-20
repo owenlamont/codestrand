@@ -15,6 +15,43 @@ pub(super) fn label_font(primary: Handle<Font>, fallback: Handle<Font>) -> FontS
     FontSource::list([primary.into(), fallback.into(), FontSource::sans_serif()])
 }
 
+/// Drops font atlases that no laid-out text uses, unless their font is a loaded asset.
+///
+/// Bevy evicts a system fallback font after two unused frames and reloads it under a
+/// new id, so the atlases of earlier ids would otherwise accumulate for the whole run.
+/// Only a frame that added atlas keys since the last pass scans the laid-out glyphs.
+pub(super) fn drop_stale_font_atlases(
+    mut atlases: ResMut<bevy::text::FontAtlasSet>,
+    mut kept: Local<usize>,
+    fonts: Res<Assets<Font>>,
+    layouts: Query<&bevy::text::TextLayoutInfo>,
+) {
+    if atlases.len() <= *kept {
+        return;
+    }
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "bevy_text keys atlases by the truncated font data id"
+    )]
+    let loaded: std::collections::HashSet<u32> = fonts
+        .into_inner()
+        .iter()
+        .map(|(_, font)| font.data.id() as u32)
+        .collect();
+    let used: std::collections::HashSet<AssetId<Image>> = layouts
+        .iter()
+        .flat_map(|layout| &layout.glyphs)
+        .map(|glyph| glyph.atlas_info.texture)
+        .collect();
+    atlases.retain(|key, font_atlases| {
+        loaded.contains(&key.id)
+            || font_atlases
+                .iter()
+                .any(|atlas| used.contains(&atlas.texture.id()))
+    });
+    *kept = atlases.len();
+}
+
 #[derive(Default)]
 struct Territories {
     revision: Option<u64>,
@@ -217,13 +254,7 @@ pub(super) fn avatar_mesh(theme: &Theme) -> Mesh {
 }
 
 pub(super) fn ring_mesh(theme: &Theme, radii: Vec2) -> Mesh {
-    if !matches!(
-        theme.glyph_style,
-        crate::theme::GlyphStyle::Outline
-            | crate::theme::GlyphStyle::Hatched
-            | crate::theme::GlyphStyle::Page
-            | crate::theme::GlyphStyle::Iron
-    ) {
+    if theme.round_rings() {
         return Annulus::new(radii.x, radii.y).into();
     }
     let width = radii.y - radii.x;
@@ -594,6 +625,70 @@ mod tests {
     use super::super::{DiffSample, Playback, Pools, SceneTarget, Title};
     use super::*;
     use crate::theme::ThemeName;
+    use bevy::{
+        ecs::system::RunSystemOnce,
+        text::{
+            FontAtlas, FontAtlasKey, FontAtlasSet, FontSmoothing, GlyphAtlasInfo,
+            PositionedGlyph, TextLayoutInfo,
+        },
+    };
+
+    #[test]
+    fn only_atlases_of_loaded_or_laid_out_fonts_survive() {
+        let mut world = World::new();
+        world.init_resource::<Assets<Image>>();
+        world.init_resource::<FontAtlasSet>();
+        let font = Font::from_bytes(Vec::new());
+        let loaded = u32::try_from(font.data.id()).unwrap();
+        let mut fonts = Assets::<Font>::default();
+        fonts.add(font);
+        world.insert_resource(fonts);
+        let [laid_out, stale] = [loaded + 1, loaded + 2];
+        let mut used = None;
+        for id in [loaded, laid_out, stale] {
+            let atlas = FontAtlas::new(
+                &mut world.resource_mut::<Assets<Image>>(),
+                UVec2::splat(4),
+                FontSmoothing::default(),
+            );
+            if id == laid_out {
+                used = Some(atlas.texture.id());
+            }
+            let key = FontAtlasKey {
+                id,
+                index: 0,
+                font_size_bits: 14.0_f32.to_bits(),
+                variations_hash: 0,
+                hinting: default(),
+                font_smoothing: FontSmoothing::default(),
+            };
+            world
+                .resource_mut::<FontAtlasSet>()
+                .insert(key, vec![atlas]);
+        }
+        world.spawn(TextLayoutInfo {
+            glyphs: vec![PositionedGlyph {
+                position: Vec2::ZERO,
+                atlas_info: GlyphAtlasInfo {
+                    texture: used.unwrap(),
+                    rect: Rect::default(),
+                    offset: Vec2::ZERO,
+                    is_alpha_mask: true,
+                },
+                section_index: 0,
+                line_index: 0,
+            }],
+            ..default()
+        });
+        world.run_system_once(drop_stale_font_atlases).unwrap();
+        let mut kept: Vec<_> = world
+            .resource::<FontAtlasSet>()
+            .keys()
+            .map(|key| key.id)
+            .collect();
+        kept.sort_unstable();
+        assert_eq!(kept, [loaded, laid_out]);
+    }
 
     fn active_code_world() -> World {
         let mut events = crate::timeline::synthetic();

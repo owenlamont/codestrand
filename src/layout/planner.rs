@@ -37,13 +37,18 @@ impl Plan {
         self.seconds += plan.seconds;
         self.parts.push((base, plan));
     }
-    fn new(layout: &mut Layout, events: &[Event], starts: &[Time]) -> Self {
+    fn new(
+        layout: &mut Layout,
+        events: &[&Event],
+        starts: &[Time],
+        skip: usize,
+    ) -> Self {
         for event in events {
             for change in &event.changes {
-                layout.ensure_dir(parent_path(&change.path));
+                layout.ensure_dir(parent_path(&change.path[skip..]));
             }
         }
-        let (required, step) = occupancy(layout, events, starts);
+        let (required, step) = occupancy(layout, events, starts, skip);
         let peak: Vec<_> = required
             .iter()
             .map(|row| row.iter().copied().fold(0.0, f32::max))
@@ -59,12 +64,14 @@ impl Plan {
         let root = subtree(&children, 0, &peak, &mut regions, &mut sizes);
         let mut windows = vec![8_usize; required[0].len()];
         let mut samples = loop {
-            // Reverse the two filter supports, including the spline, into reservations.
-            let reserved: Vec<_> = required
-                .iter()
-                .map(|row| spread(&spread(&maximum(row, 2), &windows), &windows))
-                .collect();
-            let mut samples = pack(&regions, root, &reserved);
+            let mut samples = {
+                // Reverse the two filter supports, including the spline, into reservations.
+                let reserved: Vec<_> = required
+                    .iter()
+                    .map(|row| spread(&spread(&maximum(row, 2), &windows), &windows))
+                    .collect();
+                pack(&regions, root, &reserved)
+            };
             anchor_motion(&mut samples, &required);
             for row in &mut samples {
                 *row = smooth(&smooth(row, &windows), &windows);
@@ -149,8 +156,9 @@ fn interpolator(time: Time, step: f32, length: usize) -> impl Fn(&[Vec2]) -> Vec
 
 fn occupancy(
     layout: &Layout,
-    events: &[Event],
+    events: &[&Event],
     starts: &[Time],
+    skip: usize,
 ) -> (Vec<Vec<f32>>, f32) {
     let mut shadow = layout.clone();
     let duration = starts.last().copied().unwrap_or(Time::seconds(0.5)) + 2.5;
@@ -172,7 +180,7 @@ fn occupancy(
         let time = model::tick_time(tick);
         while starts.get(event_index).is_some_and(|&start| start <= time) {
             for change in &events[event_index].changes {
-                let id = model::apply(&mut shadow, change, 0);
+                let id = model::apply_within(&mut shadow, change, skip, 0);
                 if matches!(change.kind, Kind::Deleted)
                     && shadow.files[&id].state == Presence::Leaving
                 {
@@ -201,6 +209,7 @@ fn occupancy(
             let Some(file) = shadow.files.remove(&id) else {
                 continue;
             };
+            shadow.fading.remove(&id);
             if shadow.file_index.get(&file.path) == Some(&id) {
                 shadow.file_index.remove(&file.path);
             }
@@ -537,13 +546,15 @@ impl Layout {
     #[cfg(test)]
     pub(crate) fn planned(events: &[Event]) -> Self {
         let starts = model::schedule::Schedule::new(events, 0.5, 1.0).starts;
-        Self::scheduled(events, &starts)
+        Self::scheduled(&events.iter().collect::<Vec<_>>(), &starts, 0)
     }
 
-    pub(crate) fn scheduled(events: &[Event], starts: &[Time]) -> Self {
+    /// Plans directories for `events`, whose paths all start with `skip` bytes of
+    /// repository prefix that the layout omits.
+    pub(crate) fn scheduled(events: &[&Event], starts: &[Time], skip: usize) -> Self {
         let mut layout = Self::empty();
         let started = std::time::Instant::now();
-        layout.plan = Plan::new(&mut layout, events, starts);
+        layout.plan = Plan::new(&mut layout, events, starts, skip);
         layout.plan.seconds = started.elapsed().as_secs_f64();
         for (index, dir) in layout.dirs.iter_mut().enumerate() {
             dir.live = index == 0;
@@ -601,7 +612,7 @@ mod tests {
         contributors::Mappings,
         model::{Options, Simulation},
         theme::Theme,
-        timeline::{FileChange, Identity, Kind},
+        timeline::{FileChange, Kind},
     };
 
     fn full_relax(layout: &mut Layout, dt: f32) {
@@ -711,20 +722,13 @@ mod tests {
     }
 
     pub(super) fn event(seconds: i64, changes: &[(&str, Kind)]) -> Event {
-        Event {
+        Event::at(
             seconds,
-            author: Identity {
-                name: b"Ada".to_vec(),
-                email: Vec::new(),
-            },
-            repository: 0,
-            contributor: None,
-            commit: String::new(),
-            changes: changes
+            changes
                 .iter()
                 .map(|(path, kind)| change((*path).to_owned(), kind.clone()))
                 .collect(),
-        }
+        )
     }
 
     fn burst() -> Vec<Event> {
@@ -1005,7 +1009,7 @@ mod tests {
             .collect();
         let starts = model::schedule::Schedule::new(&events, 86_400.0, 86_400.0).starts;
         assert!(starts[999].ticks(true) > u64::from(u32::MAX));
-        let layout = Layout::scheduled(&events, &starts);
+        let layout = Layout::scheduled(&events.iter().collect::<Vec<_>>(), &starts, 0);
         assert!(layout.plan.samples[0].len() <= 8_194);
     }
 
@@ -1059,13 +1063,13 @@ mod probes {
     };
 
     fn ev(seconds: i64, changes: Vec<(String, Kind)>) -> Event {
-        Event {
-            changes: changes
+        Event::at(
+            seconds,
+            changes
                 .into_iter()
                 .map(|(path, kind)| super::tests::change(path, kind))
                 .collect(),
-            ..super::tests::event(seconds, &[])
-        }
+        )
     }
 
     pub(super) fn assert_separated(sim: &Simulation) {
@@ -1231,31 +1235,20 @@ mod rate_probe {
         contributors::Mappings,
         model::{Options, Simulation},
         theme::Theme,
-        timeline::{FileChange, Identity, Kind},
+        timeline::Kind,
     };
 
     #[test]
     fn probe_rate_change() {
         for factor in [0.25_f32, 4.0] {
-            let ev = |s: i64, paths: Vec<String>| Event {
-                seconds: s,
-                author: Identity {
-                    name: b"Ada".to_vec(),
-                    email: Vec::new(),
-                },
-                repository: 0,
-                contributor: None,
-                commit: String::new(),
-                changes: paths
-                    .into_iter()
-                    .map(|path| FileChange {
-                        path,
-                        kind: Kind::Added,
-                        insertions: 1,
-                        removals: 0,
-                        samples: Vec::new(),
-                    })
-                    .collect(),
+            let ev = |s: i64, paths: Vec<String>| {
+                Event::at(
+                    s,
+                    paths
+                        .into_iter()
+                        .map(|path| super::tests::change(path, Kind::Added))
+                        .collect(),
+                )
             };
             let mut events =
                 vec![ev(0, (0..30).map(|d| format!("p/d{d}/seed")).collect())];

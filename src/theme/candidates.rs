@@ -7,9 +7,8 @@ pub(crate) enum GlyphStyle {
     #[default]
     Language,
     Outline,
-    Hatched,
+    Plate,
     Page,
-    Survey,
     Iron,
 }
 
@@ -97,7 +96,7 @@ pub(super) fn build(name: ThemeName) -> Theme {
             )
         }
         ThemeName::Blueprint => {
-            t.glyph_style = GlyphStyle::Hatched;
+            t.glyph_style = GlyphStyle::Plate;
             t.beam_style = BeamStyle::Construction;
             t.avatar_style = AvatarStyle::Reticle;
             t.font = FontStyle::Tech;
@@ -125,7 +124,6 @@ pub(super) fn build(name: ThemeName) -> Theme {
             )
         }
         ThemeName::Atlas => {
-            t.glyph_style = GlyphStyle::Survey;
             t.beam_style = BeamStyle::Ink;
             t.avatar_style = AvatarStyle::Pin;
             t.font = FontStyle::Serif;
@@ -146,7 +144,7 @@ pub(super) fn build(name: ThemeName) -> Theme {
             t.blackbody = true;
             t.glyph_material.base_color = color(0x002a_2422);
             t.glyph_material.unlit = false;
-            t.glyph_material.emissive = LinearRgba::from(color(0x002a_2422));
+            t.glyph_material.emissive = t.heat_emissive(0.0);
             (
                 0x0007_0505,
                 0x00d9_cfc6,
@@ -210,6 +208,9 @@ fn apply_palette(
         };
     }
 }
+
+/// Grey of the plate behind each Forge icon.
+pub(super) const IRON_PLATE: u32 = 0x0066_6666;
 
 pub(super) const BLACKBODY: [(f32, u32); 6] = [
     (0.0, 0x002a_2422),
@@ -310,27 +311,45 @@ impl Theme {
         })
     }
 
-    pub(crate) fn glyph_svg(&self, source: &str, kind: usize) -> String {
-        let art = match self.glyph_style {
+    /// The file icon `source` inside this theme's frame, if it has one.
+    pub(crate) fn glyph_svg(&self, source: &str) -> String {
+        let (frame, placement) = match self.glyph_style {
             GlyphStyle::Language => return source.to_owned(),
-            GlyphStyle::Outline => r##"<rect x="3" y="3" width="26" height="26" rx="2" fill="#310b39" stroke="#ff3fa4" stroke-width="2"/><path d="M7 24V8h18M7 26h18" fill="none" stroke="#ff8dce"/>"##.to_owned(),
-            GlyphStyle::Hatched => r#"<defs><pattern id="h" width="5" height="5" patternUnits="userSpaceOnUse"><path d="M0 5L5 0" stroke="white" stroke-width=".6"/></pattern></defs><rect x="3" y="3" width="26" height="26" fill="url(#h)" stroke="white" stroke-width="1.5"/>"#.to_owned(),
-            GlyphStyle::Page => {
-                let tint = ["#b7410e", "#3776ab", "#e6b800", "#764abc", "#00843d", "#c04389"][kind % 6];
-                format!(r##"<path d="M5 2H21L28 9V30H5Z" fill="white" stroke="#202020"/><path d="M21 2V9H28" fill="#c0c0c0" stroke="#202020"/><path d="M7 13H25V18H7Z" fill="{tint}"/><path d="M8 22H23M8 25H20" stroke="#808080"/>"##)
-            }
-            GlyphStyle::Survey => r##"<circle cx="16" cy="16" r="8" fill="#eceee6" stroke="#28352f" stroke-width="2"/><circle cx="16" cy="16" r="2" fill="#28352f"/><path d="M16 2V8M16 24V30M2 16H8M24 16H30" stroke="#28352f" stroke-width="1.5"/>"##.to_owned(),
-            GlyphStyle::Iron => r##"<rect x="2" y="3" width="28" height="26" rx="2" fill="white"/><path d="M4 27V5H28" fill="none" stroke="#999999" stroke-width="2"/><path d="M6 8H8M24 8H26M6 24H8M24 24H26" stroke="#333333" stroke-width="2"/>"##.to_owned(),
+            GlyphStyle::Outline => (
+                r##"<rect x="3" y="3" width="26" height="26" rx="2" fill="#310b39" stroke="#ff3fa4" stroke-width="2"/>{icon}"##,
+                r#"x="6" y="6" width="20" height="20""#,
+            ),
+            GlyphStyle::Plate => (
+                r##"<rect x="3" y="3" width="26" height="26" fill="#0d3a73" stroke="white" stroke-width="1.5"/>{icon}"##,
+                r#"x="6" y="6" width="20" height="20""#,
+            ),
+            GlyphStyle::Page => (
+                r##"<path d="M5 2H21L28 9V30H5Z" fill="white" stroke="#202020"/><path d="M21 2V9H28" fill="#c0c0c0" stroke="#202020"/>{icon}"##,
+                r#"x="7" y="10" width="19" height="19""#,
+            ),
+            // Forge glyphs show only their glow, which the texture tints: the grey
+            // plate glows `heat_color` and the brighter icon glows in its own colours.
+            GlyphStyle::Iron => (
+                r#"<rect x="2" y="3" width="28" height="26" rx="2" fill="{plate}"/>{icon}"#,
+                r#"x="5" y="5" width="22" height="22""#,
+            ),
         };
+        let icon = source.replacen("<svg", &format!("<svg {placement}"), 1);
+        let art = frame
+            .replace("{icon}", &icon)
+            .replace("{plate}", &format!("#{IRON_PLATE:06x}"));
         format!(
             r#"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">{art}</svg>"#
         )
     }
 
+    /// Glow of a white glyph texel; Forge's plate texels glow `heat_color` itself.
     pub(crate) fn heat_emissive(&self, heat: f32) -> LinearRgba {
         if self.blackbody {
-            LinearRgba::from(self.heat_color(heat))
-                * (1.0 + (heat - 0.3).max(0.0) * 4.0)
+            let plate = LinearRgba::from(color(IRON_PLATE)).red;
+            let glow = LinearRgba::from(self.heat_color(heat))
+                * ((1.0 + (heat - 0.3).max(0.0) * 4.0) / plate);
+            glow.with_alpha(1.0)
         } else {
             LinearRgba::BLACK
         }

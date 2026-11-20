@@ -1,18 +1,8 @@
 use super::*;
-use crate::timeline::{FileChange, Identity};
+use crate::timeline::FileChange;
 
 fn event(day: i64, changes: Vec<FileChange>) -> Event {
-    Event {
-        seconds: day * 86_400,
-        author: Identity {
-            name: b"Ada".to_vec(),
-            email: Vec::new(),
-        },
-        repository: 0,
-        contributor: None,
-        commit: String::new(),
-        changes,
-    }
+    Event::at(day * 86_400, changes)
 }
 
 fn changes(dir: &str, count: usize, kind: &Kind) -> Vec<FileChange> {

@@ -116,6 +116,10 @@ impl ConfinedFile {
 struct Snapshot {
     version: u32,
     tip: String,
+    /// Links settled into the boundary event; each repository caches one range.
+    skip: usize,
+    /// Links read, oldest first; `None` reads through the tip.
+    end: Option<usize>,
     events: Vec<timeline::Event>,
 }
 
@@ -141,7 +145,7 @@ impl<W: Write> Write for SnapshotWriter<W> {
     }
 }
 
-fn valid_snapshot(snapshot: &Snapshot, tip: &str) -> bool {
+fn valid_snapshot(snapshot: &Snapshot, tip: &str, skip: usize) -> bool {
     let oid = |value: &str| {
         value.len() == 40
             && value
@@ -150,6 +154,7 @@ fn valid_snapshot(snapshot: &Snapshot, tip: &str) -> bool {
     };
     if snapshot.version != timeline::CACHE_VERSION
         || snapshot.tip != tip
+        || snapshot.skip != skip
         || !oid(&snapshot.tip)
         || snapshot.events.len() > 1_000_000
     {
@@ -157,17 +162,24 @@ fn valid_snapshot(snapshot: &Snapshot, tip: &str) -> bool {
     }
     let mut changes = 0usize;
     let mut commits = std::collections::HashSet::new();
-    for event in &snapshot.events {
+    for (index, event) in snapshot.events.iter().enumerate() {
+        let boundary = index == 0 && skip > 0;
         if !oid(&event.commit)
             || !commits.insert(&event.commit)
             || event.author.name.len() > 4096
             || event.author.email.len() > 4096
+            || event.co_authors.len() > timeline::MAX_CO_AUTHORS
+            || event.co_authors.iter().any(|identity| {
+                identity.email.is_empty()
+                    || identity.email.len() > timeline::MAX_IDENTITY_BYTES
+                    || identity.name.len() > timeline::MAX_IDENTITY_BYTES
+            })
             || !(-62_135_596_800..=253_402_300_799).contains(&event.seconds)
         {
             return false;
         }
         changes = changes.saturating_add(event.changes.len());
-        if changes > 2_000_000 || event.changes.is_empty() {
+        if changes > 2_000_000 || (event.changes.is_empty() && !boundary) {
             return false;
         }
         let mut samples = 0usize;
@@ -212,27 +224,55 @@ pub(super) fn root() -> Option<PathBuf> {
     dirs::cache_dir().map(|path| path.join("codestrand"))
 }
 
-pub(super) fn load_with_options(
+#[cfg(test)]
+pub(super) fn load_whole(
     path: &Path,
     revision: &str,
     cache_root: Option<&Path>,
-    options: history::Options,
 ) -> Result<Vec<timeline::Event>, history::Error> {
     let (repo, tip) = history::resolve(path, revision)?;
+    load_range(&repo, tip, None, None, cache_root)
+}
+
+/// Loads the events of the links in `range`, led by a boundary event when it skips any;
+/// `None` loads the whole history without scanning first. `end_date` only bounds the
+/// start dates a budget refusal suggests.
+pub(super) fn load_range(
+    repo: &gix::Repository,
+    tip: gix::ObjectId,
+    range: Option<(&[history::Link], &std::ops::Range<usize>)>,
+    end_date: Option<i64>,
+    cache_root: Option<&Path>,
+) -> Result<Vec<timeline::Event>, history::Error> {
+    let skip = range.map_or(0, |(_, range)| range.start);
+    let end =
+        range.and_then(|(links, range)| (range.end < links.len()).then_some(range.end));
     let entry = cache_root
         .filter(|_| repo.objects.store_ref().replacements().next().is_none())
-        .and_then(|root| entry_path(root, &repo));
+        .and_then(|root| entry_path(root, repo));
     let tip_text = tip.to_string();
-    if let Some(events) = entry.as_deref().and_then(|path| read(path, &tip_text)) {
+    if let Some(events) = entry
+        .as_deref()
+        .and_then(|path| read(path, &tip_text, skip, end))
+    {
         return Ok(events);
     }
-    let history = history::import_with_options(&repo, tip, options)?;
+    let scanned;
+    let links = if let Some((links, range)) = range {
+        &links[..range.end]
+    } else {
+        scanned = history::links(repo, tip)?;
+        &scanned
+    };
+    let history = history::import(repo, tip, links, skip, end_date)?;
     let snapshot = Snapshot {
         version: timeline::CACHE_VERSION,
         tip: tip_text,
+        skip,
+        end,
         events: timeline::from_history(&history),
     };
-    if let Some(path) = entry.filter(|_| !history.truncated) {
+    if let Some(path) = entry {
         let _ = store(&path, &snapshot);
     }
     Ok(snapshot.events)
@@ -246,7 +286,12 @@ fn entry_path(root: &Path, repo: &gix::Repository) -> Option<PathBuf> {
     Some(root.join(namespace).join("timeline.json"))
 }
 
-fn read(path: &Path, tip: &str) -> Option<Vec<timeline::Event>> {
+fn read(
+    path: &Path,
+    tip: &str,
+    skip: usize,
+    end: Option<usize>,
+) -> Option<Vec<timeline::Event>> {
     let file = ConfinedFile::at(path, false).ok()?.open().ok()?;
     if file.metadata().ok()?.len() > MAX_SNAPSHOT_BYTES {
         return None;
@@ -259,7 +304,9 @@ fn read(path: &Path, tip: &str) -> Option<Vec<timeline::Event>> {
         return None;
     }
     let snapshot: Snapshot = serde_json::from_slice(&bytes).ok()?;
-    (valid_snapshot(&snapshot, tip) && serde_json::to_vec(&snapshot).ok()? == bytes)
+    (valid_snapshot(&snapshot, tip, skip)
+        && snapshot.end == end
+        && serde_json::to_vec(&snapshot).ok()? == bytes)
         .then_some(snapshot.events)
 }
 
@@ -291,7 +338,7 @@ mod tests {
         revision: &str,
         cache_root: Option<&Path>,
     ) -> Result<Vec<timeline::Event>, history::Error> {
-        load_with_options(path, revision, cache_root, history::Options::default())
+        load_whole(path, revision, cache_root)
     }
 
     pub(crate) fn directory_link(target: &Path, link: &Path) {
@@ -325,6 +372,8 @@ mod tests {
             serde_json::to_vec(&Snapshot {
                 version: timeline::CACHE_VERSION,
                 tip: git(repo.path(), &["rev-parse", "HEAD"]),
+                skip: 0,
+                end: None,
                 events,
             })
             .unwrap(),
@@ -401,9 +450,12 @@ mod tests {
         change.insertions = 0;
         change.removals = 0;
         change.samples.clear();
-        assert!(valid_snapshot(&snapshot, &snapshot.tip));
+        assert!(valid_snapshot(&snapshot, &snapshot.tip, 0));
         store(&path, &snapshot).unwrap();
-        assert_eq!(read(&path, &snapshot.tip).unwrap(), snapshot.events);
+        assert_eq!(
+            read(&path, &snapshot.tip, 0, None).unwrap(),
+            snapshot.events
+        );
     }
 
     #[test]
@@ -415,7 +467,7 @@ mod tests {
         let bytes = fs::read(path).unwrap();
         let snapshot: Snapshot = serde_json::from_slice(&bytes).unwrap();
         let tip = snapshot.tip.clone();
-        assert!(valid_snapshot(&snapshot, &tip));
+        assert!(valid_snapshot(&snapshot, &tip, 0));
         for (pointer, invalid) in [
             ("/version", serde_json::json!(0)),
             ("/tip", serde_json::json!("0".repeat(40))),
@@ -434,9 +486,22 @@ mod tests {
             let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
             *value.pointer_mut(pointer).unwrap() = invalid;
             assert!(
-                !valid_snapshot(&serde_json::from_value(value).unwrap(), &tip),
+                !valid_snapshot(&serde_json::from_value(value).unwrap(), &tip, 0),
                 "{pointer}"
             );
+        }
+        let identity = |name: usize, email: usize| serde_json::json!({"name": vec![b'n'; name], "email": vec![b'e'; email]});
+        for (co_authors, valid) in [
+            (vec![identity(1, 1); timeline::MAX_CO_AUTHORS], true),
+            (vec![identity(1, 1); timeline::MAX_CO_AUTHORS + 1], false),
+            (vec![identity(1, 0)], false),
+            (vec![identity(timeline::MAX_IDENTITY_BYTES + 1, 1)], false),
+            (vec![identity(1, timeline::MAX_IDENTITY_BYTES + 1)], false),
+        ] {
+            let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            value["events"][0]["co_authors"] = co_authors.into();
+            let snapshot = serde_json::from_value(value).unwrap();
+            assert_eq!(valid_snapshot(&snapshot, &tip, 0), valid);
         }
     }
 
@@ -474,6 +539,12 @@ mod tests {
     }
 
     fn fixture() -> tempfile::TempDir {
+        let scratch = empty_fixture();
+        commit(scratch.path(), "first\n");
+        scratch
+    }
+
+    fn empty_fixture() -> tempfile::TempDir {
         let scratch =
             crate::cache::test_directory().expect("temporary directory is available");
         git(scratch.path(), &["init", "--initial-branch=main"]);
@@ -482,7 +553,6 @@ mod tests {
             scratch.path(),
             &["config", "core.hooksPath", "unused-hooks"],
         );
-        commit(scratch.path(), "first\n");
         scratch
     }
 
@@ -492,15 +562,254 @@ mod tests {
         git(path, &["commit", "-m", "fixture"]);
     }
 
+    fn dated_commit(path: &Path, date: &str, change: &[&str]) {
+        git(path, change);
+        git(
+            path,
+            &["commit", "--allow-empty", "-m", date, "--date", date],
+        );
+    }
+
+    /// Commit order with out-of-order author dates, an empty commit, and a rename as the
+    /// first commit on or after 2026-05-03.
+    fn dated_fixture(name: &str) -> tempfile::TempDir {
+        let repo = empty_fixture();
+        let path = repo.path();
+        fs::write(path.join(format!("{name}.txt")), "a\n").unwrap();
+        dated_commit(path, "2026-05-01T12:00:00Z", &["add", "."]);
+        dated_commit(path, "2026-05-02T12:00:00Z", &["status"]);
+        fs::create_dir(path.join("moved")).unwrap();
+        dated_commit(
+            path,
+            "2026-05-04T12:00:00Z",
+            &["mv", &format!("{name}.txt"), "moved/"],
+        );
+        commit(path, "edited out of order\n");
+        git(
+            path,
+            &[
+                "commit",
+                "--amend",
+                "-m",
+                "edit",
+                "--date",
+                "2026-05-03T12:00:00Z",
+            ],
+        );
+        fs::write(path.join("late.txt"), "late\n").unwrap();
+        dated_commit(path, "2026-05-06T12:00:00Z", &["add", "late.txt"]);
+        repo
+    }
+
+    fn present(events: &[timeline::Event]) -> std::collections::BTreeSet<String> {
+        let mut paths = std::collections::BTreeSet::new();
+        for change in events.iter().flat_map(|event| &event.changes) {
+            if let timeline::Kind::Moved { from } = &change.kind {
+                paths.remove(from);
+            }
+            if change.kind == timeline::Kind::Deleted {
+                paths.remove(&change.path);
+            } else {
+                paths.insert(change.path.clone());
+            }
+        }
+        paths
+    }
+
+    #[test]
+    fn late_start_reads_from_the_boundary_and_keeps_full_selection() {
+        use clap::Parser;
+
+        let early = empty_fixture();
+        fs::write(early.path().join("early.txt"), "early\n").unwrap();
+        dated_commit(early.path(), "2026-05-01T00:00:00Z", &["add", "."]);
+        let fixtures = [dated_fixture("one"), dated_fixture("two"), early];
+        for chosen in [vec![0], vec![0, 1], vec![0, 2]] {
+            let fixtures: Vec<_> =
+                chosen.iter().map(|&index| &fixtures[index]).collect();
+            let count = fixtures.len();
+            let mut args = vec!["codestrand", "preview", "--start-date", "2026-05-03"];
+            for repo in &fixtures {
+                args.extend(["--repository", repo.path().to_str().unwrap()]);
+            }
+            let Some(crate::Command::Preview { source, .. }) =
+                crate::Cli::parse_from(args).command
+            else {
+                panic!("preview")
+            };
+            let repositories =
+                crate::repositories::inputs(&source.repository, None).unwrap();
+            let mut whole: Vec<_> = fixtures
+                .iter()
+                .map(|repo| load(repo.path(), "HEAD", None).unwrap())
+                .collect();
+            if count > 1 {
+                for (index, events) in whole.iter_mut().enumerate() {
+                    crate::repositories::namespace(events, index);
+                }
+            }
+            let whole = crate::repositories::merge(whole);
+            let selected = source.resolve_range(&crate::seconds(&whole)).unwrap();
+            let cache = crate::cache::test_directory().unwrap();
+            for _ in 0..2 {
+                let (events, range, _) = source
+                    .events(
+                        Some(cache.path()),
+                        &repositories,
+                        &crate::progress::Progress::default(),
+                    )
+                    .unwrap();
+                assert_eq!(range, count..count + selected.len());
+                assert!(events[..count].is_sorted_by_key(|event| event.seconds));
+                assert_eq!(events[range], whole[selected.clone()]);
+                assert_eq!(
+                    present(&events[..count]),
+                    present(&whole[..selected.start])
+                );
+                assert!(events[count].changes.iter().any(|change| {
+                    matches!(&change.kind, timeline::Kind::Moved { from } if from.ends_with("one.txt"))
+                }));
+            }
+            let cached: Snapshot = serde_json::from_slice(
+                &fs::read(entry(cache.path(), fixtures[0].path())).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(cached.skip, 1);
+        }
+    }
+
+    fn preview(fixtures: &[&tempfile::TempDir], dates: &[&str]) -> crate::Source {
+        use clap::Parser;
+
+        let mut args = vec!["codestrand", "preview"];
+        args.extend(dates);
+        for repo in fixtures {
+            args.extend(["--repository", repo.path().to_str().unwrap()]);
+        }
+        let Some(crate::Command::Preview { source, .. }) =
+            crate::Cli::parse_from(args).command
+        else {
+            panic!("preview")
+        };
+        source
+    }
+
+    fn merged_whole(fixtures: &[&tempfile::TempDir]) -> Vec<timeline::Event> {
+        let mut whole: Vec<_> = fixtures
+            .iter()
+            .map(|repo| load(repo.path(), "HEAD", None).unwrap())
+            .collect();
+        if whole.len() > 1 {
+            for (index, events) in whole.iter_mut().enumerate() {
+                crate::repositories::namespace(events, index);
+            }
+        }
+        crate::repositories::merge(whole)
+    }
+
+    fn ends_before(events: &[timeline::Event], repository: usize, end: usize) -> bool {
+        events
+            .iter()
+            .rposition(|event| event.repository == repository)
+            .is_some_and(|last| last < end)
+    }
+
+    /// Imports `source`'s range twice, the second time from the cache, and compares
+    /// commit numbers and repository endings with the whole history's.
+    fn assert_numbered_as_whole(source: &crate::Source, whole: &[timeline::Event]) {
+        let repositories =
+            crate::repositories::inputs(&source.repository, None).unwrap();
+        let selected = source.resolve_range(&crate::seconds(whole)).unwrap();
+        let cache = crate::cache::test_directory().unwrap();
+        for _ in 0..2 {
+            let (events, range, unread) = source
+                .events(
+                    Some(cache.path()),
+                    &repositories,
+                    &crate::progress::Progress::default(),
+                )
+                .unwrap();
+            let after: usize = unread.after.iter().sum();
+            assert_eq!(events[range.clone()], whole[selected.clone()]);
+            assert_eq!(range.start + unread.before, selected.start);
+            assert_eq!(events.len() + unread.before + after, whole.len());
+            assert_eq!(
+                range.end == events.len() && after == 0,
+                selected.end == whole.len()
+            );
+            for (repository, &unread_after) in unread.after.iter().enumerate() {
+                assert_eq!(
+                    unread_after == 0 && ends_before(&events, repository, range.end),
+                    ends_before(whole, repository, selected.end),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn date_ranges_number_and_end_as_the_whole_history_does() {
+        let early = empty_fixture();
+        fs::write(early.path().join("early.txt"), "early\n").unwrap();
+        dated_commit(early.path(), "2026-05-01T00:00:00Z", &["add", "."]);
+        let late = empty_fixture();
+        fs::write(late.path().join("late.txt"), "late\n").unwrap();
+        dated_commit(late.path(), "2026-05-07T00:00:00Z", &["add", "."]);
+        let fixtures = [dated_fixture("one"), dated_fixture("two"), early, late];
+        for chosen in [vec![0], vec![0, 1], vec![0, 2], vec![0, 3]] {
+            let fixtures: Vec<_> =
+                chosen.iter().map(|&index| &fixtures[index]).collect();
+            let whole = merged_whole(&fixtures);
+            for dates in [
+                &["--end-date", "2026-05-04"][..],
+                &["--start-date", "2026-05-03", "--end-date", "2026-05-04"],
+                &["--start-date", "2026-05-02", "--end-date", "2026-05-03"],
+                &["--start-date", "2026-05-03"],
+            ] {
+                assert_numbered_as_whole(&preview(&fixtures, dates), &whole);
+            }
+        }
+    }
+
+    #[test]
+    fn a_cached_range_serves_only_its_own_end() {
+        let repo = dated_fixture("one");
+        let cache = crate::cache::test_directory().unwrap();
+        let ranged = |end| {
+            let source = preview(&[&repo], &["--end-date", end]);
+            let repositories =
+                crate::repositories::inputs(&source.repository, None).unwrap();
+            source
+                .events(
+                    Some(cache.path()),
+                    &repositories,
+                    &crate::progress::Progress::default(),
+                )
+                .map(|(events, ..)| events)
+        };
+        let wider = ranged("2026-05-04").unwrap();
+        remove_object(repo.path(), "HEAD:moved/one.txt");
+        assert_eq!(ranged("2026-05-04").unwrap(), wider);
+        assert!(ranged("2026-05-01").is_err());
+        assert!(load(repo.path(), "HEAD", Some(cache.path())).is_err());
+    }
+
     fn entry(root: &Path, path: &Path) -> PathBuf {
         let (repo, _) = history::resolve(path, "HEAD").expect("fixture resolves");
         entry_path(root, &repo).expect("fixture path is canonical")
     }
 
     fn remove_blob(path: &Path) {
-        let blob = git(path, &["rev-parse", "HEAD:file.txt"]);
-        fs::remove_file(path.join(".git/objects").join(&blob[..2]).join(&blob[2..]))
-            .expect("fixture blob is loose");
+        remove_object(path, "HEAD:file.txt");
+    }
+
+    fn remove_object(path: &Path, revision: &str) {
+        let object = git(path, &["rev-parse", revision]);
+        fs::remove_file(
+            path.join(".git/objects")
+                .join(&object[..2])
+                .join(&object[2..]),
+        )
+        .expect("fixture object is loose");
     }
 
     #[test]
@@ -533,7 +842,8 @@ mod tests {
                     &repositories,
                     &crate::progress::Progress::default(),
                 )
-                .unwrap();
+                .unwrap()
+                .0;
             assert!(
                 events
                     .iter()
@@ -637,7 +947,8 @@ emails = ["author@example.invalid"]
                     .unwrap(),
                     &crate::progress::Progress::default(),
                 )
-                .unwrap();
+                .unwrap()
+                .0;
             assert_eq!(events[0].author.name, b"Author");
             assert_eq!(events[0].author.email, b"author@example.invalid");
             assert!(events[0].contributor.is_none());
@@ -681,12 +992,12 @@ emails = ["author@example.invalid"]
         let output = PathBuf::from(std::env::var("CODESTRAND_MEASURE_OUTPUT").unwrap());
         let (repo, tip) =
             history::resolve(Path::new(&repository), "origin/main").unwrap();
-        let history =
-            history::import_with_options(&repo, tip, history::Options::default())
-                .unwrap();
+        let history = history::import_all(&repo, tip).unwrap();
         let snapshot = Snapshot {
             version: timeline::CACHE_VERSION,
             tip: history.tip.clone(),
+            skip: 0,
+            end: None,
             events: timeline::from_history(&history),
         };
         let after = serde_json::to_vec(&snapshot).unwrap();

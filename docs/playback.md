@@ -148,10 +148,11 @@ codestrand preview --theme outrun
 codestrand export frames --theme atlas --frames 90 --fps 30
 ```
 
-Outrun uses pink tiles, arched beams and a banded sunset. Blueprint uses hatched
-plates and construction lines. Retro Desktop uses page icons and static
-black/white dashed beams. Atlas uses survey points, paper contours and tinted
-top-level territories. Forge uses iron plates coloured by file heat.
+Every theme shows each file's type icon. Outrun frames icons in pink tiles and uses
+arched beams and a banded sunset. Blueprint frames them in outlined plates and uses
+construction lines. Retro Desktop draws them on pages and uses static black/white
+dashed beams. Atlas uses paper contours and tinted top-level territories. Forge cuts
+icons through iron plates coloured by file heat.
 Blueprint and Atlas use ink without additive glow. All grounds and dash patterns
 are steady; switching with `,` and `.` preserves playback and file positions.
 
@@ -378,7 +379,9 @@ free-camera controls remain independent.
 
 Planning snapshots the machine's available physical memory before importing history.
 Swap does not count. An estimate above that snapshot is refused, with both values
-reported in bytes and MiB. If memory information cannot be read, planning stops.
+reported in bytes and MiB. Total RAM stands in for an available reading above it, and
+on macOS for a reading of zero, which means the reading failed; a stderr line says so.
+If total RAM cannot be read, planning stops.
 The estimate uses the actual selected schedule, repository samples, contributor
 first arrivals, imported changes, path bytes and directory samples. Variable allocation
 sizes are estimates, so the figure is not a process-memory ceiling. Each padded schedule
@@ -402,7 +405,7 @@ remains available throughout playback. This does not bound total process memory.
 To inspect a smaller interval, use inclusive `--start-date` and `--end-date`.
 
 Playback memory and duration checks use the range selected by `--start-date` and `--end-date`;
-the layout estimate also includes the imported history needed to settle that range.
+the layout estimate also includes the files present when the range starts.
 
 To choose visual treatments, use
 `--repository-boundary none|glass` and `--repository-label-plane files|raised`.
@@ -412,13 +415,9 @@ Both options apply to preview and export, including single repositories.
 
 ## Range and pacing
 
-Import refuses truncated history by default, before planning or rendering. The error
-names the exhausted budget. `--allow-truncated-history` accepts completed commits only
-and prints the reason; the incomplete result is never cached. The option applies
-to `inspect`, `preview` and `export`. When a playback prefix was read, both messages
-name its last complete first-parent commit, position and UTC author date, inclusive.
-Commits with no file changes are not shown. If import stopped before completing a
-playback commit, the message says so.
+Import refuses a history over budget before planning or rendering. The error names
+the exhausted budget, the commit and its UTC author date, and a later `--start-date`
+whose range fits, or says that none does.
 
 Import budgets are 1,000,000 commits, 2,000,000 changed entries, 20,000,000 diff input
 lines and 512 MiB of retained-input accounting per repository.
@@ -427,12 +426,9 @@ Single-object and single-tree limits stay fixed, including 16 MiB objects, 2,000
 expanded tree entries, depth 256, 16,384-byte paths and 64 MiB of expanded path bytes.
 The 32 GiB cumulative work ceiling, 8 GiB blob-detail budget and per-diff work limits
 also stay fixed. Oversized or expensive blob diffs keep file changes but omit detail;
-exhausting the cumulative line budget also omits detail. Playback range options do not
-reduce import work: the reachable history is checked before selecting the playback range.
-
-```sh
-codestrand inspect /path/to/repository --allow-truncated-history
-```
+exhausting the cumulative line budget also omits detail. Date bounds reduce import
+work: diffs outside the range are not read. The caption still numbers commits
+against the whole first-parent history.
 
 ```sh
 codestrand preview --repository /path/to/repository --start-date 2026-05-01 --end-date 2026-05-31 \
@@ -440,7 +436,7 @@ codestrand preview --repository /path/to/repository --start-date 2026-05-01 --en
 ```
 
 - `--start-date YYYY-MM-DD`: first commit in merged order authored on or after
-  00:00 UTC that day, inclusive; preceding commits are settled before playback.
+  00:00 UTC that day, inclusive; playback opens on the tree of the commit before it.
 - `--end-date YYYY-MM-DD`: last commit in merged order authored on or before that
   UTC day, inclusive of the whole day. Omitted bounds use the beginning or end of
   history. A reversed range or one containing no commits reports both bounds.

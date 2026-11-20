@@ -41,15 +41,21 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y mesa-vulkan-drivers libvulkan1 vulkan-tools \
-            fonts-noto-core fonts-noto-cjk libwayland-dev libxkbcommon-dev
+            fonts-noto-core fonts-noto-cjk libwayland-dev libxkbcommon-dev strace
       - name: Install pinned Rust toolchain
         if: steps.changes.outputs.rust == 'true'
         run: rustup show
+      - name: Install uv
+        if: steps.changes.outputs.rust == 'true'
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2
       - name: Restore Cargo cache
         if: steps.changes.outputs.rust == 'true'
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
         with:
           shared-key: render-export
+      - name: Check the dependency graph has one network client
+        if: steps.changes.outputs.rust == 'true'
+        run: uv run --script scripts/check_dependency_graph.py
       - name: Run graphics export tests
         if: steps.changes.outputs.rust == 'true'
         timeout-minutes: 35
@@ -62,6 +68,26 @@ jobs:
           mkdir -m 700 "$XDG_RUNTIME_DIR"
           vulkaninfo --summary
           cargo test --locked --test render_export -- --ignored
+      - name: Export with no network, tracing socket calls
+        if: steps.changes.outputs.rust == 'true'
+        timeout-minutes: 10
+        run: |
+          # Ubuntu's AppArmor policy otherwise blocks unprivileged user namespaces.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          icds=(/usr/share/vulkan/icd.d/lvp_icd*.json)
+          export VK_DRIVER_FILES="${icds[0]}"
+          export XDG_RUNTIME_DIR="$RUNNER_TEMP/xdg-runtime"
+          export XDG_CACHE_HOME="$RUNNER_TEMP/traced-cache"
+          repository="$RUNNER_TEMP/traced-repository"
+          git init --quiet --initial-branch=main "$repository"
+          for text in one two; do
+            echo "$text" >> "$repository/notes.txt"
+            git -C "$repository" add notes.txt
+            git -C "$repository" -c user.name=CI -c user.email=ci@example.invalid               commit --quiet --message "$text"
+          done
+          output="$RUNNER_TEMP/traced-export"
+          uv run --script scripts/trace_network.py -- target/debug/codestrand export             "$output" --repository "$repository" --frames 2 --fps 2 --resolution 320x180
+          test -s "$output/frame-00001.png"
 
   coverage:
     name: Coverage
@@ -96,7 +122,7 @@ jobs:
           shared-key: coverage
       - name: Install cargo-nextest and cargo-llvm-cov
         if: steps.changes.outputs.rust == 'true'
-        uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39
         with:
           tool: cargo-nextest,cargo-llvm-cov
       - name: Report test coverage
@@ -160,7 +186,7 @@ jobs:
           run-install: false
       - name: Run lint hooks
         env:
-          SKIP: no-commit-to-branch,cargo-fmt,clippy-enforce
+          SKIP: no-commit-to-branch,cargo-fmt,clippy-enforce,dependency-graph
           GITHUB_TOKEN: ${{ github.token }}
         run: prek run --all-files
       - name: Validate the agent skill
@@ -209,7 +235,7 @@ jobs:
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - name: Install cargo-nextest
         if: steps.changes.outputs.rust == 'true'
-        uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39
         with:
           tool: cargo-nextest
       - name: Run tests

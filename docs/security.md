@@ -13,18 +13,26 @@ available portrait and account information, requests can disclose:
   `GH_TOKEN` is unset or not valid Unicode. An empty `GH_TOKEN` disables authentication
   without falling back to `GITHUB_TOKEN`; empty tokens are ignored. GitHub avatar
   servers receive the account name or numeric ID.
-- A SHA-256 digest of a selected email address, or its configured Gravatar address,
-  to Gravatar when a portrait is still missing. The address is trimmed and lowercased
-  first. A hash is not anonymity:
-  someone who knows an address can calculate the same value.
-- A configured GitLab username to GitLab. Raw email lookup at GitLab requires both
-  `--fetch-avatars` and `--gitlab-email-avatars`.
 - A configured remote avatar URL to its HTTPS server, and any redirect destination.
+
+No email address, email hash or author name is sent, and GitHub is the only service
+contacted unless a configured avatar URL names another.
 
 Codestrand does not add source file paths, source contents or diff text to these
 requests. Servers also receive ordinary connection information such as the source
 IP address and the Codestrand user agent. Configured URLs can contain whatever
 information their author put in them.
+
+## What CI checks
+
+- Only Codestrand depends on `ureq`, `rustls` is reached only through `ureq`, and
+  neither `bevy_asset` nor `gix-transport` enables an HTTP feature.
+- A Linux PNG export of a small local repository, with the history cache on, runs
+  under `strace` in an empty network namespace and fails on any IP socket or Unix
+  socket connection outside an allow-list.
+
+The trace covers Linux and the code paths that export exercises. Preview, video
+encoding, avatar fetching, macOS and Windows are not traced.
 
 ## Local files and processes
 
@@ -36,7 +44,7 @@ not encrypted by Codestrand. `--no-cache` disables reading and writing its cache
 The cache is under `codestrand` in the operating system's user cache directory:
 `%LOCALAPPDATA%` on Windows, `~/Library/Caches` on macOS, and `$XDG_CACHE_HOME` or
 `~/.cache` on Linux. History snapshots use per-repository subdirectories;
-portrait data uses `avatars-v2`.
+portrait data uses `avatars-v3`.
 
 Video export starts FFmpeg and sends it rendered frames through standard input.
 Codestrand's production import and renderer do not launch Git, repository hooks,

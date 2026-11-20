@@ -122,8 +122,6 @@ enum Command {
         repository: PathBuf,
         #[arg(long, default_value = "HEAD")]
         revision: String,
-        #[command(flatten)]
-        history: history::Options,
     },
     /// Play history in a loop as planning progresses; [ halves and ] doubles live speed (0.125x–8x).
     #[command(
@@ -186,9 +184,6 @@ impl ContributorTravel {
     reason = "each bool is an independent clap switch"
 )]
 struct Source {
-    #[command(flatten)]
-    #[serde(flatten)]
-    history: history::Options,
     /// Assume departure after this many calendar days; default 60 marks two quiet months.
     #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u32).range(1..=36500))]
     contributor_inactivity_days: u32,
@@ -229,13 +224,10 @@ struct Source {
     /// Contributor TOML file; defaults to the Codestrand user configuration directory.
     #[arg(long)]
     contributors: Option<PathBuf>,
-    /// Fetch contributor avatars before playback; sends account requests and email hashes.
+    /// Fetch contributor avatars and GitHub accounts from GitHub before playback.
     #[arg(long)]
     fetch_avatars: bool,
-    /// Select opted-in GitLab cache entries offline; allow email lookup with --fetch-avatars.
-    #[arg(long)]
-    gitlab_email_avatars: bool,
-    /// Begin at the first commit on or after this UTC date, inclusive; settle earlier commits.
+    /// Begin at the first commit on or after this UTC date, inclusive, from the tree before it.
     #[arg(long, value_name = "YYYY-MM-DD", value_parser = start_date)]
     start_date: Option<i64>,
     /// End at the last commit on or before this UTC date, inclusive of the whole day.
@@ -278,21 +270,54 @@ struct Source {
 }
 
 impl Source {
+    /// Imports the selected range of every repository, led by the boundary events that
+    /// settle the state before it, and returns where the selection lies and what the
+    /// import left unread.
     fn events(
         &self,
         cache_root: Option<&std::path::Path>,
         repositories: &[repositories::Repository],
         progress: &Progress,
-    ) -> anyhow::Result<Vec<timeline::Event>> {
+    ) -> anyhow::Result<(Vec<timeline::Event>, std::ops::Range<usize>, model::Unread)>
+    {
+        if repositories.is_empty() {
+            let events = timeline::synthetic();
+            let range = self.resolve_range(&seconds(&events))?;
+            return Ok((events, range, model::Unread::default()));
+        }
+        let mut tips = Vec::new();
+        let mut chains = Vec::new();
+        if self.start_date.is_some() || self.end_date.is_some() {
+            let started = std::time::Instant::now();
+            for repository in repositories {
+                let (repo, tip) = history::resolve(&repository.path, &self.revision)?;
+                chains.push(history::links(&repo, tip)?);
+                tips.push(tip.to_string());
+            }
+            if self.trace.on() {
+                eprintln!("scan_seconds={:.6}", started.elapsed().as_secs_f64());
+            }
+        }
+        let (ranges, selected) = if chains.is_empty() {
+            (Vec::new(), None)
+        } else {
+            let (ranges, range) = self.select(&chains)?;
+            (ranges, Some(range))
+        };
+        let mut boundaries = Vec::new();
         let mut histories = Vec::new();
         for (index, repository) in repositories.iter().enumerate() {
             progress.report(Stage::History, index as u64, repositories.len() as u64);
             let started = std::time::Instant::now();
-            let mut events = cache::load_with_options(
-                &repository.path,
-                &self.revision,
+            let revision = tips.get(index).unwrap_or(&self.revision);
+            let (repo, tip) = history::resolve(&repository.path, revision)?;
+            let range = ranges.get(index);
+            let mut events = cache::load_range(
+                &repo,
+                tip,
+                chains.get(index).map(Vec::as_slice).zip(range),
+                self.end_date,
                 cache_root.filter(|_| !self.no_cache),
-                self.history,
             )?;
             if self.trace.on() {
                 eprintln!(
@@ -310,20 +335,70 @@ impl Source {
                     change.samples.clear();
                 }
             }
+            if range.is_some_and(|range| range.start > 0) && !events.is_empty() {
+                boundaries.push(events.remove(0));
+            }
             histories.push(events);
         }
-        Ok(if repositories.is_empty() {
-            timeline::synthetic()
-        } else if repositories.len() == 1 {
-            histories.pop().expect("one repository")
+        let mut events = boundaries;
+        events.sort_by_key(|event| event.seconds);
+        let settled = events.len();
+        if histories.len() == 1 {
+            events.append(&mut histories[0]);
         } else {
-            repositories::merge(histories)
-        })
+            events.extend(repositories::merge(histories));
+        }
+        let Some(selected) = selected else {
+            let range = self.resolve_range(&seconds(&events))?;
+            return Ok((events, range, model::Unread::default()));
+        };
+        let unread = model::Unread {
+            before: selected.start - settled,
+            after: chains
+                .iter()
+                .zip(&ranges)
+                .map(|(links, range)| links.len() - range.end)
+                .collect(),
+        };
+        let range = settled..(settled + selected.len()).min(events.len());
+        Ok((events, range, unread))
     }
 
+    /// Chooses the range from commit headers alone, the way `resolve_range` chooses it
+    /// from imported events, and returns the links of each repository it covers,
+    /// starting after the ones settled before it.
+    fn select(
+        &self,
+        chains: &[Vec<history::Link>],
+    ) -> anyhow::Result<(Vec<std::ops::Range<usize>>, std::ops::Range<usize>)> {
+        let merged = repositories::merge_by(
+            chains
+                .iter()
+                .enumerate()
+                .map(|(index, links)| {
+                    links.iter().map(|link| (link.seconds, index)).collect()
+                })
+                .collect(),
+            |&(seconds, _)| seconds,
+        );
+        let seconds: Vec<_> = merged.iter().map(|&(seconds, _)| seconds).collect();
+        let range = self.resolve_range(&seconds)?;
+        let mut ranges = vec![0..0; chains.len()];
+        for (position, &(_, index)) in merged[..range.end].iter().enumerate() {
+            ranges[index].end += 1;
+            if position < range.start {
+                ranges[index].start += 1;
+            }
+        }
+        Ok((ranges, range))
+    }
+
+    /// Merges commit emails of one GitHub account into one contributor and sets
+    /// portraits for the selected commits.
     fn resolve_avatars(
         &self,
         events: &mut [timeline::Event],
+        mappings: &mut contributors::Mappings,
         repositories: &[repositories::Repository],
         range: std::ops::Range<usize>,
     ) {
@@ -334,28 +409,22 @@ impl Source {
             fetch,
             avatars::now(),
         );
-        resolver.gitlab_email = self.gitlab_email_avatars;
-        let start = range.start.min(events.len());
-        let end = range.end.min(events.len());
+        let selected = range.start.min(events.len())..range.end.min(events.len());
         if repositories.is_empty() {
-            resolver.resolve(&mut events[start..end], None);
+            resolver.accounts(&events[selected.clone()], None);
         }
         for (index, repository) in repositories.iter().enumerate() {
             let remote = avatars::repository(&repository.path);
-            if repositories.len() == 1 {
-                resolver.resolve(&mut events[start..end], remote.as_deref());
-                return;
-            }
-            let indices: Vec<_> = (start..end)
-                .filter(|&at| events[at].repository == index)
-                .collect();
-            let mut selected: Vec<_> =
-                indices.iter().map(|&at| events[at].clone()).collect();
-            resolver.resolve(&mut selected, remote.as_deref());
-            for (at, event) in indices.into_iter().zip(selected) {
-                events[at] = event;
-            }
+            resolver.accounts(
+                events[selected.clone()]
+                    .iter()
+                    .filter(|event| event.repository == index),
+                remote.as_deref(),
+            );
         }
+        mappings.infer(resolver.found());
+        mappings.apply(events);
+        resolver.portraits(&mut events[selected]);
     }
 
     /// The `--repository` paths, or the repository holding the current directory when
@@ -395,12 +464,11 @@ impl Source {
         } else {
             repositories::inputs(&paths, file)?
         };
-        let mappings = contributors::load(self.contributors.as_deref())?;
-        let mut events =
+        let mut mappings = contributors::load(self.contributors.as_deref())?;
+        let (mut events, range, unread) =
             self.events(cache::root().as_deref(), &repositories, progress)?;
-        let range = self.resolve_range(&events)?;
         mappings.apply(&mut events);
-        self.resolve_avatars(&mut events, &repositories, range.clone());
+        self.resolve_avatars(&mut events, &mut mappings, &repositories, range.clone());
         let names: Vec<_> = repositories
             .iter()
             .map(repositories::Repository::name)
@@ -429,12 +497,15 @@ impl Source {
             max_idle_seconds: self.max_idle_seconds,
             start: range.start,
             commits: range.len(),
+            unread,
             travel_cap: self.contributor_travel.cap(),
             travel_window_seconds: None,
             #[cfg(test)]
             eager_windows: false,
             #[cfg(test)]
             window_hook: None,
+            #[cfg(test)]
+            advance_all_files: false,
             replay_everything: false,
             region_threads: 0,
             bot_travel: self.bot_travel,
@@ -470,10 +541,7 @@ impl Source {
         Ok((simulation, title))
     }
 
-    fn resolve_range(
-        &self,
-        events: &[timeline::Event],
-    ) -> anyhow::Result<std::ops::Range<usize>> {
+    fn resolve_range(&self, seconds: &[i64]) -> anyhow::Result<std::ops::Range<usize>> {
         let start_label = self
             .start_date
             .map_or_else(|| "beginning of history".to_owned(), model::date);
@@ -487,31 +555,29 @@ impl Source {
             "inclusive date range {start_label} through {end_label}: end precedes start"
         );
         if (self.start_date.is_some() || self.end_date.is_some())
-            && !events.iter().any(|event| {
-                self.start_date.is_none_or(|start| event.seconds >= start)
-                    && self.end_date.is_none_or(|end| event.seconds < end + 86_400)
+            && !seconds.iter().any(|&time| {
+                self.start_date.is_none_or(|start| time >= start)
+                    && self.end_date.is_none_or(|end| time < end + 86_400)
             })
         {
-            let last = events.last().map_or_else(
+            let last = seconds.last().map_or_else(
                 || "history is empty".to_owned(),
-                |event| {
-                    format!("last commit date is {} UTC", model::date(event.seconds))
-                },
+                |&time| format!("last commit date is {} UTC", model::date(time)),
             );
             anyhow::bail!(
                 "inclusive date range {start_label} through {end_label} contains no commits; {last}"
             );
         }
         let start = self.start_date.map_or(0, |date| {
-            events
+            seconds
                 .iter()
-                .position(|event| event.seconds >= date)
-                .unwrap_or(events.len())
+                .position(|&time| time >= date)
+                .unwrap_or(seconds.len())
         });
-        let end = self.end_date.map_or(events.len(), |end| {
-            events
+        let end = self.end_date.map_or(seconds.len(), |end| {
+            seconds
                 .iter()
-                .rposition(|event| event.seconds < end + 86_400)
+                .rposition(|&time| time < end + 86_400)
                 .map_or(0, |last| last + 1)
         });
         anyhow::ensure!(
@@ -579,6 +645,9 @@ impl Source {
     }
 }
 
+fn seconds(events: &[timeline::Event]) -> Vec<i64> {
+    events.iter().map(|event| event.seconds).collect()
+}
 fn start_date(value: &str) -> Result<i64, String> {
     let invalid = || "expected a valid UTC date in YYYY-MM-DD format".to_owned();
     if value.len() != 10
@@ -813,10 +882,9 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
         Some(Command::Inspect {
             repository,
             revision,
-            history: options,
         }) => {
             let (repo, tip) = history::resolve(&repository, &revision)?;
-            let history = history::import_with_options(&repo, tip, options)?;
+            let history = history::import_all(&repo, tip)?;
             serde_json::to_writer_pretty(std::io::stdout().lock(), &history)?;
         }
         Some(Command::Preview { source, theme }) => preview(source, theme)?,
@@ -830,6 +898,12 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
             resolution,
             camera_path,
         }) => {
+            export::check(&directory)?;
+            let camera_path = camera_path
+                .as_deref()
+                .map(camera_path::CameraPath::read)
+                .transpose()?;
+            encoding.check(fps, resolution)?;
             let mut loading = export::report::Loading::new(std::time::Instant::now());
             let (mut simulation, title) =
                 source.load_reporting(std::time::Duration::from_secs(1), |update| {
@@ -841,10 +915,8 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 })?;
             simulation.set_theme(theme.build());
 
-            let camera_path = camera_path
-                .as_deref()
-                .map(|path| camera_path::CameraPath::load(path, &simulation))
-                .transpose()?;
+            let camera_path =
+                camera_path.map(|path| path.bind(&simulation)).transpose()?;
             if let Some(path) = &camera_path {
                 path.pose(&simulation, 0, fps)?;
             }
@@ -945,12 +1017,15 @@ mod tests {
                 [("2026-05-01", 0), ("2026-05-02", 1), ("2026-05-03", 2)]
             {
                 source.start_date = Some(start_date(date).unwrap());
-                assert_eq!(source.resolve_range(&events).unwrap().start, expected);
+                assert_eq!(
+                    source.resolve_range(&seconds(&events)).unwrap().start,
+                    expected
+                );
             }
             source.start_date = Some(start_date("2026-05-04").unwrap());
             assert!(
                 source
-                    .resolve_range(&events)
+                    .resolve_range(&seconds(&events))
                     .unwrap_err()
                     .to_string()
                     .contains("inclusive date range 2026-05-04 through end of history contains no commits; last commit date is 2026-05-03 UTC")
@@ -959,15 +1034,15 @@ mod tests {
         source.start_date = Some(midnight);
         assert_eq!(
             source
-                .resolve_range(&[event(midnight - 1), event(midnight + 1)])
+                .resolve_range(&seconds(&[event(midnight - 1), event(midnight + 1)]))
                 .unwrap()
                 .start,
             1
         );
         let reversed = vec![event(midnight + 1), event(midnight - 1)];
-        assert_eq!(source.resolve_range(&reversed).unwrap().start, 0);
+        assert_eq!(source.resolve_range(&seconds(&reversed)).unwrap().start, 0);
         let merged = repositories::merge(vec![reversed, vec![event(midnight - 2)]]);
-        assert_eq!(source.resolve_range(&merged).unwrap().start, 1);
+        assert_eq!(source.resolve_range(&seconds(&merged)).unwrap().start, 1);
     }
 
     #[test]
@@ -1189,28 +1264,6 @@ mod tests {
     }
 
     #[test]
-    fn gitlab_email_permission_is_separate_from_fetching() {
-        for (flags, fetch, email) in [
-            (vec![], false, false),
-            (vec!["--fetch-avatars"], true, false),
-            (vec!["--gitlab-email-avatars"], false, true),
-            (
-                vec!["--fetch-avatars", "--gitlab-email-avatars"],
-                true,
-                true,
-            ),
-        ] {
-            let args = [vec!["codestrand", "preview"], flags].concat();
-            let cli = Cli::try_parse_from(args).unwrap();
-            let Some(Command::Preview { source, .. }) = cli.command else {
-                panic!("preview command parsed")
-            };
-            assert_eq!(source.fetch_avatars, fetch);
-            assert_eq!(source.gitlab_email_avatars, email);
-        }
-    }
-
-    #[test]
     fn cli_combines_repeated_repositories_and_a_manifest() {
         let cli = Cli::try_parse_from([
             "codestrand",
@@ -1427,7 +1480,7 @@ mod tests {
             let Some(Command::Preview { source, .. }) = cli.command else {
                 panic!("preview")
             };
-            let actual = source.resolve_range(&events);
+            let actual = source.resolve_range(&seconds(&events));
             if let Some(expected) = expected {
                 assert_eq!(actual.unwrap(), expected);
             } else {

@@ -202,18 +202,16 @@ pub(super) fn namespace(events: &mut [Event], index: usize) {
     }
 }
 
-pub(super) fn local_event(event: &Event, prefix: &str) -> Event {
-    let mut event = event.clone();
-    for change in &mut event.changes {
-        change.path = change.path[prefix.len()..].to_owned();
-        if let Kind::Moved { from } = &mut change.kind {
-            *from = from[prefix.len()..].to_owned();
-        }
-    }
-    event
+pub(super) fn merge(histories: Vec<Vec<Event>>) -> Vec<Event> {
+    merge_by(histories, |event| event.seconds)
 }
 
-pub(super) fn merge(histories: Vec<Vec<Event>>) -> Vec<Event> {
+/// Repeatedly takes the earliest head, so merging the histories' suffixes yields the
+/// suffix of their merge.
+pub(super) fn merge_by<T>(
+    histories: Vec<Vec<T>>,
+    seconds: impl Fn(&T) -> i64,
+) -> Vec<T> {
     let mut histories: Vec<_> = histories
         .into_iter()
         .map(|history| history.into_iter().peekable())
@@ -224,7 +222,7 @@ pub(super) fn merge(histories: Vec<Vec<Event>>) -> Vec<Event> {
             .iter_mut()
             .enumerate()
             .filter_map(|(index, history)| {
-                history.peek().map(|event| (event.seconds, index))
+                history.peek().map(|event| (seconds(event), index))
             })
             .min();
         let Some((_, index)) = next else { break };
