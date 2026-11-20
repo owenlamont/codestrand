@@ -737,26 +737,19 @@ mod tests {
     }
 
     #[test]
-    fn a_settled_refinement_stops_without_changing_playback() {
+    fn passing_avatars_do_not_trigger_slot_replanning() {
         let (mut events, labels) = super::super::tests::short_repository_history(6);
         events.truncate(12);
         let [(mut reused, fast), (mut replayed, slow)] =
             reused_and_replayed(&(events, labels), 3.0, TravelCap::None);
-        let rounds = |reports: &[Report]| {
-            total(
-                reports,
-                &[Phase::RefineServiceSlots, Phase::Reserve],
-                Counter::Replays,
-            )
-        };
-        assert!(
-            total(
-                &fast,
-                &[Phase::RefineServiceSlots],
-                Counter::SettledRefinements
-            ) > 0
-        );
-        assert!(rounds(&fast) < rounds(&slow));
+        for reports in [&fast, &slow] {
+            assert!(reports.iter().any(|report| {
+                report.calls(&[Phase::RefineServiceSlots, Phase::Reserve]) > 0
+            }));
+            assert!(reports.iter().all(|report| {
+                report.calls(&[Phase::RefineServiceSlots, Phase::PlanTravel]) == 0
+            }));
+        }
         assert_same_playback(&mut reused, &mut replayed);
     }
 

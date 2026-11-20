@@ -144,13 +144,17 @@ impl Simulation {
             .avatars
             .iter()
             .enumerate()
-            .filter(|(_, a)| a.presence > 0.0)
+            // A passing avatar can briefly overlap a parked one. Its route cannot
+            // reserve a dock or move one that stays clear of stationary avatars.
+            .filter(|(i, a)| {
+                a.presence > 0.0 && !self.travel.travelling(*i, state.tick)
+            })
             .map(|(i, a)| {
                 let point = titles::screen(self, a.position);
-                let parked = !self.travel.travelling(i, state.tick)
-                    && a.slot
-                        .as_ref()
-                        .is_some_and(|s| point.distance(s.point) < 0.1);
+                let parked = a
+                    .slot
+                    .as_ref()
+                    .is_some_and(|s| point.distance(s.point) < 0.1);
                 (i, point, parked)
             })
             .collect();
@@ -164,6 +168,10 @@ impl Simulation {
             };
             let low = tile.low * HALF;
             let span = (tile.high - tile.low) * HALF;
+            let ring_seat = avatar
+                .slot
+                .as_ref()
+                .is_some_and(|slot| slot.offset != Vec2::ZERO);
             pairs += live.len() - 1;
             // A group parks around its author's dock, so its author makes room for it.
             let owner = avatar
@@ -173,7 +181,11 @@ impl Simulation {
                 .unwrap_or(i);
             let mut foreign = live
                 .iter()
-                .filter(|&&(j, _, _)| i != j && !state.in_party(j, owner))
+                .filter(|&&(j, _, _)| {
+                    i != j
+                        && !state.in_party(j, owner)
+                        && !(ring_seat && self.shares_ring_participant(i, j))
+                })
                 .peekable();
             if foreign.peek().is_none() {
                 continue;
@@ -194,6 +206,23 @@ impl Simulation {
             }
         }
         (conflicts, pairs)
+    }
+
+    /// Whether another ring seat in this repository serves a commit that one
+    /// of the two avatars shares.
+    fn shares_ring_participant(&self, a: usize, b: usize) -> bool {
+        let avatars = &self.state.avatars;
+        let joins = |commit: usize, avatar: usize| {
+            self.events
+                .get(commit)
+                .is_some_and(|e| e.participants().any(|c| c.key == avatars[avatar].key))
+        };
+        avatars[a].repository == avatars[b].repository
+            && avatars[b]
+                .slot
+                .as_ref()
+                .is_some_and(|slot| slot.offset != Vec2::ZERO)
+            && (joins(avatars[a].commit, b) || joins(avatars[b].commit, a))
     }
 
     pub(in crate::model) fn reserve_service_slots(&mut self) -> bool {
@@ -337,6 +366,77 @@ impl Simulation {
 #[cfg(test)]
 mod tests {
     use super::{Rect, Vec2};
+
+    #[test]
+    fn a_passing_walker_does_not_move_a_parked_ring() {
+        let mut events = crate::timeline::synthetic();
+        events.truncate(3);
+        events[0].co_authors.push(crate::timeline::Identity {
+            name: b"Pair".to_vec(),
+            email: b"pair@example.invalid".to_vec(),
+        });
+        let mut sim = super::Simulation::new(
+            events,
+            &crate::model::Options::default(),
+            &crate::theme::Theme::neon(),
+            &crate::contributors::Mappings::default(),
+        );
+        sim.advance_to(45, 60);
+        let avatars = &mut sim.state.avatars;
+        let lead = avatars
+            .iter()
+            .position(|avatar| avatar.name == "Ada")
+            .unwrap();
+        assert_ne!(avatars[lead].slot.as_ref().unwrap().offset, Vec2::ZERO);
+        let mut passer = avatars[lead].clone();
+        passer.key = sim.events[2].participants().next().unwrap().key.clone();
+        passer.commit = 2;
+        passer.group = None;
+        passer.slot = None;
+        let walker = avatars.len();
+        avatars.push(passer);
+        let point = super::titles::screen(&sim, sim.state.avatars[lead].position);
+        let reservations = |sim: &super::Simulation| {
+            let mut occupied = super::Reservations::new();
+            let (conflicts, _) =
+                sim.reserve_frame(&mut occupied, &mut super::BTreeSet::new());
+            let rows: Vec<_> = occupied
+                .into_iter()
+                .map(|(key, row)| (key, row.into_row()))
+                .collect();
+            (conflicts, rows)
+        };
+        assert!(
+            reservations(&sim).0 > 0,
+            "a stationary avatar still conflicts"
+        );
+        let presence = sim.state.avatars[walker].presence;
+        sim.state.avatars[walker].presence = 0.0;
+        let absent = reservations(&sim);
+        sim.state.avatars[walker].presence = presence;
+
+        sim.travel.trips.push(super::super::Trip {
+            author: walker,
+            commit: 2,
+            departure: sim.state.tick,
+            arrival: sim.state.tick + 2,
+            destination: point + Vec2::X,
+            source: point,
+            fade_ticks: 0,
+            route: super::super::Route::new(&[point, point + Vec2::X], 480.0),
+            fade: false,
+            bot: false,
+            source_repository: 0,
+            destination_repository: 0,
+            free: sim.state.tick,
+            failure: None,
+            cutoff: None,
+            proof: None,
+        });
+        let passing = reservations(&sim);
+        assert_eq!(passing.0, 0);
+        assert_eq!(passing, absent);
+    }
 
     /// The merge as first shipped, one list scanned whole, which [`super::Row`] must
     /// reproduce bit for bit.
