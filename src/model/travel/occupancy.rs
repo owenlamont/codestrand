@@ -317,9 +317,7 @@ impl Simulation {
             }
             let round = self.travel.round_state(self.window.as_ref());
             // A round that ends where it began repeats unchanged until the cap.
-            if !options.replay_everything
-                && previous.as_ref() == Some(&round)
-                && !round.contains("NaN")
+            if !options.replay_everything && repeated_round(previous.as_deref(), &round)
             {
                 self.trace.count(Counter::SettledRefinements, 1);
                 break;
@@ -330,9 +328,21 @@ impl Simulation {
     }
 }
 
+fn repeated_round(previous: Option<&str>, round: &str) -> bool {
+    previous == Some(round) && !round.contains("NaN")
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Rect, Vec2};
+
+    #[test]
+    fn refinement_settles_only_when_a_comparable_round_repeats() {
+        assert!(!super::repeated_round(None, "dock 1"));
+        assert!(!super::repeated_round(Some("dock 1"), "dock 2"));
+        assert!(super::repeated_round(Some("dock 1"), "dock 1"));
+        assert!(!super::repeated_round(Some("dock NaN"), "dock NaN"));
+    }
 
     /// The merge as first shipped, one list scanned whole, which [`super::Row`] must
     /// reproduce bit for bit.
