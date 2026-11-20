@@ -3,7 +3,16 @@ use std::fmt::Write;
 use crate::history::{BlobDiff, ChangeKind, Commit, History};
 
 // Bump when the snapshot format, history import policies or timeline conversion change.
-pub(super) const CACHE_VERSION: u32 = 9;
+pub(super) const CACHE_VERSION: u32 = 10;
+
+/// Co-authors read from one commit; later `Co-authored-by:` trailers are ignored.
+pub(super) const MAX_CO_AUTHORS: usize = 8;
+// The author and co-authors of one event fit a `u16` bit set of first arrivals.
+const _: () = assert!(MAX_CO_AUTHORS < 16);
+/// Name or email bytes beyond which a co-author trailer is ignored.
+pub(super) const MAX_IDENTITY_BYTES: usize = 4096;
+/// Longer commit messages are not read for co-authors, which bounds trailer parsing.
+const MAX_TRAILER_MESSAGE_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(super) enum Kind {
@@ -37,11 +46,26 @@ pub(super) struct Event {
     #[serde(skip)]
     pub repository: usize,
     pub author: Identity,
+    /// `Co-authored-by:` identities, excluding the author and repeated emails.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub co_authors: Vec<Identity>,
     pub commit: String,
     #[serde(skip)]
     pub contributor: Option<crate::contributors::Contributor>,
+    /// Resolved co-authors, excluding any that resolve to the author's contributor.
+    #[serde(skip)]
+    pub co_contributors: Vec<crate::contributors::Contributor>,
     pub seconds: i64,
     pub changes: Vec<FileChange>,
+}
+
+impl Event {
+    /// The author's contributor, then each co-author's.
+    pub(super) fn participants(
+        &self,
+    ) -> impl Iterator<Item = &crate::contributors::Contributor> {
+        self.contributor.iter().chain(&self.co_contributors)
+    }
 }
 
 #[cfg(test)]
@@ -61,8 +85,10 @@ impl Event {
         Self {
             repository: 0,
             author: Identity::new("Ada", ""),
+            co_authors: Vec::new(),
             commit: String::new(),
             contributor: None,
+            co_contributors: Vec::new(),
             seconds,
             changes,
         }
@@ -79,8 +105,10 @@ pub(super) fn from_history(history: &History) -> Vec<Event> {
             name: commit.author.name.clone(),
             email: commit.author.email.clone(),
         },
+        co_authors: co_authors(&commit.message, &commit.author.email),
         repository: 0,
         contributor: None,
+        co_contributors: Vec::new(),
         commit: commit.id.clone(),
         seconds: commit.author.seconds,
         changes: sampled_changes(commit),
@@ -97,6 +125,46 @@ pub(super) fn from_history(history: &History) -> Vec<Event> {
                 .map(event),
         )
         .collect()
+}
+
+/// Reads `Co-authored-by: Name <email>` trailers as Git and GitHub do: from the
+/// message's final trailer block, skipping malformed, oversized, empty-email and
+/// repeated identities, up to [`MAX_CO_AUTHORS`].
+fn co_authors(message: &[u8], author_email: &[u8]) -> Vec<Identity> {
+    let mut seen = vec![author_email.to_ascii_lowercase()];
+    let mut found = Vec::new();
+    if message.len() > MAX_TRAILER_MESSAGE_BYTES {
+        return found;
+    }
+    let Some(body) = gix::objs::commit::MessageRef::from_bytes(message).body() else {
+        return found;
+    };
+    for trailer in body.trailers().co_authored_by() {
+        if found.len() == MAX_CO_AUTHORS {
+            break;
+        }
+        let mut value: &[u8] = &trailer.value;
+        let Ok(identity) = gix::actor::IdentityRef::from_bytes_consuming(&mut value)
+        else {
+            continue;
+        };
+        let identity = identity.trim();
+        let email = identity.email.to_ascii_lowercase();
+        if !value.trim_ascii().is_empty()
+            || email.is_empty()
+            || email.len() > MAX_IDENTITY_BYTES
+            || identity.name.len() > MAX_IDENTITY_BYTES
+            || seen.contains(&email)
+        {
+            continue;
+        }
+        seen.push(email);
+        found.push(Identity {
+            name: identity.name.to_vec(),
+            email: identity.email.to_vec(),
+        });
+    }
+    found
 }
 
 fn sampled_changes(commit: &Commit) -> Vec<FileChange> {
@@ -168,8 +236,10 @@ fn synthetic_event(author: &str, changes: Vec<FileChange>, index: usize) -> Even
             name: author.as_bytes().to_vec(),
             email: format!("{author}@example.invalid").into_bytes(),
         },
+        co_authors: Vec::new(),
         repository: 0,
         contributor: None,
+        co_contributors: Vec::new(),
         commit: String::new(),
         seconds: 1_700_000_000 + 86_400 * i64::try_from(index).unwrap_or(0),
         changes,
@@ -335,6 +405,74 @@ mod tests {
             .map(|change| change.path)
             .collect();
         assert_eq!(paths, ["kept.txt"]);
+    }
+
+    #[test]
+    fn co_author_trailers_skip_malformed_repeated_and_oversized_identities() {
+        let long = "x".repeat(MAX_IDENTITY_BYTES + 1);
+        let message = format!(
+            "Pair on parsing\n\nCo-authored-by: Not trailing <early@example.com>\n\n\
+             Co-authored-by: Grace <grace@example.com>\n\
+             co-authored-by: Grace Again <GRACE@example.com>\n\
+             Co-authored-by: Ada Author <ADA@example.com>\n\
+             Co-authored-by: No Email <>\n\
+             Co-authored-by: Unclosed <unclosed@example.com\n\
+             Co-authored-by: Trailing <trailing@example.com> extra\n\
+             Co-authored-by: Long <{long}@example.com>\n\
+             Signed-off-by: Reviewer <reviewer@example.com>\n\
+             CO-AUTHORED-BY:   Codex   <codex@example.com>  \n"
+        );
+        let names: Vec<_> = co_authors(message.as_bytes(), b"ada@example.com")
+            .into_iter()
+            .map(|identity| String::from_utf8(identity.name).unwrap())
+            .collect();
+        assert_eq!(names, ["Grace", "Codex"]);
+    }
+
+    #[test]
+    fn co_authors_stop_at_the_cap_and_skip_oversized_messages() {
+        let mut trailers = String::new();
+        for index in 0..=MAX_CO_AUTHORS {
+            writeln!(trailers, "Co-authored-by: P{index} <p{index}@example.com>")
+                .unwrap();
+        }
+        let message = |body_bytes| {
+            let body = "x".repeat(body_bytes);
+            format!("Title\r\n\r\n{body}\r\n\r\n{trailers}")
+        };
+        let fits = message(MAX_TRAILER_MESSAGE_BYTES - message(0).len());
+        let capped = co_authors(fits.as_bytes(), b"");
+        assert_eq!(capped.len(), MAX_CO_AUTHORS);
+        assert_eq!(capped[0].email, b"p0@example.com");
+        let oversized = message(MAX_TRAILER_MESSAGE_BYTES - message(0).len() + 1);
+        assert_eq!(co_authors(oversized.as_bytes(), b""), []);
+    }
+
+    #[test]
+    fn imported_commits_carry_their_co_authors() {
+        let scratch = tempfile::tempdir().expect("temporary directory is available");
+        let path = scratch.path();
+        git(path, &["init", "--initial-branch=main"]);
+        fs::write(path.join("pair.txt"), "pair\n").expect("fixture is writable");
+        git(path, &["add", "-A"]);
+        git(
+            path,
+            &[
+                "commit",
+                "-m",
+                "pair\n\nCo-authored-by: Grace <grace@example.invalid>",
+            ],
+        );
+        let (repo, tip) = crate::history::resolve(path, "HEAD").expect("fixture opens");
+        let history = crate::history::import_all(&repo, tip).expect("fixture imports");
+        let events = from_history(&history);
+        assert_eq!(
+            events[0].co_authors,
+            [Identity {
+                name: b"Grace".to_vec(),
+                email: b"grace@example.invalid".to_vec(),
+            }]
+        );
     }
 
     #[test]
