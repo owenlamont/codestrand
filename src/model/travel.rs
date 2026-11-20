@@ -952,17 +952,10 @@ impl Router {
 }
 
 #[cfg(test)]
-pub(super) fn assert_edge_connectivity(simulation: &Simulation) {
-    let cells: Vec<_> = simulation
-        .state
-        .layout
-        .repositories
-        .iter()
-        .filter_map(|r| {
-            r.gutter
-                .map(|t| Rect::from_corners(t.low * HALF, t.high * HALF))
-        })
-        .collect();
+pub(crate) fn assert_gutter_routes(
+    gutters: impl Iterator<Item = crate::layout::packing::Tile>,
+) -> Vec<Rect> {
+    let cells = network(gutters);
     let target = cells[0].min;
     for cell in &cells {
         for point in [
@@ -973,9 +966,23 @@ pub(super) fn assert_edge_connectivity(simulation: &Simulation) {
         ] {
             Router::default()
                 .route(point, target, &cells)
-                .expect("connected guillotine gutters");
+                .expect("connected gutters");
         }
     }
+    cells
+}
+
+#[cfg(test)]
+pub(super) fn assert_edge_connectivity(simulation: &Simulation) {
+    let cells = assert_gutter_routes(
+        simulation
+            .state
+            .layout
+            .repositories
+            .iter()
+            .filter_map(|r| r.gutter),
+    );
+    let target = cells[0].min;
     for (author, avatar) in
         simulation
             .state

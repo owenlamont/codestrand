@@ -7,9 +7,10 @@ use crate::model::{caption, framing};
 
 mod fit;
 mod held;
+mod reflow;
 mod zoom;
 
-const BOUND: f32 = 2.5;
+const BOUND: f32 = 3.5;
 pub(crate) const MINIMUM: Vec2 = Vec2::new(144.0, 64.0);
 pub(crate) const BIRTH_TICKS: u32 = 45;
 /// Ticks whose zoom is fitted together; fixed so counts do not depend on the thread count.
@@ -468,6 +469,7 @@ fn reweigh(
 /// The feasibility states of the last presence vector tiled, and how often they were reused.
 #[derive(Default)]
 struct Tiling {
+    tree_tick: usize,
     presence: Vec<u32>,
     states: Vec<Feasible>,
     samples: usize,
@@ -632,14 +634,19 @@ struct Sample {
 #[derive(Clone, Copy, Debug)]
 struct Placement {
     tile: Option<Tile>,
+    gutter: Option<Tile>,
     origin: Vec2,
     scale: f32,
 }
 
-fn gutter_cells(nodes: &[Node], placement: &[Placement]) -> Vec<Option<Tile>> {
-    fn bounds(nodes: &[Node], index: usize, placement: &[Placement]) -> Option<Tile> {
+fn gutter_cells(nodes: &[Node], placement: &[Option<Tile>]) -> Vec<Option<Tile>> {
+    fn bounds(
+        nodes: &[Node],
+        index: usize,
+        placement: &[Option<Tile>],
+    ) -> Option<Tile> {
         match nodes[index] {
-            Node::Repository(i) => placement[i].tile,
+            Node::Repository(i) => placement[i],
             Node::Split { first, second, .. } => {
                 match (
                     bounds(nodes, first, placement),
@@ -658,11 +665,11 @@ fn gutter_cells(nodes: &[Node], placement: &[Placement]) -> Vec<Option<Tile>> {
         nodes: &[Node],
         index: usize,
         cell: Tile,
-        placement: &[Placement],
+        placement: &[Option<Tile>],
         result: &mut [Option<Tile>],
     ) {
         match nodes[index] {
-            Node::Repository(i) => result[i] = placement[i].tile.map(|_| cell),
+            Node::Repository(i) => result[i] = placement[i].map(|_| cell),
             Node::Split {
                 axis,
                 first,
@@ -700,6 +707,7 @@ pub(crate) struct Packing {
     /// Repository title scale; zero before planning.
     lettering: f32,
     nodes: Vec<Node>,
+    reflows: Arc<[reflow::Change]>,
     labels: Arc<[String]>,
     inputs: Arc<[Vec<Input>]>,
     samples: Arc<[Sample]>,
@@ -740,6 +748,7 @@ pub(crate) struct Inputs {
     items: Vec<Vec<f32>>,
     /// When each repository starts fading out, after which its count no longer moves tiles.
     fading: Vec<crate::model::Time>,
+    exit_reflow: f32,
 }
 
 impl Inputs {
@@ -749,12 +758,19 @@ impl Inputs {
             rows: Vec::with_capacity(ticks),
             items: Vec::with_capacity(ticks),
             fading: Vec::new(),
+            exit_reflow: 0.0,
         }
     }
 
     /// Stops counting each repository `exit` seconds after its end, when it starts fading.
-    pub(crate) fn fade_from(&mut self, ends: &[crate::model::Time], exit: f32) {
+    pub(crate) fn fade_from(
+        &mut self,
+        ends: &[crate::model::Time],
+        exit: f32,
+        reflow: f32,
+    ) {
         self.fading = ends.iter().map(|&end| end + exit).collect();
+        self.exit_reflow = reflow;
     }
 
     pub(crate) fn push(&mut self, regions: Vec<RepositoryRegion>) {
@@ -843,6 +859,15 @@ impl Packing {
         std::mem::size_of::<Sample>()
     }
 
+    pub(crate) fn reflow_bytes(ticks: u128, repositories: u128) -> u128 {
+        (1 + ticks / held::reflow_spacing() as u128)
+            * (std::mem::size_of::<reflow::Change>() as u128
+                + repositories
+                    * (2 * std::mem::size_of::<Node>()
+                        + 4 * std::mem::size_of::<Option<Tile>>())
+                        as u128)
+    }
+
     pub(crate) fn with_endings(
         mut self,
         endings: &[crate::model::Time],
@@ -890,8 +915,13 @@ impl Packing {
     #[cfg(test)]
     pub(crate) fn exact_state(&self) -> String {
         format!(
-            "{:?}{:?}{:?}{:?}{:?}",
-            self.nodes, self.inputs, self.samples, self.rotated, self.zoom
+            "{:?}{:?}{:?}{:?}{:?}{:?}",
+            self.nodes,
+            self.inputs,
+            self.samples,
+            self.rotated,
+            self.zoom,
+            self.reflows
         )
     }
 
@@ -919,6 +949,10 @@ impl Packing {
             .collect()
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "birth, exit and weight timing share one pass"
+    )]
     pub(crate) fn from_inputs(
         inputs: Inputs,
         gutter_scale: f32,
@@ -930,6 +964,7 @@ impl Packing {
             rows: regions,
             items,
             fading,
+            exit_reflow,
         } = inputs;
         let Some(first) = regions.first().filter(|r| !r.is_empty()) else {
             return Ok(Self::default());
@@ -945,6 +980,7 @@ impl Packing {
         let space = Space::new(detail, gutter_scale);
         let mut held = held::Weights::new(first.len());
         let earliest = births.iter().copied().min().unwrap_or(0);
+        let mut reflows = Vec::<reflow::Change>::new();
         let samples: Vec<_> = regions
             .iter()
             .enumerate()
@@ -997,10 +1033,44 @@ impl Packing {
                         }
                     })
                     .collect();
-                Sample {
-                    weights: held.step(tick, &items[tick], &shown),
-                    presence,
+                let future = held::target_tick(tick).min(items.len() - 1);
+                let weights =
+                    held.step_towards(tick, &items[tick], &items[future], &shown);
+                if let Some(target) = held.target_at_start(tick)
+                    && shown.iter().enumerate().all(|(i, &p)| {
+                        let fade = fading
+                            .get(i)
+                            .copied()
+                            .unwrap_or(crate::model::Time::INFINITY);
+                        let finish = tick + held::reflow_ticks();
+                        let end = crate::model::tick_time(
+                            u64::try_from(finish).expect("bounded reflow"),
+                        );
+                        let birth = activation.map_or(births[i], |a| {
+                            births[i]
+                                .min(usize::try_from(a[i]).expect("bounded activation"))
+                        });
+                        let lead =
+                            usize::try_from(BIRTH_TICKS).expect("bounded lead-in");
+                        (p >= 1.0 && end < fade)
+                            || (p == 0.0
+                                && (finish < birth.saturating_sub(lead)
+                                    || now >= fade + exit_reflow))
+                    })
+                    && let Some(change) = reflow::plan(
+                        tick,
+                        reflows
+                            .last()
+                            .map_or(nodes.as_slice(), |event| &event.nodes),
+                        &weights,
+                        target,
+                        &shown,
+                        space,
+                    )
+                {
+                    reflows.push(change);
                 }
+                Sample { weights, presence }
             })
             .collect();
         let rotated = rotations(&nodes, &regions, &samples, space);
@@ -1010,6 +1080,7 @@ impl Packing {
             detail,
             lettering,
             nodes,
+            reflows: reflows.into(),
             labels: labels.into(),
             inputs: regions.into(),
             samples: samples.into(),
@@ -1108,7 +1179,6 @@ impl Packing {
             .zip(self.labels.iter())
             .map(|(input, label)| input.region(label))
             .collect();
-        let gutters = gutter_cells(&self.nodes, &placement);
         let mut origins = Vec::with_capacity(regions.len());
         let mut scales = Vec::with_capacity(regions.len());
         for (i, r) in regions.iter_mut().enumerate() {
@@ -1130,7 +1200,7 @@ impl Packing {
             r.height *= scale;
             r.live = tile.is_some();
             r.tile = tile;
-            r.gutter = gutters[i].filter(|_| selected(i));
+            r.gutter = placement[i].gutter.filter(|_| selected(i));
             r.items = sample.weights[i]
                 * (sample.presence[i]
                     * presence
@@ -1148,24 +1218,19 @@ impl Packing {
         Some((regions, origins, scales))
     }
 
-    /// [`tiles`] for this packing, reusing the polygons while presence repeats bit for bit.
-    fn tiles(&self, weights: &[f32], presence: &[f32]) -> Option<Vec<Option<Tile>>> {
-        if self.fresh_tiling {
-            return tiles(&self.nodes, weights, presence, self.space());
-        }
-        self.tiles_in(&mut self.tiling.lock(), weights, presence)
-    }
-
-    /// [`Self::tiles`] against a caller's own kept polygons, for use off the shared ones.
+    /// Reuse the polygons while the tree and presence repeat.
     fn tiles_in(
         &self,
         tiling: &mut Tiling,
+        tree: (usize, &[Node]),
         weights: &[f32],
         presence: &[f32],
     ) -> Option<Vec<Option<Tile>>> {
+        let (tree_tick, nodes) = tree;
         let space = self.space();
         tiling.samples += 1;
-        if tiling.states.len() == self.nodes.len()
+        if tiling.tree_tick == tree_tick
+            && tiling.states.len() == nodes.len()
             && tiling
                 .presence
                 .iter()
@@ -1173,13 +1238,14 @@ impl Packing {
                 .eq(presence.iter().map(|p| p.to_bits()))
         {
             tiling.reuses += 1;
-            reweigh(&self.nodes, 0, weights, presence, &mut tiling.states);
+            reweigh(nodes, 0, weights, presence, &mut tiling.states);
         } else {
+            tiling.tree_tick = tree_tick;
             tiling.presence = presence.iter().map(|p| p.to_bits()).collect();
-            tiling.states = vec![Feasible::default(); self.nodes.len()];
-            feasibility(&self.nodes, 0, weights, presence, space, &mut tiling.states);
+            tiling.states = vec![Feasible::default(); nodes.len()];
+            feasibility(nodes, 0, weights, presence, space, &mut tiling.states);
         }
-        allocated(&self.nodes, weights.len(), &tiling.states)
+        allocated(nodes, weights.len(), &tiling.states)
     }
 
     /// Tiles with every easing repository moved towards full presence by the least
@@ -1187,6 +1253,7 @@ impl Packing {
     /// planned full-presence arrangement does not.
     fn firmer_tiles(
         &self,
+        nodes: &[Node],
         weights: &[f32],
         presence: &[f32],
     ) -> Option<Vec<Option<Tile>>> {
@@ -1195,7 +1262,7 @@ impl Packing {
                 .iter()
                 .map(|&p| if p > 0.0 { p.lerp(1.0, firmness) } else { 0.0 })
                 .collect();
-            tiles(&self.nodes, weights, &firm, self.space())
+            tiles(nodes, weights, &firm, self.space())
         };
         let mut best = at(1.0)?;
         let (mut loose, mut firm) = (0.0_f32, 1.0_f32);
@@ -1283,21 +1350,40 @@ impl Packing {
                     .clamp(0.0, 1.0)
             })
             .collect();
-        let placement = match tiling {
-            Some(tiling) if !self.fresh_tiling => {
-                self.tiles_in(tiling, &weights, &presence)
-            }
-            _ => self.tiles(&weights, &presence),
-        }
-        .or_else(|| self.firmer_tiles(&weights, &presence))
-        .expect("tiles at full presence remain feasible");
+        let reflow = self.reflows
+            [..self.reflows.partition_point(|r| r.tick <= tile_tick)]
+            .last();
+        let layout = reflow
+            .filter(|change| change.matches_presence(&presence))
+            .and_then(|change| change.sample(tile_tick))
+            .unwrap_or_else(|| {
+                let tree = reflow.map_or((0, self.nodes.as_slice()), |c| {
+                    (c.tick, c.nodes.as_slice())
+                });
+                let result = if self.fresh_tiling {
+                    tiles(tree.1, &weights, &presence, self.space())
+                } else if let Some(tiling) = tiling {
+                    self.tiles_in(tiling, tree, &weights, &presence)
+                } else {
+                    self.tiles_in(&mut self.tiling.lock(), tree, &weights, &presence)
+                }
+                .or_else(|| self.firmer_tiles(tree.1, &weights, &presence));
+                if let Some(allocated) = result {
+                    reflow::Layout::new(tree.1, allocated)
+                } else {
+                    let allocated = self
+                        .firmer_tiles(&self.nodes, &weights, &presence)
+                        .expect("tiles at full presence remain feasible");
+                    reflow::Layout::new(&self.nodes, allocated)
+                }
+            });
         self.inputs[tick]
             .iter()
             .enumerate()
             .map(|(i, r)| {
                 let turn = |p: Vec2| if self.rotated[i] { p.perp() } else { p };
                 let shape: Vec<_> = r.outline.iter().copied().map(turn).collect();
-                let tile = placement[i];
+                let tile = layout.tiles[i];
                 // A fixed screen anchor avoids switching between equal-area fit vertices.
                 let fitted = tile.map(|tile| {
                     fit::anchored(tile.usable(), &shape, r.height, Vec2::splat(0.5))
@@ -1313,6 +1399,7 @@ impl Packing {
                 });
                 Placement {
                     tile,
+                    gutter: layout.gutters[i],
                     origin,
                     scale,
                 }
@@ -1390,7 +1477,7 @@ mod tests {
 
     #[test]
     fn tile_areas_follow_item_counts() {
-        let counts = [100.0, 300.0];
+        let counts = [25.0, 75.0];
         let row: Vec<_> = counts
             .iter()
             .enumerate()
@@ -1404,9 +1491,10 @@ mod tests {
         let (regions, _, _) = packing.sample(59).unwrap();
         let areas: Vec<_> = regions.iter().map(|r| r.tile.unwrap().area()).collect();
         let total: f32 = areas.iter().sum();
+        let total_items: f32 = counts.iter().sum();
         for (area, items) in areas.iter().zip(counts) {
-            let share = area / total / (items / 400.0);
-            assert!((0.9..1.1).contains(&share), "{areas:?}");
+            let share = area / total;
+            assert!((share - items / total_items).abs() < 0.001, "{areas:?}");
         }
     }
 
@@ -1712,7 +1800,8 @@ mod tests {
 
     #[test]
     fn archive_presence_scales_clamps_and_returns_the_whole_view_to_a_singleton() {
-        let packing = Packing::before_service(&fixture());
+        let settled = fixture().pop().unwrap();
+        let packing = Packing::before_service(&[settled]);
         for step in 0..=100_u16 {
             let p = f32::from(step) / 100.0;
             let presence: Vec<_> =

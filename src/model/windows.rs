@@ -742,6 +742,14 @@ mod tests {
         events.truncate(12);
         let [(mut reused, fast), (mut replayed, slow)] =
             reused_and_replayed(&(events, labels), 3.0, TravelCap::None);
+        let rounds = |reports: &[Report]| {
+            total(
+                reports,
+                &[Phase::RefineServiceSlots, Phase::Reserve],
+                Counter::Replays,
+            )
+        };
+        assert!(rounds(&fast) <= rounds(&slow));
         for reports in [&fast, &slow] {
             assert!(reports.iter().any(|report| {
                 report.calls(&[Phase::RefineServiceSlots, Phase::Reserve]) > 0
@@ -925,7 +933,8 @@ mod tests {
         let (events, labels) = super::super::tests::short_repository_history(2);
         let options = Options {
             eager_windows: true,
-            travel_window_seconds: Some(0.3),
+            travel_cap: TravelCap::None,
+            travel_window_seconds: Some(0.2),
             ..Options::default()
         };
         let mut sim = Simulation::with_repositories(

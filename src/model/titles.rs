@@ -124,22 +124,12 @@ fn title(
     lettering: f32,
 ) -> Option<Title> {
     let bounds = Rect::from_corners(tile.low * HALF, tile.high * HALF);
-    inset_title(
-        bounds.inflate(-INSET * detail),
-        label,
-        height,
-        corner,
-        lettering,
-    )
-    .or_else(|| {
-        inset_title(
-            bounds.inflate(-EDGE_INSET),
-            label,
-            height,
-            corner,
-            lettering,
-        )
-    })
+    let scale = lettering.max(MIN_SCALE);
+    let width = 8.6 * scale * super::count(label.chars().count()) + 8.01;
+    let room = ((bounds.width() - width) * 0.5)
+        .min((bounds.height() - height * scale - 4.0) * 0.5);
+    let inset = (INSET * detail).min(room.max(EDGE_INSET));
+    inset_title(bounds.inflate(-inset), label, height, corner, lettering)
 }
 
 fn inset_title(
@@ -496,11 +486,34 @@ mod tests {
         };
         let label = "a-long-repository-name";
         let wide = title(tile(0.9), label, 20.0, 0, 1.0, 1.0).unwrap();
-        let narrow = title(tile(0.2), label, 20.0, 0, 1.0, 1.0).unwrap();
+        let narrow_tile = tile(0.14);
+        let narrow = title(narrow_tile, label, 20.0, 0, 1.0, 1.0).unwrap();
         assert_eq!(wide.text, label);
         assert!(narrow.text.ends_with('…'));
         assert_eq!(wide.size.y, narrow.size.y);
-        assert!(narrow.rect().max.x <= tile(0.2).high.x * HALF.x - INSET);
+        assert!(narrow.rect().max.x <= narrow_tile.high.x * HALF.x - EDGE_INSET);
+    }
+
+    #[test]
+    fn edge_inset_preserves_a_title_that_would_otherwise_be_elided() {
+        let tile = crate::layout::packing::Tile {
+            low: Vec2::ZERO,
+            high: Vec2::new(135.0, 150.0) / HALF,
+        };
+        let caption = title(tile, "codestrand", 20.0, 0, 1.0, 1.0).unwrap();
+        assert_eq!(caption.text, "codestrand");
+        assert!(caption.point.x < INSET);
+        let mut previous = caption.point;
+        for width in 136_u16..=170 {
+            let growing = crate::layout::packing::Tile {
+                high: Vec2::new(f32::from(width), 150.0) / HALF,
+                ..tile
+            };
+            let next = title(growing, "codestrand", 20.0, 0, 1.0, 1.0).unwrap();
+            assert_eq!(next.text, "codestrand");
+            assert!(next.point.distance(previous) < 1.0);
+            previous = next.point;
+        }
     }
 
     #[test]

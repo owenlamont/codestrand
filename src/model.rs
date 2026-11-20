@@ -37,6 +37,8 @@ mod time;
 mod titles;
 mod trace;
 mod travel;
+#[cfg(test)]
+pub(crate) use travel::assert_gutter_routes;
 mod windows;
 pub(super) use names::rect as label_rect;
 #[cfg(not(test))]
@@ -1210,7 +1212,11 @@ impl Simulation {
             }
         }
         self.trace.add_ticks(&mut self.tick_times);
-        samples.fade_from(&self.repository_ends, lifecycle::REPOSITORY_EXIT);
+        samples.fade_from(
+            &self.repository_ends,
+            lifecycle::REPOSITORY_EXIT,
+            lifecycle::REFLOW,
+        );
         self.packing = crate::layout::packing::Packing::from_inputs(
             samples,
             self.state.gutter,
