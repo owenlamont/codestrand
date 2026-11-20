@@ -601,7 +601,7 @@ mod tests {
         contributors::Mappings,
         model::{Options, Simulation},
         theme::Theme,
-        timeline::{FileChange, Identity, Kind},
+        timeline::{FileChange, Kind},
     };
 
     fn full_relax(layout: &mut Layout, dt: f32) {
@@ -711,22 +711,13 @@ mod tests {
     }
 
     pub(super) fn event(seconds: i64, changes: &[(&str, Kind)]) -> Event {
-        Event {
+        Event::at(
             seconds,
-            author: Identity {
-                name: b"Ada".to_vec(),
-                email: Vec::new(),
-            },
-            repository: 0,
-            contributor: None,
-            co_authors: Vec::new(),
-            co_contributors: Vec::new(),
-            commit: String::new(),
-            changes: changes
+            changes
                 .iter()
                 .map(|(path, kind)| change((*path).to_owned(), kind.clone()))
                 .collect(),
-        }
+        )
     }
 
     fn burst() -> Vec<Event> {
@@ -1061,13 +1052,13 @@ mod probes {
     };
 
     fn ev(seconds: i64, changes: Vec<(String, Kind)>) -> Event {
-        Event {
-            changes: changes
+        Event::at(
+            seconds,
+            changes
                 .into_iter()
                 .map(|(path, kind)| super::tests::change(path, kind))
                 .collect(),
-            ..super::tests::event(seconds, &[])
-        }
+        )
     }
 
     pub(super) fn assert_separated(sim: &Simulation) {
@@ -1233,33 +1224,20 @@ mod rate_probe {
         contributors::Mappings,
         model::{Options, Simulation},
         theme::Theme,
-        timeline::{FileChange, Identity, Kind},
+        timeline::Kind,
     };
 
     #[test]
     fn probe_rate_change() {
         for factor in [0.25_f32, 4.0] {
-            let ev = |s: i64, paths: Vec<String>| Event {
-                seconds: s,
-                author: Identity {
-                    name: b"Ada".to_vec(),
-                    email: Vec::new(),
-                },
-                repository: 0,
-                contributor: None,
-                co_authors: Vec::new(),
-                co_contributors: Vec::new(),
-                commit: String::new(),
-                changes: paths
-                    .into_iter()
-                    .map(|path| FileChange {
-                        path,
-                        kind: Kind::Added,
-                        insertions: 1,
-                        removals: 0,
-                        samples: Vec::new(),
-                    })
-                    .collect(),
+            let ev = |s: i64, paths: Vec<String>| {
+                Event::at(
+                    s,
+                    paths
+                        .into_iter()
+                        .map(|path| super::tests::change(path, Kind::Added))
+                        .collect(),
+                )
             };
             let mut events =
                 vec![ev(0, (0..30).map(|d| format!("p/d{d}/seed")).collect())];

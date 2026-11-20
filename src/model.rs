@@ -51,8 +51,8 @@ pub(super) const TICK_RATE: u32 = 60;
 pub(super) const PREVIEW_FPS: u16 = 30;
 const LEAD_IN: f32 = 0.5;
 const TAIL: f32 = 2.5;
-// Sixty-second windows beat fifteen on whole mid30 (459 vs 514 s) and the matched
-// all48 prefix (971 vs 1026 s), with first frames at 24/136 s rather than 19/112 s.
+// Sixty-second windows beat fifteen on whole mid30 (459 vs 514 s) and tie thirty within
+// 2% over five paired runs, though thirty reaches the first frame about 2.5 s sooner.
 const WINDOW_SECONDS: f32 = 60.0;
 const PULSE_SECONDS: f32 = 1.3;
 /// Beam crossings per second at the default `--fragment-speed` of 1.
@@ -127,6 +127,7 @@ pub(super) struct Options {
     pub max_idle_seconds: f32,
     pub start: usize,
     pub commits: usize,
+    pub unread: Unread,
     pub travel_cap: TravelCap,
     pub travel_window_seconds: Option<f32>,
     #[cfg(test)]
@@ -145,6 +146,26 @@ pub(super) struct Options {
     pub fragment_speed: f32,
     pub progress: Progress,
     pub trace: Trace,
+}
+
+/// Commits a header scan counted that import never read, so commit numbers and
+/// repository endings describe the whole history rather than the events.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(super) struct Unread {
+    /// Commits before the selection beyond the boundary events that settle them.
+    pub before: usize,
+    /// Commits after the selection, per repository.
+    pub after: Vec<usize>,
+}
+
+impl Unread {
+    fn after(&self, repository: usize) -> usize {
+        self.after.get(repository).copied().unwrap_or(0)
+    }
+
+    fn total(&self) -> usize {
+        self.before + self.after.iter().sum::<usize>()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize)]
@@ -218,6 +239,7 @@ impl Default for Options {
             max_idle_seconds: 1.0,
             start: 0,
             commits: usize::MAX,
+            unread: Unread::default(),
             travel_cap: TravelCap::Seconds(0.4),
             travel_window_seconds: None,
             #[cfg(test)]
@@ -572,6 +594,8 @@ pub(super) struct Simulation {
     pub repository_label_plane: crate::repositories::LabelPlane,
     events: windows::Events,
     offset: usize,
+    /// Commits before `offset` that import never read, counted only in commit numbers.
+    unread_before: usize,
     total: usize,
     schedule: Schedule,
     clock: schedule::Clock,
@@ -1001,7 +1025,7 @@ impl Simulation {
             state.avatars.clear();
             state.authors.clear();
         }
-        let total = events.len();
+        let total = events.len() + options.unread.total();
         let prior_active = prior_activity(&events[..start], repositories.len());
         let (departures, repository_ends) =
             lifecycle::plan(&events, &schedule, options, start..end);
@@ -1025,6 +1049,7 @@ impl Simulation {
             repository_label_plane: crate::repositories::LabelPlane::default(),
             events: events.into(),
             offset: start,
+            unread_before: options.unread.before,
             total,
             clock: schedule::Clock::new(schedule.clone(), schedule.clone()),
             births: Vec::new(),
@@ -1568,7 +1593,7 @@ impl Simulation {
     }
 
     pub(super) fn commit(&self) -> usize {
-        self.offset + self.state.next_event
+        self.unread_before + self.offset + self.state.next_event
     }
 
     pub(super) fn total(&self) -> usize {
@@ -3825,6 +3850,62 @@ mod tests {
         assert_eq!(sim.events.len(), 1);
         assert_eq!(sim.events[0].changes[0].path, path);
         assert_eq!(sim.events[0].author.name, author);
+    }
+
+    #[test]
+    fn unread_commits_keep_whole_history_numbers() {
+        let sim = Simulation::new(
+            timeline::synthetic(),
+            &Options {
+                start: 1,
+                commits: 1,
+                unread: Unread {
+                    before: 5,
+                    after: vec![3],
+                },
+                ..Options::default()
+            },
+            &Theme::neon(),
+            &Mappings::default(),
+        );
+        assert_eq!(sim.commit(), 6);
+        assert_eq!(sim.total(), timeline::synthetic().len() + 8);
+    }
+
+    #[test]
+    fn unread_commits_leave_travel_padding_in_place() {
+        let histories = (0..2)
+            .map(|repository| {
+                let mut events = timeline::synthetic();
+                for event in &mut events {
+                    event.seconds += i64::from(repository == 1) * 86_400;
+                }
+                crate::repositories::namespace(&mut events, repository);
+                events
+            })
+            .collect();
+        let events = crate::repositories::merge(histories);
+        let unpadded = Schedule::new(&events[2..], 0.5, 1.0);
+        let plan = |before| {
+            Simulation::with_repositories(
+                events.clone(),
+                &Options {
+                    start: 2,
+                    unread: Unread {
+                        before,
+                        after: vec![0, 0],
+                    },
+                    ..Options::default()
+                },
+                &Theme::neon(),
+                &Mappings::default(),
+                &["first".into(), "second".into()],
+            )
+        };
+        let (read, unread) = (plan(0), plan(7));
+        assert_ne!(read.scheduled_starts(), unpadded.starts);
+        assert_eq!(read.scheduled_starts(), unread.scheduled_starts());
+        assert_eq!(unread.commit(), read.commit() + 7);
     }
 
     fn assert_clearance(sim: &Simulation) {

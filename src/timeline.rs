@@ -3,7 +3,7 @@ use std::fmt::Write;
 use crate::history::{BlobDiff, ChangeKind, Commit, History};
 
 // Bump when the snapshot format, history import policies or timeline conversion change.
-pub(super) const CACHE_VERSION: u32 = 8;
+pub(super) const CACHE_VERSION: u32 = 10;
 
 /// Co-authors read from one commit; later `Co-authored-by:` trailers are ignored.
 pub(super) const MAX_CO_AUTHORS: usize = 8;
@@ -65,6 +65,33 @@ impl Event {
         &self,
     ) -> impl Iterator<Item = &crate::contributors::Contributor> {
         self.contributor.iter().chain(&self.co_contributors)
+    }
+}
+
+#[cfg(test)]
+impl Identity {
+    pub(super) fn new(name: &str, email: &str) -> Self {
+        Self {
+            name: name.as_bytes().to_vec(),
+            email: email.as_bytes().to_vec(),
+        }
+    }
+}
+
+#[cfg(test)]
+impl Event {
+    /// A commit by Ada with no email, for fixtures where only the time and changes matter.
+    pub(super) fn at(seconds: i64, changes: Vec<FileChange>) -> Self {
+        Self {
+            repository: 0,
+            author: Identity::new("Ada", ""),
+            co_authors: Vec::new(),
+            commit: String::new(),
+            contributor: None,
+            co_contributors: Vec::new(),
+            seconds,
+            changes,
+        }
     }
 }
 

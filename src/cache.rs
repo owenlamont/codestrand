@@ -118,6 +118,8 @@ struct Snapshot {
     tip: String,
     /// Links settled into the boundary event; each repository caches one range.
     skip: usize,
+    /// Links read, oldest first; `None` reads through the tip.
+    end: Option<usize>,
     events: Vec<timeline::Event>,
 }
 
@@ -229,40 +231,45 @@ pub(super) fn load_whole(
     cache_root: Option<&Path>,
 ) -> Result<Vec<timeline::Event>, history::Error> {
     let (repo, tip) = history::resolve(path, revision)?;
-    load_range(&repo, tip, None, cache_root)
+    load_range(&repo, tip, None, None, cache_root)
 }
 
-/// Loads the events from `start`'s link onwards, led by a boundary event when it skips
-/// any; `None` loads the whole history without scanning first.
+/// Loads the events of the links in `range`, led by a boundary event when it skips any;
+/// `None` loads the whole history without scanning first. `end_date` only bounds the
+/// start dates a budget refusal suggests.
 pub(super) fn load_range(
     repo: &gix::Repository,
     tip: gix::ObjectId,
-    start: Option<(&[history::Link], usize)>,
+    range: Option<(&[history::Link], &std::ops::Range<usize>)>,
+    end_date: Option<i64>,
     cache_root: Option<&Path>,
 ) -> Result<Vec<timeline::Event>, history::Error> {
-    let skip = start.map_or(0, |(_, skip)| skip);
+    let skip = range.map_or(0, |(_, range)| range.start);
+    let end =
+        range.and_then(|(links, range)| (range.end < links.len()).then_some(range.end));
     let entry = cache_root
         .filter(|_| repo.objects.store_ref().replacements().next().is_none())
         .and_then(|root| entry_path(root, repo));
     let tip_text = tip.to_string();
     if let Some(events) = entry
         .as_deref()
-        .and_then(|path| read(path, &tip_text, skip))
+        .and_then(|path| read(path, &tip_text, skip, end))
     {
         return Ok(events);
     }
     let scanned;
-    let links = if let Some((links, _)) = start {
-        links
+    let links = if let Some((links, range)) = range {
+        &links[..range.end]
     } else {
         scanned = history::links(repo, tip)?;
         &scanned
     };
-    let history = history::import(repo, tip, links, skip)?;
+    let history = history::import(repo, tip, links, skip, end_date)?;
     let snapshot = Snapshot {
         version: timeline::CACHE_VERSION,
         tip: tip_text,
         skip,
+        end,
         events: timeline::from_history(&history),
     };
     if let Some(path) = entry {
@@ -279,7 +286,12 @@ fn entry_path(root: &Path, repo: &gix::Repository) -> Option<PathBuf> {
     Some(root.join(namespace).join("timeline.json"))
 }
 
-fn read(path: &Path, tip: &str, skip: usize) -> Option<Vec<timeline::Event>> {
+fn read(
+    path: &Path,
+    tip: &str,
+    skip: usize,
+    end: Option<usize>,
+) -> Option<Vec<timeline::Event>> {
     let file = ConfinedFile::at(path, false).ok()?.open().ok()?;
     if file.metadata().ok()?.len() > MAX_SNAPSHOT_BYTES {
         return None;
@@ -293,6 +305,7 @@ fn read(path: &Path, tip: &str, skip: usize) -> Option<Vec<timeline::Event>> {
     }
     let snapshot: Snapshot = serde_json::from_slice(&bytes).ok()?;
     (valid_snapshot(&snapshot, tip, skip)
+        && snapshot.end == end
         && serde_json::to_vec(&snapshot).ok()? == bytes)
         .then_some(snapshot.events)
 }
@@ -360,6 +373,7 @@ mod tests {
                 version: timeline::CACHE_VERSION,
                 tip: git(repo.path(), &["rev-parse", "HEAD"]),
                 skip: 0,
+                end: None,
                 events,
             })
             .unwrap(),
@@ -438,7 +452,10 @@ mod tests {
         change.samples.clear();
         assert!(valid_snapshot(&snapshot, &snapshot.tip, 0));
         store(&path, &snapshot).unwrap();
-        assert_eq!(read(&path, &snapshot.tip, 0).unwrap(), snapshot.events);
+        assert_eq!(
+            read(&path, &snapshot.tip, 0, None).unwrap(),
+            snapshot.events
+        );
     }
 
     #[test]
@@ -635,7 +652,7 @@ mod tests {
             let selected = source.resolve_range(&crate::seconds(&whole)).unwrap();
             let cache = crate::cache::test_directory().unwrap();
             for _ in 0..2 {
-                let (events, range) = source
+                let (events, range, _) = source
                     .events(
                         Some(cache.path()),
                         &repositories,
@@ -661,15 +678,138 @@ mod tests {
         }
     }
 
+    fn preview(fixtures: &[&tempfile::TempDir], dates: &[&str]) -> crate::Source {
+        use clap::Parser;
+
+        let mut args = vec!["codestrand", "preview"];
+        args.extend(dates);
+        for repo in fixtures {
+            args.extend(["--repository", repo.path().to_str().unwrap()]);
+        }
+        let Some(crate::Command::Preview { source, .. }) =
+            crate::Cli::parse_from(args).command
+        else {
+            panic!("preview")
+        };
+        source
+    }
+
+    fn merged_whole(fixtures: &[&tempfile::TempDir]) -> Vec<timeline::Event> {
+        let mut whole: Vec<_> = fixtures
+            .iter()
+            .map(|repo| load(repo.path(), "HEAD", None).unwrap())
+            .collect();
+        if whole.len() > 1 {
+            for (index, events) in whole.iter_mut().enumerate() {
+                crate::repositories::namespace(events, index);
+            }
+        }
+        crate::repositories::merge(whole)
+    }
+
+    fn ends_before(events: &[timeline::Event], repository: usize, end: usize) -> bool {
+        events
+            .iter()
+            .rposition(|event| event.repository == repository)
+            .is_some_and(|last| last < end)
+    }
+
+    /// Imports `source`'s range twice, the second time from the cache, and compares
+    /// commit numbers and repository endings with the whole history's.
+    fn assert_numbered_as_whole(source: &crate::Source, whole: &[timeline::Event]) {
+        let repositories =
+            crate::repositories::inputs(&source.repository, None).unwrap();
+        let selected = source.resolve_range(&crate::seconds(whole)).unwrap();
+        let cache = crate::cache::test_directory().unwrap();
+        for _ in 0..2 {
+            let (events, range, unread) = source
+                .events(
+                    Some(cache.path()),
+                    &repositories,
+                    &crate::progress::Progress::default(),
+                )
+                .unwrap();
+            let after: usize = unread.after.iter().sum();
+            assert_eq!(events[range.clone()], whole[selected.clone()]);
+            assert_eq!(range.start + unread.before, selected.start);
+            assert_eq!(events.len() + unread.before + after, whole.len());
+            assert_eq!(
+                range.end == events.len() && after == 0,
+                selected.end == whole.len()
+            );
+            for (repository, &unread_after) in unread.after.iter().enumerate() {
+                assert_eq!(
+                    unread_after == 0 && ends_before(&events, repository, range.end),
+                    ends_before(whole, repository, selected.end),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn date_ranges_number_and_end_as_the_whole_history_does() {
+        let early = empty_fixture();
+        fs::write(early.path().join("early.txt"), "early\n").unwrap();
+        dated_commit(early.path(), "2026-05-01T00:00:00Z", &["add", "."]);
+        let late = empty_fixture();
+        fs::write(late.path().join("late.txt"), "late\n").unwrap();
+        dated_commit(late.path(), "2026-05-07T00:00:00Z", &["add", "."]);
+        let fixtures = [dated_fixture("one"), dated_fixture("two"), early, late];
+        for chosen in [vec![0], vec![0, 1], vec![0, 2], vec![0, 3]] {
+            let fixtures: Vec<_> =
+                chosen.iter().map(|&index| &fixtures[index]).collect();
+            let whole = merged_whole(&fixtures);
+            for dates in [
+                &["--end-date", "2026-05-04"][..],
+                &["--start-date", "2026-05-03", "--end-date", "2026-05-04"],
+                &["--start-date", "2026-05-02", "--end-date", "2026-05-03"],
+                &["--start-date", "2026-05-03"],
+            ] {
+                assert_numbered_as_whole(&preview(&fixtures, dates), &whole);
+            }
+        }
+    }
+
+    #[test]
+    fn a_cached_range_serves_only_its_own_end() {
+        let repo = dated_fixture("one");
+        let cache = crate::cache::test_directory().unwrap();
+        let ranged = |end| {
+            let source = preview(&[&repo], &["--end-date", end]);
+            let repositories =
+                crate::repositories::inputs(&source.repository, None).unwrap();
+            source
+                .events(
+                    Some(cache.path()),
+                    &repositories,
+                    &crate::progress::Progress::default(),
+                )
+                .map(|(events, ..)| events)
+        };
+        let wider = ranged("2026-05-04").unwrap();
+        remove_object(repo.path(), "HEAD:moved/one.txt");
+        assert_eq!(ranged("2026-05-04").unwrap(), wider);
+        assert!(ranged("2026-05-01").is_err());
+        assert!(load(repo.path(), "HEAD", Some(cache.path())).is_err());
+    }
+
     fn entry(root: &Path, path: &Path) -> PathBuf {
         let (repo, _) = history::resolve(path, "HEAD").expect("fixture resolves");
         entry_path(root, &repo).expect("fixture path is canonical")
     }
 
     fn remove_blob(path: &Path) {
-        let blob = git(path, &["rev-parse", "HEAD:file.txt"]);
-        fs::remove_file(path.join(".git/objects").join(&blob[..2]).join(&blob[2..]))
-            .expect("fixture blob is loose");
+        remove_object(path, "HEAD:file.txt");
+    }
+
+    fn remove_object(path: &Path, revision: &str) {
+        let object = git(path, &["rev-parse", revision]);
+        fs::remove_file(
+            path.join(".git/objects")
+                .join(&object[..2])
+                .join(&object[2..]),
+        )
+        .expect("fixture object is loose");
     }
 
     #[test]
@@ -857,6 +997,7 @@ emails = ["author@example.invalid"]
             version: timeline::CACHE_VERSION,
             tip: history.tip.clone(),
             skip: 0,
+            end: None,
             events: timeline::from_history(&history),
         };
         let after = serde_json::to_vec(&snapshot).unwrap();

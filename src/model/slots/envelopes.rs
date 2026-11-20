@@ -145,18 +145,9 @@ mod tests {
     use super::*;
 
     fn commit(seconds: i64, paths: impl IntoIterator<Item = String>) -> Event {
-        Event {
-            repository: 0,
-            author: crate::timeline::Identity {
-                name: b"Ada".to_vec(),
-                email: b"ada@example.invalid".to_vec(),
-            },
-            co_authors: Vec::new(),
-            co_contributors: Vec::new(),
-            commit: String::new(),
-            contributor: None,
+        Event::at(
             seconds,
-            changes: paths
+            paths
                 .into_iter()
                 .map(|path| crate::timeline::FileChange {
                     path,
@@ -164,7 +155,7 @@ mod tests {
                     ..Default::default()
                 })
                 .collect(),
-        }
+        )
     }
 
     /// Commits a tick apart whose pulses overlap: one beam per file, one file listed

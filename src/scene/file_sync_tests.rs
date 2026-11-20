@@ -1,21 +1,5 @@
 use super::*;
-use crate::timeline::{Event, FileChange, Identity, Kind};
-
-fn event(seconds: i64, changes: Vec<FileChange>) -> Event {
-    Event {
-        repository: 0,
-        author: Identity {
-            name: b"author".to_vec(),
-            email: b"author@example.invalid".to_vec(),
-        },
-        co_authors: Vec::new(),
-        co_contributors: Vec::new(),
-        commit: String::new(),
-        contributor: None,
-        seconds,
-        changes,
-    }
-}
+use crate::timeline::{Event, FileChange, Kind};
 
 fn added(path: &str) -> FileChange {
     FileChange {
@@ -47,7 +31,7 @@ fn fixture(events: Vec<Event>) -> (World, Palette, Pools, Simulation) {
 #[test]
 fn glyph_cache_follows_theme_changes_and_reset() {
     let (mut world, palette, mut pools, mut simulation) =
-        fixture(vec![event(0, vec![added("main.rs")])]);
+        fixture(vec![Event::at(0, vec![added("main.rs")])]);
     let entity = pools.files[&0];
     let mut theme = crate::theme::ThemeName::Phosphor.build();
     theme.glyphs = &[];
@@ -82,8 +66,8 @@ fn glyph_cache_follows_theme_changes_and_reset() {
 #[test]
 fn retention_removes_replaced_file_when_layout_counts_match() {
     let (mut world, palette, mut pools, mut simulation) = fixture(vec![
-        event(0, vec![added("a.rs"), added("b.rs")]),
-        event(
+        Event::at(0, vec![added("a.rs"), added("b.rs")]),
+        Event::at(
             86_400,
             vec![
                 FileChange {
@@ -114,7 +98,7 @@ fn retention_removes_replaced_file_when_layout_counts_match() {
 #[test]
 fn hidden_halo_stays_untouched_and_updates_when_glowing() {
     let (mut world, palette, mut pools, mut simulation) =
-        fixture(vec![event(0, vec![added("main.rs")])]);
+        fixture(vec![Event::at(0, vec![added("main.rs")])]);
     let halo = world.get::<FileVisual>(pools.files[&0]).unwrap().halo;
     simulation.advance_to(600, 30);
     sync_lod(&mut world, &mut pools, &simulation);
@@ -147,7 +131,7 @@ fn hidden_halo_stays_untouched_and_updates_when_glowing() {
 #[test]
 fn unchanged_file_and_structure_transforms_do_not_change() {
     let (mut world, palette, mut pools, simulation) =
-        fixture(vec![event(0, vec![added("src/main.rs")])]);
+        fixture(vec![Event::at(0, vec![added("src/main.rs")])]);
     pools.grid.push(world.spawn(Transform::default()).id());
     pools.lod.glyphs = vec![0];
     pools.lod.glyph[0] = 1.0;

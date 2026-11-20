@@ -655,17 +655,8 @@ mod tests {
         let events = authors
             .iter()
             .map(|(name, email)| Event {
-                author: timeline::Identity {
-                    name: name.as_bytes().to_vec(),
-                    email: email.as_bytes().to_vec(),
-                },
-                repository: 0,
-                contributor: None,
-                co_authors: Vec::new(),
-                co_contributors: Vec::new(),
-                commit: String::new(),
-                seconds: 0,
-                changes: Vec::new(),
+                author: timeline::Identity::new(name, email),
+                ..Event::at(0, Vec::new())
             })
             .collect::<Vec<_>>();
         let mut simulation = Simulation::new(
