@@ -68,7 +68,7 @@ codestrand preview --repository /path/to/first --repository /path/to/second --th
 
 Preview loops until the window closes (Escape). Both date bounds are UTC and inclusive:
 `--end-date` includes the whole named day. A start date opens on the tree of the commit
-before it and reads no earlier diffs. `--seconds-per-day` and `--max-idle-seconds`
+before it; neither bound reads diffs outside the range. `--seconds-per-day` and `--max-idle-seconds`
 set pacing. `codestrand preview --help` lists the themes and every default.
 
 ## Export
