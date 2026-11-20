@@ -1254,7 +1254,7 @@ mod security_tests {
             entries: 1,
             ..Limits::default()
         };
-        let error = format!("{:#}", load_all(&repo, tip, limits).err().unwrap());
+        let error = message(load_all(&repo, tip, limits).err().unwrap());
         assert!(error.contains("changed entries budget reached"), "{error}");
     }
 
