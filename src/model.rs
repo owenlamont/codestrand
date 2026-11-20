@@ -1124,23 +1124,12 @@ impl Simulation {
         pending.clear();
     }
 
-    fn plan_repositories(
-        &mut self,
-        mut active: Vec<bool>,
-        options: &Options,
-    ) -> anyhow::Result<Option<slots::Snapshots>> {
-        let uncapped = options.travel_cap == TravelCap::None;
-        let threads = options.region_threads;
-        #[cfg(test)]
-        tests::LAYOUT_COUNTS
-            .with(|counts| counts.set((counts.get().0, counts.get().1 + 1)));
-        let _phase = self.trace.phase(Phase::PlanRepositories);
-        let mut activation = vec![u32::MAX; active.len()];
-        for (repository, live) in active.iter().enumerate() {
-            if *live {
-                activation[repository] = 0;
-            }
-        }
+    /// The tick each repository's tile first takes part in packing.
+    fn activation_ticks(&self, active: &[bool]) -> Vec<u32> {
+        let mut activation: Vec<u32> = active
+            .iter()
+            .map(|&live| if live { 0 } else { u32::MAX })
+            .collect();
         for (index, event) in self.events.iter().enumerate() {
             let arrival = u32::try_from(self.schedule.starts[index].ticks(false))
                 .expect("bounded service tick");
@@ -1152,6 +1141,21 @@ impl Simulation {
                     .min(arrival),
             );
         }
+        activation
+    }
+
+    fn plan_repositories(
+        &mut self,
+        mut active: Vec<bool>,
+        options: &Options,
+    ) -> anyhow::Result<Option<slots::Snapshots>> {
+        let uncapped = options.travel_cap == TravelCap::None;
+        let threads = options.region_threads;
+        #[cfg(test)]
+        tests::LAYOUT_COUNTS
+            .with(|counts| counts.set((counts.get().0, counts.get().1 + 1)));
+        let _phase = self.trace.phase(Phase::PlanRepositories);
+        let activation = self.activation_ticks(&active);
         let mut snapshots = (!self.windowed)
             .then(|| slots::Snapshots::new(&self.events, self.state.fragment_pace));
         for (_, file) in self.layout().files() {
