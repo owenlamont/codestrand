@@ -45,6 +45,14 @@ impl Events {
             end: self.start + end,
         }
     }
+
+    pub(super) fn range(&self, range: std::ops::Range<usize>) -> Self {
+        Self {
+            rows: self.rows.clone(),
+            start: self.start + range.start,
+            end: self.start + range.end,
+        }
+    }
 }
 impl<'a> IntoIterator for &'a Events {
     type Item = &'a Event;
@@ -131,12 +139,11 @@ fn work(
 impl Stream {
     pub(super) fn start(
         mut seed: Simulation,
-        all: Vec<Event>,
+        all: Events,
         options: Options,
         labels: Vec<String>,
         seconds: f32,
     ) -> anyhow::Result<Simulation> {
-        let all = Events::from(all);
         seed.events = Events {
             rows: all.rows.clone(),
             start: seed.offset,

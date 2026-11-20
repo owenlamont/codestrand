@@ -84,7 +84,7 @@ impl Simulation {
 
     pub(super) fn plan_windows(
         self,
-        all_events: &[crate::timeline::Event],
+        all_events: Events,
         options: &Options,
         repositories: &[String],
         seconds: f32,
@@ -92,7 +92,7 @@ impl Simulation {
         #[cfg(test)]
         if options.eager_windows {
             return self.plan_windows_with_padding(
-                all_events,
+                &all_events,
                 options,
                 repositories,
                 seconds,
@@ -101,7 +101,7 @@ impl Simulation {
         }
         Stream::start(
             self,
-            all_events.to_vec(),
+            all_events,
             options.clone(),
             repositories.to_vec(),
             seconds,

@@ -751,7 +751,7 @@ fn diffed(
     let after = repo.find_tree(link.tree)?;
     let mut changes = Vec::new();
     let mut exhaustion = None;
-    before
+    let walked = before
         .changes()?
         .options(|options| {
             options
@@ -770,10 +770,12 @@ fn diffed(
             }
             changes.extend(records(change).into_iter().flatten());
             Ok(ControlFlow::Continue(()))
-        })?;
+        });
+    // Breaking out of the walk surfaces as gix's `Cancelled`; report the budget instead.
     if let Some(error) = exhaustion {
         return Err(error);
     }
+    walked?;
     resources.clear_resource_cache();
     changes.sort_by(|a, b| {
         (&a.path, &a.source_path, &a.kind).cmp(&(&b.path, &b.source_path, &b.kind))
@@ -1219,6 +1221,41 @@ mod security_tests {
             assert!(error.contains(name), "{error}");
             assert!(error.contains("no later --start-date fits"), "{error}");
         }
+    }
+
+    #[test]
+    fn a_refusal_with_changes_left_to_diff_names_its_budget() {
+        // Tree diffs report modifications as they walk, so a refusal at `a/file`
+        // leaves `b/file` undiffed; additions would wait for rename tracking.
+        let (_root, repo, first) = hostile_history(1, b"first\n");
+        let entry = |kind: gix::objs::tree::EntryKind, name: &str, oid| {
+            gix::objs::tree::Entry {
+                mode: kind.into(),
+                filename: name.into(),
+                oid,
+            }
+        };
+        let blob = repo.write_blob(b"second\n").unwrap().detach();
+        let file = gix::objs::Tree {
+            entries: vec![entry(gix::objs::tree::EntryKind::Blob, "file", blob)],
+        };
+        let file = repo.write_object(&file).unwrap().detach();
+        let tree = gix::objs::Tree {
+            entries: ["a", "b"]
+                .map(|name| entry(gix::objs::tree::EntryKind::Tree, name, file))
+                .into(),
+        };
+        let commit = repo.find_commit(first).unwrap();
+        let mut commit = commit.decode().unwrap().to_owned().unwrap();
+        commit.tree = repo.write_object(&tree).unwrap().detach();
+        commit.parents = [first].into_iter().collect();
+        let tip = repo.write_object(&commit).unwrap().detach();
+        let limits = Limits {
+            entries: 1,
+            ..Limits::default()
+        };
+        let error = message(load_all(&repo, tip, limits).err().unwrap());
+        assert!(error.contains("changed entries budget reached"), "{error}");
     }
 
     #[test]
