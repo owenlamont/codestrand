@@ -9,7 +9,7 @@ mod fit;
 mod held;
 mod zoom;
 
-const BOUND: f32 = 2.5;
+const BOUND: f32 = 4.0;
 pub(crate) const MINIMUM: Vec2 = Vec2::new(144.0, 64.0);
 pub(crate) const BIRTH_TICKS: u32 = 45;
 /// Ticks whose zoom is fitted together; fixed so counts do not depend on the thread count.
@@ -1390,7 +1390,7 @@ mod tests {
 
     #[test]
     fn tile_areas_follow_item_counts() {
-        let counts = [100.0, 300.0];
+        let counts = [18.0, 82.0];
         let row: Vec<_> = counts
             .iter()
             .enumerate()
@@ -1404,9 +1404,10 @@ mod tests {
         let (regions, _, _) = packing.sample(59).unwrap();
         let areas: Vec<_> = regions.iter().map(|r| r.tile.unwrap().area()).collect();
         let total: f32 = areas.iter().sum();
+        let total_items: f32 = counts.iter().sum();
         for (area, items) in areas.iter().zip(counts) {
-            let share = area / total / (items / 400.0);
-            assert!((0.9..1.1).contains(&share), "{areas:?}");
+            let share = area / total;
+            assert!((share - items / total_items).abs() < 0.001, "{areas:?}");
         }
     }
 

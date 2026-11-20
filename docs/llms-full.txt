@@ -554,7 +554,7 @@ their tile. Invisible archived
 content cannot constrain earlier zoom.
 
 A newcomer splits one existing tile or subtree. Other repositories retain their
-relative order. Splits clamp to a ground-aspect range of 1:2.5 to 2.5:1, inclusive,
+relative order. Splits clamp to a ground-aspect range of 1:4 to 4:1, inclusive,
 and a 144-by-64 reference-pixel floor at full detail. Births ease for up to 0.75
 playback seconds before their first commit; births near the lead-in use the available
 lead-in time. Aspect and size clamps scale with presence during the transition.

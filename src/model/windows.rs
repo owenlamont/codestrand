@@ -730,7 +730,7 @@ mod tests {
     #[test]
     fn a_settled_refinement_stops_without_changing_playback() {
         let (mut events, labels) = super::super::tests::short_repository_history(6);
-        events.truncate(12);
+        events.truncate(9);
         let [(mut reused, fast), (mut replayed, slow)] =
             reused_and_replayed(&(events, labels), 3.0, TravelCap::None);
         let rounds = |reports: &[Report]| {
@@ -923,7 +923,8 @@ mod tests {
         let (events, labels) = super::super::tests::short_repository_history(2);
         let options = Options {
             eager_windows: true,
-            travel_window_seconds: Some(0.3),
+            travel_cap: TravelCap::None,
+            travel_window_seconds: Some(0.2),
             ..Options::default()
         };
         let mut sim = Simulation::with_repositories(
