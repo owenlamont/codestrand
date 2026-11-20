@@ -1268,13 +1268,13 @@ mod rate_probe {
                 &Mappings::default(),
             );
             sim.change_rate(factor);
-            let ticks = u32::try_from(sim.duration().ticks(true)).unwrap();
+            let ticks = u32::try_from(sim.end_tick()).unwrap();
             for _ in 0..ticks {
                 sim.tick_layout();
                 super::probes::assert_separated(&sim);
             }
             sim.restart();
-            let ticks = u32::try_from(sim.duration().ticks(true)).unwrap();
+            let ticks = u32::try_from(sim.end_tick()).unwrap();
             for _ in 0..ticks {
                 sim.tick_layout();
                 super::probes::assert_separated(&sim);

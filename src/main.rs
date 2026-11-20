@@ -862,7 +862,7 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
             serde_json::to_writer(
                 &mut writer,
                 &serde_json::json!({
-                    "schema": 1, "source": source,
+                    "schema": 2, "source": source,
                     "history_events": simulation.total(),
                     "duration_seconds": simulation.duration().lossy_secs_f32(), "tick_rate": model::TICK_RATE,
                 }),

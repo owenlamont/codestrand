@@ -923,7 +923,7 @@ mod tests {
         let (events, labels) = super::super::tests::short_repository_history(2);
         let options = Options {
             eager_windows: true,
-            travel_window_seconds: Some(0.25),
+            travel_window_seconds: Some(0.3),
             ..Options::default()
         };
         let mut sim = Simulation::with_repositories(

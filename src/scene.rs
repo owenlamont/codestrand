@@ -1033,9 +1033,11 @@ fn preview_clock(
         *pending = Some(next);
         return;
     }
-    let duration = world.resource::<Playback>().0.duration();
-    let fps = world.resource::<Frame>().fps;
-    let frames = model::frames_for(duration, fps).unwrap_or(u32::MAX);
+    let frames = world
+        .resource::<Playback>()
+        .0
+        .frames(fps)
+        .unwrap_or(u32::MAX);
     let period_nanos = (u128::from(frames) * 1_000_000_000).div_ceil(u128::from(fps));
     if world.resource::<Playback>().0.planning_complete()
         && next.as_nanos() >= period_nanos
@@ -3596,9 +3598,9 @@ mod tests {
             .0
             .prepare_frame(u32::MAX, 60, true)
             .unwrap();
-        let duration = world.resource::<Playback>().0.duration();
-        assert!(duration > first_duration);
-        let last = model::frames_for(duration, 60).unwrap() - 1;
+        let playback = &world.resource::<Playback>().0;
+        assert!(playback.duration() > first_duration);
+        let last = playback.frames(60).unwrap() - 1;
         world
             .resource_mut::<Time<Real>>()
             .update_with_duration(Duration::from_nanos(
