@@ -464,10 +464,10 @@ mod tests {
         assert!(trips[0].route.duration + ticks_duration(70) > ticks_duration(90));
         let plan = Plan {
             trips,
-            docks: Vec::new(),
+            docks: std::collections::BTreeMap::new(),
             replanning: false,
             frozen: 0,
-            occupancy: Vec::new(),
+            occupancy: std::collections::BTreeMap::new(),
             stats: Statistics::default(),
         };
         assert!(plan.sample(0, 69).is_none());
@@ -486,10 +486,10 @@ mod tests {
         let (trips, _) = trips(&capture, 480.0, crate::model::BotTravel::Walk, true);
         let plan = Plan {
             trips,
-            docks: Vec::new(),
+            docks: std::collections::BTreeMap::new(),
             replanning: false,
             frozen: 0,
-            occupancy: Vec::new(),
+            occupancy: std::collections::BTreeMap::new(),
             stats: Statistics::default(),
         };
         assert!(!plan.travelling(0, 90));
@@ -501,10 +501,10 @@ mod tests {
         let (trips, _) = trips(&capture, 480.0, crate::model::BotTravel::Walk, true);
         let expected = Plan {
             trips,
-            docks: Vec::new(),
+            docks: std::collections::BTreeMap::new(),
             replanning: false,
             frozen: 0,
-            occupancy: Vec::new(),
+            occupancy: std::collections::BTreeMap::new(),
             stats: Statistics::default(),
         }
         .report();
@@ -517,10 +517,10 @@ mod tests {
             expected,
             Plan {
                 trips,
-                docks: Vec::new(),
+                docks: std::collections::BTreeMap::new(),
                 replanning: false,
                 frozen: 0,
-                occupancy: Vec::new(),
+                occupancy: std::collections::BTreeMap::new(),
                 stats: Statistics::default()
             }
             .report()
@@ -536,10 +536,10 @@ mod tests {
         assert_eq!(trips[0].departure, 13);
         let plan = Plan {
             trips,
-            docks: Vec::new(),
+            docks: std::collections::BTreeMap::new(),
             replanning: false,
             frozen: 0,
-            occupancy: Vec::new(),
+            occupancy: std::collections::BTreeMap::new(),
             stats: Statistics::default(),
         };
         assert!(!plan.travelling(0, 11));

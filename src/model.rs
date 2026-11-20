@@ -67,6 +67,13 @@ const MIN_AVATAR_HEIGHT: f32 = 3.2;
 
 const AVATAR_IDLE: f32 = 5.0;
 const ARRIVAL_SCALE: f32 = 1.15;
+/// Seconds a disbanding group's ring, and the co-authors leaving with it, take to fade.
+const DISBAND: f32 = 0.4;
+/// Seconds an avatar takes to walk a short step to a new seat.
+const SETTLE_SECONDS: f32 = 0.4;
+/// Reference pixels a seat may move in one tick before it counts as a new seat: seats
+/// drift by far less as avatars rescale, and a reseat moves by about a member's width.
+const SEAT_DRIFT: f32 = 1.0;
 const BEAM_LIMIT: usize = 24;
 const FRAGMENT_TARGETS: usize = 24;
 const SETTLE_TICKS: u32 = 1200;
@@ -376,6 +383,74 @@ pub(super) struct Avatar {
     commit: usize,
     slot: Option<slots::Placement>,
     slot_origin: Option<(usize, slots::Dock, Vec2)>,
+    group: Option<Group>,
+    /// Left behind by a disbanding group with no later commit, so fading with its ring.
+    dismissed: bool,
+    /// How visible this author's group ring is, fading in and out over [`DISBAND`].
+    ring_presence: f32,
+    /// Seats the ring held when last shown, so a disbanding ring keeps its size.
+    ring_capacity: u8,
+    /// A short walk from a position to the avatar's place, and when it began.
+    settle: Option<(Vec3, Time)>,
+    /// How far through its settle the avatar is, from 0 to 1.
+    settled: f32,
+    /// Where the name stood when a walk to a seat began; it fades out there over the
+    /// walk's first half while the name at the seat fades in over the second.
+    leaving_name: Option<Vec2>,
+    /// The seat offset last parked at, whose change starts a settle.
+    seat: Vec2,
+    travelling: bool,
+}
+
+impl Avatar {
+    /// Moves to `target`, or along a travel route; a short step to a new seat or off the
+    /// end of a route is walked over [`SETTLE_SECONDS`] rather than jumped.
+    fn walk(&mut self, target: Vec3, route: Option<Vec3>, now: Time, reach: f32) {
+        let offset = self.slot.as_ref().map_or(Vec2::ZERO, |s| s.offset);
+        if let Some(point) = route {
+            self.position = point;
+            self.settle = None;
+            self.settled = 1.0;
+            self.leaving_name = None;
+            self.travelling = true;
+        } else {
+            let distance = self.position.distance(target);
+            let seated = self.travelling && offset != Vec2::ZERO
+                || offset.distance(self.seat) > SEAT_DRIFT;
+            // A new seat chooses its name afresh, at the ring point nearest it, rather than
+            // holding the place it had before.
+            let before = seated
+                .then(|| self.name_visibility.placement.take())
+                .flatten();
+            if seated && self.presence > 0.0 && distance > 1e-4 && distance < reach {
+                self.settle = Some((self.position, now));
+                self.leaving_name = before.map(|name| name.point);
+            }
+            self.position = match self.settle {
+                Some((from, begun)) if now - begun < SETTLE_SECONDS => {
+                    let t = (now - begun) / SETTLE_SECONDS;
+                    self.settled = t;
+                    from.lerp(target, t * t * (3.0 - 2.0 * t))
+                }
+                _ => {
+                    self.settle = None;
+                    self.settled = 1.0;
+                    self.leaving_name = None;
+                    target
+                }
+            };
+            self.travelling = false;
+        }
+        self.seat = offset;
+    }
+}
+
+/// The author whose group an avatar parks in, and its seat there; an author sits in
+/// seat 0 of its own group.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct Group {
+    pub lead: usize,
+    pub seat: u8,
 }
 
 impl Avatar {
@@ -473,6 +548,8 @@ struct State {
     fragment_pace: FragmentPace,
     slot_records: BTreeMap<usize, slots::Record>,
     titles: BTreeMap<usize, titles::Title>,
+    /// Seats in each avatar's group as last placed, 1 for an avatar alone.
+    capacities: Vec<u8>,
 }
 
 #[derive(Clone)]
@@ -501,7 +578,10 @@ impl std::fmt::Debug for SharedState {
 #[derive(Clone)]
 pub(super) struct Simulation {
     file_ids: HashMap<String, FileIdentity>,
-    first_arrivals: Vec<bool>,
+    first_arrivals: Vec<u16>,
+    /// Per selected event, the participants taking part in no later event, as bits by
+    /// rank.
+    finals: Vec<u16>,
     departures: Vec<Time>,
     repository_ends: Vec<Time>,
     pub caption_style: caption::Style,
@@ -965,9 +1045,12 @@ impl Simulation {
         let (departures, repository_ends) =
             lifecycle::plan(events, &schedule, options, start..end);
         let first_arrivals = lifecycle::arrivals(events, start..end);
+        let finals =
+            lifecycle::finals(&events[start..end], &schedule.starts, &departures);
         let mut simulation = Self {
             file_ids: file_identities(&state),
             first_arrivals,
+            finals,
             departures,
             repository_ends,
             caption_style: caption::Style::default(),
@@ -1182,22 +1265,20 @@ impl Simulation {
         let Some(avatar) = self.state.avatars.get(file.author) else {
             return to;
         };
-        let endpoint = self
-            .state
-            .pulses
-            .iter()
-            .rev()
-            .find(|pulse| {
-                pulse.author == file.author && pulse.touched.binary_search(&id).is_ok()
-            })
+        let pulse = self.state.pulses.iter().rev().find(|pulse| {
+            pulse.author == file.author && pulse.touched.binary_search(&id).is_ok()
+        });
+        let endpoint = pulse
             .filter(|pulse| pulse.aggregated)
             .and_then(|pulse| pulse.directory_target(file.dir, self.layout()))
             .and_then(|target| self.state.point(target));
+        let from = if pulse.is_some() {
+            self.state.beam_start(file.author, endpoint.unwrap_or(to))
+        } else {
+            avatar.position
+        };
         let Some(endpoint) = endpoint else {
-            return self
-                .theme
-                .beam_style
-                .point(avatar.position, to, file.presence);
+            return self.theme.beam_style.point(from, to, file.presence);
         };
         let flight = (file.presence / AGGREGATED_ARRIVAL_FLIGHT).min(1.0);
         let settle = ((file.presence - AGGREGATED_ARRIVAL_FLIGHT)
@@ -1205,7 +1286,7 @@ impl Simulation {
             .max(0.0);
         self.theme
             .beam_style
-            .point(avatar.position, endpoint, flight)
+            .point(from, endpoint, flight)
             .lerp(to, settle)
     }
 
@@ -1300,14 +1381,25 @@ impl Simulation {
             let Some(start) = self.schedule.start(state.next_event, canonical) else {
                 break;
             };
+            let behind = state.left_behind(event);
             state.begin(event, start, &mut self.file_ids);
-            if let Some(&author) = event
-                .contributor
-                .as_ref()
-                .and_then(|c| state.authors.get(&c.key))
-            {
+            for member in behind {
+                let commit = state.avatars[member].commit;
+                let key = &state.avatars[member].key;
+                let rank = self.events[commit]
+                    .participants()
+                    .position(|c| &c.key == key);
+                if rank.is_some_and(|rank| self.finals[commit] & (1 << rank) != 0) {
+                    state.avatars[member].expires = start;
+                    state.avatars[member].dismissed = true;
+                }
+            }
+            for (rank, contributor) in event.participants().enumerate() {
+                let Some(&author) = state.authors.get(&contributor.key) else {
+                    continue;
+                };
                 state.avatars[author].expires = self.departures[state.next_event];
-                if !self.first_arrivals[state.next_event]
+                if self.first_arrivals[state.next_event] & (1 << rank) == 0
                     && state.avatars[author].arrived >= start
                 {
                     state.avatars[author].arrived = Time::NEG_INFINITY;
@@ -1340,7 +1432,7 @@ impl Simulation {
         let state = &mut *self.state;
         let now = tick_time(state.tick);
         if self.windowed {
-            for avatar in &mut state.avatars {
+            for avatar in state.avatars.iter_mut().filter(|a| !a.dismissed) {
                 let expires = self.departures[avatar.commit];
                 avatar.expires = if expires - now > windows::MARGIN {
                     Time::INFINITY
@@ -1365,15 +1457,34 @@ impl Simulation {
             .iter()
             .map(|a| a.slot.as_ref().map_or(a.position, slots::Placement::world))
             .collect();
+        let capacities: Vec<_> = (0..state.avatars.len())
+            .map(|index| state.capacity(index))
+            .collect();
+        let reach = state.settle_reach();
         for (index, (avatar, target)) in
             state.avatars.iter_mut().zip(targets).enumerate()
         {
             let travel = self.travel.sample(index, state.tick);
             avatar.activity *= (-dt / 3.0).exp();
-            avatar.position = target;
-            if let Some((point, _)) = travel {
-                avatar.position = slots::world(point);
-            }
+            avatar.walk(
+                target,
+                travel.map(|(point, _)| slots::world(point)),
+                now,
+                reach,
+            );
+            let leads = avatar.group.is_some_and(|g| g.lead == index);
+            let ring = if leads && !avatar.travelling {
+                avatar.ring_capacity = avatar.ring_capacity.max(capacities[index]);
+                if capacities[index] > 1 {
+                    avatar.ring_capacity = capacities[index];
+                    dt / DISBAND
+                } else {
+                    -dt / DISBAND
+                }
+            } else {
+                -dt / DISBAND
+            };
+            avatar.ring_presence = (avatar.ring_presence + ring).clamp(0.0, 1.0);
             avatar.projection_scale = slots::projection_scale(avatar.position);
             let service_visible = now < avatar.expires;
             let service_fade = if service_visible { dt / 0.4 } else { -dt / 1.2 };
@@ -1381,6 +1492,8 @@ impl Simulation {
                 (avatar.slot_presence + service_fade).clamp(0.0, 1.0);
             let fade = if service_visible {
                 dt / 0.4
+            } else if avatar.dismissed {
+                -dt / DISBAND
             } else {
                 -dt / lifecycle::EXIT
             };
@@ -1485,6 +1598,10 @@ impl Simulation {
         self.state.avatar_scale
     }
 
+    pub(super) fn member_scales(&self) -> Vec<f32> {
+        self.state.member_scales()
+    }
+
     pub(super) fn avatar_disc_scale(&self) -> f32 {
         self.state.avatar_scale * self.state.avatar_size * self.state.detail
     }
@@ -1539,9 +1656,9 @@ impl Simulation {
             if envelope <= 0.0 {
                 continue;
             }
-            let from = self.state.avatars[pulse.author].position;
             for &(target, weight, ..) in &pulse.targets {
                 if let Some(to) = self.state.point(target) {
+                    let from = self.state.beam_start(pulse.author, to);
                     beams.push(Beam {
                         author: pulse.author,
                         from,
@@ -1552,6 +1669,16 @@ impl Simulation {
             }
         }
         beams
+    }
+
+    /// Each visible group ring: its author, its centre and its world radius.
+    pub(super) fn groups(&self) -> Vec<(usize, Vec3, f32)> {
+        (0..self.state.avatars.len())
+            .filter_map(|lead| {
+                let (centre, rim) = self.state.visible_ring(lead)?;
+                Some((lead, centre, rim))
+            })
+            .collect()
     }
 
     fn pulse_beams_visible(&self, pulse: &Pulse) -> bool {
@@ -1581,13 +1708,13 @@ impl Simulation {
             if envelope <= 0.0 {
                 continue;
             }
-            let from = self.state.avatars[pulse.author].position;
             for &(target, _, insertions, removals) in
                 pulse.targets.iter().take(FRAGMENT_TARGETS)
             {
                 let Some(to) = self.state.point(target) else {
                     continue;
                 };
+                let from = self.state.beam_start(pulse.author, to);
                 let sample_detail = match target {
                     Target::File(id) => {
                         self.layout().file(id).map_or(0.0, |file| detail(file.dir))
@@ -1850,18 +1977,13 @@ impl State {
             fragment_pace: options.fragment_pace(),
             slot_records: BTreeMap::new(),
             titles: BTreeMap::new(),
+            capacities: Vec::new(),
         }
     }
 
     fn apply_history(&mut self, events: &[Event]) {
         for event in events {
-            let author = self.author(
-                event
-                    .contributor
-                    .as_ref()
-                    .expect("contributors are resolved"),
-                Time::ZERO,
-            );
+            let author = self.participants(event, Time::ZERO)[0];
             for change in &event.changes {
                 apply(&mut self.layout, change, author);
             }
@@ -1898,24 +2020,39 @@ impl State {
             commit: 0,
             slot: None,
             slot_origin: None,
+            group: None,
+            dismissed: false,
+            ring_presence: 0.0,
+            ring_capacity: 1,
+            settle: None,
+            settled: 1.0,
+            leaving_name: None,
+            seat: Vec2::ZERO,
+            travelling: false,
         });
         self.authors.insert(contributor.key.clone(), index);
         index
     }
 
+    /// Avatar indices of the event's author, then its co-authors.
+    fn participants(&mut self, event: &Event, now: Time) -> Vec<usize> {
+        assert!(event.contributor.is_some(), "contributors are resolved");
+        event
+            .participants()
+            .map(|contributor| self.author(contributor, now))
+            .collect()
+    }
+
+    /// Applies the event's changes for its author and gathers every participant into
+    /// one group, whose single pulse belongs to the author.
     fn begin(
         &mut self,
         event: &Event,
         start: Time,
         file_ids: &mut HashMap<String, FileIdentity>,
     ) {
-        let author = self.author(
-            event
-                .contributor
-                .as_ref()
-                .expect("contributors are resolved"),
-            start,
-        );
+        let participants = self.participants(event, start);
+        let author = participants[0];
         let mut touched = BTreeMap::new();
         let mut samples = Vec::new();
         for change in &event.changes {
@@ -1950,40 +2087,45 @@ impl State {
             .iter()
             .filter_map(|&(target, ..)| self.destination(target))
             .fold((Vec2::ZERO, 0.0), |(sum, n), point| (sum + point, n + 1.0));
-
-        let avatar = &mut self.avatars[author];
-        if avatar.repository != event.repository {
-            avatar.slot_origin = avatar
-                .slot
-                .take()
-                .map(|s| (avatar.repository, s.dock, s.point));
-        }
-        avatar.repository = event.repository;
-        avatar.commit = self.next_event;
-        avatar.touched = touched.into_keys().collect();
-        if centroid.1 > 0.0 {
-            avatar.target = ground(centroid.0 / centroid.1);
-        }
-        if avatar.presence <= 0.0 {
-            avatar.position = avatar.target + Vec3::Y * MIN_AVATAR_HEIGHT;
-        }
-        avatar.last_active = start;
-        avatar.activity = (avatar.activity + 1.0).min(1000.0);
+        let touched: Vec<u64> = touched.into_keys().collect();
+        let seats = self.seats(&participants, event.repository);
         let flight = self.fragment_pace.flight();
-        let previous = self.pulses.iter().rposition(|pulse| pulse.author == author);
-        let mut index = 0;
-        self.pulses.retain_mut(|pulse| {
-            let keep = pulse.author != author || Some(index) == previous;
-            if pulse.author == author {
-                pulse.end = pulse.end.min(start + flight + 0.3);
+        for (&member, seat) in participants.iter().zip(seats) {
+            let avatar = &mut self.avatars[member];
+            if avatar.repository != event.repository {
+                avatar.slot_origin = avatar
+                    .slot
+                    .take()
+                    .map(|s| (avatar.repository, s.dock, s.point));
             }
-            index += 1;
-            keep
-        });
+            avatar.repository = event.repository;
+            avatar.commit = self.next_event;
+            avatar.touched.clone_from(&touched);
+            if centroid.1 > 0.0 {
+                avatar.target = ground(centroid.0 / centroid.1);
+            }
+            if avatar.presence <= 0.0 {
+                avatar.position = avatar.target + Vec3::Y * MIN_AVATAR_HEIGHT;
+            }
+            avatar.last_active = start;
+            avatar.activity = (avatar.activity + 1.0).min(1000.0);
+            avatar.group = Some(Group { lead: author, seat });
+            avatar.dismissed = false;
+            let previous = self.pulses.iter().rposition(|pulse| pulse.author == member);
+            let mut index = 0;
+            self.pulses.retain_mut(|pulse| {
+                let keep = pulse.author != member || Some(index) == previous;
+                if pulse.author == member {
+                    pulse.end = pulse.end.min(start + flight + 0.3);
+                }
+                index += 1;
+                keep
+            });
+        }
         self.pulses.push_back(Pulse {
             commit: self.next_event,
             repository: event.repository,
-            touched: self.avatars[author].touched.clone(),
+            touched,
             start,
             end: self.fragment_pace.pulse_end(start),
             author,
@@ -1991,6 +2133,65 @@ impl State {
             aggregated,
             samples,
         });
+        self.capacities = self.compute_capacities();
+    }
+
+    /// Seats for an event's participants in its author's group, after the members who
+    /// cannot stay leave: those of a participant other than the author, those of the
+    /// author no longer in its group or outside `repository`, and, when the group would
+    /// outgrow its seats, every member not taking part. Seat 0 is the author's; a
+    /// co-author already in the group keeps its seat and a newcomer takes the lowest
+    /// free seat.
+    fn seats(&mut self, participants: &[usize], repository: usize) -> Vec<u8> {
+        let author = participants[0];
+        let mut stay = Vec::new();
+        for index in 0..self.avatars.len() {
+            let Some(group) = self.avatars[index].group else {
+                continue;
+            };
+            if group.lead == index
+                || participants.contains(&index)
+                || !participants.contains(&group.lead)
+            {
+                continue;
+            }
+            if group.lead == author
+                && self.in_party(index, author)
+                && self.avatars[index].repository == repository
+            {
+                stay.push(index);
+            } else {
+                self.avatars[index].group = None;
+            }
+        }
+        if stay.len() + participants.len() > crate::timeline::MAX_CO_AUTHORS + 1 {
+            for index in stay.drain(..) {
+                self.avatars[index].group = None;
+            }
+        }
+        let kept = |state: &Self, member: usize| {
+            state
+                .in_party(member, author)
+                .then(|| state.avatars[member].group.map(|g| g.seat))
+                .flatten()
+        };
+        let mut taken: Vec<u8> = stay
+            .iter()
+            .chain(&participants[1..])
+            .filter_map(|&member| kept(self, member))
+            .chain(std::iter::once(0))
+            .collect();
+        std::iter::once(0)
+            .chain(participants[1..].iter().map(|&member| {
+                kept(self, member).unwrap_or_else(|| {
+                    let seat = (1..=u8::MAX)
+                        .find(|seat| !taken.contains(seat))
+                        .expect("groups hold at most 9 members");
+                    taken.push(seat);
+                    seat
+                })
+            }))
+            .collect()
     }
 
     fn aggregate(
@@ -2039,6 +2240,108 @@ impl State {
             Target::File(id) => self.layout.target(id),
             Target::Dir(index) => Some(self.layout.dir(index).position),
         }
+    }
+
+    /// The ring an avatar sits in now, as its world centre and radius, while its group
+    /// has two or more seats.
+    fn ring_of(&self, index: usize) -> Option<(Vec3, f32)> {
+        let lead = self.avatars[index]
+            .group
+            .map(|g| g.lead)
+            .filter(|&lead| self.in_party(index, lead))
+            .unwrap_or(index);
+        let capacity = self.capacity(lead);
+        let author = &self.avatars[lead];
+        let slot = author.slot.as_ref().filter(|_| capacity > 1)?;
+        let radius = self.avatar_radius();
+        let centre = slot.ring_centre(capacity, radius);
+        let edge = centre + Vec2::X * slots::group_radius(capacity, radius);
+        Some((
+            slots::world(centre),
+            slots::world(edge).distance(slots::world(centre)),
+        ))
+    }
+
+    /// The ring an author draws, as its world centre and radius: it grows out of the
+    /// author while forming and shrinks back into it while fading.
+    fn visible_ring(&self, lead: usize) -> Option<(Vec3, f32)> {
+        let author = &self.avatars[lead];
+        let shown = author.ring_presence * author.presence;
+        let slot = author.slot.as_ref().filter(|_| shown > 0.0)?;
+        let radius = self.avatar_radius();
+        let centre = slot.ring_centre(author.ring_capacity, radius);
+        let edge = centre + Vec2::X * slots::group_radius(author.ring_capacity, radius);
+        let rim = slots::world(edge).distance(slots::world(centre));
+        let centre = author
+            .position
+            .lerp(slots::world(centre), author.ring_presence);
+        Some((centre, rim * shown))
+    }
+
+    /// The visible ring an avatar's beams leave from: its group's, or its own.
+    fn beam_ring(&self, index: usize) -> Option<(Vec3, f32)> {
+        let lead = self.avatars[index]
+            .group
+            .map(|g| g.lead)
+            .filter(|&lead| self.in_party(index, lead))
+            .unwrap_or(index);
+        self.visible_ring(lead)
+    }
+
+    /// Where an avatar's beam towards `to` starts: the point of its visible ring nearest
+    /// `to` as seen from the camera, or the avatar itself outside a ring.
+    fn beam_start(&self, author: usize, to: Vec3) -> Vec3 {
+        let Some((centre, rim)) = self.beam_ring(author) else {
+            return self.avatars[author].position;
+        };
+        let view = view_direction();
+        let across = to - centre;
+        centre + (across - view * across.dot(view)).normalize_or_zero() * rim
+    }
+
+    /// Seats in an author's group, 1 for an author alone.
+    fn capacity(&self, lead: usize) -> u8 {
+        self.capacities.get(lead).copied().unwrap_or(1)
+    }
+
+    /// Members of the event author's group who take no part in the event.
+    fn left_behind(&self, event: &Event) -> Vec<usize> {
+        let Some(&author) = event
+            .contributor
+            .as_ref()
+            .and_then(|contributor| self.authors.get(&contributor.key))
+        else {
+            return Vec::new();
+        };
+        (0..self.avatars.len())
+            .filter(|&i| {
+                i != author
+                    && self.in_party(i, author)
+                    && event.participants().all(|c| c.key != self.avatars[i].key)
+            })
+            .collect()
+    }
+
+    /// World distance within which an avatar walks to a new seat rather than jumping.
+    fn settle_reach(&self) -> f32 {
+        let span = Vec2::X * 4.0 * self.avatar_radius();
+        slots::world(span).distance(slots::world(Vec2::ZERO))
+    }
+
+    /// Display scale of each avatar: smaller while packed into a group or fading with one.
+    pub(super) fn member_scales(&self) -> Vec<f32> {
+        (0..self.avatars.len())
+            .map(|index| {
+                let lead = self.avatars[index].group.map_or(index, |g| g.lead);
+                if self.avatars[index].dismissed
+                    || self.capacity(lead) > 1 && self.in_party(index, lead)
+                {
+                    slots::MEMBER_SCALE
+                } else {
+                    1.0
+                }
+            })
+            .collect()
     }
 
     fn point(&self, target: Target) -> Option<Vec3> {
@@ -2674,6 +2977,40 @@ mod tests {
                 .zip(positions)
                 .all(|(line, old)| line.position != old)
         );
+    }
+
+    #[test]
+    fn a_co_authored_commit_shows_its_text_and_labels_once() {
+        let mut events = crate::timeline::synthetic();
+        events.truncate(1);
+        events[0].changes[0].samples = vec![crate::diff_samples::Sample {
+            added: true,
+            text: "let sample = 1;".to_owned(),
+        }];
+        events[0].co_authors = vec![timeline::Identity {
+            name: b"Pair".to_vec(),
+            email: b"pair@example.invalid".to_vec(),
+        }];
+        let mut sim = super::Simulation::new(
+            events,
+            &super::Options::default(),
+            &crate::theme::Theme::neon(),
+            &crate::contributors::Mappings::default(),
+        );
+        sim.advance_to(45, 60);
+        assert_eq!(sim.diff_lines().len(), 1);
+        assert!(sim.fragments().iter().any(|fragment| {
+            fragment.sample.is_some() && fragment.beam.is_some_and(|(a, _)| a == 0)
+        }));
+        let mut activity: Vec<_> = sim
+            .labels()
+            .into_iter()
+            .filter(|label| label.kind == LabelKind::Activity)
+            .map(|label| label.text)
+            .collect();
+        let labelled = activity.len();
+        activity.dedup();
+        assert_eq!((labelled, activity.len()), (3, 3));
     }
 
     #[test]
@@ -3508,6 +3845,8 @@ mod tests {
                 },
                 repository: 0,
                 contributor: None,
+                co_authors: Vec::new(),
+                co_contributors: Vec::new(),
                 commit: String::new(),
                 seconds: 0,
                 changes: vec![timeline::FileChange {

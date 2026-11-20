@@ -1,3 +1,5 @@
+use std::collections::{BTreeMap, BTreeSet};
+
 use super::{HALF, Rect, Vec2};
 use crate::model::{
     Simulation, titles,
@@ -20,42 +22,35 @@ fn merge(row: &mut Vec<(u8, Rect)>, edge: u8, mut rect: Rect) {
     }
     row.push((edge, rect));
 }
+type Reservations = BTreeMap<(usize, usize), Vec<(u8, Rect)>>;
+
+/// Extends each conflicted service's reservation back over the same avatar's
+/// services in that repository during the preceding eight seconds.
 fn anticipate_service_reservations(
     events: &[crate::timeline::Event],
     starts: &[crate::model::Time],
-    occupied: &mut [Vec<(u8, Rect)>],
-    conflicted: &mut [bool],
+    keys: &[crate::contributors::Key],
+    occupied: &mut Reservations,
+    conflicted: &mut BTreeSet<(usize, usize)>,
 ) {
-    let observed = conflicted.to_vec();
-    for (commit, conflict) in observed.into_iter().enumerate() {
-        if !conflict {
-            continue;
-        }
-        let future = occupied[commit].clone();
-        let author = events[commit]
-            .contributor
-            .as_ref()
-            .expect("resolved contributor");
+    let observed: Vec<_> = conflicted.iter().copied().collect();
+    for (commit, avatar) in observed {
+        let future = occupied.get(&(commit, avatar)).cloned().unwrap_or_default();
         for prior in (0..commit).rev() {
             if starts[commit] - starts[prior] > 8.0 {
                 break;
             }
             let event = &events[prior];
-            if event
-                .contributor
-                .as_ref()
-                .expect("resolved contributor")
-                .key
-                != author.key
-            {
+            if event.participants().all(|c| c.key != keys[avatar]) {
                 continue;
             }
             if event.repository != events[commit].repository {
                 break;
             }
-            conflicted[prior] = true;
+            conflicted.insert((prior, avatar));
+            let row = occupied.entry((prior, avatar)).or_default();
             for &(edge, rect) in &future {
-                merge(&mut occupied[prior], edge, rect);
+                merge(row, edge, rect);
             }
         }
     }
@@ -64,8 +59,8 @@ fn anticipate_service_reservations(
 impl Simulation {
     fn reserve_frame(
         &self,
-        occupied: &mut [Vec<(u8, Rect)>],
-        conflicted: &mut [bool],
+        occupied: &mut Reservations,
+        conflicted: &mut BTreeSet<(usize, usize)>,
     ) -> (usize, usize) {
         let mut conflicts = 0;
         let mut pairs = 0;
@@ -96,8 +91,14 @@ impl Simulation {
             let low = tile.low * HALF;
             let span = (tile.high - tile.low) * HALF;
             pairs += live.len() - 1;
+            // A group parks around its author's dock, so its author makes room for it.
+            let owner = avatar
+                .group
+                .map(|group| group.lead)
+                .filter(|&lead| state.in_party(i, lead))
+                .unwrap_or(i);
             for &(j, other, _) in &live {
-                if i == j {
+                if i == j || state.in_party(j, owner) {
                     continue;
                 }
                 if super::committing_overlap(
@@ -108,9 +109,10 @@ impl Simulation {
                     [true, false],
                 ) {
                     conflicts += 1;
-                    conflicted[avatar.commit] = true;
+                    conflicted.insert((avatar.commit, owner));
                 }
-                reserve_other(&mut occupied[avatar.commit], low, span, other, radius);
+                let row = occupied.entry((avatar.commit, owner)).or_default();
+                reserve_other(row, low, span, other, radius);
             }
         }
         (conflicts, pairs)
@@ -119,9 +121,9 @@ impl Simulation {
     pub(in crate::model) fn reserve_service_slots(&mut self) -> bool {
         let _phase = self.trace.phase(Phase::Reserve);
         let mut previous = std::mem::take(&mut self.travel.occupancy);
-        previous.resize_with(self.events.len(), Vec::new);
-        let mut occupied = vec![Vec::new(); self.events.len()];
-        let mut conflicted = vec![false; self.events.len()];
+        previous.retain(|&(commit, _), _| commit < self.events.len());
+        let mut occupied = Reservations::new();
+        let mut conflicted = BTreeSet::new();
         let visuals = std::mem::replace(&mut self.visuals, crate::model::Visuals::None);
         self.restart();
         let mut conflicts = 0;
@@ -146,17 +148,19 @@ impl Simulation {
         }
         self.trace.count(Counter::PairComparisons, pairs);
         self.trace.add_ticks(&mut self.tick_times);
+        let keys: Vec<_> = self.state.avatars.iter().map(|a| a.key.clone()).collect();
         self.restart();
         self.visuals = visuals;
         anticipate_service_reservations(
             &self.events,
             &self.schedule.starts,
+            &keys,
             &mut occupied,
             &mut conflicted,
         );
-        for (index, row) in occupied.into_iter().enumerate() {
-            if conflicted[index] && index >= self.travel.frozen {
-                previous[index] = row;
+        for (key, row) in occupied {
+            if conflicted.contains(&key) && key.0 >= self.travel.frozen {
+                previous.insert(key, row);
             }
         }
         self.travel.occupancy = previous;
@@ -203,6 +207,7 @@ impl super::Plan {
     pub(in crate::model) fn reserved(
         &self,
         commit: usize,
+        avatar: usize,
         tile: Option<crate::layout::packing::Tile>,
         choosing: bool,
     ) -> Vec<Rect> {
@@ -212,7 +217,7 @@ impl super::Plan {
         tile.into_iter()
             .flat_map(|tile| {
                 self.occupancy
-                    .get(commit)
+                    .get(&(commit, avatar))
                     .into_iter()
                     .flatten()
                     .map(move |(_, r)| {
@@ -274,26 +279,36 @@ mod tests {
             0,
             super::Rect::from_center_size(super::Vec2::ZERO, super::Vec2::ONE),
         );
-        let mut rows = vec![vec![], vec![], vec![], vec![reservation]];
-        let mut flags = vec![false, false, false, true];
+        let keys = [events[0].contributor.clone().unwrap().key];
+        let delayed = || {
+            (
+                super::Reservations::from([((3, 0), vec![reservation])]),
+                super::BTreeSet::from([(3, 0)]),
+            )
+        };
+        let (mut rows, mut flags) = delayed();
         super::anticipate_service_reservations(
             &events,
             &[0.0, 2.0, 4.0, 6.0].map(crate::model::Time::seconds),
+            &keys,
             &mut rows,
             &mut flags,
         );
-        assert!(flags.iter().all(|f| *f));
-        assert!(rows.iter().all(|row| row.as_slice() == [reservation]));
+        assert_eq!(
+            flags,
+            super::BTreeSet::from([(0, 0), (1, 0), (2, 0), (3, 0)])
+        );
+        assert!(rows.values().all(|row| row.as_slice() == [reservation]));
 
-        let mut rows = vec![vec![], vec![], vec![], vec![reservation]];
-        let mut flags = vec![false, false, false, true];
+        let (mut rows, mut flags) = delayed();
         super::anticipate_service_reservations(
             &events,
             &[0.0, 2.0, 4.0, 20.0].map(crate::model::Time::seconds),
+            &keys,
             &mut rows,
             &mut flags,
         );
-        assert_eq!(flags, [false, false, false, true]);
+        assert_eq!(flags, super::BTreeSet::from([(3, 0)]));
     }
     #[test]
     fn reservations_include_both_future_radii_before_the_discs_grow() {

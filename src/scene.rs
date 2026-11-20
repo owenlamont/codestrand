@@ -122,6 +122,7 @@ struct Palette {
     membership_mesh: Handle<Mesh>,
     directory_rings: Vec<Vec<Handle<Mesh>>>,
     activity_mesh: Handle<Mesh>,
+    group_ring: Handle<Mesh>,
     tile: Option<(Handle<StandardMaterial>, Transform)>,
     glyph_mesh: Handle<Mesh>,
     glyphs: Vec<Handle<StandardMaterial>>,
@@ -143,6 +144,7 @@ impl Palette {
         let ring = styling::ring_mesh(theme, theme.membership_radii);
         let membership_mesh = meshes.add(ring.clone());
         let activity_mesh = meshes.add(styling::ring_mesh(theme, theme.activity_radii));
+        let group_ring = meshes.add(Annulus::new(0.9, 1.0));
         // Export sorts opaque mesh bins, but instances within a bin retain insertion order.
         let root_cube = meshes.add(Cuboid::default());
         let [avatar_spheres, avatar_discs, segment_beams] =
@@ -223,6 +225,7 @@ impl Palette {
             membership_mesh,
             directory_rings,
             activity_mesh,
+            group_ring,
             tile,
             glyph_mesh,
             glyphs,
@@ -393,6 +396,7 @@ struct Pools {
     directories: Vec<Entity>,
     hues: DirectoryHues,
     avatars: Vec<Entity>,
+    groups: Vec<Entity>,
     grid: Vec<Entity>,
 }
 
@@ -2027,6 +2031,7 @@ fn sync_activity(
         attach_portrait(world, palette, entity, &avatars[index]);
         pools.avatars.push(entity);
     }
+    let scales = simulation.member_scales();
     for (index, &entity) in pools.avatars.iter().enumerate() {
         let avatar = avatars.get(index);
         let presence = avatar.map_or(0.0, |avatar| avatar.presence);
@@ -2038,6 +2043,7 @@ fn sync_activity(
                 (presence
                     * simulation.scale()
                     * simulation.avatar_disc_scale()
+                    * scales[index]
                     * avatar.projection_scale)
                     * avatar.lifecycle_scale.max(0.001),
             );
@@ -2047,8 +2053,42 @@ fn sync_activity(
             fade(world, entity, avatar.grey, presence);
         }
     }
+    sync_groups(world, palette, pools, simulation);
     styling::beams(world, palette, pools, simulation);
     sync_fragments(world, palette, pools, simulation);
+}
+
+/// Rings each parked group of a commit's contributors in its author's colour.
+fn sync_groups(
+    world: &mut World,
+    palette: &Palette,
+    pools: &mut Pools,
+    simulation: &Simulation,
+) {
+    let groups = simulation.groups();
+    while pools.groups.len() < groups.len() {
+        let entity = world
+            .spawn((
+                Mesh3d(palette.group_ring.clone()),
+                MeshMaterial3d(palette.avatars[0].clone()),
+                Transform::default(),
+                Visibility::Hidden,
+                RenderLayers::layer(AVATAR_LAYER),
+                PortraitDisc,
+            ))
+            .id();
+        pools.groups.push(entity);
+    }
+    for (&entity, &(author, centre, rim)) in pools.groups.iter().zip(&groups) {
+        let material = palette.avatars[author % palette.avatars.len()].clone();
+        world.entity_mut(entity).insert(MeshMaterial3d(material));
+        if let Some(mut transform) = world.get_mut::<Transform>(entity) {
+            transform.translation = centre;
+            transform.scale = Vec3::splat(rim);
+        }
+        set_visible(world, entity, true);
+    }
+    hide_rest(world, &pools.groups, groups.len());
 }
 
 fn sync_fragments(
@@ -3682,6 +3722,7 @@ mod tests {
             bot: None,
             key: crate::contributors::Key::Config(0),
             name: "Portrait".to_owned(),
+            email: Vec::new(),
             accounts: default(),
             portrait: Some(std::sync::Arc::new(crate::avatars::Portrait {
                 pixels: vec![255; 128 * 128 * 4],
