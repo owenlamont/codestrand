@@ -144,18 +144,21 @@ impl Simulation {
             .avatars
             .iter()
             .enumerate()
-            .filter(|(_, a)| a.presence > 0.0)
+            // A passing avatar can briefly overlap a parked one. Its route cannot
+            // reserve a dock or move one that stays clear of stationary avatars.
+            .filter(|(i, a)| {
+                a.presence > 0.0 && !self.travel.travelling(*i, state.tick)
+            })
             .map(|(i, a)| {
                 let point = titles::screen(self, a.position);
-                let travelling = self.travel.travelling(i, state.tick);
-                let parked = !travelling
-                    && a.slot
-                        .as_ref()
-                        .is_some_and(|s| point.distance(s.point) < 0.1);
-                (i, point, parked, travelling)
+                let parked = a
+                    .slot
+                    .as_ref()
+                    .is_some_and(|s| point.distance(s.point) < 0.1);
+                (i, point, parked)
             })
             .collect();
-        for &(i, point, applying, _) in &live {
+        for &(i, point, applying) in &live {
             if !applying {
                 continue;
             }
@@ -176,23 +179,20 @@ impl Simulation {
                 .map(|group| group.lead)
                 .filter(|&lead| state.in_party(i, lead))
                 .unwrap_or(i);
-            for &(j, other, _, travelling) in &live {
+            for &(j, other, _) in &live {
                 if i == j
                     || state.in_party(j, owner)
                     || (ring_seat && self.shares_ring_participant(i, j))
                 {
                     continue;
                 }
-                // A passing avatar can briefly overlap a ring seat off the gutter.
-                if !(ring_seat && travelling)
-                    && super::committing_overlap(
-                        point,
-                        other,
-                        2.0 * radius,
-                        [true, true],
-                        [true, false],
-                    )
-                {
+                if super::committing_overlap(
+                    point,
+                    other,
+                    2.0 * radius,
+                    [true, true],
+                    [true, false],
+                ) {
                     conflicts += 1;
                     conflicted.insert((avatar.commit, owner));
                 }
@@ -391,14 +391,24 @@ mod tests {
         let walker = avatars.len();
         avatars.push(passer);
         let point = super::titles::screen(&sim, sim.state.avatars[lead].position);
-        let count = |sim: &super::Simulation| {
-            sim.reserve_frame(
-                &mut super::Reservations::new(),
-                &mut super::BTreeSet::new(),
-            )
-            .0
+        let reservations = |sim: &super::Simulation| {
+            let mut occupied = super::Reservations::new();
+            let (conflicts, _) =
+                sim.reserve_frame(&mut occupied, &mut super::BTreeSet::new());
+            let rows: Vec<_> = occupied
+                .into_iter()
+                .map(|(key, row)| (key, row.into_row()))
+                .collect();
+            (conflicts, rows)
         };
-        assert!(count(&sim) > 0, "a stationary avatar still conflicts");
+        assert!(
+            reservations(&sim).0 > 0,
+            "a stationary avatar still conflicts"
+        );
+        let presence = sim.state.avatars[walker].presence;
+        sim.state.avatars[walker].presence = 0.0;
+        let absent = reservations(&sim);
+        sim.state.avatars[walker].presence = presence;
 
         sim.travel.trips.push(super::super::Trip {
             author: walker,
@@ -418,7 +428,9 @@ mod tests {
             cutoff: None,
             proof: None,
         });
-        assert_eq!(count(&sim), 0);
+        let passing = reservations(&sim);
+        assert_eq!(passing.0, 0);
+        assert_eq!(passing, absent);
     }
 
     /// The merge as first shipped, one list scanned whole, which [`super::Row`] must
