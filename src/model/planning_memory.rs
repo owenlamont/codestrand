@@ -87,7 +87,11 @@ pub(super) fn check(
         .sum::<u128>();
     let packing_bytes = regions
         * crate::layout::packing::Packing::input_bytes() as u128
-        + history_frames * crate::layout::packing::Packing::row_bytes() as u128;
+        + history_frames * crate::layout::packing::Packing::row_bytes() as u128
+        + crate::layout::packing::Packing::reflow_bytes(
+            history_frames,
+            repositories.len() as u128,
+        );
     let conversion =
         history_frames * crate::layout::packing::Packing::conversion_bytes() as u128;
     let row_bytes = repositories.len() as u128

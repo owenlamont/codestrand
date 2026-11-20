@@ -286,12 +286,16 @@ their tile. Invisible archived
 content cannot constrain earlier zoom.
 
 A newcomer splits one existing tile or subtree. Other repositories retain their
-relative order. Splits clamp to a ground-aspect range of 1:4 to 4:1, inclusive,
+relative order. A reflow can change the split tree between repository arrivals and exits.
+Tiles and their contents ease together when the new tree improves area shares and
+the gutters stay connected throughout the move.
+Splits clamp to a ground-aspect range of 1:2.5 to 2.5:1, inclusive,
 and a 144-by-64 reference-pixel floor at full detail. Births ease for up to 0.75
 playback seconds before their first commit; births near the lead-in use the available
 lead-in time. Aspect and size clamps scale with presence during the transition.
-Tiles and shared gutters partition the whole inset field. `--gutter` sets the visible
-spacing in 1280×720 reference pixels: default `4`, range `0`–`20`, inclusive,
+Between reflows, tiles and shared gutters partition the whole inset field.
+`--gutter` sets the visible spacing in 1280×720 reference pixels: default `4`,
+range `0`–`20`, inclusive,
 including touching tiles at `0`. Crowd scaling shrinks avatars and names when many are
 active.
 Names prefer clear content rectangles, including repository labels

@@ -86,14 +86,16 @@ impl Weights {
     }
 
     fn at(&self, tick: usize) -> Vec<f32> {
-        let reflow = span(self.policy.reflow).max(1);
-        let u = count((tick - self.start).min(reflow)) / count(reflow);
-        let eased = u * u * (3.0 - 2.0 * u);
+        let eased = ease(tick - self.start, self.policy.reflow);
         self.from
             .iter()
             .zip(&self.to)
             .map(|(&from, &to)| from + (to - from) * eased)
             .collect()
+    }
+
+    pub(super) fn target_at_start(&self, tick: usize) -> Option<&[f32]> {
+        (tick != 0 && tick == self.start).then_some(&self.to)
     }
 
     fn drifted(&self, targets: &[f32], presence: &[f32]) -> bool {
@@ -113,6 +115,24 @@ impl Weights {
         }
         variation > self.policy.drift
     }
+}
+
+pub(super) fn reflow_ticks() -> usize {
+    span(POLICY.reflow)
+}
+
+pub(super) fn reflow_spacing() -> usize {
+    span(POLICY.reflow + POLICY.hold)
+}
+
+pub(super) fn reflow_ease(elapsed: usize) -> f32 {
+    ease(elapsed, POLICY.reflow)
+}
+
+fn ease(elapsed: usize, ticks: u32) -> f32 {
+    let duration = span(ticks).max(1);
+    let u = count(elapsed.min(duration)) / count(duration);
+    u * u * (3.0 - 2.0 * u)
 }
 
 fn span(ticks: u32) -> usize {
