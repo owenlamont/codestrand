@@ -61,6 +61,57 @@ must decode as PNG, JPEG or GIF, at most 4 MiB and 2048 pixels per side. Missing
 undecodable local images produce a warning and fall back to account lookups.
 Remote overrides require an HTTPS URL without credentials.
 
+## Coding agents
+
+Coding agents sign commits with fixed emails that GitHub links to their own accounts.
+Codestrand does not build these in, so map the ones you use; a `github` login gives the
+agent its portrait under `--fetch-avatars`. Agents that commit as a GitHub noreply
+address, such as Copilot, Jules and Devin, need no entry.
+
+| Agent | Email | `github` | Source |
+| --- | --- | --- | --- |
+| Claude Code | `noreply@anthropic.com` | `claude` | [Settings](https://docs.anthropic.com/en/docs/claude-code/settings) |
+| Codex | `noreply@openai.com`, `codex@openai.com` | `codex` | [Source](https://github.com/openai/codex/blob/0e8c7683c4a85f00667bd762265358a407124f2e/codex-rs/ext/git-attribution/src/world_state.rs) |
+| Cursor | `cursoragent@cursor.com` | `cursoragent` | [Agents](https://docs.cursor.com/background-agent) |
+| Amp | `amp@ampcode.com` | `ampagent` | [Manual](https://ampcode.com/manual) |
+| OpenHands | `openhands@all-hands.dev` | `openhands-agent` | [Source](https://github.com/OpenHands/OpenHands/blob/428b3dc2a0e8d3d0f689a909e2607e33d973da76/src/services/settings.ts) |
+| Aider | `noreply@aider.chat` | none | [Git](https://aider.chat/docs/git.html) |
+
+```toml
+[[contributor]]
+name = "Claude"
+emails = ["noreply@anthropic.com"]
+github = "claude"
+
+[[contributor]]
+name = "Codex"
+emails = ["noreply@openai.com", "codex@openai.com"]
+github = "codex"
+
+[[contributor]]
+name = "Cursor"
+emails = ["cursoragent@cursor.com"]
+github = "cursoragent"
+
+[[contributor]]
+name = "Amp"
+emails = ["amp@ampcode.com"]
+github = "ampagent"
+
+[[contributor]]
+name = "OpenHands"
+emails = ["openhands@all-hands.dev"]
+github = "openhands-agent"
+
+[[contributor]]
+name = "Aider"
+emails = ["noreply@aider.chat"]
+```
+
+These identities were checked in November 2026 and can change. To check one, open a
+commit the agent co-authored on GitHub: the avatars beside the commit link to the
+account GitHub matched to each email.
+
 ## Contributor avatars
 
 Contributors stay above the file plane and move between repository service lanes.

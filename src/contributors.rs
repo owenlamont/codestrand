@@ -334,6 +334,20 @@ mod tests {
     }
 
     #[test]
+    fn the_documented_coding_agent_entries_parse() {
+        let docs = include_str!("../docs/contributors.md");
+        let section = &docs[docs
+            .find("## Coding agents")
+            .expect("coding agents section")..];
+        let block = section
+            .split("```toml\n")
+            .nth(1)
+            .and_then(|rest| rest.split("```").next())
+            .expect("coding agents TOML block");
+        Mappings::parse(block, Path::new("contributors.toml")).unwrap();
+    }
+
+    #[test]
     fn bot_overrides_precede_noreply_and_suffix_without_substring_matches() {
         let mut history = events(&[
             (
