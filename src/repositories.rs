@@ -202,17 +202,6 @@ pub(super) fn namespace(events: &mut [Event], index: usize) {
     }
 }
 
-pub(super) fn local_event(event: &Event, prefix: &str) -> Event {
-    let mut event = event.clone();
-    for change in &mut event.changes {
-        change.path = change.path[prefix.len()..].to_owned();
-        if let Kind::Moved { from } = &mut change.kind {
-            *from = from[prefix.len()..].to_owned();
-        }
-    }
-    event
-}
-
 pub(super) fn merge(histories: Vec<Vec<Event>>) -> Vec<Event> {
     merge_by(histories, |event| event.seconds)
 }

@@ -216,16 +216,19 @@ impl Layout {
         starts: &[crate::model::Time],
         repository: usize,
     ) -> Self {
-        let prefix = crate::repositories::prefix(repository);
         let mut local = Vec::new();
         let mut times = Vec::new();
         for (event, &time) in events.iter().zip(starts) {
             if event.repository == repository {
-                local.push(crate::repositories::local_event(event, &prefix));
+                local.push(event);
                 times.push(time);
             }
         }
-        Self::scheduled(&local, &times)
+        Self::scheduled(
+            &local,
+            &times,
+            crate::repositories::prefix(repository).len(),
+        )
     }
 
     pub(crate) fn region_labels(&self) -> Vec<String> {

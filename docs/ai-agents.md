@@ -26,7 +26,7 @@ A line in a repository's `AGENTS.md` or `CLAUDE.md` points agents at the tool:
 
 > Visualise this repository's history with `codestrand preview --repository .`, or
 > export it with `codestrand export <new directory> --repository .`. Do not pass
-> `--fetch-avatars` without asking: it sends contributor lookups to GitHub and Gravatar.
+> `--fetch-avatars` without asking: it sends contributor lookups to GitHub.
 
 ## Feeding the docs to an LLM
 
