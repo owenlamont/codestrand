@@ -990,7 +990,10 @@ fn bounded_blob_diff(
         let id = gix::ObjectId::from_hex(entry.id.as_bytes())?;
         budget.charge(1)?;
         let size = match repo.find_header(id) {
-            Ok(header) => header.size(),
+            Ok(header) => {
+                budget.charge(u64::from(header.num_deltas().unwrap_or_default()))?;
+                header.size()
+            }
             Err(error) if error.is_resource_exhausted() => {
                 budget.charge(budget.limits.object_bytes)?;
                 return Ok(BlobDiff::Skipped);
