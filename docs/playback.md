@@ -50,18 +50,18 @@ macOS discovers installed fonts through CoreText and Library/Fonts directories.
 | Input | Action |
 | --- | --- |
 | Escape | Release captured mouse; otherwise close preview |
-| C | Capture or release the mouse while display settings are closed |
-| Left click in viewport | Capture the mouse while display settings are closed |
+| C | Capture or release the mouse while settings are closed |
+| Left click in viewport | Capture the mouse while settings are closed |
 | Mouse movement (captured) | Aim directly without holding a button |
 | Hold left / right button (captured) | Move along world Y up / down; both cancel |
-| F10 | Open or close display settings; release capture and pause camera controls |
+| F10 | Open or close settings; release capture and pause camera controls |
 | F11 | Toggle borderless fullscreen on the current monitor |
 | `[` | Halve live speed, down to 0.125x |
 | `]` | Double live speed, up to 8x |
 | `,` / `.` | Previous or next theme |
 | WASD | Move horizontally relative to yaw; release contributor follow |
 | Right drag (released) | Orbit with world-Y yaw and pitch clamped to ±90° |
-| Scroll wheel | Zoom; scroll the preset list when over display settings |
+| Scroll wheel | Zoom; scroll the preset list when over the Display tab |
 | Tab | Follow or cycle visible contributors |
 | Space | Restore the fit-to-scene camera over half a second |
 
@@ -79,7 +79,12 @@ Held mouse buttons move at the WASD speed along world Y, independent of pitch.
 Descending stops at floor clearance. The left click that
 captures the mouse cannot move the camera until released and pressed again.
 
-Display settings have a scrollable preset list with a draggable scrollbar. Monitor native
+F10 settings have two tabs. Playback changes the theme, live speed, caption style and
+directory collapsing while playback continues, matching the `,` `.` `[` `]` keys and the
+`--theme`, `--caption-style` and `--collapse-directories` options. Export uses only the
+command-line options.
+
+The Display tab has a scrollable preset list with a draggable scrollbar. Monitor native
 is first; other choices are grouped by aspect ratio, then ascending pixel size.
 Ratios use conventional display names: 3440×1440 is labelled 21:9.
 

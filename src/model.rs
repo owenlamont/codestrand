@@ -60,6 +60,8 @@ const FRAGMENT_SPEED: f32 = 1.1;
 /// Accepted `--fragment-speed` values. The slowest pulse still ends before its avatar
 /// goes idle and gives up its slot.
 pub(crate) const FRAGMENT_SPEEDS: std::ops::RangeInclusive<f32> = 0.25..=2.0;
+/// Live preview speed multipliers, both bounds inclusive.
+pub(crate) const PLAYBACK_MULTIPLIERS: std::ops::RangeInclusive<f32> = 0.125..=8.0;
 const ADD_DELAY: f32 = 0.2;
 const AGGREGATED_ARRIVAL_FLIGHT: f32 = 0.8;
 const DELETE_DELAY: f32 = 0.0;
@@ -1338,8 +1340,12 @@ impl Simulation {
     }
 
     pub(super) fn change_rate(&mut self, factor: f32) {
-        self.playback_multiplier =
-            (self.playback_multiplier * factor).clamp(0.125, 8.0);
+        self.set_playback_multiplier(self.playback_multiplier * factor);
+    }
+
+    pub(super) fn set_playback_multiplier(&mut self, multiplier: f32) {
+        self.playback_multiplier = multiplier
+            .clamp(*PLAYBACK_MULTIPLIERS.start(), *PLAYBACK_MULTIPLIERS.end());
     }
 
     pub(super) fn playback_multiplier(&self) -> f32 {
