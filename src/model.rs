@@ -692,14 +692,14 @@ impl Simulation {
             mappings.apply(&mut events);
         }
         Self::check_repository_plan(&events, options, repositories)?;
+        let events = windows::Events::from(events);
         let global_started = std::time::Instant::now();
         let trace = &options.trace;
         let mut layout_cache = None;
-        let mut simulation = Self::build(
-            events.clone(),
+        let mut simulation = Self::build_shared(
+            &events,
             options,
             theme,
-            mappings,
             &[],
             repositories,
             &mut layout_cache,
@@ -765,10 +765,6 @@ impl Simulation {
             compactions = 1;
             padding = simulation.compact_travel_padding(options, &padding);
         }
-        let Range { start, end } = options.selected_range(events.len());
-        events.truncate(end);
-        events.drain(..start);
-        simulation.events = events.into();
         {
             let _phase = trace.phase(Phase::Caption);
             simulation.caption_plan =
@@ -903,6 +899,7 @@ impl Simulation {
         (schedule, layout_starts)
     }
 
+    #[cfg(test)]
     fn build(
         mut events: Vec<Event>,
         options: &Options,
@@ -912,17 +909,35 @@ impl Simulation {
         repositories: &[String],
         layout_cache: &mut Option<(Vec<Time>, Layout)>,
     ) -> anyhow::Result<Self> {
-        let _phase = options.trace.phase(Phase::Build);
         if events.iter().any(|event| event.contributor.is_none()) {
             mappings.apply(&mut events);
         }
+        Self::build_shared(
+            &events.into(),
+            options,
+            theme,
+            padding,
+            repositories,
+            layout_cache,
+        )
+    }
+
+    /// Plays `events`, whose contributors are already mapped, sharing their storage.
+    fn build_shared(
+        events: &windows::Events,
+        options: &Options,
+        theme: &Theme,
+        padding: &[(usize, u32)],
+        repositories: &[String],
+        layout_cache: &mut Option<(Vec<Time>, Layout)>,
+    ) -> anyhow::Result<Self> {
+        let _phase = options.trace.phase(Phase::Build);
         let Range { start, end } = options.selected_range(events.len());
-        let (schedule, layout_starts) =
-            Self::build_schedules(&events, options, padding);
+        let (schedule, layout_starts) = Self::build_schedules(events, options, padding);
         let layout = {
             let _phase = options.trace.phase(Phase::ScheduledLayout);
             Self::scheduled_layout(
-                &events,
+                events,
                 &layout_starts.starts,
                 repositories,
                 layout_cache,
@@ -948,10 +963,8 @@ impl Simulation {
         let total = events.len() + options.unread.total();
         let prior_active = prior_activity(&events[..start], repositories.len());
         let (departures, repository_ends) =
-            lifecycle::plan(&events, &schedule, options, start..end);
-        let first_arrivals = lifecycle::arrivals(&events, start..end);
-        events.truncate(end);
-        events.drain(..start);
+            lifecycle::plan(events, &schedule, options, start..end);
+        let first_arrivals = lifecycle::arrivals(events, start..end);
         let mut simulation = Self {
             file_ids: file_identities(&state),
             first_arrivals,
@@ -965,7 +978,7 @@ impl Simulation {
             collapse_directories: true,
             diff_text_distance: 1.0,
             repository_label_plane: crate::repositories::LabelPlane::default(),
-            events: events.into(),
+            events: events.range(start..end),
             offset: start,
             unread_before: options.unread.before,
             total,
@@ -2045,13 +2058,25 @@ pub(crate) fn apply(
     change: &crate::timeline::FileChange,
     author: usize,
 ) -> u64 {
+    apply_within(layout, change, 0, author)
+}
+
+/// Applies `change` with the first `skip` bytes of its paths, a repository prefix,
+/// removed.
+pub(crate) fn apply_within(
+    layout: &mut Layout,
+    change: &crate::timeline::FileChange,
+    skip: usize,
+    author: usize,
+) -> u64 {
+    let path = &change.path[skip..];
     let id = match &change.kind {
-        Kind::Added => layout.add(&change.path, ADD_DELAY, author),
+        Kind::Added => layout.add(path, ADD_DELAY, author),
         Kind::Deleted => layout
-            .remove(&change.path, DELETE_DELAY, author)
-            .unwrap_or_else(|| layout.touch(&change.path, author)),
-        Kind::Modified => layout.touch(&change.path, author),
-        Kind::Moved { from } => layout.rename(from, &change.path, author),
+            .remove(path, DELETE_DELAY, author)
+            .unwrap_or_else(|| layout.touch(path, author)),
+        Kind::Modified => layout.touch(path, author),
+        Kind::Moved { from } => layout.rename(&from[skip..], path, author),
     };
     let lines = f64::from(change.insertions) + f64::from(change.removals);
     #[expect(clippy::cast_possible_truncation, reason = "heat is bounded to 0.75")]

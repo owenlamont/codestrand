@@ -37,13 +37,18 @@ impl Plan {
         self.seconds += plan.seconds;
         self.parts.push((base, plan));
     }
-    fn new(layout: &mut Layout, events: &[Event], starts: &[Time]) -> Self {
+    fn new(
+        layout: &mut Layout,
+        events: &[&Event],
+        starts: &[Time],
+        skip: usize,
+    ) -> Self {
         for event in events {
             for change in &event.changes {
-                layout.ensure_dir(parent_path(&change.path));
+                layout.ensure_dir(parent_path(&change.path[skip..]));
             }
         }
-        let (required, step) = occupancy(layout, events, starts);
+        let (required, step) = occupancy(layout, events, starts, skip);
         let peak: Vec<_> = required
             .iter()
             .map(|row| row.iter().copied().fold(0.0, f32::max))
@@ -151,8 +156,9 @@ fn interpolator(time: Time, step: f32, length: usize) -> impl Fn(&[Vec2]) -> Vec
 
 fn occupancy(
     layout: &Layout,
-    events: &[Event],
+    events: &[&Event],
     starts: &[Time],
+    skip: usize,
 ) -> (Vec<Vec<f32>>, f32) {
     let mut shadow = layout.clone();
     let duration = starts.last().copied().unwrap_or(Time::seconds(0.5)) + 2.5;
@@ -174,7 +180,7 @@ fn occupancy(
         let time = model::tick_time(tick);
         while starts.get(event_index).is_some_and(|&start| start <= time) {
             for change in &events[event_index].changes {
-                let id = model::apply(&mut shadow, change, 0);
+                let id = model::apply_within(&mut shadow, change, skip, 0);
                 if matches!(change.kind, Kind::Deleted)
                     && shadow.files[&id].state == Presence::Leaving
                 {
@@ -539,13 +545,15 @@ impl Layout {
     #[cfg(test)]
     pub(crate) fn planned(events: &[Event]) -> Self {
         let starts = model::schedule::Schedule::new(events, 0.5, 1.0).starts;
-        Self::scheduled(events, &starts)
+        Self::scheduled(&events.iter().collect::<Vec<_>>(), &starts, 0)
     }
 
-    pub(crate) fn scheduled(events: &[Event], starts: &[Time]) -> Self {
+    /// Plans directories for `events`, whose paths all start with `skip` bytes of
+    /// repository prefix that the layout omits.
+    pub(crate) fn scheduled(events: &[&Event], starts: &[Time], skip: usize) -> Self {
         let mut layout = Self::empty();
         let started = std::time::Instant::now();
-        layout.plan = Plan::new(&mut layout, events, starts);
+        layout.plan = Plan::new(&mut layout, events, starts, skip);
         layout.plan.seconds = started.elapsed().as_secs_f64();
         for (index, dir) in layout.dirs.iter_mut().enumerate() {
             dir.live = index == 0;
@@ -1000,7 +1008,7 @@ mod tests {
             .collect();
         let starts = model::schedule::Schedule::new(&events, 86_400.0, 86_400.0).starts;
         assert!(starts[999].ticks(true) > u64::from(u32::MAX));
-        let layout = Layout::scheduled(&events, &starts);
+        let layout = Layout::scheduled(&events.iter().collect::<Vec<_>>(), &starts, 0);
         assert!(layout.plan.samples[0].len() <= 8_194);
     }
 

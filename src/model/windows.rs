@@ -84,7 +84,7 @@ impl Simulation {
 
     pub(super) fn plan_windows(
         self,
-        all_events: Vec<crate::timeline::Event>,
+        all_events: Events,
         options: &Options,
         repositories: &[String],
         seconds: f32,
