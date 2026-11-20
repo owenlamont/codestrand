@@ -531,11 +531,12 @@ avatars, gutter routes and name labels stay below the strip, matching caption cl
 The default 16:9 export camera stays fixed. Spacing and size floors use a fixed world scale
 calibrated in reference pixels; apparent ground spacing is slightly smaller to reserve
 room for elevated portraits. Preview orbit changes the projection, not the packing.
-Shared gutters separate neighbouring tiles, with no
-contributor band. Tile areas follow live file and directory counts, within the size
-floors and aspect limits. Tiles hold still until one tile's share differs from its count's
-by more than half again, or 5% of the field sits on the wrong tiles; they then ease over
-two seconds, at most once every six seconds. Empty active repositories weigh as one item.
+Shared gutters separate neighbouring tiles, with no contributor band. Each tile's weight
+comes from its live file and directory count. A reflow starts when the ratio between a
+tile's held and live shares exceeds 1.5 in either direction, or when more than 5% of the
+total weight would need to shift between tiles. The weights ease over two seconds, with
+at least six seconds between reflow starts. Empty active repositories weigh as one item.
+The split tree, size floors and aspect limits also affect each tile's area.
 Each repository keeps file identity,
 local layout and one uniform scale, with a fixed quarter-turn chosen for its history.
 Content zoom anticipates growth with a precomputed safe-fit envelope and half-second
