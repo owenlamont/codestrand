@@ -1126,23 +1126,12 @@ impl Simulation {
         pending.clear();
     }
 
-    fn plan_repositories(
-        &mut self,
-        mut active: Vec<bool>,
-        options: &Options,
-    ) -> anyhow::Result<Option<slots::Snapshots>> {
-        let uncapped = options.travel_cap == TravelCap::None;
-        let threads = options.region_threads;
-        #[cfg(test)]
-        tests::LAYOUT_COUNTS
-            .with(|counts| counts.set((counts.get().0, counts.get().1 + 1)));
-        let _phase = self.trace.phase(Phase::PlanRepositories);
-        let mut activation = vec![u32::MAX; active.len()];
-        for (repository, live) in active.iter().enumerate() {
-            if *live {
-                activation[repository] = 0;
-            }
-        }
+    /// The tick each repository's tile first takes part in packing.
+    fn activation_ticks(&self, active: &[bool]) -> Vec<u32> {
+        let mut activation: Vec<u32> = active
+            .iter()
+            .map(|&live| if live { 0 } else { u32::MAX })
+            .collect();
         for (index, event) in self.events.iter().enumerate() {
             let arrival = u32::try_from(self.schedule.starts[index].ticks(false))
                 .expect("bounded service tick");
@@ -1154,6 +1143,21 @@ impl Simulation {
                     .min(arrival),
             );
         }
+        activation
+    }
+
+    fn plan_repositories(
+        &mut self,
+        mut active: Vec<bool>,
+        options: &Options,
+    ) -> anyhow::Result<Option<slots::Snapshots>> {
+        let uncapped = options.travel_cap == TravelCap::None;
+        let threads = options.region_threads;
+        #[cfg(test)]
+        tests::LAYOUT_COUNTS
+            .with(|counts| counts.set((counts.get().0, counts.get().1 + 1)));
+        let _phase = self.trace.phase(Phase::PlanRepositories);
+        let activation = self.activation_ticks(&active);
         let mut snapshots = (!self.windowed)
             .then(|| slots::Snapshots::new(&self.events, self.state.fragment_pace));
         for (_, file) in self.layout().files() {
@@ -1201,10 +1205,11 @@ impl Simulation {
                     usize::try_from(self.schedule.padding(index))
                         .expect("bounded padding"),
                 );
-                samples.anticipate_files(event.repository, begin, arrival);
+                samples.anticipate_items(event.repository, begin, arrival);
             }
         }
         self.trace.add_ticks(&mut self.tick_times);
+        samples.fade_from(&self.repository_ends, lifecycle::REPOSITORY_EXIT);
         self.packing = crate::layout::packing::Packing::from_inputs(
             samples,
             self.state.gutter,
@@ -1233,8 +1238,8 @@ impl Simulation {
         Ok(snapshots)
     }
     pub(super) fn duration(&self) -> Time {
-        if let Some(ready) = &self.ready_end {
-            return tick_time(ready.end);
+        if self.ready_end.is_some() {
+            return tick_time(self.end_tick());
         }
         if let Some(window) = &self.window {
             return self.clock.present(window.end);
@@ -1244,6 +1249,25 @@ impl Simulation {
             &self.repository_ends,
             self.state.fragment_pace,
         )
+    }
+
+    /// The tick playback ends on, from the same padded schedule eager and streamed
+    /// playback both finish with; a window still being planned ends where it is planned.
+    pub(crate) fn end_tick(&self) -> u64 {
+        match self.ready_end {
+            Some(ready) if !ready.complete => ready.end,
+            _ => lifecycle::duration(
+                &self.schedule,
+                &self.repository_ends,
+                self.state.fragment_pace,
+            )
+            .ticks(true),
+        }
+    }
+
+    /// Frames of whole playback at `fps`, counted from `end_tick` without an `f32` hop.
+    pub(crate) fn frames(&self, fps: u16) -> anyhow::Result<u32> {
+        frames_for_ticks(self.end_tick(), fps)
     }
 
     pub(super) fn repository_effect(&self, repository: usize) -> (f32, f32, f32) {
@@ -2575,12 +2599,24 @@ pub(super) fn date(seconds: i64) -> String {
 )]
 pub(super) fn frames_for(duration: Time, fps: u16) -> anyhow::Result<u32> {
     let frames = (duration.as_secs_f64() * f64::from(fps)).ceil();
-    anyhow::ensure!(
-        frames.is_finite() && frames >= 0.0 && frames <= f64::from(u32::MAX),
+    if !(frames.is_finite() && frames >= 0.0 && frames <= f64::from(u32::MAX)) {
+        return Err(beyond_export_range());
+    }
+    Ok((frames as u32).max(2))
+}
+
+/// Frames covering `ticks` simulation ticks at `fps`, rounded up.
+pub(crate) fn frames_for_ticks(ticks: u64, fps: u16) -> anyhow::Result<u32> {
+    let frames = (u128::from(ticks) * u128::from(fps)).div_ceil(u128::from(TICK_RATE));
+    let frames = u32::try_from(frames).map_err(|_| beyond_export_range())?;
+    Ok(frames.max(2))
+}
+
+fn beyond_export_range() -> anyhow::Error {
+    anyhow::anyhow!(
         "whole playback exceeds the supported export range of {} frames; use --frames or reduce duration or fps",
         u32::MAX
-    );
-    Ok((frames as u32).max(2))
+    )
 }
 
 pub(super) fn preview_frame(elapsed: Duration, fps: u16) -> u32 {
@@ -3775,6 +3811,13 @@ mod tests {
         );
         assert!(frames_for(schedule.duration(), 30).is_ok());
         assert_eq!(frames_for(Time::seconds(1.0), 30).unwrap(), 30);
+    }
+
+    #[test]
+    fn an_end_tick_counts_whole_frames_at_any_rate() {
+        assert_eq!(frames_for_ticks(756, 240).unwrap(), 3024);
+        assert_eq!(frames_for_ticks(757, 25).unwrap(), 316);
+        assert!(frames_for_ticks(u64::MAX / 240, 240).is_err());
     }
 
     #[test]

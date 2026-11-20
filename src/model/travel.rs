@@ -1080,9 +1080,12 @@ mod tests {
     #[test]
     fn a_slower_fragment_speed_holds_the_trip_until_the_last_fragment_lands() {
         let mut events = Vec::new();
-        for (index, repository) in [0, 1, 1].into_iter().enumerate() {
+        // The second tile is born before the trip's release and still reflows at it.
+        for (index, (repository, day)) in
+            [(0, 0), (1, 1), (1, 6)].into_iter().enumerate()
+        {
             let mut event = crate::timeline::synthetic().remove(0);
-            event.seconds = i64::try_from(index).unwrap() * 2 * 86_400;
+            event.seconds = day * 86_400;
             if index == 1 {
                 event.author.email = b"other@example.invalid".to_vec();
             }

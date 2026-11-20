@@ -6,6 +6,7 @@ use super::{RepositoryRegion, outline};
 use crate::model::{caption, framing};
 
 mod fit;
+mod held;
 mod zoom;
 
 const BOUND: f32 = 2.5;
@@ -52,7 +53,7 @@ impl Space {
 /// when shrinking from full size, or from the area bound when that is smaller.
 fn plan_tree(
     regions: &[Vec<Input>],
-    files: &[Vec<f32>],
+    items: &[Vec<f32>],
     births: &[usize],
     order: &[usize],
     gutter: f32,
@@ -75,7 +76,7 @@ fn plan_tree(
         let mut born = vec![false; order.len()];
         for (&i, &(begin, end)) in order.iter().zip(&windows) {
             born[i] = true;
-            let (weights, aspects) = birth_weights(regions, files, &born, begin, end);
+            let (weights, aspects) = birth_weights(regions, items, &born, begin, end);
             if !insert(&mut nodes, i, &weights, &aspects, space, threads) {
                 return None;
             }
@@ -736,7 +737,9 @@ impl From<RepositoryRegion> for Input {
 pub(crate) struct Inputs {
     labels: Vec<String>,
     rows: Vec<Vec<Input>>,
-    files: Vec<Vec<f32>>,
+    items: Vec<Vec<f32>>,
+    /// When each repository starts fading out, after which its count no longer moves tiles.
+    fading: Vec<crate::model::Time>,
 }
 
 impl Inputs {
@@ -744,34 +747,40 @@ impl Inputs {
         Self {
             labels: Vec::new(),
             rows: Vec::with_capacity(ticks),
-            files: Vec::with_capacity(ticks),
+            items: Vec::with_capacity(ticks),
+            fading: Vec::new(),
         }
+    }
+
+    /// Stops counting each repository `exit` seconds after its end, when it starts fading.
+    pub(crate) fn fade_from(&mut self, ends: &[crate::model::Time], exit: f32) {
+        self.fading = ends.iter().map(|&end| end + exit).collect();
     }
 
     pub(crate) fn push(&mut self, regions: Vec<RepositoryRegion>) {
         if self.rows.is_empty() {
             self.labels = regions.iter().map(|region| region.label.clone()).collect();
         }
-        let (rows, files) = regions
+        let (rows, items) = regions
             .into_iter()
             .map(|region| {
-                let files = region.files;
-                (Input::from(region), files)
+                let items = region.items;
+                (Input::from(region), items)
             })
             .unzip();
         self.rows.push(rows);
-        self.files.push(files);
+        self.items.push(items);
     }
 
-    pub(crate) fn anticipate_files(
+    pub(crate) fn anticipate_items(
         &mut self,
         repository: usize,
         begin: usize,
         arrival: usize,
     ) {
-        let files = self.files[arrival][repository];
-        for row in &mut self.files[begin..arrival] {
-            row[repository] = files;
+        let items = self.items[arrival][repository];
+        for row in &mut self.items[begin..arrival] {
+            row[repository] = items;
         }
     }
 }
@@ -784,7 +793,7 @@ impl Input {
             outline: self.outline.to_vec(),
             height: self.height,
             live: self.live,
-            files: 0.0,
+            items: 0.0,
             tile: None,
             gutter: None,
             rotated: false,
@@ -919,7 +928,8 @@ impl Packing {
         let Inputs {
             labels,
             rows: regions,
-            files,
+            items,
+            fading,
         } = inputs;
         let Some(first) = regions.first().filter(|r| !r.is_empty()) else {
             return Ok(Self::default());
@@ -930,19 +940,15 @@ impl Packing {
         let mut order: Vec<_> = (0..first.len()).collect();
         order.sort_by_key(|&i| (births[i], i));
         let (nodes, detail) =
-            plan_tree(&regions, &files, &births, &order, gutter_scale, threads)?;
+            plan_tree(&regions, &items, &births, &order, gutter_scale, threads)?;
         let lettering = detail.min(0.5 * area_detail(first.len(), gutter_scale));
         let space = Space::new(detail, gutter_scale);
-        let alpha = 1.0 - (-crate::model::tick_seconds() / 0.25).exp();
-        let mut weights = vec![1.0; first.len()];
+        let mut held = held::Weights::new(first.len());
         let earliest = births.iter().copied().min().unwrap_or(0);
         let samples: Vec<_> = regions
             .iter()
             .enumerate()
             .map(|(tick, row)| {
-                for (weight, files) in weights.iter_mut().zip(&files[tick]) {
-                    *weight = weight.lerp(files.max(1.0).sqrt(), alpha);
-                }
                 let mut presence: Vec<_> = row
                     .iter()
                     .enumerate()
@@ -977,14 +983,28 @@ impl Packing {
                 if presence.iter().all(|&p| p == 0.0) {
                     presence[order[0]] = 1.0;
                 }
+                let now = crate::model::tick_time(
+                    u64::try_from(tick).expect("bounded packing tick"),
+                );
+                let shown: Vec<_> = presence
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &p)| {
+                        if fading.get(i).is_some_and(|&fade| now >= fade) {
+                            0.0
+                        } else {
+                            p
+                        }
+                    })
+                    .collect();
                 Sample {
-                    weights: weights.clone(),
+                    weights: held.step(tick, &items[tick], &shown),
                     presence,
                 }
             })
             .collect();
         let rotated = rotations(&nodes, &regions, &samples, space);
-        drop(files);
+        drop(items);
         Ok(Self {
             gutter_scale,
             detail,
@@ -1111,7 +1131,7 @@ impl Packing {
             r.live = tile.is_some();
             r.tile = tile;
             r.gutter = gutters[i].filter(|_| selected(i));
-            r.files = sample.weights[i]
+            r.items = sample.weights[i]
                 * (sample.presence[i]
                     * presence
                         .and_then(|v| v.get(i))
@@ -1303,7 +1323,7 @@ impl Packing {
 
 fn birth_weights(
     regions: &[Vec<Input>],
-    files: &[Vec<f32>],
+    items: &[Vec<f32>],
     born: &[bool],
     begin: usize,
     end: usize,
@@ -1311,9 +1331,9 @@ fn birth_weights(
     let mut weights = vec![0.0; born.len()];
     let mut aspects = vec![1.0; born.len()];
     for (j, _) in born.iter().enumerate().filter(|(_, live)| **live) {
-        weights[j] = files[begin..end]
+        weights[j] = items[begin..end]
             .iter()
-            .map(|row| row[j].max(1.0).sqrt())
+            .map(|row| row[j].max(1.0))
             .sum::<f32>()
             / crate::model::count_u32(
                 u32::try_from(end - begin).expect("bounded timeline"),
@@ -1335,7 +1355,7 @@ mod tests {
                 low: -Vec2::ONE,
                 high: Vec2::ONE,
                 live: true,
-                files: 1.0,
+                items: 1.0,
                 tile: None,
                 gutter: None,
                 outline: outline::rectangle(-Vec2::ONE, Vec2::ONE),
@@ -1365,6 +1385,28 @@ mod tests {
                 let overlap = tile.high.min(other.high) - tile.low.max(other.low);
                 assert!(overlap.min_element() <= 1e-5, "{tile:?} {other:?}");
             }
+        }
+    }
+
+    #[test]
+    fn tile_areas_follow_item_counts() {
+        let counts = [100.0, 300.0];
+        let row: Vec<_> = counts
+            .iter()
+            .enumerate()
+            .map(|(i, &items)| RepositoryRegion {
+                label: format!("Repository {i}"),
+                items,
+                ..capacity_fixture()[0].clone()
+            })
+            .collect();
+        let packing = Packing::before_service(&vec![row; 60]);
+        let (regions, _, _) = packing.sample(59).unwrap();
+        let areas: Vec<_> = regions.iter().map(|r| r.tile.unwrap().area()).collect();
+        let total: f32 = areas.iter().sum();
+        for (area, items) in areas.iter().zip(counts) {
+            let share = area / total / (items / 400.0);
+            assert!((0.9..1.1).contains(&share), "{areas:?}");
         }
     }
 
@@ -1465,7 +1507,7 @@ mod tests {
             assert_eq!(scales, fresh_scales);
             for (a, b) in cached.iter().zip(fresh) {
                 assert_eq!(a.tile, b.tile);
-                assert_eq!((a.low, a.high, a.files), (b.low, b.high, b.files));
+                assert_eq!((a.low, a.high, a.items), (b.low, b.high, b.items));
             }
             let (hidden, _, _) = packing
                 .sample_with_presence(tick, Some(&[0.0; 30]))
@@ -1544,7 +1586,7 @@ mod tests {
                             low: -size,
                             high: size,
                             live: tick >= i * 40,
-                            files: f32::from(1 + (i * 37 + tick / 30) % 200),
+                            items: f32::from(1 + (i * 37 + tick / 30) % 200),
                             tile: None,
                             gutter: None,
                             outline: outline::rectangle(-size, size),

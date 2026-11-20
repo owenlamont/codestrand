@@ -97,7 +97,7 @@ pub(super) fn render(
                 |app| wait_for_plan(app, &mut report, index, fps),
             )?;
             let playback = &app.world().resource::<scene::Playback>().0;
-            let planned = crate::model::frames_for(playback.duration(), fps)?;
+            let planned = playback.frames(fps)?;
             if frames.is_none() && playback.planning_complete() && index >= planned {
                 break;
             }
@@ -171,7 +171,7 @@ fn report_progress(
         None if playback.planning_complete() => report::Length::Planned(planned),
         // A projection past the export range only says the video is too long.
         None => report::Length::Projected(
-            crate::model::frames_for(playback.projected_duration(), fps)
+            crate::model::frames_for_ticks(playback.projected_end_tick(), fps)
                 .unwrap_or(u32::MAX),
         ),
     };
@@ -789,7 +789,7 @@ mod tests {
             playback.0.advance_to(frame, 60);
             let (history, duration) = playback.0.history_progress();
             let last = playback.0.planning_complete()
-                && frame >= model::frames_for(playback.0.duration(), 60).unwrap();
+                && frame >= playback.0.frames(60).unwrap();
             if (sample < 4
                 && history.lossy_secs_f32()
                     >= duration.lossy_secs_f32() * model::count_u32(sample) / 4.0)
