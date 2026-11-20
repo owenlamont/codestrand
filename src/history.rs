@@ -4,7 +4,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, bail};
 use gix::object::tree::diff::Change as TreeChange;
 use serde::Serialize;
 
@@ -13,16 +12,59 @@ pub(super) enum Error {
     #[error("open local repository {}", path.display())]
     Open { path: PathBuf, source: gix::Error },
     #[error("resolve revision {revision:?} to a commit")]
-    Revision {
-        revision: String,
-        source: anyhow::Error,
-    },
+    Revision { revision: String, source: ReadError },
     #[error("import history at {tip}")]
     History {
         tip: gix::ObjectId,
-        source: anyhow::Error,
+        source: ReadError,
     },
 }
+
+#[derive(Debug, thiserror::Error)]
+pub(super) enum ReadError {
+    #[error("{name} budget reached ({limit})")]
+    Exhausted { name: &'static str, limit: u64 },
+    #[error(transparent)]
+    Git(#[from] gix::Error),
+    #[error(transparent)]
+    Count(#[from] std::num::ParseIntError),
+    #[error("{0}")]
+    Invalid(&'static str),
+    #[error("read commit {id}; complete local history is required")]
+    Incomplete {
+        id: gix::ObjectId,
+        source: Box<ReadError>,
+    },
+    #[error("diff path {path:?} in commit {id}")]
+    Diff {
+        path: gix::bstr::BString,
+        id: gix::ObjectId,
+        source: Box<ReadError>,
+    },
+    #[error("commit {id} dated {date} UTC exceeds the import budget; {advice}")]
+    Refused {
+        id: gix::ObjectId,
+        date: String,
+        advice: String,
+        source: Box<ReadError>,
+    },
+}
+
+impl ReadError {
+    /// A budget or a gix allocation limit stopped the read, so a later start may fit.
+    fn is_exhausted(&self) -> bool {
+        match self {
+            Self::Exhausted { .. } => true,
+            Self::Git(error) => error.is_resource_exhausted(),
+            Self::Incomplete { source, .. }
+            | Self::Diff { source, .. }
+            | Self::Refused { source, .. } => source.is_exhausted(),
+            Self::Count(_) | Self::Invalid(_) => false,
+        }
+    }
+}
+
+type Result<T, E = ReadError> = std::result::Result<T, E>;
 
 #[derive(Serialize)]
 pub(super) struct History {
@@ -66,24 +108,8 @@ impl Default for Limits {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
-#[error("{name} budget reached ({limit})")]
-struct Exhausted {
-    name: &'static str,
-    limit: u64,
-}
-
-fn exhausted(name: &'static str, limit: u64) -> anyhow::Error {
-    Exhausted { name, limit }.into()
-}
-
-fn is_exhausted(error: &anyhow::Error) -> bool {
-    error.is::<Exhausted>()
-        || error.chain().any(|cause| {
-            cause
-                .downcast_ref::<gix::Error>()
-                .is_some_and(gix::Error::is_resource_exhausted)
-        })
+fn exhausted(name: &'static str, limit: u64) -> ReadError {
+    ReadError::Exhausted { name, limit }
 }
 
 /// The cumulative charges, recorded after each commit so a shorter range's cost is known.
@@ -111,7 +137,7 @@ impl Budget {
         }
     }
 
-    fn charge(&mut self, amount: u64) -> anyhow::Result<()> {
+    fn charge(&mut self, amount: u64) -> Result<()> {
         self.spent.work = self.spent.work.saturating_add(amount);
         if self.spent.work > self.limits.work {
             return Err(exhausted("cumulative work", self.limits.work));
@@ -119,7 +145,7 @@ impl Budget {
         Ok(())
     }
 
-    fn retain(&mut self, bytes: u64) -> anyhow::Result<()> {
+    fn retain(&mut self, bytes: u64) -> Result<()> {
         self.spent.retained_bytes = self.spent.retained_bytes.saturating_add(bytes);
         if self.spent.retained_bytes > self.limits.retained_bytes {
             return Err(exhausted(
@@ -130,7 +156,7 @@ impl Budget {
         Ok(())
     }
 
-    fn change(&mut self, change: &TreeChange<'_, '_, '_>) -> anyhow::Result<()> {
+    fn change(&mut self, change: &TreeChange<'_, '_, '_>) -> Result<()> {
         let source_bytes = match change {
             TreeChange::Rewrite {
                 source_location, ..
@@ -140,7 +166,7 @@ impl Budget {
         self.entry(change.location().len() + source_bytes)
     }
 
-    fn entry(&mut self, path_bytes: usize) -> anyhow::Result<()> {
+    fn entry(&mut self, path_bytes: usize) -> Result<()> {
         self.spent.changes += 1;
         self.charge(1)?;
         if self.spent.changes > self.limits.entries {
@@ -149,11 +175,7 @@ impl Budget {
         self.retain((path_bytes + 512) as u64)
     }
 
-    fn object(
-        &mut self,
-        repo: &gix::Repository,
-        id: gix::ObjectId,
-    ) -> anyhow::Result<u64> {
+    fn object(&mut self, repo: &gix::Repository, id: gix::ObjectId) -> Result<u64> {
         self.charge(1)?;
         let size = repo.find_header(id)?.size();
         if size > self.limits.object_bytes {
@@ -168,7 +190,7 @@ impl Budget {
         repo: &gix::Repository,
         id: gix::ObjectId,
         depth: usize,
-    ) -> anyhow::Result<(u64, usize, usize, u64)> {
+    ) -> Result<(u64, usize, usize, u64)> {
         self.charge(1)?;
         if depth > 256 {
             return Err(exhausted("tree depth", 256));
@@ -339,17 +361,14 @@ pub(super) fn import_all(
 const MAX_REFERENCE_HOPS: usize = 64;
 const OBJECT_ALLOCATION_BYTES: u64 = 16 * 1024 * 1024;
 
-fn reference_id(
-    repo: &gix::Repository,
-    name: &str,
-) -> anyhow::Result<Option<gix::ObjectId>> {
+fn reference_id(repo: &gix::Repository, name: &str) -> Result<Option<gix::ObjectId>> {
     let Some(mut reference) = repo.try_find_reference(name)? else {
         return Ok(None);
     };
     let mut seen = BTreeSet::new();
     for _ in 0..MAX_REFERENCE_HOPS {
         if !seen.insert(reference.name().to_owned()) {
-            bail!("symbolic reference cycle");
+            return Err(ReadError::Invalid("symbolic reference cycle"));
         }
         match reference.target() {
             gix::refs::TargetRef::Object(id) => return Ok(Some(id.to_owned())),
@@ -361,18 +380,20 @@ fn reference_id(
             }
         }
     }
-    bail!("symbolic reference chain exceeds 64 hops")
+    Err(ReadError::Invalid(
+        "symbolic reference chain exceeds 64 hops",
+    ))
 }
 
 fn peel_commit(
     repo: &gix::Repository,
     mut id: gix::ObjectId,
     budget: &mut Budget,
-) -> anyhow::Result<gix::ObjectId> {
+) -> Result<gix::ObjectId> {
     let mut seen = BTreeSet::new();
     for hop in 0..=MAX_REFERENCE_HOPS {
         if !seen.insert(id) {
-            bail!("tag object cycle");
+            return Err(ReadError::Invalid("tag object cycle"));
         }
         let header = match repo.find_header(id) {
             Ok(header) => header,
@@ -387,20 +408,21 @@ fn peel_commit(
             gix::objs::Kind::Commit => return Ok(id),
             gix::objs::Kind::Tag => {
                 if hop == MAX_REFERENCE_HOPS {
-                    bail!("tag chain exceeds 64 hops");
+                    return Err(ReadError::Invalid("tag chain exceeds 64 hops"));
                 }
                 id = repo.find_tag(id)?.target_id()?.detach();
             }
-            _ => bail!("revision target is not a commit or annotated tag"),
+            _ => {
+                return Err(ReadError::Invalid(
+                    "revision target is not a commit or annotated tag",
+                ));
+            }
         }
     }
     unreachable!("the last hop returns an error")
 }
 
-fn revision_anchor(
-    repo: &gix::Repository,
-    name: &str,
-) -> anyhow::Result<gix::ObjectId> {
+fn revision_anchor(repo: &gix::Repository, name: &str) -> Result<gix::ObjectId> {
     if name.len() == 40
         && let Ok(id) = gix::ObjectId::from_hex(name.as_bytes())
     {
@@ -412,17 +434,16 @@ fn revision_anchor(
     let prefix = gix::hash::Prefix::from_hex(name)?;
     match repo.objects.lookup_prefix(prefix, None)? {
         Some(Ok(id)) => Ok(id),
-        Some(Err(())) => bail!("ambiguous object prefix"),
-        None => bail!("revision reference or object does not exist"),
+        Some(Err(())) => Err(ReadError::Invalid("ambiguous object prefix")),
+        None => Err(ReadError::Invalid(
+            "revision reference or object does not exist",
+        )),
     }
 }
 
-fn bounded_revision(
-    repo: &gix::Repository,
-    revision: &str,
-) -> anyhow::Result<gix::ObjectId> {
+fn bounded_revision(repo: &gix::Repository, revision: &str) -> Result<gix::ObjectId> {
     if revision.is_empty() || revision.len() > 4096 {
-        bail!("revision must contain 1–4096 bytes");
+        return Err(ReadError::Invalid("revision must contain 1–4096 bytes"));
     }
     let split = revision.find(['^', '~']).unwrap_or(revision.len());
     let mut budget = Budget::new(Limits::default());
@@ -443,7 +464,9 @@ fn bounded_revision(
         }
         let operator = suffix.as_bytes()[0];
         if !matches!(operator, b'^' | b'~') {
-            bail!("unsupported revision expression; use a ref, object ID, ^N or ~N");
+            return Err(ReadError::Invalid(
+                "unsupported revision expression; use a ref, object ID, ^N or ~N",
+            ));
         }
         suffix = &suffix[1..];
         let digits = suffix.bytes().take_while(u8::is_ascii_digit).count();
@@ -455,7 +478,9 @@ fn bounded_revision(
         suffix = &suffix[digits..];
         steps = steps.saturating_add(count.max(1));
         if steps > budget.limits.commits {
-            bail!("revision traversal exceeds 1000000 steps");
+            return Err(ReadError::Invalid(
+                "revision traversal exceeds 1000000 steps",
+            ));
         }
         for _ in 0..if operator == b'~' {
             count
@@ -468,7 +493,7 @@ fn bounded_revision(
             let parent = commit
                 .parent_ids()
                 .nth(index)
-                .context("revision parent does not exist")?
+                .ok_or(ReadError::Invalid("revision parent does not exist"))?
                 .detach();
             id = peel_commit(repo, parent, &mut budget)?;
         }
@@ -484,7 +509,7 @@ fn load_with_limits(
     skip: usize,
     end_date: Option<i64>,
     limits: Limits,
-) -> anyhow::Result<History> {
+) -> Result<History> {
     let mut budget = Budget::new(limits);
     let mut resources = bounded_resources(repo)?;
     let mut commits = Vec::new();
@@ -495,7 +520,7 @@ fn load_with_limits(
                 commits.push(commit);
                 spent.push(budget.spent);
             }
-            Err(error) if is_exhausted(&error) => {
+            Err(error) if error.is_exhausted() => {
                 return Err(refusal(
                     repo,
                     links,
@@ -514,7 +539,7 @@ fn load_with_limits(
         None => None,
         Some(last) => match boundary(repo, &links[last], &mut budget) {
             Ok(boundary) => Some(boundary),
-            Err(error) if is_exhausted(&error) => {
+            Err(error) if error.is_exhausted() => {
                 return Err(refusal(
                     repo,
                     links,
@@ -546,18 +571,19 @@ fn refusal(
     end_date: Option<i64>,
     budget: Budget,
     spent: &[Spent],
-    error: anyhow::Error,
-) -> anyhow::Error {
+    error: ReadError,
+) -> ReadError {
     let advice = later_start(repo, links, after, end_date, budget, spent).map_or_else(
         || "no later --start-date fits".to_owned(),
         |date| format!("--start-date {} fits", crate::model::date(date)),
     );
     let link = &links[failed];
-    error.context(format!(
-        "commit {} dated {} UTC exceeds the import budget; {advice}",
-        link.id,
-        crate::model::date(link.seconds)
-    ))
+    ReadError::Refused {
+        id: link.id,
+        date: crate::model::date(link.seconds),
+        advice,
+        source: Box::new(error),
+    }
 }
 
 /// The first UTC day whose selection starts after `after` with a range and boundary
@@ -613,7 +639,7 @@ fn scan(
     repo: &gix::Repository,
     tip: gix::ObjectId,
     budget: &mut Budget,
-) -> anyhow::Result<Vec<Link>> {
+) -> Result<Vec<Link>> {
     let mut links = Vec::new();
     let mut seen = BTreeSet::new();
     let mut child: Option<Link> = None;
@@ -626,14 +652,16 @@ fn scan(
             ));
         }
         if !seen.insert(id) {
-            bail!("commit graph contains a cycle");
+            return Err(ReadError::Invalid("commit graph contains a cycle"));
         }
-        budget.object(repo, id).with_context(|| {
-            format!("read commit {id}; complete local history is required")
-        })?;
-        let commit = repo.find_commit(id).with_context(|| {
-            format!("read commit {id}; complete local history is required")
-        })?;
+        let incomplete = |source| ReadError::Incomplete {
+            id,
+            source: Box::new(source),
+        };
+        budget.object(repo, id).map_err(incomplete)?;
+        let commit = repo
+            .find_commit(id)
+            .map_err(|error| incomplete(error.into()))?;
         budget.retain(128)?;
         let tree = commit.tree_id()?.detach();
         let author = commit.decode()?.author;
@@ -654,7 +682,7 @@ fn boundary(
     repo: &gix::Repository,
     link: &Link,
     budget: &mut Budget,
-) -> anyhow::Result<Commit> {
+) -> Result<Commit> {
     budget.object(repo, link.id)?;
     let commit = repo.find_commit(link.id)?;
     let (entries, ..) = budget.tree(repo, link.tree, 0)?;
@@ -689,7 +717,7 @@ fn record_commit(
     commit: &gix::Commit<'_>,
     changes: Vec<Change>,
     budget: &mut Budget,
-) -> anyhow::Result<Commit> {
+) -> Result<Commit> {
     let decoded = commit.decode()?;
     budget.retain(commit.data.len() as u64 * 3)?;
     Ok(Commit {
@@ -707,7 +735,7 @@ fn diffed(
     link: &Link,
     budget: &mut Budget,
     resources: &mut gix::diff::blob::Platform,
-) -> anyhow::Result<Commit> {
+) -> Result<Commit> {
     let id = link.id;
     budget.object(repo, id)?;
     let commit = repo.find_commit(id)?;
@@ -751,17 +779,20 @@ fn diffed(
         (&a.path, &a.source_path, &a.kind).cmp(&(&b.path, &b.source_path, &b.kind))
     });
     for change in &mut changes {
-        change.diff = bounded_blob_diff(repo, change, budget)
-            .with_context(|| format!("diff path {:?} in commit {id}", change.path))?;
+        change.diff = bounded_blob_diff(repo, change, budget).map_err(|source| {
+            ReadError::Diff {
+                path: change.path.clone().into(),
+                id,
+                source: Box::new(source),
+            }
+        })?;
     }
     record_commit(&commit, changes, budget)
 }
 
 /// A diff cache with no attributes: rename tracking matches exact object ids only and
 /// blob diffs read raw blobs, so neither HEAD, the index nor any attribute file is read.
-fn bounded_resources(
-    repo: &gix::Repository,
-) -> anyhow::Result<gix::diff::blob::Platform> {
+fn bounded_resources(repo: &gix::Repository) -> Result<gix::diff::blob::Platform> {
     let attributes = gix::worktree::stack::state::Attributes::new(
         gix::attrs::Search::default(),
         None,
@@ -782,7 +813,7 @@ fn bounded_resources(
     )?)
 }
 
-fn identity(raw: &[u8]) -> anyhow::Result<Identity> {
+fn identity(raw: &[u8]) -> Result<Identity> {
     let signature = gix::actor::SignatureRef::from_bytes(raw)?;
     let time = signature.time()?;
     Ok(Identity {
@@ -903,8 +934,8 @@ fn record(change: TreeChange<'_, '_, '_>) -> Option<Change> {
 fn load_blobs(
     repo: &gix::Repository,
     change: &Change,
-) -> anyhow::Result<Option<(Vec<u8>, Vec<u8>)>> {
-    let load = |entry: &Option<Entry>| -> anyhow::Result<Vec<u8>> {
+) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+    let load = |entry: &Option<Entry>| -> Result<Vec<u8>> {
         match entry {
             Some(entry) => {
                 let id = gix::ObjectId::from_hex(entry.id.as_bytes())?;
@@ -917,15 +948,7 @@ fn load_blobs(
         .and_then(|before| load(&change.after).map(|after| (before, after)));
     match loaded {
         Ok(blobs) => Ok(Some(blobs)),
-        Err(error)
-            if error.chain().any(|cause| {
-                cause
-                    .downcast_ref::<gix::Error>()
-                    .is_some_and(gix::Error::is_resource_exhausted)
-            }) =>
-        {
-            Ok(None)
-        }
+        Err(ReadError::Git(error)) if error.is_resource_exhausted() => Ok(None),
         Err(error) => Err(error),
     }
 }
@@ -934,7 +957,7 @@ fn bounded_blob_diff(
     repo: &gix::Repository,
     change: &Change,
     budget: &mut Budget,
-) -> anyhow::Result<BlobDiff> {
+) -> Result<BlobDiff> {
     if change
         .before
         .iter()
@@ -1042,9 +1065,14 @@ mod security_tests {
         repo: &gix::Repository,
         tip: gix::ObjectId,
         limits: Limits,
-    ) -> anyhow::Result<History> {
+    ) -> Result<History> {
         let links = scan(repo, tip, &mut Budget::new(Limits::default()))?;
         load_with_limits(repo, tip, &links, 0, None, limits)
+    }
+
+    /// The error and its causes, as the CLI prints them.
+    fn message(error: impl Into<anyhow::Error>) -> String {
+        format!("{:#}", error.into())
     }
 
     #[test]
@@ -1187,7 +1215,7 @@ mod security_tests {
                 "single-tree entries",
             ),
         ] {
-            let error = format!("{:#}", load_all(&repo, tip, limits).err().unwrap());
+            let error = message(load_all(&repo, tip, limits).err().unwrap());
             assert!(error.contains(name), "{error}");
             assert!(error.contains("no later --start-date fits"), "{error}");
         }
@@ -1197,7 +1225,7 @@ mod security_tests {
     fn single_tree_ceiling_is_fixed() {
         let (_root, repo, tip) = hostile_history(20, b"ok\n");
         let error = import_all(&repo, tip).err().unwrap();
-        let message = format!("{:#}", anyhow::Error::from(error));
+        let message = message(error);
         assert!(
             message.contains("single-tree entries budget reached (2000000)"),
             "{message}"
@@ -1212,7 +1240,7 @@ mod security_tests {
         ] {
             let (_root, repo, tip) = hostile_path(levels, b"ok\n", &filename);
             let error = import_all(&repo, tip).err().unwrap();
-            let message = format!("{:#}", anyhow::Error::from(error));
+            let message = message(error);
             assert!(message.contains(reason), "{message}");
         }
     }
@@ -1451,11 +1479,10 @@ mod security_tests {
         assert!(
             load_with_limits(repo, tip, links, links.len() - 1, None, limits).is_ok()
         );
-        format!(
-            "{:#}",
+        message(
             load_with_limits(repo, tip, links, skip, None, limits)
                 .err()
-                .unwrap()
+                .unwrap(),
         )
     }
 
@@ -1608,7 +1635,7 @@ mod security_tests {
             assert!(budget.spent.work >= 13);
             for _ in 0..100 {
                 if let Err(error) = bounded_blob_diff(&repo, change, &mut budget) {
-                    assert!(error.is::<Exhausted>());
+                    assert!(matches!(error, ReadError::Exhausted { .. }));
                     break;
                 }
             }
@@ -1636,7 +1663,19 @@ mod security_tests {
     fn deep_shared_tree_stops_before_gix_expansion() {
         let (_root, repo, tip) = hostile_history(512, b"ok\n");
         let error = import_all(&repo, tip).err().unwrap();
-        assert!(format!("{:#}", anyhow::Error::from(error)).contains("tree depth"));
+        assert!(message(error).contains("tree depth"));
+    }
+
+    #[test]
+    fn exhaustion_inside_a_diff_still_offers_a_later_start() {
+        let id = gix::ObjectId::null(gix::hash::Kind::Sha1);
+        let diff = |source| ReadError::Diff {
+            path: "file".into(),
+            id,
+            source: Box::new(source),
+        };
+        assert!(diff(exhausted("cumulative work", 0)).is_exhausted());
+        assert!(!diff(ReadError::Invalid("tag object cycle")).is_exhausted());
     }
 
     #[test]

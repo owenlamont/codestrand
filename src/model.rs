@@ -51,8 +51,8 @@ pub(super) const TICK_RATE: u32 = 60;
 pub(super) const PREVIEW_FPS: u16 = 30;
 const LEAD_IN: f32 = 0.5;
 const TAIL: f32 = 2.5;
-// Sixty-second windows beat fifteen on whole mid30 (459 vs 514 s) and the matched
-// all48 prefix (971 vs 1026 s), with first frames at 24/136 s rather than 19/112 s.
+// Sixty-second windows beat fifteen on whole mid30 (459 vs 514 s) and tie thirty within
+// 2% over five paired runs, though thirty reaches the first frame about 2.5 s sooner.
 const WINDOW_SECONDS: f32 = 60.0;
 const PULSE_SECONDS: f32 = 1.3;
 /// Beam crossings per second at the default `--fragment-speed` of 1.
