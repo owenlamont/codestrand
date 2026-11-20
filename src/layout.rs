@@ -15,7 +15,8 @@ pub(super) struct RepositoryRegion {
     pub low: Vec2,
     pub high: Vec2,
     pub live: bool,
-    pub files: f32,
+    /// Live files and directories; after packing, the tile weight scaled by presence.
+    pub items: f32,
     pub tile: Option<packing::Tile>,
     pub gutter: Option<packing::Tile>,
     pub outline: Vec<Vec2>,

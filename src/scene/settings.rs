@@ -1,15 +1,19 @@
 use bevy::{
     camera::{CameraOutputMode, Viewport},
     input::mouse::{AccumulatedMouseScroll, MouseScrollUnit},
+    input_focus::InputFocus,
+    picking::hover::Hovered,
     prelude::*,
-    ui::RelativeCursorPosition,
+    ui::{RelativeCursorPosition, Selected},
+    ui_widgets::{SelectedTab, Tab, TabList, tablist_self_update},
     window::{
         Monitor, MonitorSelection, OnMonitor, PrimaryWindow, WindowMode, WindowPosition,
     },
 };
 
-use super::{AvatarCamera, SceneCamera};
+use super::{AvatarCamera, Playback, SceneCamera};
 
+mod playback;
 mod presets;
 mod scrollbar;
 
@@ -21,6 +25,7 @@ impl Plugin for PreviewSettingsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Settings>()
             .add_systems(super::loading::Loaded, setup.after(super::setup))
+            .add_observer(tablist_self_update)
             .add_systems(
                 PreUpdate,
                 viewports
@@ -32,8 +37,10 @@ impl Plugin for PreviewSettingsPlugin {
                 (
                     monitor,
                     apply_windowed,
+                    pages,
                     clicks,
                     controls,
+                    playback::show,
                     viewports,
                     super::scale_ui,
                     scroll,
@@ -45,9 +52,12 @@ impl Plugin for PreviewSettingsPlugin {
     }
 }
 
+pub(super) use playback::RequestedTheme;
+
 #[derive(Default, Resource)]
 pub(super) struct Settings {
     open: bool,
+    page: Page,
     windowed: Option<(UVec2, WindowPosition)>,
     pending_windowed: Option<(UVec2, WindowPosition)>,
     monitor: Option<UVec2>,
@@ -166,6 +176,13 @@ pub(super) fn captures_camera(world: &World) -> bool {
 #[derive(Component)]
 struct Panel;
 
+#[derive(Component, Clone, Copy, Default, PartialEq, Eq, Debug)]
+enum Page {
+    #[default]
+    Display,
+    Playback,
+}
+
 #[derive(Component)]
 struct Status;
 
@@ -233,16 +250,36 @@ fn setup(mut commands: Commands, camera: Single<Entity, With<AvatarCamera>>) {
             BackgroundColor(Color::srgb(0.04, 0.05, 0.08)),
         ))
         .with_children(|panel| {
-            panel.spawn(label("Display settings · F10", 22.0));
-            panel.spawn((label("", 16.0), Status));
-            panel.spawn(label("Render size · physical pixels", 16.0));
+            panel.spawn(label("Settings · F10", 22.0));
             panel
-                .spawn(Node {
-                    height: px(390),
+                .spawn((
+                    TabList::default(),
+                    Node {
+                        flex_wrap: FlexWrap::Wrap,
+                        column_gap: px(6),
+                        row_gap: px(6),
+                        ..default()
+                    },
+                ))
+                .with_children(|tabs| {
+                    let display = tabs.spawn(tab("Display", Page::Display)).id();
+                    tabs.spawn(tab("Playback", Page::Playback));
+                    let list = tabs.target_entity();
+                    tabs.commands()
+                        .entity(list)
+                        .insert(SelectedTab(Some(display)));
+                });
+            panel.spawn((Page::Display, page())).with_children(|page| {
+                page.spawn((label("", 16.0), Status));
+                page.spawn(label("Render size · physical pixels", 16.0));
+                page.spawn(Node {
+                    height: px(335),
                     column_gap: px(8),
                     ..default()
                 })
                 .with_children(setup_presets);
+            });
+            panel.spawn((Page::Playback, playback::page()));
             for (name, action) in [
                 ("Toggle fullscreen · F11", Action::Fullscreen),
                 ("Close settings · F10", Action::Close),
@@ -250,6 +287,60 @@ fn setup(mut commands: Commands, camera: Single<Entity, With<AvatarCamera>>) {
                 panel.spawn(button(name, action));
             }
         });
+}
+
+fn tab(name: &str, page: Page) -> impl Bundle {
+    (
+        Tab,
+        page,
+        Hovered::default(),
+        Node {
+            padding: UiRect::all(px(8)),
+            ..default()
+        },
+        BackgroundColor(Color::srgb(0.15, 0.19, 0.26)),
+        children![label(name, 16.0)],
+    )
+}
+
+fn page() -> Node {
+    Node {
+        flex_direction: FlexDirection::Column,
+        row_gap: px(10),
+        ..default()
+    }
+}
+
+fn pages(
+    mut settings: ResMut<Settings>,
+    lists: Query<&SelectedTab, With<TabList>>,
+    mut tabs: Query<(&Page, Has<Selected>, &Hovered, &mut BackgroundColor), With<Tab>>,
+    mut bodies: Query<(&Page, &mut Node), Without<Tab>>,
+) {
+    for selected in &lists {
+        if let Some(page) = selected.0.and_then(|tab| tabs.get(tab).ok()).map(|t| *t.0)
+            && settings.page != page
+        {
+            settings.page = page;
+        }
+    }
+    for (_, selected, hovered, mut background) in &mut tabs {
+        background.set_if_neq(BackgroundColor(match (selected, hovered.get()) {
+            (true, _) => Color::srgb(0.20, 0.42, 0.62),
+            (false, true) => Color::srgb(0.25, 0.32, 0.43),
+            (false, false) => Color::srgb(0.15, 0.19, 0.26),
+        }));
+    }
+    for (page, mut node) in &mut bodies {
+        let display = if *page == settings.page {
+            Display::Flex
+        } else {
+            Display::None
+        };
+        if node.display != display {
+            node.display = display;
+        }
+    }
 }
 
 fn button(name: &str, action: Action) -> impl Bundle {
@@ -284,6 +375,7 @@ fn scroll(
         .as_ref()
         .map_or(Vec2::ZERO, |viewport| viewport.physical_position.as_vec2());
     if settings.open
+        && settings.page == Page::Display
         && window.focused
         && window
             .physical_cursor_position()
@@ -301,7 +393,7 @@ fn scroll(
     }
 }
 
-fn label(text: &str, size: f32) -> impl Bundle {
+fn label(text: &str, size: f32) -> impl Bundle + use<> {
     (
         Text::new(text),
         TextFont::from_font_size(size),
@@ -327,6 +419,11 @@ fn clicks(
         return;
     }
     for (action, cursor, mut color, children) in &mut buttons {
+        if matches!(action, Action::Resize(_) | Action::Native)
+            && settings.page != Page::Display
+        {
+            continue;
+        }
         let (enabled, caption) = describe(*action, settings.monitor);
         let ink_color = if enabled {
             Color::WHITE
@@ -374,10 +471,18 @@ fn controls(
     mut window: Single<&mut Window, With<PrimaryWindow>>,
     mut panel: Single<&mut Node, With<Panel>>,
     mut status: Single<&mut Text, With<Status>>,
+    focus: Option<ResMut<InputFocus>>,
 ) {
     let keys = keys.into_inner();
     if window.focused && keys.just_pressed(KeyCode::F10) {
         settings.open = !settings.open;
+    }
+    // A tab focused by a click would otherwise keep taking Space and arrow keys.
+    if !settings.open
+        && let Some(mut focus) = focus
+        && focus.get().is_some()
+    {
+        focus.clear();
     }
     if window.focused && keys.just_pressed(KeyCode::F11) {
         settings.toggle_fullscreen(&mut window);

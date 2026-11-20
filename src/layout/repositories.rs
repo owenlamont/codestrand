@@ -76,6 +76,7 @@ impl RegionSample {
         let mut supports = vec![[f32::NEG_INFINITY; 8]; labels.len()];
         let mut counts = vec![0_u32; labels.len()];
         for dir in self.dirs.iter().filter(|dir| dir.live) {
+            counts[dir.repository] = counts[dir.repository].saturating_add(1);
             super::outline::include(
                 &mut supports[dir.repository],
                 dir.position,
@@ -119,7 +120,7 @@ impl RegionSample {
                     low,
                     high,
                     live: self.live[repository],
-                    files: crate::model::count_u32(counts[repository]),
+                    items: crate::model::count_u32(counts[repository]),
                     tile: None,
                     gutter: None,
                     outline,
@@ -188,7 +189,7 @@ impl Layout {
             low: Vec2::splat(-2.0),
             high: Vec2::splat(2.0),
             live: false,
-            files: 0.0,
+            items: 0.0,
             tile: None,
             gutter: None,
             outline: Vec::new(),
