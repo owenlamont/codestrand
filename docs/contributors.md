@@ -12,16 +12,16 @@ Override the file with `--contributors /path/to/contributors.toml`:
 [[contributor]]
 name = "Owen Lamont"
 emails = ["owen@personal.example", "owen@work.example"]
-github = "owenlamont"           # optional GitHub login
-gitlab = "owenlamont"           # optional GitLab.com username
-gravatar = "owen@avatar.example" # optional Gravatar email
+github = "owenlamont"         # optional GitHub login
 bot = false                   # optional bot classification override
 # avatar = "portraits/owen.png"  # optional local path or HTTPS URL; overrides lookups
 ```
 
 Emails match case-insensitively; duplicate emails are errors. Matching names never merge
-people with different nonempty emails. Unlisted emails keep separate identities,
-displayed with the name from the last commit in playback order. Commits without an email
+people with different nonempty emails. Unlisted emails of one GitHub account become one
+contributor (see [GitHub accounts](#github-accounts)); other unlisted emails keep
+separate identities. Each is displayed with the name from its last commit in playback
+order. Commits without an email
 are grouped by author name. A missing default file is fine; an explicit missing file,
 unknown key or malformed TOML is an error. Edits take effect on cache hits; original
 authors and repository history remain unchanged.
@@ -48,10 +48,9 @@ Configuration is limited to 1 MiB before parsing, 4,096 contributors, 4,096 tota
 aliases, and 4,096 bytes per string. Expanded alias payloads may total at most 16 MiB.
 Files exceeding a limit are rejected with a configuration error before alias expansion.
 
-Account fields accept usernames, never profile URLs or whitespace. GitHub logins use
-letters, digits and hyphens (bot logins may end in `[bot]`); GitLab usernames start with
-a letter or digit and may also contain `_`, `-` and `.`. Invalid fields report the file,
-contributor and field. Local avatar paths resolve relative to the TOML file and must stay
+`github` accepts a login, never a profile URL or whitespace: letters, digits and
+hyphens, and bot logins may end in `[bot]`. Invalid fields report the file, contributor
+and field. Local avatar paths resolve relative to the TOML file and must stay
 inside the TOML file's directory. Absolute paths are accepted only inside that directory.
 Parent escapes, symlinks, directory junctions, network paths and device paths are rejected
 before opening an image. Rejected paths warn and use the default coloured sphere.
@@ -134,8 +133,8 @@ Playback time drives crowd scaling and placement, so export speed does not chang
 
 Preview and export stay offline by default: local overrides and cached portraits are
 used, with the coloured sphere as the fallback. Add `--fetch-avatars` to either command
-to opt in to network requests before playback starts. Export never fetches during frame
-capture.
+to opt in to requests to GitHub before playback starts. Export never fetches during
+frame capture.
 
 ```sh
 codestrand preview --repository /path/to/repo --fetch-avatars
@@ -146,67 +145,65 @@ Resolution stops at the first usable portrait, in the following order:
 
 1. Explicit `avatar`: local file or cached/fetched HTTPS image. An unavailable local
    file warns and continues below. An unavailable HTTPS override keeps the default glyph
-   (or its previous cached portrait), without account lookups.
-2. Explicit `github`, then explicit `gitlab` using the GitLab.com Users API.
-3. GitHub noreply login, then the commit author's GitHub account when a remote points
-   to github.com (`origin` preferred). An explicit GitHub login replaces inferred
-   GitHub lookup. The commit API runs at most once per distinct unresolved email per run,
-   and never for someone who only co-authored, since a commit names only its author's
-   account.
-4. GitLab.com email lookup, only with **both** `--fetch-avatars` and
-   `--gitlab-email-avatars`.
-5. Gravatar using `gravatar` when provided, otherwise the commit email, hashed with
-   SHA-256 after trimming and lowercasing; `d=404` avoids Gravatar placeholders.
-6. Default coloured sphere.
+   (or its previous cached portrait), without GitHub lookups.
+2. The contributor's GitHub account: explicit `github`, else the account found for one
+   of its emails, preferring one with a numeric account ID.
+3. Default coloured sphere.
+
+## GitHub accounts
+
+Codestrand finds the GitHub account behind a commit email, without a contributors file:
+
+- A GitHub noreply address, `<id>+<login>@users.noreply.github.com` or
+  `<login>@users.noreply.github.com`, names its account. No request is needed, so this
+  works offline.
+- With `--fetch-avatars`, when a remote points to github.com (`origin` preferred),
+  GitHub's commit API names the author account of one commit by that email. Busiest
+  emails go first, and each email is looked up at most once per run. An email seen only
+  as a co-author is not looked up, since a commit names only its author's account.
+
+Unlisted emails of one account become one contributor, identified by the numeric
+account ID where known, so a renamed login stays one person. A contributors entry whose
+`github` names any login of that account takes those emails, unless two entries do; the
+entry may list no emails, to name an account's contributor alone. An email the
+file lists always keeps its entry. A commit email can claim any noreply address, so a
+forged one merges with that account, just as GitHub attributes it.
 
 `GH_TOKEN` or `GITHUB_TOKEN`, when present, authenticates only GitHub API requests.
 Public repositories work without a token; private repositories need a token with
-repository access. GitLab lookups are unauthenticated and support GitLab.com only.
-Rate limits and network failures leave playback available. HTTPS uses Rustls with ring
-and the operating system trust store on Linux, macOS and Windows.
+repository access. Unauthenticated, GitHub allows about 60 API requests an hour, so a
+history with many authors needs a token, or several runs, to find every account; the
+summary line reports `unresolved_emails`. Rate limits and network failures leave
+playback available. HTTPS uses Rustls with ring and the operating system trust store on
+Linux, macOS and Windows.
 
 ## Privacy and network settings
 
-`--fetch-avatars` alone **never sends raw commit emails**. GitLab email lookup is off by
-default, even when fetching is enabled. Opt in explicitly for each invocation:
+Codestrand never sends a commit email, an email hash or an author name. GitHub is the
+only service it contacts on its own, and only with `--fetch-avatars`:
 
-```sh
-codestrand export frames --repository /path/to/repo --fetch-avatars --gitlab-email-avatars
-```
+- No flag: no requests; local overrides and cache only.
+- GitHub API: receives the repository owner and name and a commit SHA.
+- GitHub image hosts: receive a login or numeric account ID in the image URL.
+- Remote `avatar`: the override host receives the configured URL, including path and
+  query, which can carry whatever its author put in it.
 
-- No fetch flags: no requests; local overrides and cache only.
-- `--fetch-avatars`, remote `avatar`: the override host receives the configured URL,
-  including path and query.
-- `--fetch-avatars`, GitHub: GitHub receives the configured or noreply login, or the
-  repository and commit SHA. The image host receives the image URL, possibly containing
-  a numeric account ID.
-- `--fetch-avatars`, `gitlab`: GitLab.com receives the configured username. The returned
-  image host receives the avatar URL.
-- `--fetch-avatars`, Gravatar: Gravatar receives the normalized email's SHA-256 hash,
-  never the email.
-- Both flags, GitLab email: GitLab.com receives the trimmed, lowercased commit email
-  in a URL query. The returned image host receives the avatar URL.
-
-Identifiers and email hashes are identifying information. GitLab may return an external
-avatar URL; fetching follows that URL unless the host is `gravatar.com` or a subdomain.
-GitLab Gravatar URLs are treated as misses so the configured Gravatar step decides.
-HTTPS redirects can also contact another image host.
-An explicit avatar URL can itself contain identifying information supplied by the user.
-GitHub credentials are never added to GitLab or image requests. Diagnostics show counts,
-not emails or request URLs. Local avatar overrides do not require either fetch flag.
+HTTPS redirects can contact another image host. GitHub credentials are never added to
+image requests. Diagnostics show counts, not emails or request URLs. Local avatar
+overrides need no flag.
 
 ## Cache
 
-Portraits and account resolutions live under `codestrand/avatars-v2/` in the platform
-cache directory, keyed by a hash of email, explicit accounts, override, remote and GitLab
-email setting. Remote overrides are keyed only by URL. Existing GitHub/Gravatar-only
-cache entries remain usable. For account lookups, changing the GitLab email flag selects
-a separate cache entry; pass `--gitlab-email-avatars` without
-`--fetch-avatars` to reuse an opted-in portrait offline. The email flag alone never
-enables network requests.
+Portraits and accounts live under `codestrand/avatars-v3/` in the platform cache
+directory. An account found for an email is reused for every repository; an email with
+no account is rechecked for a different remote, and a commit GitHub does not have, such
+as an unpushed one, is rechecked next run. Images are keyed by URL. Earlier
+releases used `avatars-v2`, which Codestrand leaves on disk but no longer reads; after
+upgrading, run once with `--fetch-avatars` to get portraits back.
 Portraits are resized to 128-pixel PNG files beside small JSON account records.
 Fetching covers only contributors in the selected playback window, with a 30-second
-total network budget. Entries refresh after seven days when fetching is enabled;
+total network budget; account lookups stop with 15 seconds left so portraits still
+load. Entries refresh after seven days when fetching is enabled;
 offline playback can reuse expired images. Failed refreshes retain cached images.
 `--no-cache` disables avatar cache reads and writes too; local overrides still work.
 Delete the directory to clear saved avatars. Circular portraits retain the contributor

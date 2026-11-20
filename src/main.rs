@@ -224,12 +224,9 @@ struct Source {
     /// Contributor TOML file; defaults to the Codestrand user configuration directory.
     #[arg(long)]
     contributors: Option<PathBuf>,
-    /// Fetch contributor avatars before playback; sends account requests and email hashes.
+    /// Fetch contributor avatars and GitHub accounts from GitHub before playback.
     #[arg(long)]
     fetch_avatars: bool,
-    /// Select opted-in GitLab cache entries offline; allow email lookup with --fetch-avatars.
-    #[arg(long)]
-    gitlab_email_avatars: bool,
     /// Begin at the first commit on or after this UTC date, inclusive, from the tree before it.
     #[arg(long, value_name = "YYYY-MM-DD", value_parser = start_date)]
     start_date: Option<i64>,
@@ -396,9 +393,12 @@ impl Source {
         Ok((ranges, range))
     }
 
+    /// Merges commit emails of one GitHub account into one contributor and sets
+    /// portraits for the selected commits.
     fn resolve_avatars(
         &self,
         events: &mut [timeline::Event],
+        mappings: &mut contributors::Mappings,
         repositories: &[repositories::Repository],
         range: std::ops::Range<usize>,
     ) {
@@ -409,28 +409,22 @@ impl Source {
             fetch,
             avatars::now(),
         );
-        resolver.gitlab_email = self.gitlab_email_avatars;
-        let start = range.start.min(events.len());
-        let end = range.end.min(events.len());
+        let selected = range.start.min(events.len())..range.end.min(events.len());
         if repositories.is_empty() {
-            resolver.resolve(&mut events[start..end], None);
+            resolver.accounts(&events[selected.clone()], None);
         }
         for (index, repository) in repositories.iter().enumerate() {
             let remote = avatars::repository(&repository.path);
-            if repositories.len() == 1 {
-                resolver.resolve(&mut events[start..end], remote.as_deref());
-                return;
-            }
-            let indices: Vec<_> = (start..end)
-                .filter(|&at| events[at].repository == index)
-                .collect();
-            let mut selected: Vec<_> =
-                indices.iter().map(|&at| events[at].clone()).collect();
-            resolver.resolve(&mut selected, remote.as_deref());
-            for (at, event) in indices.into_iter().zip(selected) {
-                events[at] = event;
-            }
+            resolver.accounts(
+                events[selected.clone()]
+                    .iter()
+                    .filter(|event| event.repository == index),
+                remote.as_deref(),
+            );
         }
+        mappings.infer(resolver.found());
+        mappings.apply(events);
+        resolver.portraits(&mut events[selected]);
     }
 
     /// The `--repository` paths, or the repository holding the current directory when
@@ -470,11 +464,11 @@ impl Source {
         } else {
             repositories::inputs(&paths, file)?
         };
-        let mappings = contributors::load(self.contributors.as_deref())?;
+        let mut mappings = contributors::load(self.contributors.as_deref())?;
         let (mut events, range, unread) =
             self.events(cache::root().as_deref(), &repositories, progress)?;
         mappings.apply(&mut events);
-        self.resolve_avatars(&mut events, &repositories, range.clone());
+        self.resolve_avatars(&mut events, &mut mappings, &repositories, range.clone());
         let names: Vec<_> = repositories
             .iter()
             .map(repositories::Repository::name)
@@ -1264,28 +1258,6 @@ mod tests {
                 fragment_speed(value).unwrap_err(),
                 "fragment speed must be between 0.25 and 2, inclusive"
             );
-        }
-    }
-
-    #[test]
-    fn gitlab_email_permission_is_separate_from_fetching() {
-        for (flags, fetch, email) in [
-            (vec![], false, false),
-            (vec!["--fetch-avatars"], true, false),
-            (vec!["--gitlab-email-avatars"], false, true),
-            (
-                vec!["--fetch-avatars", "--gitlab-email-avatars"],
-                true,
-                true,
-            ),
-        ] {
-            let args = [vec!["codestrand", "preview"], flags].concat();
-            let cli = Cli::try_parse_from(args).unwrap();
-            let Some(Command::Preview { source, .. }) = cli.command else {
-                panic!("preview command parsed")
-            };
-            assert_eq!(source.fetch_avatars, fetch);
-            assert_eq!(source.gitlab_email_avatars, email);
         }
     }
 
