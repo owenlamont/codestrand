@@ -179,13 +179,19 @@ impl Simulation {
                 .map(|group| group.lead)
                 .filter(|&lead| state.in_party(i, lead))
                 .unwrap_or(i);
-            for &(j, other, _) in &live {
-                if i == j
-                    || state.in_party(j, owner)
-                    || (ring_seat && self.shares_ring_participant(i, j))
-                {
-                    continue;
-                }
+            let mut foreign = live
+                .iter()
+                .filter(|&&(j, _, _)| {
+                    i != j
+                        && !state.in_party(j, owner)
+                        && !(ring_seat && self.shares_ring_participant(i, j))
+                })
+                .peekable();
+            if foreign.peek().is_none() {
+                continue;
+            }
+            let row = occupied.entry((avatar.commit, owner)).or_default();
+            for &(_, other, _) in foreign {
                 if super::committing_overlap(
                     point,
                     other,
@@ -196,7 +202,6 @@ impl Simulation {
                     conflicts += 1;
                     conflicted.insert((avatar.commit, owner));
                 }
-                let row = occupied.entry((avatar.commit, owner)).or_default();
                 reserve_other(row, low, span, other, radius);
             }
         }
@@ -584,6 +589,63 @@ mod tests {
         assert!(row.iter().any(|(_, r)| r.contains(super::Vec2::X * 0.27)));
         assert!(!row.iter().any(|(_, r)| r.contains(super::Vec2::X * 0.30)));
     }
+
+    #[test]
+    fn a_parked_avatar_reserves_for_each_foreign_avatar() {
+        let (events, labels) = crate::model::tests::short_repository_history(1);
+        let mut sim = super::Simulation::with_repositories(
+            events,
+            &crate::model::Options::default(),
+            &crate::theme::Theme::neon(),
+            &crate::contributors::Mappings::default(),
+            &labels,
+        );
+        sim.advance_to(120, 60);
+        let parked = sim
+            .state
+            .avatars
+            .iter()
+            .position(|avatar| avatar.slot.is_some())
+            .unwrap();
+        let position = sim.state.avatars[parked].position;
+        let point = super::titles::screen(&sim, position);
+        let commit = sim.state.avatars[parked].commit;
+        let tile = sim.state.layout.repositories[0].gutter.unwrap();
+        let mut rows = super::Reservations::new();
+        let mut conflicted = super::BTreeSet::new();
+        for (index, avatar) in sim.state.avatars.iter_mut().enumerate() {
+            avatar.presence = f32::from(u8::from(index == parked));
+            if index == parked {
+                avatar.slot.as_mut().unwrap().point = point;
+            } else {
+                avatar.slot = None;
+            }
+        }
+        assert_eq!(sim.reserve_frame(&mut rows, &mut conflicted), (0, 0));
+        assert!(rows.is_empty());
+        for avatar in &mut sim.state.avatars {
+            avatar.presence = 1.0;
+            avatar.position = position;
+        }
+        assert_eq!(sim.reserve_frame(&mut rows, &mut conflicted), (2, 2));
+        assert_eq!(conflicted, super::BTreeSet::from([(commit, parked)]));
+        let mut expected = super::Row::default();
+        for _ in 0..2 {
+            super::reserve_other(
+                &mut expected,
+                tile.low * super::HALF,
+                (tile.high - tile.low) * super::HALF,
+                point,
+                sim.state.avatar_radius(),
+            );
+        }
+        assert_eq!(rows.len(), 1);
+        let actual = rows.remove(&(commit, parked)).unwrap();
+        assert!(expected.stamp > 0);
+        assert_eq!(actual.stamp, expected.stamp);
+        assert_eq!(bits(actual.into_row()), bits(expected.into_row()));
+    }
+
     #[test]
     fn committing_disc_checks_every_visible_other_state() {
         let check = |visible, applying| {
