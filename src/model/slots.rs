@@ -2674,6 +2674,87 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_shrinking_group_walks_into_its_seats_and_stays_ringed() {
+        let identity = |name: &str| crate::timeline::Identity {
+            name: name.as_bytes().to_vec(),
+            email: format!("{name}@example.invalid").into_bytes(),
+        };
+        // The bot and Actions commit in one repository, then in a second with Owen and
+        // Codex, who come from and return to their own commits in a third.
+        let start = crate::timeline::synthetic()[0].seconds;
+        let histories = (0..3)
+            .map(|repository| {
+                let mut events = crate::timeline::synthetic();
+                if repository < 2 {
+                    events.truncate(1);
+                    events[0].author = identity("Bot");
+                    events[0].co_authors = if repository == 0 {
+                        vec![identity("Actions")]
+                    } else {
+                        ["Actions", "Owen", "Codex"].map(identity).to_vec()
+                    };
+                    events[0].seconds = start + 600 * i64::from(repository == 1);
+                }
+                for (index, event) in events.iter_mut().enumerate() {
+                    if repository == 2 {
+                        event.seconds =
+                            start + 300 + 600 * i64::try_from(index).unwrap();
+                        event.author = identity("Owen");
+                        event.co_authors = vec![identity("Codex")];
+                    }
+                }
+                crate::repositories::namespace(&mut events, repository);
+                events
+            })
+            .collect();
+        let mut sim = Simulation::with_repositories(
+            crate::repositories::merge(histories),
+            &Options::default(),
+            &Theme::neon(),
+            &Mappings::default(),
+            &["a".into(), "b".into(), "c".into()],
+        );
+        let frames = crate::model::frames_for(sim.duration(), 60).unwrap();
+        let mut walking = std::collections::HashMap::new();
+        for frame in 0..=frames {
+            sim.advance_to(frame, 60);
+            assert_members_ringed(&sim, frame);
+            let state = &sim.state;
+            // A walk into a seat lasts 0.4 s; seats drifting as avatars rescale must not
+            // keep restarting it.
+            for avatar in &state.avatars {
+                let run = walking.entry(avatar.name.clone()).or_insert(0);
+                *run = if avatar.settle.is_some() { *run + 1 } else { 0 };
+                assert!(
+                    *run <= 26,
+                    "frame {frame}: {} never reaches its seat",
+                    avatar.name
+                );
+            }
+            let member = world(Vec2::X * state.avatar_radius() * MEMBER_SCALE)
+                .distance(world(Vec2::ZERO));
+            for (index, avatar) in state.avatars.iter().enumerate() {
+                let lead = avatar.group.map_or(index, |g| g.lead);
+                let drawn = state.avatars[lead].ring_presence >= 1.0
+                    && state.avatars[lead].presence >= 1.0
+                    && avatar.settle.is_none()
+                    && !sim.travel.travelling(index, state.tick);
+                if let Some((centre, rim)) = state
+                    .beam_ring(index)
+                    .filter(|_| drawn && state.in_party(index, lead))
+                {
+                    let reach = avatar.position.distance(centre) + member;
+                    assert!(
+                        reach <= rim * 1.01,
+                        "frame {frame}: {} reaches {reach} past its drawn ring {rim}",
+                        avatar.name
+                    );
+                }
+            }
+        }
+    }
+
     fn events_author() -> crate::timeline::Identity {
         crate::timeline::Identity {
             name: b"Ada".to_vec(),

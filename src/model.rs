@@ -71,6 +71,9 @@ const ARRIVAL_SCALE: f32 = 1.15;
 const DISBAND: f32 = 0.4;
 /// Seconds an avatar takes to walk a short step to a new seat.
 const SETTLE_SECONDS: f32 = 0.4;
+/// Reference pixels a seat may move in one tick before it counts as a new seat: seats
+/// drift by far less as avatars rescale, and a reseat moves by about a member's width.
+const SEAT_DRIFT: f32 = 1.0;
 const BEAM_LIMIT: usize = 24;
 const FRAGMENT_TARGETS: usize = 24;
 const SETTLE_TICKS: u32 = 1200;
@@ -390,7 +393,8 @@ impl Avatar {
             self.travelling = true;
         } else {
             let distance = self.position.distance(target);
-            let seated = self.travelling && offset != Vec2::ZERO || offset != self.seat;
+            let seated = self.travelling && offset != Vec2::ZERO
+                || offset.distance(self.seat) > SEAT_DRIFT;
             // A new seat chooses its name afresh, at the ring point nearest it, rather than
             // holding the place it had before.
             let before = seated
