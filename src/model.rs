@@ -1179,10 +1179,11 @@ impl Simulation {
         );
         let labels = self.layout().region_labels();
         let mut pending = vec![self.layout().region_sample(&active)];
+        let files = self.file_motion(FileMotion::Glide);
         for tick in 0..ticks {
             self.progress
                 .report(Stage::Layout, tick.into(), ticks.into());
-            self.tick_layout();
+            self.tick_layout_with_files(files);
             for event in &self.events[sampled_events..self.state.next_event] {
                 active[event.repository] = true;
             }
@@ -1417,14 +1418,18 @@ impl Simulation {
     }
 
     pub(crate) fn tick_layout(&mut self) {
-        self.tick_times.laps.begin(&self.trace);
-        let placement = self.packing_sample(self.state.tick + 1, None);
-        self.tick_times.laps.end(Phase::TickPacking);
         let files = self.file_motion(match self.visuals {
             Visuals::None => FileMotion::Hold,
             Visuals::Titles => FileMotion::Glide,
             Visuals::All => FileMotion::Advance,
         });
+        self.tick_layout_with_files(files);
+    }
+
+    fn tick_layout_with_files(&mut self, files: FileMotion) {
+        self.tick_times.laps.begin(&self.trace);
+        let placement = self.packing_sample(self.state.tick + 1, None);
+        self.tick_times.laps.end(Phase::TickPacking);
         self.tick_local_layout(files);
         if let Some((regions, offsets, scales)) = placement {
             self.state
