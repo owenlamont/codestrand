@@ -37,6 +37,8 @@ mod time;
 mod titles;
 mod trace;
 mod travel;
+#[cfg(test)]
+pub(crate) use travel::assert_gutter_routes;
 mod windows;
 pub(super) use names::rect as label_rect;
 #[cfg(not(test))]

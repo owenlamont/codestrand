@@ -308,9 +308,16 @@ mod tests {
         assert!(matches!(change.nodes[0], Node::Split { axis: 1, .. }));
         let unchanged = tiles(&nodes, &target, &presence, space).unwrap();
         assert!(mismatch(&change.to.tiles, &target) < mismatch(&unchanged, &target));
+        let end = 12 + held::reflow_ticks();
+        let middle = change.sample(12 + held::reflow_ticks() / 2).unwrap();
         let mut previous = change.from.tiles.clone();
-        for tick in 12..12 + held::reflow_ticks() {
-            let current = change.sample(tick).unwrap();
+        for tick in 12..=end {
+            let current = change.sample(tick).unwrap_or_else(|| {
+                Layout::new(
+                    &change.nodes,
+                    tiles(&change.nodes, &target, &presence, space).unwrap(),
+                )
+            });
             for (a, b) in previous
                 .iter()
                 .flatten()
@@ -319,8 +326,17 @@ mod tests {
                 assert!(a.low.distance(b.low) < 0.015);
                 assert!(a.high.distance(b.high) < 0.015);
             }
+            if tick == 12 || tick == end || tick == 12 + held::reflow_ticks() / 2 {
+                crate::model::assert_gutter_routes(
+                    current.gutters.iter().flatten().copied(),
+                );
+            }
             previous = current.tiles;
         }
+        assert_eq!(previous, change.to.tiles);
+        let replay = change.sample(12 + held::reflow_ticks() / 2).unwrap();
+        assert_eq!(middle.tiles, replay.tiles);
+        assert_eq!(middle.gutters, replay.gutters);
     }
 
     #[test]
