@@ -59,12 +59,14 @@ impl Plan {
         let root = subtree(&children, 0, &peak, &mut regions, &mut sizes);
         let mut windows = vec![8_usize; required[0].len()];
         let mut samples = loop {
-            // Reverse the two filter supports, including the spline, into reservations.
-            let reserved: Vec<_> = required
-                .iter()
-                .map(|row| spread(&spread(&maximum(row, 2), &windows), &windows))
-                .collect();
-            let mut samples = pack(&regions, root, &reserved);
+            let mut samples = {
+                // Reverse the two filter supports, including the spline, into reservations.
+                let reserved: Vec<_> = required
+                    .iter()
+                    .map(|row| spread(&spread(&maximum(row, 2), &windows), &windows))
+                    .collect();
+                pack(&regions, root, &reserved)
+            };
             anchor_motion(&mut samples, &required);
             for row in &mut samples {
                 *row = smooth(&smooth(row, &windows), &windows);
