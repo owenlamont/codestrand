@@ -194,9 +194,10 @@ Preview and export use the selected revision's first-parent timeline. Revision
 defaults to `HEAD`. Codestrand does not clone or fetch a remote repository: obtain
 a complete local repository first.
 
-With `--start-date`, import scans commit headers to find the range, then reads one
-tree, the commit before the range, and the diffs inside the range. Earlier diffs are
-not read, and import budgets apply to the range read.
+With `--start-date` or `--end-date`, import scans commit headers to find the range,
+then reads one tree, the commit before the range, and the diffs inside the range.
+Diffs before or after the range are not read, and import budgets apply to the range
+read.
 
 Revisions accept reference names, full or unambiguous abbreviated object IDs, and
 `HEAD` (also `@`). Parent selectors `^N` and first-parent ancestor selectors `~N` can
@@ -205,8 +206,9 @@ including reflog and message searches, are rejected rather than delegated to unb
 reference traversal. Revision strings are limited to 4,096 bytes and navigation to
 1,000,000 steps, with the existing object-size and work budgets applied before loading.
 Annotated tags and symbolic references have a 64-hop limit and cycle detection.
-Cyclic or excessive chains produce an error, including when encountered through HEAD
-during diff setup. Import uses no wall-clock deadline.
+Cyclic or excessive chains produce an error. Diff setup does not resolve `HEAD` or
+read the index, worktree or `.gitattributes`. Import uses no
+wall-clock deadline.
 
 ## Analysis limits
 
@@ -244,9 +246,9 @@ hostile inputs bounded; a later start reduces the history they are charged again
 Repository playback saves the latest imported timeline, diff counts and bounded
 line samples under the platform user cache directory, inside `codestrand/`.
 Linked worktrees share a cache
-namespace based on the canonical common Git directory. A different resolved tip or
-start commit replaces the saved timeline after a complete import. Changing the end
-date or pacing reuses the imported timeline. Contributor mapping edits take effect on
+namespace based on the canonical common Git directory. A different resolved tip,
+start commit or end commit replaces the saved timeline after a complete import.
+Changing pacing reuses the imported timeline. Contributor mapping edits take effect on
 cache hits.
 
 Cache errors regenerate data without blocking playback. To bypass history and
@@ -649,7 +651,9 @@ free-camera controls remain independent.
 
 Planning snapshots the machine's available physical memory before importing history.
 Swap does not count. An estimate above that snapshot is refused, with both values
-reported in bytes and MiB. If memory information cannot be read, planning stops.
+reported in bytes and MiB. Total RAM stands in for an available reading above it, and
+on macOS for a reading of zero, which means the reading failed; a stderr line says so.
+If total RAM cannot be read, planning stops.
 The estimate uses the actual selected schedule, repository samples, contributor
 first arrivals, imported changes, path bytes and directory samples. Variable allocation
 sizes are estimates, so the figure is not a process-memory ceiling. Each padded schedule
@@ -694,8 +698,9 @@ Single-object and single-tree limits stay fixed, including 16 MiB objects, 2,000
 expanded tree entries, depth 256, 16,384-byte paths and 64 MiB of expanded path bytes.
 The 32 GiB cumulative work ceiling, 8 GiB blob-detail budget and per-diff work limits
 also stay fixed. Oversized or expensive blob diffs keep file changes but omit detail;
-exhausting the cumulative line budget also omits detail. A start date reduces import
-work: diffs before the range are not read.
+exhausting the cumulative line budget also omits detail. Date bounds reduce import
+work: diffs outside the range are not read. The caption still numbers commits
+against the whole first-parent history.
 
 ```sh
 codestrand preview --repository /path/to/repository --start-date 2026-05-01 --end-date 2026-05-31 \
@@ -1084,19 +1089,31 @@ Override the file with `--contributors /path/to/contributors.toml`:
 [[contributor]]
 name = "Owen Lamont"
 emails = ["owen@personal.example", "owen@work.example"]
-github = "owenlamont"           # optional GitHub login
-gitlab = "owenlamont"           # optional GitLab.com username
-gravatar = "owen@avatar.example" # optional Gravatar email
+github = "owenlamont"         # optional GitHub login
 bot = false                   # optional bot classification override
 # avatar = "portraits/owen.png"  # optional local path or HTTPS URL; overrides lookups
 ```
 
 Emails match case-insensitively; duplicate emails are errors. Matching names never merge
-people with different nonempty emails. Unlisted emails keep separate identities,
-displayed with the name from the last commit in playback order. Commits without an email
+people with different nonempty emails. Unlisted emails of one GitHub account become one
+contributor (see [GitHub accounts](#github-accounts)); other unlisted emails keep
+separate identities. Each is displayed with the name from its last commit in playback
+order. Commits without an email
 are grouped by author name. A missing default file is fine; an explicit missing file,
 unknown key or malformed TOML is an error. Edits take effect on cache hits; original
 authors and repository history remain unchanged.
+
+Each `Co-authored-by: Name <email>` trailer in a commit message's final trailer block
+makes that person a contributor of the commit, as on GitHub. Co-authors match by email
+like authors, so a co-author shares the avatar of their own commits. A commit's
+contributors pack, slightly smaller, inside one ring in the author's colour, with each
+name outside the ring nearest its member, and every beam leaves from the ring's edge. A
+co-author stays in the ring while the author keeps its place, then walks to its own
+next commit; when the author moves on, a co-author fades out with the ring unless it
+commits again within `--contributor-inactivity-days`. The author's colour marks the
+files and the caption names the author.
+Codestrand reads at most 8 co-authors per commit, none from a message over 64 KiB, and
+ignores a trailer without an email or with a name or email over 4,096 bytes.
 
 `bot = true` marks automation and `bot = false` marks a human, overriding automatic
 detection even after a display-name change. Without an override, a parsed GitHub noreply
@@ -1108,10 +1125,9 @@ Configuration is limited to 1 MiB before parsing, 4,096 contributors, 4,096 tota
 aliases, and 4,096 bytes per string. Expanded alias payloads may total at most 16 MiB.
 Files exceeding a limit are rejected with a configuration error before alias expansion.
 
-Account fields accept usernames, never profile URLs or whitespace. GitHub logins use
-letters, digits and hyphens (bot logins may end in `[bot]`); GitLab usernames start with
-a letter or digit and may also contain `_`, `-` and `.`. Invalid fields report the file,
-contributor and field. Local avatar paths resolve relative to the TOML file and must stay
+`github` accepts a login, never a profile URL or whitespace: letters, digits and
+hyphens, and bot logins may end in `[bot]`. Invalid fields report the file, contributor
+and field. Local avatar paths resolve relative to the TOML file and must stay
 inside the TOML file's directory. Absolute paths are accepted only inside that directory.
 Parent escapes, symlinks, directory junctions, network paths and device paths are rejected
 before opening an image. Rejected paths warn and use the default coloured sphere.
@@ -1120,6 +1136,57 @@ Local images
 must decode as PNG, JPEG or GIF, at most 4 MiB and 2048 pixels per side. Missing or
 undecodable local images produce a warning and fall back to account lookups.
 Remote overrides require an HTTPS URL without credentials.
+
+## Coding agents
+
+Coding agents sign commits with fixed emails that GitHub links to their own accounts.
+Codestrand does not build these in, so map the ones you use; a `github` login gives the
+agent its portrait under `--fetch-avatars`. Agents that commit as a GitHub noreply
+address, such as Copilot, Jules and Devin, need no entry.
+
+| Agent | Email | `github` | Source |
+| --- | --- | --- | --- |
+| Claude Code | `noreply@anthropic.com` | `claude` | [Settings](https://docs.anthropic.com/en/docs/claude-code/settings) |
+| Codex | `noreply@openai.com`, `codex@openai.com` | `codex` | [Source](https://github.com/openai/codex/blob/0e8c7683c4a85f00667bd762265358a407124f2e/codex-rs/ext/git-attribution/src/world_state.rs) |
+| Cursor | `cursoragent@cursor.com` | `cursoragent` | [Agents](https://docs.cursor.com/background-agent) |
+| Amp | `amp@ampcode.com` | `ampagent` | [Manual](https://ampcode.com/manual) |
+| OpenHands | `openhands@all-hands.dev` | `openhands-agent` | [Source](https://github.com/OpenHands/OpenHands/blob/428b3dc2a0e8d3d0f689a909e2607e33d973da76/src/services/settings.ts) |
+| Aider | `noreply@aider.chat` | none | [Git](https://aider.chat/docs/git.html) |
+
+```toml
+[[contributor]]
+name = "Claude"
+emails = ["noreply@anthropic.com"]
+github = "claude"
+
+[[contributor]]
+name = "Codex"
+emails = ["noreply@openai.com", "codex@openai.com"]
+github = "codex"
+
+[[contributor]]
+name = "Cursor"
+emails = ["cursoragent@cursor.com"]
+github = "cursoragent"
+
+[[contributor]]
+name = "Amp"
+emails = ["amp@ampcode.com"]
+github = "ampagent"
+
+[[contributor]]
+name = "OpenHands"
+emails = ["openhands@all-hands.dev"]
+github = "openhands-agent"
+
+[[contributor]]
+name = "Aider"
+emails = ["noreply@aider.chat"]
+```
+
+These identities were checked in November 2026 and can change. To check one, open a
+commit the agent co-authored on GitHub: the avatars beside the commit link to the
+account GitHub matched to each email.
 
 ## Contributor avatars
 
@@ -1143,8 +1210,8 @@ Playback time drives crowd scaling and placement, so export speed does not chang
 
 Preview and export stay offline by default: local overrides and cached portraits are
 used, with the coloured sphere as the fallback. Add `--fetch-avatars` to either command
-to opt in to network requests before playback starts. Export never fetches during frame
-capture.
+to opt in to requests to GitHub before playback starts. Export never fetches during
+frame capture.
 
 ```sh
 codestrand preview --repository /path/to/repo --fetch-avatars
@@ -1155,65 +1222,65 @@ Resolution stops at the first usable portrait, in the following order:
 
 1. Explicit `avatar`: local file or cached/fetched HTTPS image. An unavailable local
    file warns and continues below. An unavailable HTTPS override keeps the default glyph
-   (or its previous cached portrait), without account lookups.
-2. Explicit `github`, then explicit `gitlab` using the GitLab.com Users API.
-3. GitHub noreply login, then the commit author's GitHub account when a remote points
-   to github.com (`origin` preferred). An explicit GitHub login replaces inferred
-   GitHub lookup. The commit API runs at most once per distinct unresolved email per run.
-4. GitLab.com email lookup, only with **both** `--fetch-avatars` and
-   `--gitlab-email-avatars`.
-5. Gravatar using `gravatar` when provided, otherwise the commit email, hashed with
-   SHA-256 after trimming and lowercasing; `d=404` avoids Gravatar placeholders.
-6. Default coloured sphere.
+   (or its previous cached portrait), without GitHub lookups.
+2. The contributor's GitHub account: explicit `github`, else the account found for one
+   of its emails, preferring one with a numeric account ID.
+3. Default coloured sphere.
+
+## GitHub accounts
+
+Codestrand finds the GitHub account behind a commit email, without a contributors file:
+
+- A GitHub noreply address, `<id>+<login>@users.noreply.github.com` or
+  `<login>@users.noreply.github.com`, names its account. No request is needed, so this
+  works offline.
+- With `--fetch-avatars`, when a remote points to github.com (`origin` preferred),
+  GitHub's commit API names the author account of one commit by that email. Busiest
+  emails go first, and each email is looked up at most once per run. An email seen only
+  as a co-author is not looked up, since a commit names only its author's account.
+
+Unlisted emails of one account become one contributor, identified by the numeric
+account ID where known, so a renamed login stays one person. A contributors entry whose
+`github` names any login of that account takes those emails, unless two entries do; the
+entry may list no emails, to name an account's contributor alone. An email the
+file lists always keeps its entry. A commit email can claim any noreply address, so a
+forged one merges with that account, just as GitHub attributes it.
 
 `GH_TOKEN` or `GITHUB_TOKEN`, when present, authenticates only GitHub API requests.
 Public repositories work without a token; private repositories need a token with
-repository access. GitLab lookups are unauthenticated and support GitLab.com only.
-Rate limits and network failures leave playback available. HTTPS uses Rustls with ring
-and the operating system trust store on Linux, macOS and Windows.
+repository access. Unauthenticated, GitHub allows about 60 API requests an hour, so a
+history with many authors needs a token, or several runs, to find every account; the
+summary line reports `unresolved_emails`. Rate limits and network failures leave
+playback available. HTTPS uses Rustls with ring and the operating system trust store on
+Linux, macOS and Windows.
 
 ## Privacy and network settings
 
-`--fetch-avatars` alone **never sends raw commit emails**. GitLab email lookup is off by
-default, even when fetching is enabled. Opt in explicitly for each invocation:
+Codestrand never sends a commit email, an email hash or an author name. GitHub is the
+only service it contacts on its own, and only with `--fetch-avatars`:
 
-```sh
-codestrand export frames --repository /path/to/repo --fetch-avatars --gitlab-email-avatars
-```
+- No flag: no requests; local overrides and cache only.
+- GitHub API: receives the repository owner and name and a commit SHA.
+- GitHub image hosts: receive a login or numeric account ID in the image URL.
+- Remote `avatar`: the override host receives the configured URL, including path and
+  query, which can carry whatever its author put in it.
 
-- No fetch flags: no requests; local overrides and cache only.
-- `--fetch-avatars`, remote `avatar`: the override host receives the configured URL,
-  including path and query.
-- `--fetch-avatars`, GitHub: GitHub receives the configured or noreply login, or the
-  repository and commit SHA. The image host receives the image URL, possibly containing
-  a numeric account ID.
-- `--fetch-avatars`, `gitlab`: GitLab.com receives the configured username. The returned
-  image host receives the avatar URL.
-- `--fetch-avatars`, Gravatar: Gravatar receives the normalized email's SHA-256 hash,
-  never the email.
-- Both flags, GitLab email: GitLab.com receives the trimmed, lowercased commit email
-  in a URL query. The returned image host receives the avatar URL.
-
-Identifiers and email hashes are identifying information. GitLab may return an external
-avatar URL; fetching follows that URL unless the host is `gravatar.com` or a subdomain.
-GitLab Gravatar URLs are treated as misses so the configured Gravatar step decides.
-HTTPS redirects can also contact another image host.
-An explicit avatar URL can itself contain identifying information supplied by the user.
-GitHub credentials are never added to GitLab or image requests. Diagnostics show counts,
-not emails or request URLs. Local avatar overrides do not require either fetch flag.
+HTTPS redirects can contact another image host. GitHub credentials are never added to
+image requests. Diagnostics show counts, not emails or request URLs. Local avatar
+overrides need no flag.
 
 ## Cache
 
-Portraits and account resolutions live under `codestrand/avatars-v2/` in the platform
-cache directory, keyed by a hash of email, explicit accounts, override, remote and GitLab
-email setting. Remote overrides are keyed only by URL. Existing GitHub/Gravatar-only
-cache entries remain usable. For account lookups, changing the GitLab email flag selects
-a separate cache entry; pass `--gitlab-email-avatars` without
-`--fetch-avatars` to reuse an opted-in portrait offline. The email flag alone never
-enables network requests.
+Portraits and accounts live under `codestrand/avatars-v3/` in the platform cache
+directory. An account found for an email is reused for every repository; an email with
+no account is rechecked for a different remote, and a commit GitHub does not have, such
+as an unpushed one, is rechecked next run. Images are keyed by URL. Earlier
+releases used `avatars-v2`, which Codestrand leaves on disk but no longer reads; after
+upgrading, run once with `--fetch-avatars` to get portraits back.
 Portraits are resized to 128-pixel PNG files beside small JSON account records.
 Fetching covers only contributors in the selected playback window, with a 30-second
-total network budget. Entries refresh after seven days when fetching is enabled;
+total network budget; account lookups stop with 15 seconds left so portraits still
+load. Entries refresh after seven days when fetching is enabled;
 offline playback can reuse expired images. Failed refreshes retain cached images.
 `--no-cache` disables avatar cache reads and writes too; local overrides still work.
 Delete the directory to clear saved avatars. Circular portraits retain the contributor
@@ -1241,13 +1308,10 @@ available portrait and account information, requests can disclose:
   `GH_TOKEN` is unset or not valid Unicode. An empty `GH_TOKEN` disables authentication
   without falling back to `GITHUB_TOKEN`; empty tokens are ignored. GitHub avatar
   servers receive the account name or numeric ID.
-- A SHA-256 digest of a selected email address, or its configured Gravatar address,
-  to Gravatar when a portrait is still missing. The address is trimmed and lowercased
-  first. A hash is not anonymity:
-  someone who knows an address can calculate the same value.
-- A configured GitLab username to GitLab. Raw email lookup at GitLab requires both
-  `--fetch-avatars` and `--gitlab-email-avatars`.
 - A configured remote avatar URL to its HTTPS server, and any redirect destination.
+
+No email address, email hash or author name is sent, and GitHub is the only service
+contacted unless a configured avatar URL names another.
 
 Codestrand does not add source file paths, source contents or diff text to these
 requests. Servers also receive ordinary connection information such as the source
@@ -1275,7 +1339,7 @@ not encrypted by Codestrand. `--no-cache` disables reading and writing its cache
 The cache is under `codestrand` in the operating system's user cache directory:
 `%LOCALAPPDATA%` on Windows, `~/Library/Caches` on macOS, and `$XDG_CACHE_HOME` or
 `~/.cache` on Linux. History snapshots use per-repository subdirectories;
-portrait data uses `avatars-v2`.
+portrait data uses `avatars-v3`.
 
 Video export starts FFmpeg and sends it rendered frames through standard input.
 Codestrand's production import and renderer do not launch Git, repository hooks,
@@ -1396,7 +1460,7 @@ A line in a repository's `AGENTS.md` or `CLAUDE.md` points agents at the tool:
 
 > Visualise this repository's history with `codestrand preview --repository .`, or
 > export it with `codestrand export <new directory> --repository .`. Do not pass
-> `--fetch-avatars` without asking: it sends contributor lookups to GitHub and Gravatar.
+> `--fetch-avatars` without asking: it sends contributor lookups to GitHub.
 
 ## Feeding the docs to an LLM
 

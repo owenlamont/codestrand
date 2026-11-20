@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use bevy::math::Vec2;
 use planner::Plan;
@@ -149,6 +149,8 @@ pub(super) struct Layout {
     dirs: Vec<Dir>,
     dir_index: HashMap<String, usize>,
     files: BTreeMap<u64, File>,
+    /// Files with a delay or fade pending; every other file is present and still.
+    fading: BTreeSet<u64>,
     file_index: HashMap<String, u64>,
     next_id: u64,
     revision: u64,
@@ -180,6 +182,17 @@ pub(crate) enum StepPart {
     Files,
 }
 
+/// What a tick advances for each file. Only drawn frames read heat and activity, and
+/// travel replays read only repository tiles, directories and file existence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FileMotion {
+    /// Position, heat and activity.
+    Advance,
+    /// Position only.
+    Glide,
+    Hold,
+}
+
 /// File and directory visits by layout steps, and how many of them could change nothing.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct StepCounts {
@@ -196,7 +209,7 @@ pub(crate) struct StepCounts {
 }
 
 impl StepCounts {
-    fn count(&mut self, layout: &Layout, before: &[(Vec2, f32)]) {
+    fn count(&mut self, layout: &Layout, before: &[(Vec2, f32)], files: FileMotion) {
         self.directories += layout.dirs.len();
         self.still_directories += layout
             .dirs
@@ -204,6 +217,9 @@ impl StepCounts {
             .zip(before)
             .filter(|(dir, before)| (dir.position, dir.reserve) == **before)
             .count();
+        if files != FileMotion::Advance {
+            return;
+        }
         for file in layout.files.values() {
             self.files += 1;
             self.steady_files +=
@@ -229,6 +245,7 @@ impl Layout {
             dirs: vec![Dir::new(String::new(), None, 0, 0)],
             dir_index: HashMap::from([(String::new(), 0)]),
             files: BTreeMap::new(),
+            fading: BTreeSet::new(),
             file_index: HashMap::new(),
             next_id: 0,
             revision: 0,
@@ -250,6 +267,8 @@ impl Layout {
             },
             repository: 0,
             contributor: None,
+            co_authors: Vec::new(),
+            co_contributors: Vec::new(),
             commit: String::new(),
             changes: paths
                 .iter()
@@ -321,6 +340,7 @@ impl Layout {
             file.author = author;
             file.activity = 1.0;
             self.dirs[file.dir].touch_age = 0.0;
+            self.fading.insert(id);
             return id;
         }
         let dir = self.ensure_dir(parent_path(path));
@@ -349,6 +369,7 @@ impl Layout {
             },
         );
         self.file_index.insert(path.to_owned(), id);
+        self.fading.insert(id);
         id
     }
 
@@ -375,6 +396,7 @@ impl Layout {
         let file = self.files.get_mut(&id).expect("indexed files exist");
         file.state = Presence::Leaving;
         file.delay = delay;
+        self.fading.insert(id);
         file.author = author;
         file.activity = 1.0;
         self.dirs[file.dir].touch_age = 0.0;
@@ -390,6 +412,7 @@ impl Layout {
         if let Some(previous) = self.file_index.remove(to) {
             self.release(previous);
             self.files.remove(&previous);
+            self.fading.remove(&previous);
         }
         self.dirs[self.files[&id].dir].touch_age = 0.0;
         let dir = self.ensure_dir(parent_path(to));
@@ -423,13 +446,14 @@ impl Layout {
     }
 
     pub(super) fn step(&mut self, dt: f32) {
-        self.step_observed(dt, None, |_| ());
+        self.step_observed(dt, FileMotion::Advance, None, |_| ());
     }
 
     /// One step, calling `done` after each part and counting idle work into `counts`.
     pub(super) fn step_observed(
         &mut self,
         dt: f32,
+        files: FileMotion,
         mut counts: Option<&mut StepCounts>,
         mut done: impl FnMut(StepPart),
     ) {
@@ -445,9 +469,13 @@ impl Layout {
             .then(|| self.dirs.iter().map(|d| (d.position, d.reserve)).collect());
         self.relax(dt);
         if let (Some(counts), Some(before)) = (&mut counts, before) {
-            counts.count(self, &before);
+            counts.count(self, &before, files);
         }
         done(StepPart::Relax);
+        if files == FileMotion::Hold {
+            done(StepPart::Files);
+            return;
+        }
         for file in self.files.values_mut() {
             let target = self.dirs[file.dir].position + file.slot_offset;
             let desired =
@@ -464,8 +492,9 @@ impl Layout {
         file.heat = (file.heat + amount).min(1.0);
     }
 
-    /// Undoes region placement, if any, and cools heat, visiting each file once.
-    pub(super) fn begin_tick(&mut self, dt: f32, half_life: f32) {
+    /// Undoes region placement, if any, and cools heat when files advance, visiting each
+    /// file once.
+    pub(super) fn begin_tick(&mut self, dt: f32, half_life: f32, files: FileMotion) {
         let placed = std::mem::take(&mut self.placed);
         for dir in &mut self.dirs {
             if placed {
@@ -473,6 +502,18 @@ impl Layout {
                 dir.scale = 1.0;
             }
             dir.touch_age += dt;
+        }
+        match files {
+            FileMotion::Hold => return,
+            FileMotion::Glide => {
+                if placed {
+                    for file in self.files.values_mut() {
+                        file.position = file.local_position;
+                    }
+                }
+                return;
+            }
+            FileMotion::Advance => {}
         }
         let decay = (-dt / half_life).exp2();
         for file in self.files.values_mut() {
@@ -514,11 +555,23 @@ impl Layout {
     }
 
     fn fade_files(&mut self, dt: f32) {
+        #[cfg(test)]
+        for (id, file) in &self.files {
+            assert!(
+                self.fading.contains(id)
+                    || (file.state == Presence::Present && file.delay <= 0.0),
+                "file {id} has a fade pending outside the fading set"
+            );
+        }
         let mut gone = Vec::new();
-        for (&id, file) in &mut self.files {
+        let files = &mut self.files;
+        self.fading.retain(|id| {
+            let Some(file) = files.get_mut(id) else {
+                return false;
+            };
             if file.delay > 0.0 {
                 file.delay -= dt;
-                continue;
+                return true;
             }
             match file.state {
                 Presence::Arriving => {
@@ -530,12 +583,13 @@ impl Layout {
                 Presence::Leaving => {
                     file.presence = (file.presence - dt / 1.2).max(0.0);
                     if file.presence <= 0.0 {
-                        gone.push(id);
+                        gone.push(*id);
                     }
                 }
                 Presence::Present => {}
             }
-        }
+            file.state != Presence::Present || file.delay > 0.0
+        });
         for id in gone {
             let file = self.files.remove(&id).expect("faded files exist");
             if self.file_index.get(&file.path) == Some(&id) {

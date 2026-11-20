@@ -84,7 +84,7 @@ impl Simulation {
 
     pub(super) fn plan_windows(
         self,
-        all_events: &[crate::timeline::Event],
+        all_events: Events,
         options: &Options,
         repositories: &[String],
         seconds: f32,
@@ -92,7 +92,7 @@ impl Simulation {
         #[cfg(test)]
         if options.eager_windows {
             return self.plan_windows_with_padding(
-                all_events,
+                &all_events,
                 options,
                 repositories,
                 seconds,
@@ -101,7 +101,7 @@ impl Simulation {
         }
         Stream::start(
             self,
-            all_events.to_vec(),
+            all_events,
             options.clone(),
             repositories.to_vec(),
             seconds,
@@ -138,7 +138,9 @@ impl Simulation {
             if pass > 32 {
                 anyhow::bail!(
                     "window travel did not converge at commit {}",
-                    self.travel.first_unresolved().unwrap_or(self.travel.frozen)
+                    self.travel
+                        .first_unresolved(options.bot_travel)
+                        .unwrap_or(self.travel.frozen)
                         + self.offset
                 );
             }
@@ -250,11 +252,12 @@ impl Simulation {
             if let Some(hook) = &options.window_hook {
                 hook(window_index, &mut self);
             }
-            if options.travel_cap == TravelCap::None {
-                anyhow::ensure!(
-                    self.travel.first_unresolved().is_none(),
+            if options.travel_cap == TravelCap::None
+                && let Some(commit) = self.travel.first_unresolved(options.bot_travel)
+            {
+                anyhow::bail!(
                     "window travel has no route for commit {}",
-                    self.travel.first_unresolved().unwrap_or(0) + self.offset
+                    commit + self.offset
                 );
             }
             let boundary = self.finish_window(end)?;
@@ -342,6 +345,7 @@ impl Simulation {
         Self {
             file_ids: self.file_ids.clone(),
             first_arrivals: self.first_arrivals.clone(),
+            finals: self.finals.clone(),
             departures: self.departures.clone(),
             repository_ends: self.repository_ends.clone(),
             caption_style: self.caption_style,
@@ -354,6 +358,7 @@ impl Simulation {
             repository_label_plane: self.repository_label_plane,
             events,
             offset: self.offset,
+            unread_before: self.unread_before,
             total: self.total,
             schedule: self.schedule.clone(),
             clock: self.clock.clone(),
@@ -375,6 +380,8 @@ impl Simulation {
             stream: None,
             ready_end: Some(ready),
             title_start: self.title_start,
+            #[cfg(test)]
+            advance_all_files: self.advance_all_files,
         }
     }
 
@@ -548,9 +555,11 @@ mod tests {
                 window.counter(&capture, Counter::StillDirectoryTicks)
                     <= window.counter(&capture, Counter::DirectoryTicks)
             );
+            assert_eq!(window.counter(&capture, Counter::FileTicks), 0);
+            let checkpoint = [Phase::CheckpointReplay];
             assert!(
-                window.counter(&capture, Counter::SteadyFileTicks)
-                    <= window.counter(&capture, Counter::FileTicks)
+                window.counter(&checkpoint, Counter::SteadyFileTicks)
+                    <= window.counter(&checkpoint, Counter::FileTicks)
             );
             replayed +=
                 window.counter(&[Phase::CheckpointReplay], Counter::TicksReplayed);
@@ -644,6 +653,34 @@ mod tests {
                 "layout at tick {frame}"
             );
         }
+    }
+
+    #[test]
+    fn holding_files_outside_drawn_frames_changes_no_plan_or_playback() {
+        let history = crowded_history(4, 12, 5, 20_000);
+        let [mut held, mut advanced] = [false, true].map(|advance_all_files| {
+            plan_traced(
+                history.clone(),
+                Options {
+                    eager_windows: true,
+                    travel_window_seconds: Some(5.0),
+                    travel_cap: TravelCap::None,
+                    advance_all_files,
+                    ..Options::default()
+                },
+            )
+            .0
+        });
+        assert_eq!(held.envelopes, advanced.envelopes);
+        assert_eq!(held.title_plan, advanced.title_plan);
+        let layouts = |sim: &Simulation| -> Vec<_> {
+            sim.boundaries
+                .iter()
+                .map(|s| s.layout.exact_state())
+                .collect()
+        };
+        assert_eq!(layouts(&held), layouts(&advanced));
+        assert_same_playback(&mut held, &mut advanced);
     }
 
     #[test]
@@ -829,12 +866,35 @@ mod tests {
             &crate::contributors::Mappings::default(),
             &labels,
         );
-        assert!(sim.travel.first_unresolved().is_none());
+        assert!(sim.travel.first_unresolved(options.bot_travel).is_none());
         assert!(sim.boundaries.iter().any(|s| s.avatars.len() >= 2
             && super::super::tick_time(s.tick) - s.avatars[0].last_active > MARGIN
             && s.avatars[0].presence > 0.0));
         verify_boundaries(&mut sim);
         verify_streamed(&mut sim, events, &options, &labels);
+    }
+
+    #[test]
+    fn a_fading_bot_does_not_stop_uncapped_window_planning() {
+        let (mut events, labels) = super::super::tests::short_repository_history(2);
+        events.truncate(3);
+        events[0].author.name = b"helper[bot]".to_vec();
+        events[1].author = events[0].author.clone();
+        let options = Options {
+            eager_windows: true,
+            travel_window_seconds: Some(2.0),
+            travel_cap: TravelCap::None,
+            ..Options::default()
+        };
+        let sim = Simulation::try_with_repositories(
+            events,
+            &options,
+            &crate::theme::Theme::neon(),
+            &crate::contributors::Mappings::default(),
+            &labels,
+        )
+        .unwrap();
+        assert_eq!(sim.travel.stats.bot_fades, 1);
     }
 
     #[test]
@@ -992,7 +1052,7 @@ mod tests {
                     boundary.titles,
                     boundary.pulses,
                     &sim.schedule.starts[..count],
-                    &sim.travel.docks[..count],
+                    sim.travel.docks.range(..(count, 0)).collect::<Vec<_>>(),
                     trips,
                     titles,
                     caption::frozen(&sim.caption_plan, boundary.tick)

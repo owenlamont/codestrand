@@ -144,7 +144,7 @@ pub(super) fn build(name: ThemeName) -> Theme {
             t.blackbody = true;
             t.glyph_material.base_color = color(0x002a_2422);
             t.glyph_material.unlit = false;
-            t.glyph_material.emissive = LinearRgba::from(color(0x002a_2422));
+            t.glyph_material.emissive = t.heat_emissive(0.0);
             (
                 0x0007_0505,
                 0x00d9_cfc6,
@@ -208,6 +208,9 @@ fn apply_palette(
         };
     }
 }
+
+/// Grey of the plate behind each Forge icon.
+pub(super) const IRON_PLATE: u32 = 0x0066_6666;
 
 pub(super) const BLACKBODY: [(f32, u32); 6] = [
     (0.0, 0x002a_2422),
@@ -324,24 +327,29 @@ impl Theme {
                 r##"<path d="M5 2H21L28 9V30H5Z" fill="white" stroke="#202020"/><path d="M21 2V9H28" fill="#c0c0c0" stroke="#202020"/>{icon}"##,
                 r#"x="7" y="10" width="19" height="19""#,
             ),
-            // Forge plates show only their glow, which would hide any icon colour, so
-            // the icon is cut through the plate as a stencil instead.
+            // Forge glyphs show only their glow, which the texture tints: the grey
+            // plate glows `heat_color` and the brighter icon glows in its own colours.
             GlyphStyle::Iron => (
-                r#"<mask id="icon" mask-type="alpha">{icon}</mask><mask id="stencil"><rect width="32" height="32" fill="white"/><rect width="32" height="32" mask="url(#icon)"/></mask><rect x="2" y="3" width="28" height="26" rx="2" fill="white" mask="url(#stencil)"/>"#,
-                r#"x="6" y="6" width="20" height="20""#,
+                r#"<rect x="2" y="3" width="28" height="26" rx="2" fill="{plate}"/>{icon}"#,
+                r#"x="5" y="5" width="22" height="22""#,
             ),
         };
         let icon = source.replacen("<svg", &format!("<svg {placement}"), 1);
-        let art = frame.replace("{icon}", &icon);
+        let art = frame
+            .replace("{icon}", &icon)
+            .replace("{plate}", &format!("#{IRON_PLATE:06x}"));
         format!(
             r#"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">{art}</svg>"#
         )
     }
 
+    /// Glow of a white glyph texel; Forge's plate texels glow `heat_color` itself.
     pub(crate) fn heat_emissive(&self, heat: f32) -> LinearRgba {
         if self.blackbody {
-            LinearRgba::from(self.heat_color(heat))
-                * (1.0 + (heat - 0.3).max(0.0) * 4.0)
+            let plate = LinearRgba::from(color(IRON_PLATE)).red;
+            let glow = LinearRgba::from(self.heat_color(heat))
+                * ((1.0 + (heat - 0.3).max(0.0) * 4.0) / plate);
+            glow.with_alpha(1.0)
         } else {
             LinearRgba::BLACK
         }
