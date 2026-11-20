@@ -426,6 +426,8 @@ pub(super) struct Resolver<N> {
     pub now: u64,
     limited: bool,
     found: HashMap<String, Account>,
+    /// Emails whose account an authored commit or a noreply address has decided.
+    settled: HashSet<String>,
     unresolved: HashSet<String>,
     unsupported_remotes: usize,
     memo: HashMap<String, Option<Arc<Portrait>>>,
@@ -445,6 +447,7 @@ impl<N: Network> Resolver<N> {
             now,
             limited: false,
             found: HashMap::new(),
+            settled: HashSet::new(),
             unresolved: HashSet::new(),
             unsupported_remotes: 0,
             memo: HashMap::new(),
@@ -486,11 +489,13 @@ impl<N: Network> Resolver<N> {
             if contributor.accounts.github.is_some()
                 || matches!(contributor.accounts.avatar, Some(Avatar::Remote(_)))
                 || email.is_empty()
-                || self.found.contains_key(&email)
+                || self.settled.contains(&email)
+                || (commit.is_empty() && self.found.contains_key(&email))
             {
                 continue;
             }
             if let Some(account) = noreply(&email) {
+                self.settled.insert(email.clone());
                 self.found.insert(email, account);
                 continue;
             }
@@ -507,10 +512,14 @@ impl<N: Network> Resolver<N> {
                 );
             }
             let account = self.account(&email, remote, commit);
+            if !commit.is_empty() {
+                self.settled.insert(email.clone());
+            }
             if let Some(account) = account {
                 self.unresolved.remove(&email);
                 self.found.insert(email, account);
-            } else {
+            } else if !self.found.contains_key(&email) || !commit.is_empty() {
+                self.found.remove(&email);
                 self.unresolved.insert(email);
             }
         }
@@ -1114,6 +1123,30 @@ mod tests {
         let mut resolver = resolver(None, true, vec![Response::Missing]);
         resolver.accounts([&first, &pair], Some("owner/repo"));
         assert!(resolver.network.calls[0].0.contains(&"f".repeat(40)));
+    }
+
+    #[test]
+    fn an_authored_commit_in_a_later_repository_refreshes_a_co_author_account() {
+        let root = crate::cache::test_directory().unwrap();
+        let mut seed = resolver(
+            Some(root.path().to_owned()),
+            true,
+            vec![commit_by("old", 1)],
+        );
+        seed.accounts([&event("pair@example.invalid", None)], Some("owner/repo"));
+        let mut lead = event("lead@example.invalid", Some("lead"));
+        let pair = event("pair@example.invalid", None);
+        lead.co_contributors = vec![pair.contributor.clone().unwrap()];
+        let mut later = resolver(
+            Some(root.path().to_owned()),
+            true,
+            vec![commit_by("new", 2)],
+        );
+        later.now += TTL;
+        later.accounts([&lead], Some("first/repo"));
+        later.accounts([&pair], Some("second/repo"));
+        assert_eq!(later.network.calls.len(), 1);
+        assert_eq!(later.found()["pair@example.invalid"].id, Some(2));
     }
 
     #[test]
