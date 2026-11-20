@@ -711,7 +711,7 @@ impl Simulation {
                 eprintln!("global_plan_seconds={}", elapsed.as_secs_f64());
             }
             simulation.report_global(0, elapsed);
-            return simulation.plan_windows(&events, options, repositories, seconds);
+            return simulation.plan_windows(events, options, repositories, seconds);
         }
         let mut padding = simulation.travel_padding(options);
         let history = simulation.schedule.clone();
