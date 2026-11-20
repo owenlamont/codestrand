@@ -209,6 +209,7 @@ fn occupancy(
             let Some(file) = shadow.files.remove(&id) else {
                 continue;
             };
+            shadow.fading.remove(&id);
             if shadow.file_index.get(&file.path) == Some(&id) {
                 shadow.file_index.remove(&file.path);
             }

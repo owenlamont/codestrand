@@ -504,6 +504,8 @@ impl Source {
             eager_windows: false,
             #[cfg(test)]
             window_hook: None,
+            #[cfg(test)]
+            advance_all_files: false,
             replay_everything: false,
             region_threads: 0,
             bot_travel: self.bot_travel,

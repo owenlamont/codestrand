@@ -60,7 +60,7 @@ pub(super) struct Service {
     dock: slots::Dock,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct Capture {
     begin: u64,
     frozen: usize,
@@ -254,8 +254,13 @@ impl Plan {
     pub(super) fn trip_count(&self) -> usize {
         self.trips.len()
     }
-    pub(super) fn first_unresolved(&self) -> Option<usize> {
-        self.trips.iter().find(|t| t.fade).map(|t| t.commit)
+    /// The first commit whose trip fades although its policy walks; a bot under
+    /// `--bot-travel fade` fades by design.
+    pub(super) fn first_unresolved(&self, bots: super::BotTravel) -> Option<usize> {
+        self.trips
+            .iter()
+            .find(|t| t.fade && (!t.bot || bots == super::BotTravel::Walk))
+            .map(|t| t.commit)
     }
 
     pub(super) fn freeze_through(&mut self, tick: u64, applied: usize) {
@@ -1029,6 +1034,30 @@ impl Plan {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn holding_files_changes_no_capture_or_reservation() {
+        let (events, labels) = super::super::tests::short_repository_history(6);
+        let mut sim = Simulation::with_repositories(
+            events,
+            &super::super::Options {
+                travel_cap: super::super::TravelCap::None,
+                ..super::super::Options::default()
+            },
+            &crate::theme::Theme::neon(),
+            &crate::contributors::Mappings::default(),
+            &labels,
+        );
+        let planned = sim.travel.clone();
+        let [held, advanced] = [false, true].map(|advance| {
+            sim.advance_all_files = advance;
+            sim.travel = planned.clone();
+            let captured = format!("{:?}", capture(&mut sim));
+            let conflicts = sim.reserve_service_slots();
+            (captured, conflicts, sim.travel.round_state(None))
+        });
+        assert_eq!(held, advanced);
+    }
 
     #[test]
     fn near_coincident_gutters_keep_route_segments_axis_aligned() {

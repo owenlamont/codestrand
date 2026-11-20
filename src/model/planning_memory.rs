@@ -15,20 +15,41 @@ pub(crate) fn available(trace: &super::Trace) -> anyhow::Result<u64> {
     let mut system = sysinfo::System::new()
         .context("cannot read available physical memory; planning stopped")?;
     system.refresh_memory_specifics(sysinfo::MemoryRefreshKind::nothing().with_ram());
-    let available =
-        validate_available(system.total_memory(), system.available_memory())?;
+    let available = validate_available(
+        system.total_memory(),
+        system.available_memory(),
+        cfg!(target_os = "macos"),
+    )?;
+    if available != system.available_memory() {
+        eprintln!(
+            "Available memory reads {} bytes, which cannot be right; planning is checked against total RAM, {} MiB",
+            system.available_memory(),
+            available / (1024 * 1024)
+        );
+    }
     if trace.on() {
-        eprintln!("planning_available_memory_bytes={available}");
+        eprintln!("planning_memory_limit_bytes={available}");
     }
     Ok(available)
 }
 
-fn validate_available(total: u64, available: u64) -> anyhow::Result<u64> {
+/// Total RAM stands in for an available reading above the total, and for zero where
+/// zero means the reading failed: sysinfo leaves macOS at zero when its VM statistics
+/// call fails, while Linux reports zero under real memory pressure.
+fn validate_available(
+    total: u64,
+    available: u64,
+    zero_is_unread: bool,
+) -> anyhow::Result<u64> {
     anyhow::ensure!(
-        total > 0 && available <= total,
-        "cannot read available physical memory; planning stopped; check operating-system memory reporting and retry"
+        total > 0,
+        "cannot read physical memory; planning stopped; check operating-system memory reporting and retry"
     );
-    Ok(available)
+    Ok(if available > total || (available == 0 && zero_is_unread) {
+        total
+    } else {
+        available
+    })
 }
 
 pub(super) fn check(
@@ -210,7 +231,7 @@ fn author_count(events: &[Event]) -> u128 {
 fn check_bytes(bytes: u128, available: u64) -> anyhow::Result<()> {
     anyhow::ensure!(
         bytes <= u128::from(available),
-        "estimated planning memory {bytes} bytes ({} MiB) exceeds available physical memory {available} bytes ({} MiB) at startup; use fewer repositories or a later --start-date",
+        "estimated planning memory {bytes} bytes ({} MiB) exceeds the planning memory limit {available} bytes ({} MiB) taken from RAM at startup; use fewer repositories or a later --start-date",
         bytes.div_ceil(1024 * 1024),
         available / (1024 * 1024)
     );
@@ -346,17 +367,17 @@ mod tests {
             check_bytes(u128::from(available) + 1, available)
                 .unwrap_err()
                 .to_string(),
-            "estimated planning memory 1048577 bytes (2 MiB) exceeds available physical memory 1048576 bytes (1 MiB) at startup; use fewer repositories or a later --start-date"
+            "estimated planning memory 1048577 bytes (2 MiB) exceeds the planning memory limit 1048576 bytes (1 MiB) taken from RAM at startup; use fewer repositories or a later --start-date"
         );
     }
 
     #[test]
-    fn unavailable_reading_stops_planning_but_zero_available_is_valid() {
-        assert!(validate_available(0, 0).is_err());
-        assert!(validate_available(10, 11).is_err());
-        assert_eq!(validate_available(10, 0).unwrap(), 0);
-        assert!(check_bytes(1, 0).is_err());
-        assert_eq!(validate_available(10, 4).unwrap(), 4);
+    fn an_unread_or_impossible_available_reading_falls_back_to_total_memory() {
+        assert!(validate_available(0, 0, true).is_err());
+        assert_eq!(validate_available(10, 0, true).unwrap(), 10);
+        assert_eq!(validate_available(10, 0, false).unwrap(), 0);
+        assert_eq!(validate_available(10, 11, false).unwrap(), 10);
+        assert_eq!(validate_available(10, 4, true).unwrap(), 4);
     }
 
     #[test]
@@ -402,7 +423,7 @@ mod tests {
             check(&events, &options, &labels, &padded, padded.duration()).unwrap_err();
         assert!(error.to_string().contains("estimated planning memory"));
         assert!(error.to_string().contains(
-            "exceeds available physical memory 2147483648 bytes (2048 MiB) at startup"
+            "exceeds the planning memory limit 2147483648 bytes (2048 MiB) taken from RAM at startup"
         ));
     }
 
