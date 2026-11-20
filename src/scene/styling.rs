@@ -19,11 +19,16 @@ pub(super) fn label_font(primary: Handle<Font>, fallback: Handle<Font>) -> FontS
 ///
 /// Bevy evicts a system fallback font after two unused frames and reloads it under a
 /// new id, so the atlases of earlier ids would otherwise accumulate for the whole run.
+/// Only a frame that added atlas keys since the last pass scans the laid-out glyphs.
 pub(super) fn drop_stale_font_atlases(
     mut atlases: ResMut<bevy::text::FontAtlasSet>,
+    mut kept: Local<usize>,
     fonts: Res<Assets<Font>>,
     layouts: Query<&bevy::text::TextLayoutInfo>,
 ) {
+    if atlases.len() <= *kept {
+        return;
+    }
     #[expect(
         clippy::cast_possible_truncation,
         reason = "bevy_text keys atlases by the truncated font data id"
@@ -44,6 +49,7 @@ pub(super) fn drop_stale_font_atlases(
                 .iter()
                 .any(|atlas| used.contains(&atlas.texture.id()))
     });
+    *kept = atlases.len();
 }
 
 #[derive(Default)]
