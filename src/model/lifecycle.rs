@@ -56,13 +56,15 @@ pub(super) fn plan(
         .enumerate()
         .map(|(repository, &archived)| {
             archived
+                && options.unread.after(repository) == 0
                 && events
                     .iter()
                     .rposition(|event| event.repository == repository)
                     .is_some_and(|last| last < selected.end)
         })
         .collect();
-    let complete = selected.end == events.len();
+    let complete =
+        selected.end == events.len() && options.unread.after.iter().all(|&n| n == 0);
     let events = &events[selected];
     (
         departures(
@@ -350,6 +352,25 @@ mod tests {
         let selected = Schedule::new(&events[..1], 0.5, 1.0);
         assert_eq!(
             plan(&events, &selected, &archived, 0..1).1,
+            [Time::INFINITY]
+        );
+        let later_unread = super::super::Options {
+            unread: super::super::Unread {
+                before: 0,
+                after: vec![1],
+            },
+            ..archived
+        };
+        assert_eq!(
+            plan(&events[..1], &selected, &later_unread, 0..1).1,
+            [Time::INFINITY]
+        );
+        let ended_after_unread = super::super::Options {
+            repository_ends: vec![Some(200 * 86_400)],
+            ..later_unread
+        };
+        assert_eq!(
+            plan(&events[..1], &selected, &ended_after_unread, 0..1).1,
             [Time::INFINITY]
         );
     }
