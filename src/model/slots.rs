@@ -134,6 +134,8 @@ pub(super) struct Placement {
     pub dock: Dock,
     pub commit: usize,
     pub point: Vec2,
+    /// From the dock's point to this avatar's disc, which is nonzero in a group.
+    pub offset: Vec2,
     pub text: String,
     pub half_plane: bool,
     pub crossings: usize,
@@ -151,6 +153,78 @@ impl Placement {
     pub fn world(&self) -> Vec3 {
         world(self.point)
     }
+    /// The dock's own point, where travel routes end and a group's ring is centred.
+    pub fn centre(&self) -> Vec2 {
+        self.point - self.offset
+    }
+    /// The centre of the ring round a group of `capacity` seats parked here.
+    pub fn ring_centre(&self, capacity: u8, radius: f32) -> Vec2 {
+        self.centre() + ring_offset(capacity, self.dock.edge, radius)
+    }
+}
+
+/// Cost per radian of a ring member's name turning away from the point of the ring
+/// nearest that member; below holding a name still and a crossed beam.
+const NEAREST_NAME_WEIGHT: f32 = 20_000.0;
+
+/// Space between neighbouring members packed in a group, so they touch without
+/// overlapping.
+const GROUP_GAP: f32 = 0.5;
+/// Space between a group's members and its containing ring.
+const RING_GAP: f32 = 2.0;
+/// A group's members are drawn this much smaller than an avatar alone.
+pub(crate) const MEMBER_SCALE: f32 = 0.75;
+
+/// Distance from a group's centre to each seat: seats sit evenly round a circle just
+/// wide enough for neighbouring members to touch.
+fn seat_spread(capacity: u8, radius: f32) -> f32 {
+    if capacity < 2 {
+        return 0.0;
+    }
+    (radius * MEMBER_SCALE + GROUP_GAP)
+        / (std::f32::consts::PI / f32::from(capacity)).sin()
+}
+
+/// Radius of the ring containing a group with `capacity` seats; one seat is an avatar
+/// alone.
+pub(super) fn group_radius(capacity: u8, radius: f32) -> f32 {
+    if capacity < 2 {
+        radius
+    } else {
+        seat_spread(capacity, radius) + radius * MEMBER_SCALE + RING_GAP
+    }
+}
+
+/// A seat's place relative to its group's ring centre at a dock on `edge`: seat 0
+/// faces into the tile, and the seats turn so a flat side, not a seat, faces out of it.
+fn seat_around(seat: u8, capacity: u8, edge: u8, radius: f32) -> Vec2 {
+    let capacity = capacity.max(1);
+    let turn = if capacity.is_multiple_of(2) {
+        std::f32::consts::PI / f32::from(capacity)
+    } else {
+        0.0
+    };
+    let angle = inward(edge).to_angle()
+        + turn
+        + std::f32::consts::TAU * f32::from(seat) / f32::from(capacity);
+    Vec2::from_angle(angle) * seat_spread(capacity, radius)
+}
+
+/// The direction from a dock on `edge` into its tile.
+fn inward(edge: u8) -> Vec2 {
+    [-Vec2::Y, -Vec2::X, Vec2::Y, Vec2::X][usize::from(edge % 4)]
+}
+
+/// A group's ring centre relative to its dock: moved into the tile until the ring
+/// reaches no further out than an avatar alone would, so it stays in view wherever
+/// one fits.
+pub(super) fn ring_offset(capacity: u8, edge: u8, radius: f32) -> Vec2 {
+    inward(edge) * (group_radius(capacity, radius) - radius)
+}
+
+/// A seat's place relative to its group's dock.
+fn seat_offset(seat: u8, capacity: u8, edge: u8, radius: f32) -> Vec2 {
+    ring_offset(capacity, edge, radius) + seat_around(seat, capacity, edge, radius)
 }
 
 pub(super) fn world(point: Vec2) -> Vec3 {
@@ -209,6 +283,15 @@ fn fan(point: Vec2, corners: &[Vec2; 4]) -> f32 {
 fn intersect(a: Rect, b: Rect) -> bool {
     !a.intersect(b).is_empty()
 }
+/// Frees an avatar's retained space while it chooses again.
+fn release(occupied: &mut Vec<Rect>, own: Option<Rect>) {
+    if let Some(own) = own
+        && let Some(position) = occupied.iter().position(|r| *r == own)
+    {
+        occupied.remove(position);
+    }
+}
+
 fn disk(point: Vec2, radius: f32) -> Rect {
     Rect::from_center_size(point, Vec2::splat(radius * 2.0))
 }
@@ -426,17 +509,87 @@ impl State {
             .collect()
     }
     fn retained_slots(&self, now: super::Time, radius: f32) -> Vec<Option<Rect>> {
-        self.avatars
-            .iter()
-            .map(|avatar| {
+        let capacities = self.compute_capacities();
+        (0..self.avatars.len())
+            .map(|index| {
+                let avatar = &self.avatars[index];
                 if now >= avatar.expires {
                     return None;
                 }
                 let slot = avatar.slot.as_ref()?;
                 let tile = self.layout.repositories[avatar.repository].gutter?;
-                Some(disk(slot.dock.on_network(tile), radius))
+                let point = slot.dock.on_network(tile) + slot.offset;
+                self.held_space(index, point, &capacities, radius)
             })
             .collect()
+    }
+
+    /// The space an avatar parked at `point` holds: its group's ring for an author, none
+    /// for a co-author inside that ring, else its own disc.
+    fn held_space(
+        &self,
+        index: usize,
+        point: Vec2,
+        capacities: &[u8],
+        radius: f32,
+    ) -> Option<Rect> {
+        let avatar = &self.avatars[index];
+        let lead = avatar.group.map_or(index, |g| g.lead);
+        if lead != index && self.in_party(index, lead) {
+            return None;
+        }
+        let capacity = capacities[index];
+        let centre = avatar
+            .slot
+            .as_ref()
+            .filter(|_| capacity > 1)
+            .map_or(point, |s| {
+                point - s.offset + ring_offset(capacity, s.dock.edge, radius)
+            });
+        Some(disk(centre, group_radius(capacity, radius)))
+    }
+
+    /// Whether `index` parks in `lead`'s group: the author itself, or a co-author who
+    /// joined it and has not since left for another commit, repository or dock.
+    pub(super) fn in_party(&self, index: usize, lead: usize) -> bool {
+        if index == lead {
+            return true;
+        }
+        let (member, author) = (&self.avatars[index], &self.avatars[lead]);
+        member.group.is_some_and(|g| g.lead == lead)
+            && author.group.is_some_and(|g| g.lead == lead)
+            && member.repository == author.repository
+            && super::tick_time(self.tick) < member.expires
+            && (member.commit == author.commit
+                || member
+                    .slot
+                    .as_ref()
+                    .zip(author.slot.as_ref())
+                    .is_some_and(|(m, a)| m.dock == a.dock))
+    }
+
+    /// Seats in each avatar's group, counting the gaps members left; 1 for an avatar
+    /// without co-authors.
+    pub(super) fn compute_capacities(&self) -> Vec<u8> {
+        let mut capacities = vec![1_u8; self.avatars.len()];
+        for (index, avatar) in self.avatars.iter().enumerate() {
+            if let Some(group) = avatar.group.filter(|g| g.lead != index)
+                && self.in_party(index, group.lead)
+            {
+                let seats = &mut capacities[group.lead];
+                *seats = (*seats).max(group.seat + 1);
+            }
+        }
+        capacities
+    }
+
+    /// An author's group in seat order, the author first.
+    fn party(&self, lead: usize) -> Vec<usize> {
+        let mut party: Vec<_> = (0..self.avatars.len())
+            .filter(|&i| self.in_party(i, lead))
+            .collect();
+        party.sort_by_key(|&i| (i != lead, self.avatars[i].group.map(|g| g.seat)));
+        party
     }
     pub(super) fn place_slots_planned(
         &mut self,
@@ -451,51 +604,40 @@ impl State {
         );
         let radius = self.avatar_radius();
         let name_scale = self.name_scale();
-        let mut occupied: Vec<Rect> = Vec::new();
-        for avatar in &mut self.avatars {
-            if now - avatar.last_active >= super::AVATAR_IDLE
-                && let Some(slot) = &mut avatar.slot
-            {
-                if let Some(tile) = self.layout.repositories[avatar.repository].gutter {
-                    slot.point = slot.dock.on_network(tile);
-                }
-                if avatar.slot_presence > 0.0 || avatar.presence > 0.0 {
-                    occupied.push(disk(slot.point, radius));
-                }
-            }
-        }
-        let mut order: Vec<_> = (0..self.avatars.len())
-            .filter(|&i| now - self.avatars[i].last_active < super::AVATAR_IDLE)
-            .collect();
+        let capacities = self.compute_capacities();
+        let mut occupied = self.hold_idle(now, &capacities, radius);
         let retained = self.retained_slots(now, radius);
         occupied.extend(retained.iter().flatten().copied());
-        order.sort_by(|&a, &b| {
-            self.avatars[b]
-                .last_active
-                .total_cmp(self.avatars[a].last_active)
-                .then(a.cmp(&b))
-        });
-        for index in order {
-            if let Some(own) = retained[index]
-                && let Some(position) = occupied.iter().position(|r| *r == own)
-            {
-                occupied.remove(position);
-            }
+        for index in self.placing_order(now) {
             let avatar = &self.avatars[index];
             let commit = avatar.commit;
+            if let Some(group) = avatar.group.filter(|g| g.lead != index) {
+                if !self.in_party(index, group.lead) {
+                    self.hold_place(index, &mut occupied);
+                }
+                continue;
+            }
+            let party = self.party(index);
+            for &member in &party {
+                release(&mut occupied, retained[member]);
+            }
+            let capacity = capacities[index];
             let envelope = envelopes[commit].clone();
             self.slot_records.entry(commit).or_default().observations += 1;
             let Some(tile) = self.layout.repositories[avatar.repository].tile else {
                 let record = self.slot_records.entry(commit).or_default();
                 record.least_bad = true;
                 record.missing_tile = true;
-                self.avatars[index].slot = None;
+                for &member in &party {
+                    self.avatars[member].slot = None;
+                }
                 continue;
             };
             let text = short_name(&avatar.name, name_scale, tile.pixels().x - 24.0);
             let choosing = avatar.slot.as_ref().is_none_or(|s| s.commit != commit);
             let future = plan.reserved(
                 commit,
+                index,
                 self.layout.repositories[avatar.repository].gutter,
                 choosing,
             );
@@ -505,6 +647,7 @@ impl State {
                 gutter: self.layout.repositories[avatar.repository].gutter,
                 gap,
                 radius,
+                capacity,
                 beams: &beams,
                 peers: &peers,
                 future: &future,
@@ -524,19 +667,123 @@ impl State {
                         .map_or(point, |t| dock.on_network(t))
                 }),
                 commit,
-                plan.docks.get(commit).copied().flatten(),
+                plan.docks.get(&(commit, index)).copied(),
                 !plan.replanning || commit < plan.frozen,
             );
             chosen.commit = commit;
-            let record = self.slot_records.entry(commit).or_default();
-            record.fallback |= chosen.dock.edge != 0;
-            record.least_bad |= !chosen.valid();
-            record.half_plane_failures += u32::from(!chosen.half_plane);
-            record.max_crossings = record.max_crossings.max(chosen.crossings);
-            record.max_overlaps = record.max_overlaps.max(chosen.overlaps);
-            occupied.push(disk(chosen.point, radius));
-            self.avatars[index].slot = Some(chosen);
-            self.avatars[index].slot_origin = None;
+            self.record_placement(&chosen);
+            let capacity = self.seat_party(&chosen, &party);
+            let ring_centre =
+                chosen.point + ring_offset(capacity, chosen.dock.edge, radius);
+            occupied.push(disk(ring_centre, group_radius(capacity, radius)));
+        }
+        self.capacities = self.compute_capacities();
+    }
+
+    /// Re-projects idle avatars onto their moving tiles and returns the space they hold.
+    fn hold_idle(
+        &mut self,
+        now: super::Time,
+        capacities: &[u8],
+        radius: f32,
+    ) -> Vec<Rect> {
+        let mut occupied = Vec::new();
+        for index in 0..self.avatars.len() {
+            let avatar = &mut self.avatars[index];
+            if now - avatar.last_active < super::AVATAR_IDLE {
+                continue;
+            }
+            let alone =
+                avatar.group.is_some_and(|g| g.lead == index) && capacities[index] < 2;
+            let Some(slot) = &mut avatar.slot else {
+                continue;
+            };
+            // An author whose group has gone walks back from its seat to its dock.
+            if alone {
+                slot.point -= slot.offset;
+                slot.offset = Vec2::ZERO;
+            }
+            if let Some(tile) = self.layout.repositories[avatar.repository].gutter {
+                slot.point = slot.dock.on_network(tile) + slot.offset;
+            }
+            let point = slot.point;
+            if avatar.slot_presence > 0.0 || avatar.presence > 0.0 {
+                occupied.extend(self.held_space(index, point, capacities, radius));
+            }
+        }
+        occupied
+    }
+
+    /// Seats an author's group round its chosen dock and returns its seat count; a
+    /// co-author from an earlier commit leaves the group, staying put, if the author has
+    /// moved to another dock.
+    fn seat_party(&mut self, chosen: &Placement, party: &[usize]) -> u8 {
+        let radius = self.avatar_radius();
+        let author = party[0];
+        let mut seated = Vec::with_capacity(party.len());
+        for &member in party {
+            let avatar = &self.avatars[member];
+            if avatar.commit != chosen.commit
+                && avatar.slot.as_ref().is_some_and(|s| s.dock != chosen.dock)
+            {
+                self.avatars[member].group = None;
+            } else {
+                let seat = avatar
+                    .group
+                    .filter(|_| member != author)
+                    .map_or(0, |g| g.seat);
+                seated.push((member, seat));
+            }
+        }
+        let capacity = seated.iter().map(|&(_, seat)| seat + 1).max().unwrap_or(1);
+        for (member, seat) in seated {
+            let offset = seat_offset(seat, capacity, chosen.dock.edge, radius);
+            let place = Placement {
+                point: chosen.point + offset,
+                offset,
+                ..chosen.clone()
+            };
+            self.avatars[member].slot = Some(place);
+            self.avatars[member].slot_origin = None;
+        }
+        capacity
+    }
+
+    /// Active avatars, most recently active first and each author before its co-authors.
+    fn placing_order(&self, now: super::Time) -> Vec<usize> {
+        let mut order: Vec<_> = (0..self.avatars.len())
+            .filter(|&i| now - self.avatars[i].last_active < super::AVATAR_IDLE)
+            .collect();
+        let rank = |avatar: &super::Avatar| avatar.group.map_or(0, |g| g.seat);
+        order.sort_by(|&a, &b| {
+            self.avatars[b]
+                .last_active
+                .total_cmp(self.avatars[a].last_active)
+                .then(rank(&self.avatars[a]).cmp(&rank(&self.avatars[b])))
+                .then(a.cmp(&b))
+        });
+        order
+    }
+
+    fn record_placement(&mut self, chosen: &Placement) {
+        let record = self.slot_records.entry(chosen.commit).or_default();
+        record.fallback |= chosen.dock.edge != 0;
+        record.least_bad |= !chosen.valid();
+        record.half_plane_failures += u32::from(!chosen.half_plane);
+        record.max_crossings = record.max_crossings.max(chosen.crossings);
+        record.max_overlaps = record.max_overlaps.max(chosen.overlaps);
+    }
+
+    /// A co-author who has left its group holds its place as the tile moves.
+    fn hold_place(&mut self, index: usize, occupied: &mut Vec<Rect>) {
+        let radius = self.avatar_radius();
+        let avatar = &mut self.avatars[index];
+        if let (Some(tile), Some(slot)) = (
+            self.layout.repositories[avatar.repository].gutter,
+            avatar.slot.as_mut(),
+        ) {
+            slot.point = slot.dock.on_network(tile) + slot.offset;
+            occupied.push(disk(slot.point, radius));
         }
     }
 }
@@ -568,10 +815,59 @@ impl State {
         .size()
     }
 
+    /// Where each avatar's name attaches: the avatar, or for a group's member a point
+    /// one avatar radius inside the group's ring towards that member, so its name sits
+    /// just outside the ring beside it.
+    /// Where an avatar's name is anchored: the seat it is walking to, so the name holds
+    /// still while the body steps under it.
+    fn standing(&self, index: usize) -> Vec3 {
+        let avatar = &self.avatars[index];
+        avatar
+            .slot
+            .as_ref()
+            .filter(|_| avatar.settle.is_some())
+            .map_or(avatar.position, Placement::world)
+    }
     fn name_bodies(&self) -> Vec<Option<Vec2>> {
-        self.avatars
-            .iter()
-            .map(|a| self.screen(a.position))
+        let radius = self.avatar_radius();
+        let capacities = &self.capacities;
+        (0..self.avatars.len())
+            .map(|index| {
+                let avatar = &self.avatars[index];
+                let standing = self.standing(index);
+                let lead = avatar.group.map_or(index, |g| g.lead);
+                let anchor = avatar
+                    .slot
+                    .as_ref()
+                    .filter(|s| {
+                        capacities[lead] > 1
+                            && self.in_party(index, lead)
+                            && s.offset != Vec2::ZERO
+                    })
+                    .map(|slot| {
+                        let capacity = capacities[lead];
+                        let centre = slot.centre()
+                            + ring_offset(capacity, slot.dock.edge, radius);
+                        let reach = group_radius(capacity, radius) - radius;
+                        let toward = (slot.point - centre).normalize_or_zero();
+                        standing + world(centre + toward * reach) - world(slot.point)
+                    });
+                self.screen(anchor.unwrap_or(standing))
+            })
+            .collect()
+    }
+    /// For each avatar in a ring, the screen angle from the ring's centre through it and
+    /// the ring's screen disc, which its name keeps off.
+    fn name_preferences(&self) -> Vec<Option<(f32, Rect)>> {
+        (0..self.avatars.len())
+            .map(|index| {
+                let (centre, rim) = self.ring_of(index)?;
+                let from = self.screen(centre)?;
+                let edge = self.screen(centre + Vec3::X * rim)?;
+                let to = self.screen(self.standing(index))?;
+                (to != from)
+                    .then(|| ((to - from).to_angle(), disk(from, from.distance(edge))))
+            })
             .collect()
     }
     fn name_rays(
@@ -587,9 +883,11 @@ impl State {
                     && !travel.travelling(pulse.author, self.tick)
             })
             .flat_map(|pulse| {
-                pulse.targets.iter().filter_map(|&(target, ..)| {
-                    let author = pulse.author;
-                    Some((bodies[author]?, self.screen(self.point(target)?)?))
+                let author = pulse.author;
+                pulse.targets.iter().filter_map(move |&(target, ..)| {
+                    bodies[author]?;
+                    let to = self.point(target)?;
+                    Some((self.screen(self.beam_start(author, to))?, self.screen(to)?))
                 })
             })
             .collect()
@@ -605,11 +903,13 @@ impl State {
         let mut obstacles = tile_obstacles(self);
         obstacles.extend(texts.iter().map(|&rect| (usize::MAX, rect)));
         let rays = self.name_rays(bodies, travel);
+        let preferred = self.name_preferences();
         let space = LabelSpace {
             bodies,
             obstacles: &obstacles,
             rays: &rays,
             avatars: &self.avatars,
+            preferred: &preferred,
             radius: self.avatar_radius(),
             margin: 4.0 / 3.0,
         };
@@ -670,6 +970,7 @@ impl State {
                 .map(Vec2::to_angle),
             );
             targets.extend(previous.map(|p| p.motion.goal));
+            targets.extend(preferred[index].map(|(angle, _)| angle));
             let scored = targets
                 .into_iter()
                 .map(|target| space.candidate(index, target, &rotation))
@@ -953,6 +1254,9 @@ struct LabelSpace<'a> {
     obstacles: &'a [(usize, Rect)],
     rays: &'a [(Vec2, Vec2)],
     avatars: &'a [super::Avatar],
+    /// For each avatar in a ring, the screen angle from the ring's centre through it,
+    /// where its name costs least, and the ring's screen disc.
+    preferred: &'a [Option<(f32, Rect)>],
     radius: f32,
     margin: f32,
 }
@@ -974,6 +1278,9 @@ impl LabelSpace<'_> {
             + cost[1] * 1e6
             + motion.previous.map_or(0.0, |p| {
                 labels::difference(target, p.angle).abs() * 55_000.0
+            })
+            + self.preferred[index].map_or(0.0, |(angle, _)| {
+                labels::difference(target, angle).abs() * NEAREST_NAME_WEIGHT
             });
         (
             labels::Candidate {
@@ -997,11 +1304,18 @@ impl LabelSpace<'_> {
             })
     }
     fn cost(&self, index: usize, rect: Rect) -> [f32; 3] {
+        // A group's names all attach round its ring, so members' anchors do not
+        // compete; their names still keep apart through the joint assignment.
+        let lead = |i: usize| self.avatars[i].group.map(|g| g.lead);
         let foreign = self
             .bodies
             .iter()
             .enumerate()
-            .filter(|(i, _)| *i != index && self.avatars[*i].presence > 0.0)
+            .filter(|(i, _)| {
+                *i != index
+                    && self.avatars[*i].presence > 0.0
+                    && (lead(*i).is_none() || lead(*i) != lead(index))
+            })
             .filter_map(|(_, p)| *p);
         let conflicts = count(
             foreign
@@ -1032,6 +1346,7 @@ impl LabelSpace<'_> {
             conflicts,
             ownership * 1e6
                 + foreign.map(|p| area(disk(p, self.radius))).sum::<f32>() * 100.0
+                + self.preferred[index].map_or(0.0, |(_, ring)| area(ring) * 2_000.0)
                 + self
                     .obstacles
                     .iter()
@@ -1063,6 +1378,9 @@ struct Choice<'a> {
     gutter: Option<Tile>,
     gap: Vec2,
     radius: f32,
+    /// Seats in the avatar's group, whose ring is kept clear of other avatars and the
+    /// caption bar and whose members stay in view; 1 for an avatar alone.
+    capacity: u8,
     beams: &'a [(usize, Rect)],
     occupied: &'a [Rect],
     peers: &'a [(Vec2, u8, Vec2)],
@@ -1159,7 +1477,11 @@ impl Choice<'_> {
     fn avatar_cost(&self, point: Vec2) -> f32 {
         self.occupied
             .iter()
-            .map(|r| (self.radius * 2.0 - point.distance(r.center())).max(0.0))
+            .map(|r| {
+                (group_radius(self.capacity, self.radius) + r.half_size().x
+                    - point.distance(r.center()))
+                .max(0.0)
+            })
             .sum::<f32>()
             + self.reserved_cost(point)
     }
@@ -1216,16 +1538,19 @@ impl Choice<'_> {
                     && swept_crosses(point, &corners, rect.inflate(0.02))
             })
             .count();
+        let ring = group_radius(self.capacity, self.radius);
+        let centre = point + ring_offset(self.capacity, dock.edge, self.radius);
         let overlaps = usize::from(
-            !point.abs().cmple(HALF - Vec2::splat(self.radius)).all()
-                || point.y - self.radius < super::caption::BOTTOM
-                || point.y + self.radius > super::caption::TOP,
+            !centre.abs().cmple(HALF - Vec2::splat(ring)).all()
+                || centre.y - ring < super::caption::BOTTOM
+                || centre.y + ring > super::caption::TOP,
         );
         (
             Placement {
                 dock,
                 commit: usize::MAX,
                 point,
+                offset: Vec2::ZERO,
                 text: self.text.clone(),
                 half_plane: self.envelope.samples > 0
                     && span < std::f32::consts::PI - 1e-5,
@@ -1381,13 +1706,20 @@ impl Choice<'_> {
 
 impl State {
     pub(super) fn avatar_label(&self, avatar: &super::Avatar) -> super::Label {
+        let fade = 2.0 * avatar.settled - 1.0;
         if let Some(name) = &avatar.name_visibility.placement {
+            let point = avatar.leaving_name.filter(|_| fade < 0.0);
+            let shown = if point.is_some() {
+                -fade
+            } else {
+                fade.max(0.0)
+            };
             return super::Label {
-                position: world(name.point),
+                position: world(point.unwrap_or(name.point)),
                 text: name.text.clone(),
                 kind: super::LabelKind::Avatar,
                 scale: name.scale,
-                opacity: avatar.presence,
+                opacity: avatar.presence * shown,
                 priority: avatar.activity,
             };
         }
@@ -1620,6 +1952,7 @@ mod tests {
             },
             gap: Vec2::new(16.0, 32.0),
             radius: 7.5,
+            capacity: 1,
             occupied,
             peers: &[],
             future: &[],
@@ -1713,6 +2046,157 @@ mod tests {
     }
 
     #[test]
+    fn a_co_author_with_no_later_commit_fades_with_its_disbanding_ring() {
+        let mut events = crate::timeline::synthetic();
+        events.truncate(2);
+        events[0].co_authors = vec![crate::timeline::Identity {
+            name: b"Pair".to_vec(),
+            email: b"pair@example.invalid".to_vec(),
+        }];
+        let mut sim = Simulation::new(
+            events,
+            &Options::default(),
+            &Theme::neon(),
+            &Mappings::default(),
+        );
+        let solo = sim.schedule.starts[1];
+        let gone = crate::model::frames_for(solo + 0.5, 60).unwrap();
+        let mut last = [None::<Vec3>; 2];
+        let mut largest_step = 0.0_f32;
+        let mut ring_shown = 0.0_f32;
+        for frame in 0..=gone {
+            sim.advance_to(frame, 60);
+            ring_shown = ring_shown
+                .max(sim.state.avatars.first().map_or(0.0, |a| a.ring_presence));
+            for (index, last) in last.iter_mut().enumerate() {
+                let parked = sim.state.avatars.get(index).filter(|avatar| {
+                    avatar.presence > 0.0
+                        && !sim.travel.travelling(index, sim.state.tick)
+                });
+                let Some(avatar) = parked else {
+                    continue;
+                };
+                let step = last.map_or(0.0, |last| avatar.position.distance(last));
+                largest_step = largest_step.max(step);
+                *last = Some(avatar.position);
+            }
+        }
+        assert_eq!(ring_shown, 1.0);
+        assert!(
+            largest_step < 0.1 * sim.state.settle_reach(),
+            "an avatar jumped {largest_step}"
+        );
+        assert_eq!(
+            sim.state.avatars[0].slot.as_ref().unwrap().offset,
+            Vec2::ZERO
+        );
+        let (author, pair) = (&sim.state.avatars[0], &sim.state.avatars[1]);
+        assert!(pair.dismissed);
+        assert_eq!(pair.presence, 0.0);
+        assert_eq!(author.ring_presence, 0.0);
+        assert!(author.presence > 0.0);
+    }
+
+    /// Whether a co-author left behind by its author's next commit fades with the ring,
+    /// when its own next commit comes `days` later under a ten-day inactivity horizon.
+    fn left_behind_fades(days: i64) -> bool {
+        let mut events = crate::timeline::synthetic();
+        events.truncate(3);
+        let pair = crate::timeline::Identity::new("Pair", "pair@example.invalid");
+        events[0].co_authors = vec![pair.clone()];
+        events[1].seconds = events[0].seconds + 3_600;
+        events[2].seconds = events[0].seconds + days * 86_400;
+        events[2].author = pair;
+        let mut sim = Simulation::new(
+            events,
+            &Options {
+                contributor_inactivity_days: 10,
+                ..Default::default()
+            },
+            &Theme::neon(),
+            &Mappings::default(),
+        );
+        let solo = sim.schedule.starts[1];
+        sim.advance_to(crate::model::frames_for(solo + 0.1, 60).unwrap(), 60);
+        sim.state.avatars[1].dismissed
+    }
+
+    #[test]
+    fn a_co_author_waits_with_its_author_only_for_a_commit_within_its_horizon() {
+        assert!(!left_behind_fades(5));
+        assert!(left_behind_fades(30));
+    }
+
+    #[test]
+    fn a_group_never_outgrows_its_seats() {
+        let mut events = crate::timeline::synthetic();
+        events.truncate(1);
+        let template = events.remove(0);
+        let events = (0..3_u8)
+            .map(|commit| {
+                let mut event = template.clone();
+                event.seconds += i64::from(commit) * 3_600;
+                event.co_authors = (0..8)
+                    .map(|n| crate::timeline::Identity {
+                        name: format!("C{commit}-{n}").into_bytes(),
+                        email: format!("c{commit}-{n}@example.invalid").into_bytes(),
+                    })
+                    .collect();
+                event
+            })
+            .collect();
+        let mut sim = Simulation::new(
+            events,
+            &Options::default(),
+            &Theme::neon(),
+            &Mappings::default(),
+        );
+        let frames = crate::model::frames_for(sim.duration(), 60).unwrap();
+        for frame in (0..=frames).step_by(5) {
+            sim.advance_to(frame, 60);
+            let state = &sim.state;
+            assert!(state.capacities.iter().all(|&seats| seats <= 9));
+            let mut seated: Vec<_> = (0..state.avatars.len())
+                .filter_map(|i| {
+                    let group = state.avatars[i].group?;
+                    state
+                        .in_party(i, group.lead)
+                        .then_some((group.lead, group.seat))
+                })
+                .collect();
+            let all = seated.len();
+            seated.sort_unstable();
+            seated.dedup();
+            assert_eq!(seated.len(), all, "frame {frame}: two members share a seat");
+        }
+    }
+
+    #[test]
+    fn group_seats_touch_inside_their_ring() {
+        for capacity in 2..=9 {
+            let ring = group_radius(capacity, 7.5);
+            let seats: Vec<_> = (0..capacity)
+                .map(|s| seat_around(s, capacity, 0, 7.5))
+                .collect();
+            let reach = ring_offset(capacity, 0, 7.5).y + ring;
+            assert!(
+                (reach - 7.5).abs() < 1e-3,
+                "the ring reaches out as one avatar"
+            );
+            let member = 7.5 * MEMBER_SCALE;
+            for (index, seat) in seats.iter().enumerate() {
+                assert!(seat.length() + member < ring);
+                let next = seats[(index + 1) % seats.len()];
+                assert!(
+                    (seat.distance(next) - 2.0 * (member + GROUP_GAP)).abs() < 1e-3
+                );
+            }
+        }
+        assert_eq!(group_radius(1, 7.5), 7.5);
+        assert_eq!(seat_offset(0, 1, 0, 7.5), Vec2::ZERO);
+    }
+
+    #[test]
     fn crowded_fixed_docks_use_free_edge_space() {
         let mut occupied = Vec::new();
         for index in 0..40 {
@@ -1796,6 +2280,7 @@ mod tests {
         let old = state.avatars[0].slot.as_ref().unwrap().dock;
         let mut newcomer = state.avatars[0].clone();
         newcomer.slot = None;
+        newcomer.group = None;
         newcomer.last_active = sim.seconds();
         state.avatars.push(newcomer);
         state.place_slots(&sim.envelopes, sim.seconds());
@@ -2013,10 +2498,11 @@ mod tests {
                     let tile =
                         sim.layout().repositories[avatar.repository].tile.unwrap();
                     let corners = sim.envelopes[avatar.commit].corners(tile);
-                    assert!(fan(slot.point, &corners) < std::f32::consts::PI);
+                    let origin = slot.point - slot.offset;
+                    assert!(fan(origin, &corners) < std::f32::consts::PI);
                     assert!(!obstacles.iter().any(|(r, rect)| *r != usize::MAX
                         && *r != avatar.repository
-                        && swept_crosses(slot.point, &corners, rect.inflate(-0.02))));
+                        && swept_crosses(origin, &corners, rect.inflate(-0.02))));
                 }
             }
         }
@@ -2039,6 +2525,351 @@ mod tests {
         }
         eprintln!("SLOT_SUMMARY {summary}");
         moving.assert_clear(sim.travel.stats.max_speed);
+    }
+
+    /// The parked members of a pulse's group.
+    fn parked_group(
+        sim: &Simulation,
+        pulse: &super::super::Pulse,
+        parked: &[usize],
+    ) -> Vec<usize> {
+        parked
+            .iter()
+            .copied()
+            .filter(|&i| {
+                sim.state.avatars[i].commit == pulse.commit
+                    && sim.state.in_party(i, pulse.author)
+            })
+            .collect()
+    }
+
+    /// A group's members sit inside its ring, clear of each other and of every other
+    /// parked avatar.
+    fn assert_group_clear(
+        sim: &Simulation,
+        author: usize,
+        members: &[usize],
+        parked: &[usize],
+        frame: u32,
+    ) {
+        let state = &sim.state;
+        let radius = state.avatar_radius();
+        let point = |i: usize| state.avatars[i].slot.as_ref().unwrap().point;
+        let scales = state.member_scales();
+        let size = |i: usize| radius * scales[i];
+        let slot = state.avatars[author].slot.as_ref().unwrap();
+        let centre =
+            slot.centre() + ring_offset(state.capacity(author), slot.dock.edge, radius);
+        let ring = group_radius(state.capacity(author), radius);
+        for &member in members {
+            assert!(point(member).distance(centre) + size(member) < ring + 0.01);
+            for &other in parked.iter().filter(|&&o| o != member) {
+                let distance = point(member).distance(point(other));
+                assert!(
+                    distance >= size(member) + size(other) - 0.01,
+                    "frame {frame}: avatars {member} and {other} overlap"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ring_members_name_themselves_at_their_nearest_point() {
+        let mut events = crate::timeline::synthetic();
+        events.truncate(3);
+        for event in &mut events {
+            event.author = events_author();
+            event.co_authors = ["Pair", "Codex"]
+                .map(|name| crate::timeline::Identity {
+                    name: name.as_bytes().to_vec(),
+                    email: format!("{name}@example.invalid").into_bytes(),
+                })
+                .to_vec();
+        }
+        let mut sim = Simulation::new(
+            events,
+            &Options {
+                seconds_per_day: 2.0,
+                ..Default::default()
+            },
+            &Theme::neon(),
+            &Mappings::default(),
+        );
+        let settled = sim.schedule.starts[2] + 1.5;
+        sim.advance_to(crate::model::frames_for(settled, 60).unwrap(), 60);
+        let state = &sim.state;
+        let preferred = state.name_preferences();
+        let names: Vec<_> = (0..3)
+            .map(|i| state.avatars[i].name_visibility.placement.as_ref().unwrap())
+            .collect();
+        for (index, name) in names.iter().enumerate() {
+            let (angle, _) = preferred[index].expect("each member sits in the ring");
+            let turn = labels::difference(name.angle, angle).abs();
+            // Discrete candidate angles and the label's own shape leave some turn; the
+            // author, with a free side, sits at its nearest point.
+            let tolerance = if index == 0 { 0.2 } else { 0.8 };
+            assert!(
+                turn < tolerance,
+                "name {index} turned {turn} from its nearest point"
+            );
+        }
+        let bounds: Vec<_> = names
+            .iter()
+            .map(|name| name.bounds(state.geometry.label_height))
+            .collect();
+        assert!(
+            bounds.iter().enumerate().all(|(i, a)| bounds[i + 1..]
+                .iter()
+                .all(|b| a.intersect(*b).is_empty()))
+        );
+    }
+
+    #[test]
+    fn names_stay_apart_while_a_ring_forms() {
+        let identity = |name: &str| crate::timeline::Identity {
+            name: name.as_bytes().to_vec(),
+            email: format!("{name}@example.invalid").into_bytes(),
+        };
+        let mut events = crate::timeline::synthetic();
+        events.truncate(3);
+        for (event, author) in events.iter_mut().zip(["Ada", "Grace", "Ada"]) {
+            event.author = identity(author);
+        }
+        events[2].co_authors = vec![identity("Grace"), identity("Codex")];
+        let mut sim = Simulation::new(
+            events,
+            &Options::default(),
+            &Theme::neon(),
+            &Mappings::default(),
+        );
+        let first = crate::model::frames_for(sim.schedule.starts[2], 60).unwrap();
+        let mut drawn = std::collections::HashMap::new();
+        for frame in first - 30..first + 120 {
+            sim.advance_to(frame, 60);
+            let state = &sim.state;
+            for avatar in &state.avatars {
+                let label = state.avatar_label(avatar);
+                let shown = avatar
+                    .name_visibility
+                    .placement
+                    .as_ref()
+                    .filter(|_| label.opacity > 0.5)
+                    .and_then(|_| state.screen(label.position));
+                if let (Some(&before), Some(now)) = (drawn.get(&avatar.name), shown) {
+                    let step = now.distance(before);
+                    assert!(step < 4.0, "frame {frame}: {} jumped {step}", avatar.name);
+                }
+                match shown {
+                    Some(point) => drawn.insert(avatar.name.clone(), point),
+                    None => drawn.remove(&avatar.name),
+                };
+            }
+            let names: Vec<_> = state
+                .avatars
+                .iter()
+                .filter(|a| a.settled >= 0.5 && state.avatar_label(a).opacity > 0.5)
+                .filter_map(|a| a.name_visibility.placement.as_ref())
+                .map(|name| (&name.text, name.bounds(state.geometry.label_height)))
+                .collect();
+            for (i, (text, rect)) in names.iter().enumerate() {
+                for (other, bounds) in &names[i + 1..] {
+                    assert!(
+                        rect.intersect(*bounds).is_empty(),
+                        "frame {frame}: {text} overlaps {other}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Every parked avatar drawn at member size sits inside its group's ring.
+    fn assert_members_ringed(sim: &Simulation, frame: u32) {
+        let state = &sim.state;
+        let scales = state.member_scales();
+        for (index, avatar) in state.avatars.iter().enumerate() {
+            let parked = avatar.presence > 0.0
+                && avatar.settle.is_none()
+                && !avatar.dismissed
+                && !sim.travel.travelling(index, state.tick);
+            if parked && scales[index] < 1.0 {
+                let inside = state.ring_of(index).is_some_and(|(centre, rim)| {
+                    avatar.position.distance(centre) < rim
+                });
+                assert!(
+                    inside,
+                    "frame {frame}: {} drawn as a member outside its ring",
+                    avatar.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_shrinking_group_walks_into_its_seats_and_stays_ringed() {
+        let identity = |name: &str| crate::timeline::Identity {
+            name: name.as_bytes().to_vec(),
+            email: format!("{name}@example.invalid").into_bytes(),
+        };
+        // The bot and Actions commit in one repository, then in a second with Owen and
+        // Codex, who come from and return to their own commits in a third.
+        let start = crate::timeline::synthetic()[0].seconds;
+        let histories = (0..3)
+            .map(|repository| {
+                let mut events = crate::timeline::synthetic();
+                if repository < 2 {
+                    events.truncate(1);
+                    events[0].author = identity("Bot");
+                    events[0].co_authors = if repository == 0 {
+                        vec![identity("Actions")]
+                    } else {
+                        ["Actions", "Owen", "Codex"].map(identity).to_vec()
+                    };
+                    events[0].seconds = start + 600 * i64::from(repository == 1);
+                }
+                for (index, event) in events.iter_mut().enumerate() {
+                    if repository == 2 {
+                        event.seconds =
+                            start + 300 + 600 * i64::try_from(index).unwrap();
+                        event.author = identity("Owen");
+                        event.co_authors = vec![identity("Codex")];
+                    }
+                }
+                crate::repositories::namespace(&mut events, repository);
+                events
+            })
+            .collect();
+        let mut sim = Simulation::with_repositories(
+            crate::repositories::merge(histories),
+            &Options::default(),
+            &Theme::neon(),
+            &Mappings::default(),
+            &["a".into(), "b".into(), "c".into()],
+        );
+        let frames = crate::model::frames_for(sim.duration(), 60).unwrap();
+        let mut walking = std::collections::HashMap::new();
+        for frame in 0..=frames {
+            sim.advance_to(frame, 60);
+            assert_members_ringed(&sim, frame);
+            let state = &sim.state;
+            // A walk into a seat lasts 0.4 s; seats drifting as avatars rescale must not
+            // keep restarting it.
+            for avatar in &state.avatars {
+                let run = walking.entry(avatar.name.clone()).or_insert(0);
+                *run = if avatar.settle.is_some() { *run + 1 } else { 0 };
+                assert!(
+                    *run <= 26,
+                    "frame {frame}: {} never reaches its seat",
+                    avatar.name
+                );
+            }
+            let member = world(Vec2::X * state.avatar_radius() * MEMBER_SCALE)
+                .distance(world(Vec2::ZERO));
+            for (index, avatar) in state.avatars.iter().enumerate() {
+                let lead = avatar.group.map_or(index, |g| g.lead);
+                let drawn = state.avatars[lead].ring_presence >= 1.0
+                    && state.avatars[lead].presence >= 1.0
+                    && avatar.settle.is_none()
+                    && !sim.travel.travelling(index, state.tick);
+                if let Some((centre, rim)) = state
+                    .beam_ring(index)
+                    .filter(|_| drawn && state.in_party(index, lead))
+                {
+                    let reach = avatar.position.distance(centre) + member;
+                    assert!(
+                        reach <= rim * 1.01,
+                        "frame {frame}: {} reaches {reach} past its drawn ring {rim}",
+                        avatar.name
+                    );
+                }
+            }
+        }
+    }
+
+    fn events_author() -> crate::timeline::Identity {
+        crate::timeline::Identity {
+            name: b"Ada".to_vec(),
+            email: b"Ada@example.invalid".to_vec(),
+        }
+    }
+
+    #[test]
+    fn co_authors_gather_inside_one_ring_and_beam_from_it() {
+        let co_author = |name: &str| crate::timeline::Identity {
+            name: name.as_bytes().to_vec(),
+            email: format!("{name}@example.invalid").into_bytes(),
+        };
+        let histories = (0..2)
+            .map(|repository| {
+                let mut events = crate::timeline::synthetic();
+                for (index, event) in events.iter_mut().enumerate() {
+                    event.seconds += i64::try_from(repository).unwrap() * 86_400 * 3;
+                    if index % 3 == 1 {
+                        event.co_authors = vec![co_author("Pair"), co_author("Codex")];
+                    }
+                }
+                crate::repositories::namespace(&mut events, repository);
+                events
+            })
+            .collect();
+        let mut sim = Simulation::with_repositories(
+            crate::repositories::merge(histories),
+            &Options {
+                seconds_per_day: 0.02,
+                max_idle_seconds: 0.05,
+                ..Default::default()
+            },
+            &Theme::neon(),
+            &Mappings::default(),
+            &["a".into(), "b".into()],
+        );
+        let shared: Vec<_> = (0..sim.events.len())
+            .filter(|&commit| sim.events[commit].co_contributors.len() == 2)
+            .collect();
+        assert_eq!(shared.len(), 8);
+        let mut gathered = std::collections::BTreeSet::new();
+        let frames = crate::model::frames_for(sim.duration(), 60).unwrap();
+        for frame in 0..=frames {
+            sim.advance_to(frame, 60);
+            let state = &sim.state;
+            let parked: Vec<_> = (0..state.avatars.len())
+                .filter(|&i| {
+                    let avatar = &state.avatars[i];
+                    avatar.presence > 0.0
+                        && !sim.travel.travelling(i, state.tick)
+                        && avatar
+                            .slot
+                            .as_ref()
+                            .is_some_and(|s| s.world().distance(avatar.position) < 0.01)
+                })
+                .collect();
+            for pulse in state.pulses.iter().filter(|p| sim.pulse_beams_visible(p)) {
+                let members = parked_group(&sim, pulse, &parked);
+                if parked.contains(&pulse.author) {
+                    assert_group_clear(&sim, pulse.author, &members, &parked, frame);
+                }
+                let seated = (0..state.avatars.len())
+                    .filter(|&i| {
+                        state.avatars[i].commit == pulse.commit
+                            && state.in_party(i, pulse.author)
+                            && !sim.travel.travelling(i, state.tick)
+                    })
+                    .count();
+                if seated == 3 {
+                    gathered.insert(pulse.commit);
+                }
+            }
+            for beam in sim.beams() {
+                let state = &sim.state;
+                let start = match state.beam_ring(beam.author) {
+                    Some((centre, rim)) => (beam.from.distance(centre) - rim).abs(),
+                    None => beam.from.distance(state.avatars[beam.author].position),
+                };
+                assert!(start < 1e-3, "frame {frame}: beam starts off its ring");
+            }
+            assert_members_ringed(&sim, frame);
+        }
+        assert_eq!(gathered.into_iter().collect::<Vec<_>>(), shared);
+        validate(&mut sim);
     }
 
     #[test]

@@ -467,12 +467,22 @@ impl<N: Network> Resolver<N> {
         if remote.is_none() {
             self.unsupported_remotes += 1;
         }
+        let events: Vec<_> = events.into_iter().collect();
+        // Only an author's own commit can identify their account, so authors come first
+        // and a co-author's email carries no commit to look up.
+        let people = events
+            .iter()
+            .flat_map(|event| {
+                event.contributor.iter().map(|c| (c, event.commit.as_str()))
+            })
+            .chain(
+                events
+                    .iter()
+                    .flat_map(|event| event.co_contributors.iter().map(|c| (c, ""))),
+            );
         let mut pending = HashMap::<String, (usize, usize, &str)>::new();
-        for (index, event) in events.into_iter().enumerate() {
-            let Some(contributor) = &event.contributor else {
-                continue;
-            };
-            let email = email_key(&event.author.email);
+        for (index, (contributor, commit)) in people.enumerate() {
+            let email = email_key(&contributor.email);
             if contributor.accounts.github.is_some()
                 || matches!(contributor.accounts.avatar, Some(Avatar::Remote(_)))
                 || email.is_empty()
@@ -484,7 +494,7 @@ impl<N: Network> Resolver<N> {
                 self.found.insert(email, account);
                 continue;
             }
-            pending.entry(email).or_insert((0, index, &event.commit)).0 += 1;
+            pending.entry(email).or_insert((0, index, commit)).0 += 1;
         }
         let mut pending: Vec<_> = pending.into_iter().collect();
         pending.sort_by_key(|(_, (commits, first, _))| (usize::MAX - commits, *first));
@@ -605,10 +615,10 @@ impl<N: Network> Resolver<N> {
     pub(super) fn portraits(&mut self, events: &mut [Event]) {
         let mut order = Vec::new();
         let mut choices = HashMap::<Key, Choice>::new();
-        for event in events.iter() {
-            let Some(contributor) = &event.contributor else {
-                continue;
-            };
+        let people = events
+            .iter()
+            .flat_map(|event| event.contributor.iter().chain(&event.co_contributors));
+        for contributor in people {
             let choice = choices.entry(contributor.key.clone()).or_insert_with(|| {
                 order.push(contributor.key.clone());
                 Choice {
@@ -626,7 +636,7 @@ impl<N: Network> Resolver<N> {
                 ))
             } else {
                 self.found
-                    .get(&email_key(&event.author.email))
+                    .get(&email_key(&contributor.email))
                     .map(|account| {
                         (2 - u8::from(account.id.is_some()), account.clone())
                     })
@@ -658,7 +668,11 @@ impl<N: Network> Resolver<N> {
             unsupported_remotes: self.unsupported_remotes,
         });
         for event in events {
-            if let Some(contributor) = &mut event.contributor {
+            for contributor in event
+                .contributor
+                .iter_mut()
+                .chain(&mut event.co_contributors)
+            {
                 contributor.portrait = portraits.get(&contributor.key).cloned();
             }
         }
@@ -956,12 +970,15 @@ mod tests {
                 bot: None,
                 key: Key::Email(email.as_bytes().to_vec()),
                 name: "Author".to_owned(),
+                email: email.as_bytes().to_vec(),
                 accounts: Accounts {
                     github: github.map(str::to_owned),
                     ..Accounts::default()
                 },
                 portrait: None,
             }),
+            co_authors: Vec::new(),
+            co_contributors: Vec::new(),
             commit: COMMIT.to_owned(),
             seconds: 0,
             changes: vec![],
@@ -1058,6 +1075,45 @@ mod tests {
         resolve(&mut resolver, &mut events, Some("owner/repo"));
         server.join().unwrap();
         assert!(visible(&events[0]));
+    }
+
+    #[test]
+    fn a_co_author_without_an_authored_commit_triggers_no_api_lookup() {
+        let mut source = event("lead@example.invalid", Some("lead"));
+        source.co_contributors = vec![
+            event("pair@example.invalid", None).contributor.unwrap(),
+            event("5+agent@users.noreply.github.com", None)
+                .contributor
+                .unwrap(),
+        ];
+        let mut events = [source];
+        let mut resolver = resolver(
+            None,
+            true,
+            vec![Response::Found(png()), Response::Found(png())],
+        );
+        resolve(&mut resolver, &mut events, Some("owner/repo"));
+        let urls: Vec<_> = resolver.network.calls.iter().map(|(url, _)| url).collect();
+        assert_eq!(
+            urls,
+            [
+                "https://github.com/lead.png?size=128",
+                "https://avatars.githubusercontent.com/u/5?s=128"
+            ]
+        );
+        assert!(events[0].co_contributors[0].portrait.is_none());
+        assert!(events[0].co_contributors[1].portrait.is_some());
+    }
+
+    #[test]
+    fn a_co_author_who_also_commits_is_looked_up_by_that_commit() {
+        let mut first = event("lead@example.invalid", Some("lead"));
+        let mut pair = event("pair@example.invalid", None);
+        pair.commit = "f".repeat(40);
+        first.co_contributors = vec![pair.contributor.clone().unwrap()];
+        let mut resolver = resolver(None, true, vec![Response::Missing]);
+        resolver.accounts([&first, &pair], Some("owner/repo"));
+        assert!(resolver.network.calls[0].0.contains(&"f".repeat(40)));
     }
 
     #[test]

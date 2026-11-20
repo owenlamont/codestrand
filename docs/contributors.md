@@ -26,6 +26,18 @@ are grouped by author name. A missing default file is fine; an explicit missing 
 unknown key or malformed TOML is an error. Edits take effect on cache hits; original
 authors and repository history remain unchanged.
 
+Each `Co-authored-by: Name <email>` trailer in a commit message's final trailer block
+makes that person a contributor of the commit, as on GitHub. Co-authors match by email
+like authors, so a co-author shares the avatar of their own commits. A commit's
+contributors pack, slightly smaller, inside one ring in the author's colour, with each
+name outside the ring nearest its member, and every beam leaves from the ring's edge. A
+co-author stays in the ring while the author keeps its place, then walks to its own
+next commit; when the author moves on, a co-author fades out with the ring unless it
+commits again within `--contributor-inactivity-days`. The author's colour marks the
+files and the caption names the author.
+Codestrand reads at most 8 co-authors per commit, none from a message over 64 KiB, and
+ignores a trailer without an email or with a name or email over 4,096 bytes.
+
 `bot = true` marks automation and `bot = false` marks a human, overriding automatic
 detection even after a display-name change. Without an override, a parsed GitHub noreply
 login ending in `[bot]` identifies a bot; a displayed name ending in `[bot]` is the
@@ -47,6 +59,57 @@ Local images
 must decode as PNG, JPEG or GIF, at most 4 MiB and 2048 pixels per side. Missing or
 undecodable local images produce a warning and fall back to account lookups.
 Remote overrides require an HTTPS URL without credentials.
+
+## Coding agents
+
+Coding agents sign commits with fixed emails that GitHub links to their own accounts.
+Codestrand does not build these in, so map the ones you use; a `github` login gives the
+agent its portrait under `--fetch-avatars`. Agents that commit as a GitHub noreply
+address, such as Copilot, Jules and Devin, need no entry.
+
+| Agent | Email | `github` | Source |
+| --- | --- | --- | --- |
+| Claude Code | `noreply@anthropic.com` | `claude` | [Settings](https://docs.anthropic.com/en/docs/claude-code/settings) |
+| Codex | `noreply@openai.com`, `codex@openai.com` | `codex` | [Source](https://github.com/openai/codex/blob/0e8c7683c4a85f00667bd762265358a407124f2e/codex-rs/ext/git-attribution/src/world_state.rs) |
+| Cursor | `cursoragent@cursor.com` | `cursoragent` | [Agents](https://docs.cursor.com/background-agent) |
+| Amp | `amp@ampcode.com` | `ampagent` | [Manual](https://ampcode.com/manual) |
+| OpenHands | `openhands@all-hands.dev` | `openhands-agent` | [Source](https://github.com/OpenHands/OpenHands/blob/428b3dc2a0e8d3d0f689a909e2607e33d973da76/src/services/settings.ts) |
+| Aider | `noreply@aider.chat` | none | [Git](https://aider.chat/docs/git.html) |
+
+```toml
+[[contributor]]
+name = "Claude"
+emails = ["noreply@anthropic.com"]
+github = "claude"
+
+[[contributor]]
+name = "Codex"
+emails = ["noreply@openai.com", "codex@openai.com"]
+github = "codex"
+
+[[contributor]]
+name = "Cursor"
+emails = ["cursoragent@cursor.com"]
+github = "cursoragent"
+
+[[contributor]]
+name = "Amp"
+emails = ["amp@ampcode.com"]
+github = "ampagent"
+
+[[contributor]]
+name = "OpenHands"
+emails = ["openhands@all-hands.dev"]
+github = "openhands-agent"
+
+[[contributor]]
+name = "Aider"
+emails = ["noreply@aider.chat"]
+```
+
+These identities were checked in November 2026 and can change. To check one, open a
+commit the agent co-authored on GitHub: the avatars beside the commit link to the
+account GitHub matched to each email.
 
 ## Contributor avatars
 
@@ -96,7 +159,8 @@ Codestrand finds the GitHub account behind a commit email, without a contributor
   works offline.
 - With `--fetch-avatars`, when a remote points to github.com (`origin` preferred),
   GitHub's commit API names the author account of one commit by that email. Busiest
-  emails go first, and each email is looked up at most once per run.
+  emails go first, and each email is looked up at most once per run. An email seen only
+  as a co-author is not looked up, since a commit names only its author's account.
 
 Unlisted emails of one account become one contributor, identified by the numeric
 account ID where known, so a renamed login stays one person. A contributors entry whose
