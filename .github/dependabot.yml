@@ -21,3 +21,7 @@ updates:
     multi-ecosystem-group: dependencies
     cooldown:
       default-days: 7
+    ignore:
+      # The direct fontique only enables fontconfig-dlopen on Bevy's copy, so it follows Bevy.
+      - dependency-name: fontique
+        versions: ['>=0.12']
