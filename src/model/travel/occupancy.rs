@@ -172,7 +172,7 @@ impl Simulation {
                 .filter(|&lead| state.in_party(i, lead))
                 .unwrap_or(i);
             for &(j, other, _) in &live {
-                if i == j || state.in_party(j, owner) {
+                if i == j || state.in_party(j, owner) || self.co_participants(i, j) {
                     continue;
                 }
                 if super::committing_overlap(
@@ -190,6 +190,18 @@ impl Simulation {
             }
         }
         (conflicts, pairs)
+    }
+
+    /// Whether either avatar takes part in the commit the other is serving: their
+    /// rings gather the same people, so they share space rather than conflict.
+    fn co_participants(&self, a: usize, b: usize) -> bool {
+        let avatars = &self.state.avatars;
+        let joins = |commit: usize, avatar: usize| {
+            self.events
+                .get(commit)
+                .is_some_and(|e| e.participants().any(|c| c.key == avatars[avatar].key))
+        };
+        joins(avatars[a].commit, b) || joins(avatars[b].commit, a)
     }
 
     pub(in crate::model) fn reserve_service_slots(&mut self) -> bool {
