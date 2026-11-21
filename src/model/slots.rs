@@ -330,25 +330,6 @@ pub(super) fn content_obstacles(state: &State) -> Vec<(usize, Rect)> {
         if low.is_finite() && high.is_finite() {
             result.push((index, Rect::from_corners(low, high).inflate(HALO)));
         }
-        if let Some(title) = state.titles.get(&index) {
-            result.push((index, title.rect().inflate(HALO)));
-            continue;
-        }
-        let anchor = project(
-            view_direction() * framing::DISTANCE,
-            Vec3::ZERO,
-            &[framing::label_position(region)],
-        )
-        .next()
-        .flatten()
-        .expect("visible region")
-            * HALF;
-        let size = framing::label_size(&region.label, 20.0);
-        result.push((
-            index,
-            Rect::from_corners(anchor - Vec2::Y * size.y, anchor + Vec2::X * size.x)
-                .inflate(HALO),
-        ));
     }
     result
 }
@@ -1202,8 +1183,12 @@ impl State {
                 },
             );
             let rect = labels::tangent_rect(body, size, distance, angle);
+            let low = Vec2::new(-HALF.x + 0.5, super::caption::BOTTOM + 0.5);
+            let high = Vec2::new(HALF.x - 0.5, super::caption::TOP - 0.5);
+            let offset =
+                (low - rect.min).max(Vec2::ZERO) + (high - rect.max).min(Vec2::ZERO);
             let placement = super::names::Placement {
-                point: Vec2::new(rect.min.x, rect.max.y),
+                point: Vec2::new(rect.min.x, rect.max.y) + offset,
                 body: bodies[index].expect("projected visible avatar"),
                 text: displayed[index].clone(),
                 scale: super::LabelKind::Avatar.font_scale(),
@@ -1214,7 +1199,14 @@ impl State {
             };
             let visibility = &mut self.avatars[index].name_visibility;
             visibility.visible = true;
-            visibility.opacity = 1.0;
+            let wordmark =
+                super::caption::frame_text_rects()[0].inflate(super::caption::BUFFER);
+            visibility.opacity = f32::from(
+                placement
+                    .bounds(self.geometry.label_height)
+                    .intersect(wordmark)
+                    .is_empty(),
+            );
             visibility.placement = Some(placement);
             visibility.joint_exhausted = assignment.exhausted;
             visibility.joint_clear = assignment.clear;
@@ -1809,6 +1801,7 @@ impl State {
             let reference = (distance - MIN_AVATAR_HEIGHT)
                 / (framing::DISTANCE - MIN_AVATAR_HEIGHT);
             return super::Label {
+                repository: None,
                 position: world(point.unwrap_or(name.point) * reference) + focus,
                 text: name.text.clone(),
                 kind: super::LabelKind::Avatar,
@@ -1818,6 +1811,7 @@ impl State {
             };
         }
         super::Label {
+            repository: None,
             position: avatar.position,
             text: avatar
                 .slot
@@ -1834,6 +1828,9 @@ impl State {
 }
 
 fn swept_crosses(point: Vec2, corners: &[Vec2; 4], rect: Rect) -> bool {
+    if rect.min.cmpge(rect.max).any() {
+        return false;
+    }
     if corners.iter().any(|&p| segment(point, p, rect)) {
         return true;
     }
@@ -2537,7 +2534,8 @@ mod tests {
             &Mappings::default(),
             &["a".into(), "b".into()],
         );
-        sim.advance_to(120, 60);
+        let second_write = sim.schedule.commit_ticks().nth(1).unwrap();
+        sim.advance_to(u32::try_from(second_write).unwrap(), 60);
         let mut state = sim.state.clone();
         state.avatars[0].last_active = crate::model::Time::ZERO;
         state.avatars[0].presence = 0.0;
@@ -2595,9 +2593,15 @@ mod tests {
                     let corners = sim.envelopes[avatar.commit].corners(tile);
                     let origin = slot.point - slot.offset;
                     assert!(fan(origin, &corners) < std::f32::consts::PI);
-                    assert!(!obstacles.iter().any(|(r, rect)| *r != usize::MAX
-                        && *r != avatar.repository
-                        && swept_crosses(origin, &corners, rect.inflate(-0.02))));
+                    assert!(
+                        !obstacles.iter().any(|(r, rect)| *r != usize::MAX
+                            && *r != avatar.repository
+                            && swept_crosses(origin, &corners, rect.inflate(-0.02))),
+                        "frame {frame}, avatar {}, commit {}, slot {:?}",
+                        avatar.name,
+                        avatar.commit,
+                        slot
+                    );
                 }
             }
         }
@@ -3000,7 +3004,9 @@ mod tests {
         let observations = sim.state.slot_records[&0].observations;
         for frame in 361..660 {
             sim.advance_to(frame, 60);
-            assert_eq!(sim.state.avatars[0].position, parked);
+            if sim.state.avatars[0].presence > 0.0 {
+                assert_eq!(sim.state.avatars[0].position, parked);
+            }
             assert_eq!(sim.state.avatars[0].slot.as_ref().unwrap().dock, dock);
         }
         assert_eq!(sim.state.avatars[0].presence, 0.0);

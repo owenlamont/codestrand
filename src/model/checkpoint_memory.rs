@@ -39,8 +39,8 @@ pub(crate) fn tree_bytes<K, V>(len: usize) -> u128 {
 
 impl State {
     pub(super) fn replay_bytes(&self) -> u128 {
-        let (layout, avatars, authors, pulses, slot_records, titles, capacities) = retained_fields!(self, State {
-            layout, avatars, authors, pulses, slot_records, titles, capacities;
+        let (layout, avatars, authors, pulses, slot_records, capacities) = retained_fields!(self, State {
+            layout, avatars, authors, pulses, slot_records, capacities;
             field_growth, field, region_depth, tick, next_event, focus, distance,
             geometry, avatar_scale, avatar_size, avatar_max_speed, gutter, fragment_pace,
         });
@@ -54,11 +54,6 @@ impl State {
             + buffer_bytes::<Pulse>(pulses.capacity())
             + pulses.iter().map(Pulse::replay_bytes).sum::<u128>()
             + tree_bytes::<usize, slots::Record>(slot_records.len())
-            + tree_bytes::<usize, super::titles::Title>(titles.len())
-            + titles
-                .values()
-                .map(super::titles::Title::replay_bytes)
-                .sum::<u128>()
             + buffer_bytes::<u8>(capacities.capacity())
     }
 }

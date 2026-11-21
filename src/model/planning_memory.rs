@@ -65,12 +65,7 @@ pub(super) fn check(
     let pose_bytes = poses * size_of::<travel::Pose>() as u128 * 2;
     let snapshot_bytes =
         super::slots::Snapshots::estimated_bytes(selected, options.fragment_pace());
-    let history = Schedule::with_padding(
-        selected,
-        options.seconds_per_day,
-        options.max_idle_seconds,
-        |_| 0,
-    );
+    let history = Schedule::for_replay(events, options);
     let (_, endings) = super::lifecycle::plan(
         events,
         &history,

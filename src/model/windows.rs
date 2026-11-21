@@ -33,14 +33,11 @@ impl Simulation {
         history: &Schedule,
         departures: &[Time],
         endings: &[Time],
-        options: &Options,
     ) {
         self.clock = schedule::Clock::new(history.clone(), self.schedule.clone());
         self.departures = departures.iter().map(|&t| self.clock.present(t)).collect();
         self.repository_ends = endings.iter().map(|&t| self.clock.present(t)).collect();
-        let clock = self.clock.clone();
-        let schedule = self.schedule.clone();
-        self.plan_waiting_births(options, &clock, &schedule);
+        self.births = self.births_for(&self.schedule);
     }
 
     fn finish_window(&mut self, end: Time, complete: bool) -> anyhow::Result<u64> {
@@ -54,7 +51,6 @@ impl Simulation {
                 &mut self.caption_plan,
             );
         }
-        self.plan_titles();
         let boundary = if complete {
             self.end_tick()
         } else {
@@ -129,7 +125,7 @@ impl Simulation {
         all_events: &[crate::timeline::Event],
         options: &Options,
         repositories: &[String],
-        (history, departures, endings): (&Schedule, &[Time], &[Time]),
+        (history, departures, endings): (&mut Schedule, &[Time], &[Time]),
         events: &Events,
         padding: &mut Vec<(usize, u32)>,
     ) -> anyhow::Result<u32> {
@@ -153,18 +149,12 @@ impl Simulation {
                 let _phase = trace.phase(Phase::ScheduleRebuild);
                 trace.count_rebuild(self.events.len(), padding.len());
                 trace.count_rebuild(events.len(), padding.len());
-                self.schedule = Schedule::with_padding(
-                    &self.events,
-                    options.seconds_per_day,
-                    options.max_idle_seconds,
-                    |i| schedule::padding_at(padding, self.offset + i),
-                );
-                Schedule::with_padding(
-                    events,
-                    options.seconds_per_day,
-                    options.max_idle_seconds,
-                    |i| schedule::padding_at(padding, self.offset + i),
-                )
+                self.schedule = history.with_travel(self.events.len(), |i| {
+                    schedule::padding_at(padding, self.offset + i)
+                });
+                history.with_travel(events.len(), |i| {
+                    schedule::padding_at(padding, self.offset + i)
+                })
             };
             {
                 let _phase = trace.phase(Phase::CheckSchedule);
@@ -182,7 +172,7 @@ impl Simulation {
             }
             {
                 let _phase = trace.phase(Phase::WindowClock);
-                self.update_window_clock(history, departures, endings, options);
+                self.update_window_clock(history, departures, endings);
             }
             {
                 let _phase = trace.phase(Phase::Restart);
@@ -195,6 +185,13 @@ impl Simulation {
                 planned = Some(padding.clone());
             }
             self.plan_travel(options, padding);
+            if options.travel_cap == TravelCap::None
+                && self.travel.protect_birth_walks(history)
+            {
+                planned = None;
+                compactions = 0;
+                continue;
+            }
             let adjusted = self.adjust_travel_padding(options, padding);
             if adjusted != *padding
                 && (options.travel_cap == TravelCap::None || pass < 4)
@@ -204,7 +201,7 @@ impl Simulation {
             }
             if compactions == 0 {
                 compactions = 1;
-                *padding = self.compact_travel_padding(options, padding);
+                *padding = self.compact_travel_padding(padding);
                 continue;
             }
             let refined = self.refine_service_slots(options, padding);
@@ -213,6 +210,9 @@ impl Simulation {
                 continue;
             }
             break;
+        }
+        if options.travel_cap == TravelCap::None {
+            self.travel.require_birth_routes(options.bot_travel)?;
         }
         Ok(pass)
     }
@@ -232,7 +232,7 @@ impl Simulation {
         );
         let events = self.events.clone();
         self.windowed = true;
-        let history = self.schedule.clone();
+        let mut history = self.schedule.clone();
         let departures = self.departures.clone();
         let endings = self.repository_ends.clone();
         let duration = self.duration();
@@ -253,7 +253,7 @@ impl Simulation {
                 all_events,
                 options,
                 repositories,
-                (&history, &departures, &endings),
+                (&mut history, &departures, &endings),
                 &events,
                 &mut padding,
             )?;
@@ -366,7 +366,6 @@ impl Simulation {
             repository_boundary: self.repository_boundary,
             collapse_directories: self.collapse_directories,
             diff_text_distance: self.diff_text_distance,
-            repository_label_plane: self.repository_label_plane,
             events,
             offset: self.offset,
             unread_before: self.unread_before,
@@ -381,7 +380,6 @@ impl Simulation {
             theme: self.theme.clone(),
             travel: self.travel.clone(),
             visuals: self.visuals,
-            title_plan: self.title_plan.clone(),
             progress: crate::progress::Progress::default(),
             trace: super::Trace::default(),
             tick_times: super::trace::TickTimes::default(),
@@ -390,7 +388,6 @@ impl Simulation {
             windowed: true,
             stream: None,
             ready_end: Some(ready),
-            title_start: self.title_start,
             #[cfg(test)]
             advance_all_files: self.advance_all_files,
         }
@@ -407,14 +404,6 @@ impl Simulation {
                 *envelope = super::slots::Envelope::default();
             }
         }
-        let first = usize::try_from(boundary / 15)
-            .expect("bounded timeline")
-            .saturating_sub(2);
-        for row in &mut self.title_plan {
-            let count = first.saturating_sub(self.title_start).min(row.len());
-            row.drain(..count);
-        }
-        self.title_start = first;
         caption::discard_before(&mut self.caption_plan, boundary);
         let window = self.window.as_mut().expect("planning window");
         let mut last = std::collections::BTreeMap::new();
@@ -454,7 +443,7 @@ mod tests {
         for update in updates.try_iter().filter(|update| {
             matches!(
                 update.stage,
-                Stage::Travel | Stage::Reservations | Stage::Titles | Stage::Checkpoint
+                Stage::Travel | Stage::Reservations | Stage::Checkpoint
             )
         }) {
             let beginning = previous.is_none_or(|old| {
@@ -544,13 +533,10 @@ mod tests {
                 2 * passes
             );
             assert_eq!(window.calls(&[Phase::PlanTravel, Phase::Capture]), passes);
-            assert_eq!(window.calls(&[Phase::PlanTitles]), 1);
             assert_eq!(
                 window.calls(&[Phase::CheckpointReplay, Phase::TickNames]),
                 1
             );
-            assert_eq!(window.calls(&[Phase::PlanTitles, Phase::TickTitles]), 1);
-            assert_eq!(window.calls(&[Phase::PlanTitles, Phase::TickNames]), 0);
             assert!(window.counter(&[], Counter::Files) > 0);
             let capture = [Phase::PlanTravel, Phase::Capture];
             assert_eq!(
@@ -691,7 +677,6 @@ mod tests {
             );
             assert_eq!(held.envelopes, advanced.envelopes);
             assert_eq!(held.packing.exact_state(), advanced.packing.exact_state());
-            assert_eq!(held.title_plan, advanced.title_plan);
             let layouts = |sim: &Simulation| -> Vec<_> {
                 sim.boundaries
                     .iter()
@@ -752,7 +737,19 @@ mod tests {
         let (mut events, labels) = super::super::tests::short_repository_history(6);
         events.truncate(12);
         let [(mut reused, fast), (mut replayed, slow)] =
-            reused_and_replayed(&(events, labels), 3.0, TravelCap::None);
+            [false, true].map(|replay_everything| {
+                plan_traced(
+                    (events.clone(), labels.clone()),
+                    Options {
+                        start: labels.len(),
+                        eager_windows: true,
+                        travel_window_seconds: Some(3.0),
+                        travel_cap: TravelCap::None,
+                        replay_everything,
+                        ..Options::default()
+                    },
+                )
+            });
         let rounds = |reports: &[Report]| {
             total(
                 reports,
@@ -857,7 +854,6 @@ mod tests {
         assert_eq!(report.calls(&[Phase::TravelPadding]), 1);
         assert_eq!(report.calls(&[Phase::Pass]), passes);
         assert_eq!(report.calls(&[Phase::Pass, Phase::PlanTravel]), passes);
-        assert_eq!(report.calls(&[Phase::PlanTitles]), 1);
         assert!(report.counter(&[], Counter::Tilings) > 0);
     }
 
@@ -1061,22 +1057,13 @@ mod tests {
                     })
                     .cloned()
                     .collect::<Vec<_>>();
-                let titles = sim
-                    .title_plan
-                    .iter()
-                    .map(|row| {
-                        row[..usize::try_from(boundary.tick / 15 + 1).unwrap()].to_vec()
-                    })
-                    .collect::<Vec<_>>();
                 frozen.push(format!(
-                    "{:?}{:?}{:?}{:?}{:?}{:?}{:?}{}",
+                    "{:?}{:?}{:?}{:?}{:?}{}",
                     boundary.avatars,
-                    boundary.titles,
                     boundary.pulses,
                     &sim.schedule.starts[..count],
                     sim.travel.docks.range(..(count, 0)).collect::<Vec<_>>(),
                     trips,
-                    titles,
                     caption::frozen(&sim.caption_plan, boundary.tick)
                 ));
             }
