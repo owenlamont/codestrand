@@ -7,31 +7,36 @@ use super::{Simulation, framing};
 use crate::layout::{Layout, packing::Tile};
 mod gaps;
 
-pub(crate) fn largest_empty(tiles: &[Tile]) -> f32 {
+const EMPTY_RECTANGLE_WORK: usize = 1_000_000;
+
+fn largest_empty(tiles: &[Tile]) -> Option<f32> {
+    let count = tiles.len().max(1);
+    let setup = count.saturating_mul(4 + 4 * count.ilog2() as usize);
+    let mut budget = EMPTY_RECTANGLE_WORK.checked_sub(setup)?;
     let mut edges = vec![-1.0, 1.0];
     for tile in tiles {
         edges.extend([tile.low.x, tile.high.x]);
     }
     edges.sort_by(f32::total_cmp);
     edges.dedup();
+    let mut tiles = tiles.to_vec();
+    tiles.sort_by(|a, b| a.low.y.total_cmp(&b.low.y));
     let mut largest = 0.0_f32;
     for (i, &left) in edges.iter().enumerate() {
         for &right in &edges[i + 1..] {
-            let mut blocked: Vec<_> = tiles
+            budget = budget.checked_sub(count)?;
+            let blocked = tiles
                 .iter()
-                .filter(|tile| tile.low.x < right && tile.high.x > left)
-                .map(|tile| (tile.low.y, tile.high.y))
-                .collect();
-            blocked.sort_by(|a, b| a.0.total_cmp(&b.0));
+                .filter(|tile| tile.low.x < right && tile.high.x > left);
             let mut bottom = -1.0_f32;
-            for (low, high) in blocked {
-                largest = largest.max((right - left) * (low - bottom) * 0.25);
-                bottom = bottom.max(high);
+            for tile in blocked {
+                largest = largest.max((right - left) * (tile.low.y - bottom) * 0.25);
+                bottom = bottom.max(tile.high.y);
             }
             largest = largest.max((right - left) * (1.0 - bottom) * 0.25);
         }
     }
-    largest
+    Some(largest)
 }
 
 #[derive(Serialize)]
@@ -62,7 +67,7 @@ struct Repository {
 pub(crate) struct Metrics {
     pub coverage: f32,
     pub blank_fraction: f32,
-    pub largest_empty_rectangle: f32,
+    pub largest_empty_rectangle: Option<f32>,
     content_fill: f32,
     repositories: Vec<Repository>,
     pub content_largest_empty_inset: f32,
@@ -254,6 +259,20 @@ mod tests {
     use bevy::math::Vec3;
 
     #[test]
+    fn dense_treemap_omits_the_empty_rectangle_within_the_work_budget() {
+        let tiles: Vec<_> = (0..200_u16)
+            .map(|i| Tile {
+                low: Vec2::new(f32::from(i) / 100.0 - 1.0, -0.5),
+                high: Vec2::new(f32::from(i + 1) / 100.0 - 1.0, 0.5),
+            })
+            .collect();
+        assert_eq!(
+            serde_json::to_value(largest_empty(&tiles)).unwrap(),
+            serde_json::Value::Null
+        );
+    }
+
+    #[test]
     fn empty_rectangle_control_detects_a_missing_tile() {
         let full = Tile::viewport();
         let left = Tile {
@@ -265,11 +284,12 @@ mod tests {
             ..full
         };
         assert!(
-            (largest_empty(&[left, right]) - f32::midpoint(1.0, full.low.y)).abs()
+            (largest_empty(&[left, right]).unwrap() - f32::midpoint(1.0, full.low.y))
+                .abs()
                 < 1e-6
         );
-        assert!(largest_empty(&[left]) > 0.45);
-        assert_eq!(largest_empty(&[]), 1.0);
+        assert!(largest_empty(&[left]).unwrap() > 0.45);
+        assert_eq!(largest_empty(&[]), Some(1.0));
     }
 
     fn histories() -> Vec<Vec<crate::timeline::Event>> {

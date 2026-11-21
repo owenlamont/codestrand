@@ -975,6 +975,13 @@ mod pacing_tests {
     use super::{prepare, render};
     use crate::scene;
 
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Framing {
+        Overview,
+        Scripted,
+        FollowActivity,
+    }
+
     #[test]
     #[ignore = "requires a graphics adapter; repeats sibling-directory junction exports"]
     fn sibling_directory_exports_are_identical() {
@@ -1080,11 +1087,21 @@ mod pacing_tests {
     #[test]
     #[ignore = "requires a graphics adapter; renders two short PNG sequences"]
     fn export_is_complete_and_independent_of_render_pacing() {
+        assert_paced_export(Framing::Scripted);
+    }
+
+    #[test]
+    #[ignore = "requires a graphics adapter; renders short PNG sequences"]
+    fn follow_activity_export_is_independent_of_render_pacing() {
+        assert_paced_export(Framing::FollowActivity);
+    }
+
+    fn assert_paced_export(framing: Framing) {
         let scratch = tempfile::tempdir().expect("temporary directory is available");
         let fast = scratch.path().join("fast");
         let slow = scratch.path().join("slow");
-        export(&fast, Duration::ZERO);
-        export(&slow, Duration::from_millis(50));
+        export(&fast, Duration::ZERO, framing);
+        export(&slow, Duration::from_millis(50), framing);
         let expected: Vec<_> = (0..8)
             .map(|index| format!("frame-{index:05}.png"))
             .collect();
@@ -1120,33 +1137,71 @@ mod pacing_tests {
             fs::read_to_string(slow.join("frames.csv")).expect("manifest exists");
         assert_eq!(fast_manifest.lines().count(), 9);
         assert_eq!(fast_manifest, slow_manifest);
+        if framing == Framing::FollowActivity {
+            let overview = scratch.path().join("overview");
+            export(&overview, Duration::ZERO, Framing::Overview);
+            let overview_last = fs::read(overview.join(&expected[7])).unwrap();
+            assert_ne!(last, overview_last, "activity framing matched the overview");
+        }
     }
 
     /// Exports eight synthetic frames, sleeping `delay` in every app update.
-    fn export(directory: &Path, delay: Duration) {
+    fn export(directory: &Path, delay: Duration, framing: Framing) {
         let camera = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/camera-targets.toml");
-        let Some(crate::Command::Export { source, theme, .. }) =
-            crate::Cli::try_parse_from([
-                "codestrand",
-                "export",
-                "unused",
-                "--test-input",
-                "synthetic",
-            ])
-            .unwrap()
-            .command
+        let mut args = vec![
+            "codestrand",
+            "export",
+            "unused",
+            "--test-input",
+            "synthetic",
+        ];
+        if framing == Framing::FollowActivity {
+            args.push("--follow-activity");
+        }
+        let Some(crate::Command::Export {
+            source,
+            theme,
+            follow_activity,
+            ..
+        }) = crate::Cli::try_parse_from(args).unwrap().command
         else {
             panic!("export command");
         };
-        let (mut simulation, title) =
-            source.load(&crate::progress::Progress::default()).unwrap();
+        let (mut simulation, title) = if framing == Framing::Scripted {
+            source.load(&crate::progress::Progress::default()).unwrap()
+        } else {
+            let histories = (0..2)
+                .map(|index| {
+                    let mut events = crate::timeline::synthetic();
+                    crate::repositories::namespace(&mut events, index);
+                    events
+                })
+                .collect();
+            let simulation = crate::model::Simulation::with_repositories(
+                crate::repositories::merge(histories),
+                &crate::model::Options {
+                    seconds_per_day: 0.02,
+                    max_idle_seconds: 0.05,
+                    ..Default::default()
+                },
+                &theme.build(),
+                &crate::contributors::Mappings::default(),
+                &["First".into(), "Second".into()],
+            );
+            (simulation, "Activity framing".into())
+        };
         simulation.set_theme(theme.build());
-        let camera_path = crate::camera_path::CameraPath::read(&camera)
-            .and_then(|path| path.bind(&simulation))
-            .unwrap();
+        let camera_path = (framing == Framing::Scripted).then(|| {
+            crate::camera_path::CameraPath::read(&camera)
+                .and_then(|path| path.bind(&simulation))
+                .unwrap()
+        });
         let resolution = crate::resolution::Resolution::default();
         let (mut app, target) = scene::headless(simulation, title, 2, resolution);
+        if follow_activity {
+            app.insert_resource(super::FollowActivity);
+        }
         app.add_systems(bevy::prelude::Update, move || thread::sleep(delay));
         prepare(directory).unwrap();
         render(
@@ -1155,7 +1210,7 @@ mod pacing_tests {
             Some(8),
             2,
             None,
-            Some(&camera_path),
+            camera_path.as_ref(),
         )
         .unwrap();
     }

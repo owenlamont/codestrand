@@ -176,7 +176,9 @@ fn inset_title(
         if corner & 1 == 0 {
             tile.min.x
         } else {
-            tile.max.x - size.x
+            let full_width =
+                8.0 + character_width * super::count(label.chars().count());
+            (tile.max.x - full_width).max(tile.min.x)
         },
         if corner & 2 == 0 {
             tile.min.y + size.y
@@ -517,6 +519,28 @@ mod tests {
         assert!(narrow.text.ends_with('…'));
         assert_eq!(wide.size.y, narrow.size.y);
         assert!(narrow.rect().max.x <= narrow_tile.high.x * HALF.x - EDGE_INSET);
+    }
+
+    #[test]
+    fn right_title_origin_moves_continuously_through_elision() {
+        let scale = super::super::LabelKind::Repository.font_scale();
+        let threshold = 8.0 + 8.6 * scale * 6.0;
+        let title = |width: f32| {
+            inset_title(
+                Rect::new(-width, 0.0, 0.0, 30.0),
+                "repository",
+                10.0,
+                1,
+                scale,
+                1.0,
+                None,
+            )
+            .unwrap()
+        };
+        let narrow = title(threshold - 0.01);
+        let wide = title(threshold + 0.01);
+        assert_ne!(narrow.text, wide.text);
+        assert!((narrow.point.x - wide.point.x).abs() < 0.03);
     }
 
     #[test]

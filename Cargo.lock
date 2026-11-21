@@ -2005,6 +2005,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "swash",
  "sysinfo",
  "tempfile",
  "thiserror 2.0.21",

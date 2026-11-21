@@ -275,7 +275,9 @@ Source: https://codestrand.pages.dev/playback/
 # Playback
 
 Preview loops the selected history. Export renders the same launch timeline at
-explicit frame times, with a 1x playback multiplier and a fitted or scripted export camera.
+explicit frame times at 1x speed. The export camera fits the scene by default.
+Use `--follow-activity` to follow the latest commit's repository or `--camera-path`
+for a scripted camera.
 
 Preview renders at the window's physical resolution, including on HiDPI displays.
 Resizing or maximising keeps a 720-logical-pixel-high UI: text scales with height,
@@ -479,8 +481,8 @@ Paths in the TOML file resolve relative to the file. Labels default to the repos
 directory name. Repeated flags and a file can be combined; flag entries come first.
 Paths resolving to the same location are rejected as duplicate repositories. Labels for
 distinct repositories must be unique. There is no fixed repository-count limit.
-When minimum tiles and gutters cannot fit the field, tiles, gutters, avatars and titles
-shrink by one detail scale chosen before playback, as if the camera pulled back.
+Tiles, gutters, avatars and titles have world-space sizes. The field grows to fit the
+content, and the overview camera pulls back to keep the whole field in view.
 Tile packing time grows steeply with repository count.
 
 `archived = true` ends a repository after the final commit in the selected revision,
@@ -665,8 +667,6 @@ It is the host's available RAM, without container or job-specific memory limits.
 Rendering and video encoding need additional memory beyond the planning estimate.
 The check is an estimate made before planning, not a guarantee that the process will
 fit in memory. It can be conservative on some inputs and too low on others.
-Packing reserves tiles before applying repository endings, so sequential repositories
-share the detail scale of repositories visible together.
 Route searches stop at 10,000 nodes; capped playback can fade across when a search
 exceeds that bound, while uncapped walking reports an error.
 
