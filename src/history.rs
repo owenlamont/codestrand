@@ -84,6 +84,7 @@ struct Limits {
     commits: usize,
     entries: u64,
     tree_entries: u64,
+    tree_read_bytes: u64,
     retained_bytes: u64,
     blob_bytes: u64,
     lines: u64,
@@ -98,6 +99,7 @@ impl Default for Limits {
             commits: 1_000_000,
             entries: 2_000_000,
             tree_entries: 2_000_000,
+            tree_read_bytes: 512 * 1024 * 1024,
             retained_bytes: 512 * 1024 * 1024,
             blob_bytes: 8 * 1024 * 1024 * 1024,
             lines: 20_000_000,
@@ -189,7 +191,16 @@ impl Budget {
         &mut self,
         repo: &gix::Repository,
         id: gix::ObjectId,
+    ) -> Result<(u64, usize, usize, u64)> {
+        self.read_tree(repo, id, 0, self.limits.tree_read_bytes)
+    }
+
+    fn read_tree(
+        &mut self,
+        repo: &gix::Repository,
+        id: gix::ObjectId,
         depth: usize,
+        remaining_bytes: u64,
     ) -> Result<(u64, usize, usize, u64)> {
         self.charge(1)?;
         if depth > 256 {
@@ -199,14 +210,18 @@ impl Budget {
             return Ok(summary);
         }
         let bytes = self.object(repo, id)?;
-        self.retain(bytes + 128)?;
+        // Each ancestor tree buffer stays live until its children have been read.
+        let remaining_bytes = remaining_bytes.checked_sub(bytes).ok_or_else(|| {
+            exhausted("single-tree read bytes", self.limits.tree_read_bytes)
+        })?;
+        self.retain(128)?;
         let tree = repo.find_tree(id)?;
         let mut summary = (0u64, 0usize, 0usize, 0u64);
         for entry in tree.iter() {
             self.charge(1)?;
             let entry = entry?;
             let child = if entry.mode().is_tree() {
-                self.tree(repo, entry.object_id(), depth + 1)?
+                self.read_tree(repo, entry.object_id(), depth + 1, remaining_bytes)?
             } else {
                 (0, 0, 0, 0)
             };
@@ -611,6 +626,7 @@ fn later_start(
                 .iter()
                 .position(|link| link.seconds >= date)?;
         let before = spent[links.len() - 1 - start];
+        // The oldest included diff already charged the boundary tree as its parent.
         budget.spent = before;
         let fits = boundary(repo, &links[start - 1], &mut budget).is_ok();
         trials = budget
@@ -685,7 +701,7 @@ fn boundary(
 ) -> Result<Commit> {
     budget.object(repo, link.id)?;
     let commit = repo.find_commit(link.id)?;
-    let (entries, ..) = budget.tree(repo, link.tree, 0)?;
+    let (entries, ..) = budget.tree(repo, link.tree)?;
     budget.charge(entries)?;
     let mut recorder = gix::traverse::tree::Recorder::default();
     repo.find_tree(link.tree)?
@@ -742,12 +758,12 @@ fn diffed(
     let before = if let Some(parent) = commit.parent_ids().next() {
         budget.object(repo, parent.detach())?;
         let before_id = parent.object()?.into_commit().tree_id()?.detach();
-        budget.tree(repo, before_id, 0)?;
+        budget.tree(repo, before_id)?;
         repo.find_tree(before_id)?
     } else {
         repo.empty_tree()
     };
-    budget.tree(repo, link.tree, 0)?;
+    budget.tree(repo, link.tree)?;
     let after = repo.find_tree(link.tree)?;
     let mut changes = Vec::new();
     let mut exhaustion = None;
@@ -969,18 +985,22 @@ fn bounded_blob_diff(
         return Ok(BlobDiff::Gitlink);
     }
     let mut skipped = false;
+    let mut read_bytes = 0;
     for entry in change.before.iter().chain(&change.after) {
         let id = gix::ObjectId::from_hex(entry.id.as_bytes())?;
         budget.charge(1)?;
         let size = match repo.find_header(id) {
-            Ok(header) => header.size(),
+            Ok(header) => {
+                budget.charge(u64::from(header.num_deltas().unwrap_or_default()))?;
+                header.size()
+            }
             Err(error) if error.is_resource_exhausted() => {
                 budget.charge(budget.limits.object_bytes)?;
                 return Ok(BlobDiff::Skipped);
             }
             Err(error) => return Err(error.into()),
         };
-        budget.charge(size)?;
+        read_bytes += size.min(budget.limits.object_bytes);
         budget.spent.blob_bytes = budget.spent.blob_bytes.saturating_add(size);
         skipped |= size > budget.limits.object_bytes
             || budget.spent.blob_bytes > budget.limits.blob_bytes;
@@ -988,6 +1008,7 @@ fn bounded_blob_diff(
     if skipped {
         return Ok(BlobDiff::Skipped);
     }
+    budget.charge(read_bytes)?;
     let Some((before, after)) = load_blobs(repo, change)? else {
         budget.charge(budget.limits.object_bytes)?;
         return Ok(BlobDiff::Skipped);
@@ -1266,6 +1287,24 @@ mod security_tests {
         assert!(
             message.contains("single-tree entries budget reached (2000000)"),
             "{message}"
+        );
+    }
+
+    #[test]
+    fn tree_read_refuses_when_live_buffers_exceed_the_limit() {
+        let (_root, repo, tip) = hostile_history(1, b"ok\n");
+        let tree = repo.find_commit(tip).unwrap().tree_id().unwrap().detach();
+        let root_bytes = repo.find_header(tree).unwrap().size();
+        let limits = Limits {
+            tree_read_bytes: root_bytes,
+            ..Limits::default()
+        };
+        let error = message(load_all(&repo, tip, limits).err().unwrap());
+        assert!(
+            error.contains(&format!(
+                "single-tree read bytes budget reached ({root_bytes})"
+            )),
+            "{error}"
         );
     }
 
@@ -1669,7 +1708,11 @@ mod security_tests {
                 bounded_blob_diff(&repo, change, &mut budget).unwrap(),
                 BlobDiff::Skipped
             ));
-            assert!(budget.spent.work >= 13);
+            if limits.blob_bytes == 0 || limits.object_bytes == 0 {
+                assert_eq!(budget.spent.work, 1);
+            } else {
+                assert!(budget.spent.work >= 13);
+            }
             for _ in 0..100 {
                 if let Err(error) = bounded_blob_diff(&repo, change, &mut budget) {
                     assert!(matches!(error, ReadError::Exhausted { .. }));
