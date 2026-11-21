@@ -17,7 +17,10 @@ pub(crate) struct RepositoryExit {
     pub(crate) end: u64,
 }
 
-pub(super) fn repository_exits(endings: &[Time]) -> Arc<[Option<RepositoryExit>]> {
+pub(super) fn repository_exits(
+    endings: &[Time],
+    schedule: &Schedule,
+) -> Arc<[Option<RepositoryExit>]> {
     let starts: Vec<_> = endings
         .iter()
         .map(|&end| {
@@ -26,12 +29,58 @@ pub(super) fn repository_exits(endings: &[Time]) -> Arc<[Option<RepositoryExit>]
         })
         .collect();
     let mut exits = exits_from_starts(&starts);
+    if exits.iter().any(Option::is_some) {
+        reserve_archive_reflows(&mut exits, schedule);
+    }
     for (exit, &ending) in exits.iter_mut().zip(endings) {
         if ending < Time::ZERO {
             *exit = Some(RepositoryExit { start: 0, end: 0 });
         }
     }
     exits.into()
+}
+
+fn reserve_archive_reflows(exits: &mut [Option<RepositoryExit>], schedule: &Schedule) {
+    let windows = [REFLOW_TICKS, STAGGERED_REFLOW_TICKS].map(|duration| {
+        let mut after = 0;
+        schedule
+            .commit_ticks()
+            .chain([u64::MAX])
+            .filter_map(|commit| {
+                let start = std::mem::replace(&mut after, commit.saturating_add(1));
+                let latest_start = commit.checked_sub(duration)?;
+                (latest_start >= start).then_some(start..=latest_start)
+            })
+            .collect::<Vec<_>>()
+    });
+    for exit in exits.iter_mut().flatten() {
+        let duration = exit.end - exit.start;
+        let candidates = &windows[usize::from(duration == STAGGERED_REFLOW_TICKS)];
+        let index = candidates.partition_point(|window| *window.end() < exit.start);
+        exit.start = exit.start.max(*candidates[index].start());
+        exit.end = exit.start.saturating_add(duration);
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn archive_reflow_waits_for_a_commit_free_window() {
+    let events = crate::timeline::synthetic();
+    let schedule = Schedule::new(&events, 0.01, 0.01);
+    let first_write = schedule.commit_ticks().next().unwrap();
+    let mut exits = [Some(RepositoryExit {
+        start: first_write,
+        end: first_write + REFLOW_TICKS,
+    })];
+    reserve_archive_reflows(&mut exits, &schedule);
+    let exit = exits[0].unwrap();
+    assert!(exit.start > first_write);
+    assert_eq!(exit.end - exit.start, REFLOW_TICKS);
+    assert!(
+        !schedule
+            .commit_ticks()
+            .any(|write| (exit.start..exit.end).contains(&write))
+    );
 }
 
 pub(crate) fn exits_from_starts(starts: &[Option<u64>]) -> Vec<Option<RepositoryExit>> {
@@ -74,8 +123,9 @@ pub(super) fn duration(
     endings: &[Time],
     pace: FragmentPace,
 ) -> Time {
-    activity_duration(schedule, pace)
-        .max(Time::from_tick(exit_end(&repository_exits(endings))))
+    activity_duration(schedule, pace).max(Time::from_tick(exit_end(&repository_exits(
+        endings, schedule,
+    ))))
 }
 
 pub(super) fn activity_duration(schedule: &Schedule, pace: FragmentPace) -> Time {
@@ -393,7 +443,7 @@ mod tests {
         )
         .unwrap();
         sim.repository_ends = [1.500_050_1, 5.500_05].map(Time::seconds).to_vec();
-        sim.repository_exits = repository_exits(&sim.repository_ends);
+        sim.repository_exits = repository_exits(&sim.repository_ends, &sim.schedule);
         sim.plan_repositories(vec![true; 2], &options).unwrap();
         let history = sim.schedule.clone();
         assert_eq!(sim.end_tick(), 721);

@@ -69,17 +69,19 @@ pub(super) fn plan(
     presence: &[f32],
     space: Space,
 ) -> Option<Change> {
-    if presence.iter().filter(|&&p| p > 0.0).count() < 3 {
-        return None;
-    }
     let from = tiles(nodes, weights, presence, space)?;
     let from = Layout::new(nodes, from, space);
-    let unchanged = tiles(nodes, target, presence, space)?;
-    let mut best = mismatch(&unchanged, target);
-    if best <= 0.005 {
-        return None;
+    let unchanged = Layout::new(nodes, tiles(nodes, target, presence, space)?, space);
+    let mut best = mismatch(&unchanged.tiles, target);
+    if best <= 0.005 || presence.iter().filter(|&&p| p > 0.0).count() < 3 {
+        return Some(Change {
+            tick,
+            nodes: nodes.to_vec(),
+            from,
+            to: unchanged,
+        });
     }
-    let mut chosen = None;
+    let mut chosen = Some((nodes.to_vec(), unchanged));
     let mut consider = |trial: Vec<Node>| {
         if let Some(to) = tiles(&trial, target, presence, space) {
             let cost = mismatch(&to, target);

@@ -736,7 +736,19 @@ mod tests {
         let (mut events, labels) = super::super::tests::short_repository_history(6);
         events.truncate(12);
         let [(mut reused, fast), (mut replayed, slow)] =
-            reused_and_replayed(&(events, labels), 3.0, TravelCap::None);
+            [false, true].map(|replay_everything| {
+                plan_traced(
+                    (events.clone(), labels.clone()),
+                    Options {
+                        start: labels.len(),
+                        eager_windows: true,
+                        travel_window_seconds: Some(3.0),
+                        travel_cap: TravelCap::None,
+                        replay_everything,
+                        ..Options::default()
+                    },
+                )
+            });
         let rounds = |reports: &[Report]| {
             total(
                 reports,

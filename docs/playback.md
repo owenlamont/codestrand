@@ -57,6 +57,7 @@ macOS discovers installed fonts through CoreText and Library/Fonts directories.
 | Hold left / right button (captured) | Move along world Y up / down; both cancel |
 | F10 | Open or close settings; release capture and pause camera controls |
 | F11 | Toggle borderless fullscreen on the current monitor |
+| F12 | Toggle the preview frame-rate counter (off at startup) |
 | `[` | Halve live speed, down to 0.125x |
 | `]` | Double live speed, up to 8x |
 | `,` / `.` | Previous or next theme |

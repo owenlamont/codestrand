@@ -113,6 +113,10 @@ impl Schedule {
         })
     }
 
+    pub(super) fn commit_ticks(&self) -> impl Iterator<Item = u64> + '_ {
+        self.services.iter().map(|service| service.tick)
+    }
+
     pub(super) fn padding(&self, index: usize) -> u32 {
         self.services[index].padding
     }

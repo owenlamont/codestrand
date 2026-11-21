@@ -682,7 +682,6 @@ fn territories(
         for (index, dir) in dirs {
             let slot = hues[index] % 12;
             let radius = styles.territory_layout.radii[index] + 0.5;
-            let surface = simulation.repository_surface(dir.repository);
             for ring in 0..3 {
                 let entity = styles.territory_pool[used];
                 used += 1;
@@ -694,7 +693,7 @@ fn territories(
                 *world
                     .get_mut::<Transform>(entity)
                     .expect("territory transform") = Transform::from_translation(
-                    super::ground(surface.point(dir.position))
+                    super::ground(dir.position)
                         - Vec3::Y
                             * (0.14
                                 + f32::from(u16::try_from(ring).expect("3 rings"))
@@ -702,7 +701,7 @@ fn territories(
                 )
                 .with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2))
                 .with_scale(Vec3::splat(
-                    radius * surface.scale / theme.avatar_radius
+                    radius / theme.avatar_radius
                         * (1.0
                             + f32::from(u16::try_from(ring).expect("3 rings")) * 0.07),
                 ));

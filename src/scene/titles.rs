@@ -724,8 +724,9 @@ mod tests {
         let birth = (0..simulation.frames(60).unwrap())
             .find_map(|frame| {
                 simulation.advance_to(frame, 60);
-                let surface = simulation.repository_surface(1);
-                surface.tile.filter(|_| surface.scale < 0.5)
+                simulation
+                    .visible_repository_tile(1)
+                    .filter(|tile| (0.5..=4.0).contains(&tile.ground_aspect()))
             })
             .expect("the second repository grows into view");
         let ink = Vec2::new(8.0, 1.0);
@@ -795,7 +796,7 @@ mod tests {
             .id();
         let mut query = world.query::<(&Transform, &Visibility, &Title)>();
         world.resource_scope(|world, playback: Mut<Playback>| sync(world, &playback.0));
-        let (transform, visibility, _) = query
+        let (transform, visibility, title) = query
             .iter(&world)
             .find(|(_, _, title)| {
                 world.resource::<Playback>().0.layout().repositories[title.repository]
@@ -804,7 +805,11 @@ mod tests {
             .unwrap();
         let before = *transform;
         assert_eq!(*visibility, Visibility::Hidden);
-        world.get_mut::<Transform>(camera).unwrap().translation.y = 60.0;
+        let ink_height = before.scale.z * title.ink.y;
+        let distance = ink_height * crate::model::framing::VIEWPORT.y
+            / (16.0 * std::f32::consts::FRAC_PI_8.tan());
+        world.get_mut::<Transform>(camera).unwrap().translation =
+            before.translation + Vec3::Y * distance;
         world.resource_scope(|world, playback: Mut<Playback>| sync(world, &playback.0));
         let (transform, visibility, _) = query
             .iter(&world)

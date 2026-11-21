@@ -57,7 +57,7 @@ impl Weights {
         items: &[f32],
         presence: &[f32],
     ) -> Vec<f32> {
-        self.step_towards(tick, items, items, presence)
+        self.step_towards(tick, items, items, presence, true)
     }
 
     pub(super) fn step_towards(
@@ -66,6 +66,7 @@ impl Weights {
         items: &[f32],
         future: &[f32],
         presence: &[f32],
+        can_reflow: bool,
     ) -> Vec<f32> {
         let targets: Vec<_> = items.iter().map(|&count| count.max(1.0)).collect();
         let (mut from, mut to, mut live) = (0.0, 0.0, 0.0);
@@ -87,7 +88,7 @@ impl Weights {
             }
             self.present[i] = p > 0.0;
         }
-        if tick >= self.next && self.drifted(&targets, presence) {
+        if can_reflow && tick >= self.next && self.drifted(&targets, presence) {
             self.from = self.at(tick);
             self.to = future.iter().map(|&count| count.max(1.0)).collect();
             self.start = tick;
@@ -97,7 +98,7 @@ impl Weights {
     }
 
     fn at(&self, tick: usize) -> Vec<f32> {
-        let eased = ease(tick - self.start, self.policy.reflow);
+        let eased = progress(tick - self.start, span(self.policy.reflow));
         self.from
             .iter()
             .zip(&self.to)
@@ -142,13 +143,11 @@ pub(super) fn reflow_spacing() -> usize {
 }
 
 pub(super) fn reflow_ease(elapsed: usize) -> f32 {
-    ease(elapsed, POLICY.reflow)
+    progress(elapsed, reflow_ticks())
 }
 
-fn ease(elapsed: usize, ticks: u32) -> f32 {
-    let duration = span(ticks).max(1);
-    let u = count(elapsed.min(duration)) / count(duration);
-    u * u * (3.0 - 2.0 * u)
+pub(super) fn progress(elapsed: usize, duration: usize) -> f32 {
+    count(elapsed.min(duration)) / count(duration)
 }
 
 fn span(ticks: u32) -> usize {
@@ -208,11 +207,11 @@ mod tests {
         let mut weights = Weights::new(2);
         weights.step(0, &[100.0, 100.0], &BOTH);
         assert_eq!(
-            weights.step_towards(1, &[100.0, 100.0], &[100.0, 400.0], &BOTH),
+            weights.step_towards(1, &[100.0, 100.0], &[100.0, 400.0], &BOTH, true),
             [100.0, 100.0],
         );
         assert_eq!(
-            weights.step_towards(2, &[100.0, 200.0], &[100.0, 400.0], &BOTH),
+            weights.step_towards(2, &[100.0, 200.0], &[100.0, 400.0], &BOTH, true),
             [100.0, 100.0],
         );
         assert_eq!(

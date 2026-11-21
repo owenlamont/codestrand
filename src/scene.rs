@@ -630,6 +630,7 @@ pub(super) fn preview(loading: Loading) -> anyhow::Result<()> {
             fps: model::PREVIEW_FPS,
         })
         .add_plugins(settings::PreviewSettingsPlugin)
+        .add_plugins(PreviewFrameRate)
         .add_systems(Startup, loading::show)
         .add_systems(loading::Loaded, setup)
         .add_systems(
@@ -663,6 +664,89 @@ pub(super) fn preview(loading: Loading) -> anyhow::Result<()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .take();
     error.map_or(Ok(()), Err)
+}
+
+struct PreviewFrameRate;
+
+impl Plugin for PreviewFrameRate {
+    fn build(&self, app: &mut App) {
+        app.add_plugins(bevy::diagnostic::FrameTimeDiagnosticsPlugin::default())
+            .add_systems(Startup, spawn_frame_rate)
+            .add_systems(Update, update_frame_rate);
+    }
+}
+
+#[derive(Component)]
+struct FrameRateText;
+
+fn spawn_frame_rate(mut commands: Commands) {
+    commands.spawn((
+        FrameRateText,
+        Text::new(""),
+        TextFont::from_font_size(14.0),
+        Visibility::Hidden,
+        GlobalZIndex(100),
+        Node {
+            position_type: PositionType::Absolute,
+            top: px(8),
+            right: px(8),
+            ..default()
+        },
+    ));
+}
+
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Bevy extracts system parameters by value"
+)]
+fn update_frame_rate(
+    keys: Res<ButtonInput<KeyCode>>,
+    diagnostics: Res<bevy::diagnostic::DiagnosticsStore>,
+    mut overlay: Single<(&mut Visibility, &mut Text), With<FrameRateText>>,
+) {
+    if keys.just_pressed(KeyCode::F12) {
+        *overlay.0 = match *overlay.0 {
+            Visibility::Hidden => Visibility::Visible,
+            _ => Visibility::Hidden,
+        };
+    }
+    if *overlay.0 == Visibility::Visible
+        && let Some(fps) = diagnostics
+            .get(&bevy::diagnostic::FrameTimeDiagnosticsPlugin::FPS)
+            .and_then(bevy::diagnostic::Diagnostic::smoothed)
+    {
+        overlay.1.set_if_neq(Text::new(format!("{fps:.0} FPS")));
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn preview_frame_rate_starts_hidden_and_f12_toggles_it() {
+    let mut app = App::new();
+    app.add_plugins((
+        MinimalPlugins,
+        bevy::diagnostic::DiagnosticsPlugin,
+        PreviewFrameRate,
+    ))
+    .init_resource::<ButtonInput<KeyCode>>();
+    let visibility = |world: &mut World| {
+        *world
+            .query_filtered::<&Visibility, With<FrameRateText>>()
+            .single(world)
+            .unwrap()
+    };
+    app.update();
+    assert_eq!(visibility(app.world_mut()), Visibility::Hidden);
+    for expected in [Visibility::Visible, Visibility::Hidden] {
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::F12);
+        app.update();
+        assert_eq!(visibility(app.world_mut()), expected);
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .reset_all();
+    }
 }
 
 pub(super) fn headless(
@@ -951,17 +1035,6 @@ fn glass_positions(tile: Option<crate::layout::packing::Tile>) -> Vec<[f32; 3]> 
     [0, 1, 2, 0, 2, 3]
         .map(|i| [corners[i].x, model::framing::GLASS_BOTTOM, corners[i].y])
         .to_vec()
-}
-
-#[cfg(test)]
-pub(crate) fn title_test_bounds(
-    tile: crate::layout::packing::Tile,
-    ink: Vec2,
-) -> [Vec2; 2] {
-    let transform = titles::placement(tile, ink);
-    let center = transform.translation.xz();
-    let half = ink * transform.scale.xz() * 0.5;
-    [center - half, center + half].map(model::framing::world_to_field)
 }
 
 fn repository_regions(world: &mut World) {
@@ -1538,15 +1611,9 @@ fn sync_files(
         set_visible(world, entity, true);
         let (position, grey, alpha) = simulation.file_effect(id, file);
         if let Some(mut transform) = world.get_mut::<Transform>(entity) {
-            transform.set_if_neq(
-                Transform::from_translation(position).with_scale(Vec3::splat(
-                    file.draw_scale(layout.dir(file.dir))
-                        * detail
-                        * simulation
-                            .repository_surface(layout.dir(file.dir).repository)
-                            .scale,
-                )),
-            );
+            transform.set_if_neq(Transform::from_translation(position).with_scale(
+                Vec3::splat(file.draw_scale(layout.dir(file.dir)) * detail),
+            ));
         }
         let visual = world
             .get::<FileVisual>(entity)
@@ -1786,19 +1853,14 @@ fn sync_directory_edges(
                 return None;
             }
             let parent = layout.dir(dir.parent?);
-            let surface = simulation.repository_surface(dir.repository);
             let width = simulation.theme().directory_edge_width(dir.depth) * dir.scale;
             let height =
                 palette.directory_edge_height(pools.hues.slots[index], dir.depth);
             Some((
-                ground(surface.point(parent.position))
-                    + Vec3::Y * (height - 0.05) * surface.scale,
-                ground(surface.point(dir.position))
-                    + Vec3::Y * (height - 0.05) * surface.scale,
+                ground(parent.position) + Vec3::Y * (height - 0.05),
+                ground(dir.position) + Vec3::Y * (height - 0.05),
                 (pools.hues.slots[index], dir.depth),
-                width
-                    * dir.parent.map_or(1.0, |parent| pools.lod.detail[parent])
-                    * surface.scale,
+                width * dir.parent.map_or(1.0, |parent| pools.lod.detail[parent]),
                 dir.repository,
             ))
         })
@@ -1826,8 +1888,7 @@ fn sync_directory_edges(
                     .looking_to(delta.normalize_or(Vec3::Z), Vec3::Y)
                     .with_scale(Vec3::new(
                         *width,
-                        simulation.theme().directory_edge_height
-                            * simulation.repository_surface(*repository).scale,
+                        simulation.theme().directory_edge_height,
                         delta.length(),
                     )),
             );
@@ -1866,15 +1927,12 @@ fn sync_structure(
         );
         let (grey, alpha, rise) = simulation.repository_effect(dir.repository);
         if let Some(mut transform) = world.get_mut::<Transform>(*entity) {
-            let surface = simulation.repository_surface(dir.repository);
-            let mut translation =
-                ground(surface.point(dir.position)) - Vec3::Y * 0.05 * surface.scale;
+            let mut translation = ground(dir.position) - Vec3::Y * 0.05;
             translation.y += rise;
             transform.set_if_neq(Transform::from_translation(translation).with_scale(
                 simulation.theme().directory_node_scale
                     * pools.lod.detail[index]
-                    * dir.scale
-                    * surface.scale,
+                    * dir.scale,
             ));
         }
         set_visible(world, *entity, pools.lod.detail[index] > 0.0);
@@ -1896,15 +1954,13 @@ fn sync_structure(
         set_material(world, entity, palette.directory(slot, dir.depth));
         let (grey, alpha, rise) = simulation.repository_effect(dir.repository);
         if let Some(mut transform) = world.get_mut::<Transform>(entity) {
-            let surface = simulation.repository_surface(dir.repository);
             let mut folder = folder_transform(
                 simulation.theme(),
-                surface.point(dir.position),
+                dir.position,
                 pools.lod.size[index],
                 pools.lod.glyph[index],
             );
-            folder.scale *= surface.scale;
-            folder.translation.y = folder.translation.y * surface.scale + rise;
+            folder.translation.y += rise;
             transform.set_if_neq(folder);
         }
         set_visible(world, entity, true);
@@ -3227,7 +3283,7 @@ mod tests {
             let mut query = world.query::<(&RepositoryGlass, &Mesh3d, &Visibility)>();
             for (glass, mesh, visibility) in query.iter(&world) {
                 let region = &simulation.layout().repositories[glass.0];
-                assert_eq!(*visibility == Visibility::Visible, region.live);
+                assert_eq!(*visibility == Visibility::Visible, region.tile.is_some());
                 let Some(tile) = simulation.visible_repository_tile(glass.0) else {
                     continue;
                 };

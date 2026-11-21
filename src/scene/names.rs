@@ -238,8 +238,7 @@ impl Names {
         let glyph = theme.glyph_transform();
         for (id, file) in layout.files() {
             let dir = layout.dir(file.dir);
-            let surface = simulation.repository_surface(dir.repository);
-            let scale = file.draw_scale(dir) * surface.scale;
+            let scale = file.draw_scale(dir);
             let (point, _, opacity) = simulation.file_effect(id, file);
             let center = point + glyph.translation * scale;
             let half = glyph.scale * scale * 0.5;
@@ -255,7 +254,7 @@ impl Names {
                 (
                     Target::File(id),
                     dir.repository,
-                    point + Vec3::new(-0.2, 0.0, 0.45) * dir.scale * surface.scale,
+                    point + Vec3::new(-0.2, 0.0, 0.45) * dir.scale,
                     opacity,
                 ),
                 view.footprint([bounds]),
@@ -265,10 +264,8 @@ impl Names {
         }
         for (index, dir) in layout.dirs().filter(|(_, dir)| dir.depth > 0) {
             let (_, opacity, rise) = simulation.repository_effect(dir.repository);
-            let surface = simulation.repository_surface(dir.repository);
-            let center = super::ground(surface.point(dir.position))
-                + Vec3::Y * (rise - 0.05 * surface.scale);
-            let half = theme.directory_node_scale * dir.scale * surface.scale * 0.5;
+            let center = super::ground(dir.position) + Vec3::Y * (rise - 0.05);
+            let half = theme.directory_node_scale * dir.scale * 0.5;
             if opacity <= 0.001 || broad.rejects(center, half.length()) {
                 continue;
             }

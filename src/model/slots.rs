@@ -1195,7 +1195,14 @@ impl State {
             };
             let visibility = &mut self.avatars[index].name_visibility;
             visibility.visible = true;
-            visibility.opacity = 1.0;
+            let wordmark =
+                super::caption::frame_text_rects()[0].inflate(super::caption::BUFFER);
+            visibility.opacity = f32::from(
+                placement
+                    .bounds(self.geometry.label_height)
+                    .intersect(wordmark)
+                    .is_empty(),
+            );
             visibility.placement = Some(placement);
             visibility.joint_exhausted = assignment.exhausted;
             visibility.joint_clear = assignment.clear;
@@ -2983,7 +2990,9 @@ mod tests {
         let observations = sim.state.slot_records[&0].observations;
         for frame in 361..660 {
             sim.advance_to(frame, 60);
-            assert_eq!(sim.state.avatars[0].position, parked);
+            if sim.state.avatars[0].presence > 0.0 {
+                assert_eq!(sim.state.avatars[0].position, parked);
+            }
             assert_eq!(sim.state.avatars[0].slot.as_ref().unwrap().dock, dock);
         }
         assert_eq!(sim.state.avatars[0].presence, 0.0);
