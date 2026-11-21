@@ -66,6 +66,7 @@ pub(super) fn reserve_font_atlases(
         if pending.peek().is_some() {
             drop_stale_font_atlases(
                 &mut atlases,
+                &mut textures,
                 fonts.into_inner(),
                 positioned.iter(),
             );
@@ -215,6 +216,7 @@ impl AtlasReservation<'_> {
 /// new id, so the atlases of earlier ids would otherwise accumulate for the whole run.
 fn drop_stale_font_atlases<'a>(
     atlases: &mut FontAtlasSet,
+    textures: &mut Assets<Image>,
     fonts: &Assets<Font>,
     layouts: impl Iterator<Item = &'a bevy::text::TextLayoutInfo>,
 ) {
@@ -235,7 +237,11 @@ fn drop_stale_font_atlases<'a>(
         .collect();
     atlases.retain(|key, font_atlases| {
         if !loaded.contains(&key.id) {
-            font_atlases.retain(|atlas| used.contains(&atlas.texture.id()));
+            for atlas in
+                font_atlases.extract_if(.., |atlas| !used.contains(&atlas.texture.id()))
+            {
+                textures.remove(atlas.texture.id());
+            }
         }
         !font_atlases.is_empty()
     });
@@ -982,6 +988,7 @@ mod tests {
         let (key, pages) = atlases.iter().next().unwrap();
         assert_eq!(key.id, font_id);
         assert_eq!(pages.len(), 1);
+        assert_eq!(world.resource::<Assets<Image>>().len(), 1);
     }
 
     #[test]
