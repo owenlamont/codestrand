@@ -27,7 +27,6 @@ pub(crate) enum Phase {
     RefineServiceSlots,
     Reserve,
     Caption,
-    PlanTitles,
     CheckpointReplay,
     TickPacking,
     TickHeat,
@@ -40,13 +39,12 @@ pub(crate) enum Phase {
     TickPlace,
     TickSlots,
     TickAvatars,
-    TickTitles,
     TickLabels,
     TickNames,
 }
 
 /// The sections of one playback tick, in the order the tick runs them.
-const TICK_PHASES: [Phase; 14] = [
+const TICK_PHASES: [Phase; 13] = [
     Phase::TickPacking,
     Phase::TickHeat,
     Phase::TickEvents,
@@ -58,7 +56,6 @@ const TICK_PHASES: [Phase; 14] = [
     Phase::TickPlace,
     Phase::TickSlots,
     Phase::TickAvatars,
-    Phase::TickTitles,
     Phase::TickLabels,
     Phase::TickNames,
 ];
@@ -85,7 +82,6 @@ impl Phase {
             Self::RefineServiceSlots => "refine_service_slots",
             Self::Reserve => "reserve",
             Self::Caption => "caption",
-            Self::PlanTitles => "plan_titles",
             Self::CheckpointReplay => "checkpoint_replay",
             Self::TickPacking => "tick_packing",
             Self::TickHeat => "tick_heat",
@@ -98,7 +94,6 @@ impl Phase {
             Self::TickPlace => "tick_place",
             Self::TickSlots => "tick_slots",
             Self::TickAvatars => "tick_avatars",
-            Self::TickTitles => "tick_titles",
             Self::TickLabels => "tick_labels",
             Self::TickNames => "tick_names",
         }
@@ -117,7 +112,6 @@ pub(crate) enum Counter {
     /// Events times padding entries: `padding_at` stops at its first match, so real
     /// comparisons are fewer.
     PaddingComparisonsBound,
-    TitleCorners,
     /// Envelope replays skipped because the pass began with unchanged padding.
     EnvelopeReuses,
     /// Refinement loops stopped because a round ended in the state it began in.
@@ -147,7 +141,6 @@ impl Counter {
             Self::Rebuilds => "rebuilds",
             Self::Events => "events",
             Self::PaddingComparisonsBound => "padding_comparisons_bound",
-            Self::TitleCorners => "title_corners",
             Self::EnvelopeReuses => "envelope_reuses",
             Self::SettledRefinements => "settled_refinements",
             Self::Files => "files",

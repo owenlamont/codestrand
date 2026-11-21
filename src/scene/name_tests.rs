@@ -195,6 +195,7 @@ fn close_names_cannot_cover_the_caption_or_heading() {
         let chosen = place_labels(
             vec![(
                 model::Label {
+                    repository: None,
                     position: Vec3::ZERO,
                     text: "file-ignores.md".into(),
                     kind: model::LabelKind::Detail,

@@ -255,7 +255,6 @@ impl Simulation {
             next.playback_multiplier = self.playback_multiplier;
             next.caption_style = self.caption_style;
             next.repository_boundary = self.repository_boundary;
-            next.repository_label_plane = self.repository_label_plane;
             next.collapse_directories = self.collapse_directories;
             next.diff_text_distance = self.diff_text_distance;
             next.stream = Some(shared.clone());
@@ -463,7 +462,7 @@ pub(crate) mod tests {
         #[serde(skip)]
         avatars: Vec<(bevy::math::Vec3, Option<bevy::math::Vec2>)>,
         #[serde(skip)]
-        titles: std::collections::BTreeMap<usize, bevy::math::Vec2>,
+        tiles: Vec<Option<crate::layout::packing::Tile>>,
         #[serde(skip)]
         caption: Option<bevy::color::LinearRgba>,
     }
@@ -478,11 +477,23 @@ pub(crate) mod tests {
                     steps[1] = steps[1].max(slot.point.distance(*old));
                 }
             }
-            for (id, title) in &sim.state.titles {
-                if let Some(old) = self.titles.get(id) {
-                    steps[2] = steps[2].max(title.point.distance(*old));
+            let tiles: Vec<_> = sim
+                .layout()
+                .repositories
+                .iter()
+                .map(|region| region.tile)
+                .collect();
+            for (previous, current) in self.tiles.iter().zip(&tiles) {
+                if let Some((a, b)) = previous.zip(*current) {
+                    steps[2] = steps[2].max(
+                        (a.low - b.low)
+                            .abs()
+                            .max((a.high - b.high).abs())
+                            .max_element(),
+                    );
                 }
             }
+            self.tiles = tiles;
             let color = sim.caption_background().to_linear();
             if let Some(old) = self.caption {
                 steps[3] = (color.red - old.red)
@@ -505,12 +516,6 @@ pub(crate) mod tests {
                 .map(|avatar| {
                     (avatar.position, avatar.slot.as_ref().map(|slot| slot.point))
                 })
-                .collect();
-            self.titles = sim
-                .state
-                .titles
-                .iter()
-                .map(|(&id, title)| (id, title.point))
                 .collect();
             self.caption = Some(color);
         }
@@ -611,7 +616,26 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn projected_length_scales_planned_waits_and_is_exact_once_planned() {
+    fn projected_length_scales_planned_waits() {
+        let mut sim = fixture(true);
+        let unpadded = sim.duration();
+        let history = sim.clock.history.clone();
+        let waits = 60;
+        sim.schedule = history
+            .with_travel(history.starts.len(), |i| if i == 0 { waits } else { 0 });
+        sim.clock = super::super::schedule::Clock::new(history, sim.schedule.clone());
+        let end = sim.schedule.commit_ticks().nth(1).unwrap();
+        sim.ready_end = Some(Ready {
+            end,
+            unpadded,
+            complete: false,
+        });
+        let expected = unpadded.ticks(true) + u64::from(waits) * 4;
+        assert_eq!(sim.projected_end_tick(), expected);
+    }
+
+    #[test]
+    fn projected_length_is_exact_once_planned() {
         let whole = fixture_with(true, None, super::super::TravelCap::None);
         let mut stream = fixture_with(false, None, super::super::TravelCap::None);
         let mut windows = Vec::new();
@@ -620,27 +644,18 @@ pub(crate) mod tests {
             if stream.planning_complete() {
                 break;
             }
-            if windows.last().map(|&(planned, _)| planned)
-                != Some(stream.planned_history())
-            {
+            let planned = stream.planned_history();
+            if windows.last() != Some(&planned) {
                 let ready = stream.ready_end.unwrap();
                 let remaining =
                     ready.unpadded.ticks(true) - stream.clock.rows(ready.end).1;
-                let unscaled = ready.end + remaining;
-                windows.push((
-                    stream.planned_history(),
-                    stream.projected_end_tick() > unscaled,
-                ));
-                assert!(stream.projected_end_tick() >= unscaled, "frame {frame}");
+                assert!(stream.projected_end_tick() >= ready.end + remaining);
+                windows.push(planned);
             }
         }
         assert!(windows.len() > 1, "fixture plans several windows");
-        assert!(windows.iter().any(|&(_, scaled)| scaled), "{windows:?}");
         assert_eq!(stream.projected_end_tick(), whole.end_tick());
-        // The eager f32 end, 12.583334 s, sits just above tick 755.
         assert_eq!(stream.frames(240).unwrap(), whole.frames(240).unwrap());
-        let unpadded = stream.ready_end.unwrap().unpadded;
-        assert!(whole.duration() > unpadded, "walk waits pad the fixture");
     }
 
     #[test]

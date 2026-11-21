@@ -107,8 +107,8 @@ fn route_anchors(
     for (leg, pair) in points.windows(2).enumerate() {
         let axis = usize::from(pair[0].y.to_bits() == pair[1].y.to_bits());
         let midpoint = pair[0].midpoint(pair[1]);
-        let coordinate = reference.iter().enumerate().find_map(|(repository, t)| {
-            let tile = t.as_ref()?;
+        let on_edge = |repository: usize| {
+            let tile = reference[repository].as_ref()?;
             let rect = Rect::from_corners(tile.low * HALF, tile.high * HALF);
             if !rect.inflate(0.001).contains(midpoint) {
                 return None;
@@ -124,7 +124,15 @@ fn route_anchors(
                 repository,
                 fraction,
             })
-        });
+        };
+        let preferred = if leg == 0 {
+            on_edge(trip.source_repository)
+        } else if leg + 2 == points.len() {
+            on_edge(trip.destination_repository)
+        } else {
+            None
+        };
+        let coordinate = preferred.or_else(|| (0..reference.len()).find_map(on_edge));
         let coordinate = coordinate?;
         anchors[leg][axis] = coordinate;
         anchors[leg + 1][axis] = coordinate;
@@ -143,11 +151,24 @@ fn moving_route(
     let anchors = route_anchors(capture.row(epoch), trip, points)?;
     let shape = Route::new(points, speed * 0.8);
     let duration = shape.duration + ticks_duration(animation_delay);
+    let target = capture.row(epoch)[trip.destination_repository]?;
+    let target_fraction =
+        (*points.last()? / HALF - target.low) / (target.high - target.low);
     let mut track = Vec::new();
     for offset in 0..=trip.arrival - trip.departure {
         let tick = trip.departure + offset;
         let row = capture.row(tick);
         let elapsed = ticks_duration(offset.saturating_sub(animation_delay));
+        if elapsed >= shape.duration && tick < trip.arrival {
+            let target = row[trip.destination_repository]?;
+            let point =
+                (target.low + (target.high - target.low) * target_fraction) * HALF;
+            if !hard_clearance(capture, tick, point) {
+                return None;
+            }
+            track.push(point);
+            continue;
+        }
         let leg = shape
             .legs
             .iter()
@@ -161,7 +182,9 @@ fn moving_route(
             anchors[leg + 1][0].at(row, 0)?,
             anchors[leg + 1][1].at(row, 1)?,
         );
-        let point = if u >= 1.0 {
+        let point = if tick == trip.arrival {
+            trip.destination
+        } else if u >= 1.0 {
             b
         } else {
             Vec2::new(anchors[leg][0].at(row, 0)?, anchors[leg][1].at(row, 1)?)
@@ -177,11 +200,10 @@ fn moving_route(
         .windows(2)
         .map(|p| p[0].distance(p[1]) * 60.0)
         .fold(0.0, f32::max);
-    let previous = capture.pose(trip.author, epoch.saturating_sub(1))?.point;
-    if peak > speed + 0.05
-        || track.first()?.distance(previous) * 60.0 > speed + 0.05
-        || track.last()?.distance(trip.destination) * 60.0 > speed + 0.05
-    {
+    let previous = capture
+        .pose(trip.author, trip.departure.saturating_sub(1))?
+        .point;
+    if peak > speed + 0.05 || track.first()?.distance(previous) * 60.0 > speed + 0.05 {
         return None;
     }
     Some(Route {
@@ -202,6 +224,7 @@ fn search(
     release: u64,
     speed: f32,
     router: &mut Router,
+    mandatory_birth_walk: bool,
 ) -> Trip {
     let mut best = template.clone();
     let first = release.min(template.arrival - 1).max(template.free);
@@ -221,6 +244,11 @@ fn search(
             .pose(template.author, begin)
             .expect("existing author")
             .point;
+        if source.distance(template.destination)
+            > speed * ticks_duration(template.arrival - begin)
+        {
+            continue;
+        }
         let target = (target_tile.low
             + (target_tile.high - target_tile.low) * target_fraction)
             * HALF;
@@ -263,6 +291,7 @@ fn search(
             moving_route(capture, &candidate, &points, begin, speed, animation_delay)
         {
             candidate.route = route;
+            candidate.fade = false;
             candidate.failure = None;
             return candidate;
         }
@@ -272,13 +301,117 @@ fn search(
             best.cutoff = Some(begin);
         }
     }
+    if best.fade
+        && mandatory_birth_walk
+        && let Some(approach) = birth_approach(capture, template, first, speed, router)
+    {
+        return approach;
+    }
+    if mandatory_birth_walk
+        && template.arrival - first >= crate::model::BIRTH_TICKS * 2
+        && dock_outpaces_walker(capture, template, speed, target_fraction)
+    {
+        best.failure = Some(super::MOVING_DOCK);
+    }
     best
 }
+
+fn dock_outpaces_walker(
+    capture: &Capture,
+    trip: &Trip,
+    speed: f32,
+    fraction: Vec2,
+) -> bool {
+    let first = trip.arrival.saturating_sub(crate::model::BIRTH_TICKS + 1);
+    let point = |tick| {
+        capture.row(tick)[trip.destination_repository]
+            .map(|tile| (tile.low + (tile.high - tile.low) * fraction) * HALF)
+    };
+    (first..trip.arrival).any(|tick| {
+        point(tick)
+            .zip(point(tick + 1))
+            .is_some_and(|(from, to)| from.distance(to) * 60.0 > speed + 0.05)
+    })
+}
+
+fn birth_approach(
+    capture: &Capture,
+    template: &Trip,
+    first: u64,
+    speed: f32,
+    router: &mut Router,
+) -> Option<Trip> {
+    let source = capture.pose(template.author, first)?.point;
+    for tick in [first, template.arrival] {
+        let cells = super::network(capture.row(tick).iter().flatten().copied());
+        if let Some(approach) = fixed_approach(
+            capture, template, first, speed, router, source, &cells, tick,
+        ) {
+            return Some(approach);
+        }
+    }
+    None
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a late approach checks a route against the sampled network"
+)]
+fn fixed_approach(
+    capture: &Capture,
+    template: &Trip,
+    first: u64,
+    speed: f32,
+    router: &mut Router,
+    source: Vec2,
+    cells: &[Rect],
+    epoch: u64,
+) -> Option<Trip> {
+    let points = router.route(source, template.destination, cells).ok()?;
+    if points.len() < 2 {
+        return None;
+    }
+    let route = Route::new(&points, speed);
+    let duration = u64::from(super::seconds_ticks(route.duration, true));
+    let departure = template.arrival.checked_sub(duration)?;
+    if departure < first || capture.pose(template.author, departure)?.point != source {
+        return None;
+    }
+    let track: Vec<_> = (departure..=template.arrival)
+        .map(|tick| {
+            route
+                .sample(ticks_duration(tick - departure))
+                .expect("nonempty route")
+        })
+        .collect();
+    if !track.iter().enumerate().all(|(offset, &point)| {
+        let tick = departure + offset as u64;
+        hard_clearance(capture, tick, point)
+            && super::on_network(
+                point,
+                &super::network(capture.row(tick).iter().flatten().copied()),
+            )
+    }) {
+        return None;
+    }
+    let mut trip = template.clone();
+    trip.departure = departure;
+    trip.source = source;
+    trip.fade = false;
+    trip.failure = None;
+    trip.proof = Some(route_proof(&points, epoch));
+    trip.route = Route {
+        track: track.into(),
+        ..route
+    };
+    Some(trip)
+}
+
 pub(super) fn trips(
     capture: &Capture,
     speed: f32,
     bots: crate::model::BotTravel,
-    keep_idle: bool,
+    walk: bool,
 ) -> (Vec<Trip>, usize) {
     let mut previous = vec![None; capture.poses.len()];
     let mut result = Vec::<Trip>::new();
@@ -295,7 +428,7 @@ pub(super) fn trips(
             continue;
         }
         if (prior.repository == service.repository && prior.dock == service.dock)
-            || ((!keep_idle || (service.bot && bots == crate::model::BotTravel::Fade))
+            || ((!walk || (service.bot && bots == crate::model::BotTravel::Fade))
                 && ticks_duration(service.tick - prior.tick)
                     >= crate::model::AVATAR_IDLE + 1.2)
         {
@@ -316,6 +449,7 @@ pub(super) fn trips(
             source,
             fade_ticks: 0,
             route: Route::default(),
+            birth: capture.births.binary_search(&commit).is_ok(),
             fade: true,
             bot: service.bot,
             source_repository: prior.repository,
@@ -326,7 +460,14 @@ pub(super) fn trips(
             proof: None,
         };
         if !service.bot || bots == crate::model::BotTravel::Walk {
-            best = search(capture, &best, prior.release, speed, &mut router);
+            best = search(
+                capture,
+                &best,
+                prior.release,
+                speed,
+                &mut router,
+                walk && best.birth,
+            );
         }
         if best.route.is_empty() {
             best.departure = service
@@ -451,6 +592,7 @@ mod tests {
             tiles: vec![vec![]; 461],
             gutters: vec![vec![Some(a), Some(b)]; 461],
             radii: vec![7.5; 461],
+            births: vec![],
         }
     }
     #[test]

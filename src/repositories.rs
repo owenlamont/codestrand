@@ -27,13 +27,6 @@ pub(super) enum Boundary {
     Glass,
 }
 
-#[derive(Clone, Copy, Debug, Default, clap::ValueEnum, serde::Serialize)]
-pub(super) enum LabelPlane {
-    #[default]
-    Files,
-    Raised,
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Repository {

@@ -206,9 +206,6 @@ struct Source {
     /// Repository tile boundary treatment.
     #[arg(long, value_enum, default_value = "glass")]
     repository_boundary: repositories::Boundary,
-    /// Permanent repository labels at file level or between files and avatars.
-    #[arg(long, value_enum, default_value = "raised")]
-    repository_label_plane: repositories::LabelPlane,
     /// Revision resolved independently in every repository.
     #[arg(long, default_value = "HEAD")]
     revision: String,
@@ -538,7 +535,6 @@ impl Source {
         simulation.repository_boundary = self.repository_boundary;
         simulation.collapse_directories = self.collapse_directories;
         simulation.caption_style = self.caption_style;
-        simulation.repository_label_plane = self.repository_label_plane;
         Ok((simulation, title))
     }
 
@@ -696,7 +692,9 @@ mod single_source_tests {
                 &names,
             )
             .unwrap();
-            sim.advance_to(60, 60);
+            let commit = usize::from(names.len() > 1);
+            let tick = sim.scheduled_starts()[commit].ticks(true);
+            sim.advance_to(u32::try_from(tick).unwrap(), 60);
             assert_eq!(
                 sim.view(),
                 (bevy::math::Vec3::ZERO, crate::model::framing::DISTANCE)
@@ -1135,16 +1133,7 @@ mod tests {
                     let line = format!("Planning: {stage}");
                     assert!(lines.contains(&line), "missing {line:?}");
                 }
-                if window.is_none() {
-                    assert_eq!(lines.last().unwrap(), "Planning: placing titles 100%");
-                } else {
-                    assert!(!reported.planning_complete());
-                    assert!(
-                        lines
-                            .iter()
-                            .any(|line| line.starts_with("Planning: placing titles "))
-                    );
-                }
+                assert_eq!(reported.planning_complete(), window.is_none());
 
                 let (mut quiet, quiet_title) =
                     source.load(&crate::progress::Progress::default()).unwrap();
@@ -1278,8 +1267,6 @@ mod tests {
             "repos.toml",
             "--repository-boundary",
             "glass",
-            "--repository-label-plane",
-            "raised",
         ])
         .unwrap();
         let Some(Command::Preview { source, .. }) = cli.command else {
@@ -1293,10 +1280,6 @@ mod tests {
         assert!(matches!(
             source.repository_boundary,
             repositories::Boundary::Glass
-        ));
-        assert!(matches!(
-            source.repository_label_plane,
-            repositories::LabelPlane::Raised
         ));
     }
 

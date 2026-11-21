@@ -6361,10 +6361,10 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 ================================================================================
 MIT License (MIT)
 Used by:
-  resvg 0.49.0
-  Source: https://crates.io/api/v1/crates/resvg/0.49.0/download
-  usvg 0.49.0
-  Source: https://crates.io/api/v1/crates/usvg/0.49.0/download
+  resvg 0.50.0
+  Source: https://crates.io/api/v1/crates/resvg/0.50.0/download
+  usvg 0.50.0
+  Source: https://crates.io/api/v1/crates/usvg/0.50.0/download
 
 Copyright 2017 the Resvg Authors
 
@@ -7121,6 +7121,37 @@ SOFTWARE.
 ================================================================================
 MIT License (MIT)
 Used by:
+  float_next_after 1.0.0
+  Source: https://crates.io/api/v1/crates/float_next_after/1.0.0/download
+
+MIT License
+
+Copyright (c) 2020 Scripta Qumranica Electronica
+
+Created by Bronson Brown-deVost
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+================================================================================
+MIT License (MIT)
+Used by:
   sys-locale 0.3.2
   Source: https://crates.io/api/v1/crates/sys-locale/0.3.2/download
 
@@ -7485,6 +7516,12 @@ Used by:
   Source: https://crates.io/api/v1/crates/jni/0.22.4/download
   libm 0.2.16
   Source: https://crates.io/api/v1/crates/libm/0.2.16/download
+  lyon_geom 1.0.20
+  Source: https://crates.io/api/v1/crates/lyon_geom/1.0.20/download
+  lyon_path 1.0.19
+  Source: https://crates.io/api/v1/crates/lyon_path/1.0.19/download
+  lyon_tessellation 1.0.23
+  Source: https://crates.io/api/v1/crates/lyon_tessellation/1.0.23/download
   mutants 0.0.3
   Source: https://crates.io/api/v1/crates/mutants/0.0.3/download
   ndk-context 0.1.1
