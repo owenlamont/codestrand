@@ -1,15 +1,21 @@
 use bevy::{
     asset::RenderAssetUsages, mesh::Indices, prelude::*,
-    render::render_resource::PrimitiveTopology, text::FontCx,
+    render::render_resource::PrimitiveTopology,
 };
+use lyon_tessellation::path::iterator::PathIterator;
 use lyon_tessellation::{
     FillGeometryBuilder, FillOptions, FillRule, FillTessellator, FillVertex,
     GeometryBuilder, GeometryBuilderError, VertexId, math::point, path::Path,
 };
-use parley::{FontFamily, Layout, LayoutContext, PositionedLayoutItem, StyleProperty};
+use parley::{
+    FontContext, FontFamily, Layout, LayoutContext, PositionedLayoutItem,
+    StyleProperty,
+    fontique::{Collection, CollectionOptions, SourceCache},
+};
 use swash::{
-    FontRef,
+    FontRef, TableProvider,
     scale::{ScaleContext, outline::Outline},
+    tag_from_bytes,
     zeno::{Command, PathData},
 };
 
@@ -19,10 +25,18 @@ const MESH_BYTES: usize = 64 * 1024 * 1024;
 const MAX_TITLE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_TITLE_CHARS: usize = 1024;
 const MAX_GLYPH_POINTS: usize = 4096;
+const MAX_GLYPH_EDGES: usize = 4096;
+const MAX_TITLE_EDGES: usize = 65_536;
+const TOLERANCE: f32 = 0.00005;
+const BUNDLED_FONT: &[u8] =
+    include_bytes!("../../assets/fonts/IBMPlexMono-Regular.ttf");
 // Scaling outlines at one pixel per em loses precision before tessellation.
 const SHAPING_SIZE: f32 = 1024.0;
 const OPACITY: f32 = 0.18;
 const PADDING: f32 = 0.04;
+const GLYPH_PADDING: f32 = 0.08;
+const MIN_INK_HEIGHT: f32 =
+    4.0 * crate::model::framing::WORLD_UNITS_PER_REFERENCE_PIXEL;
 const PLANE: f32 = crate::model::framing::GLASS_BOTTOM;
 
 #[derive(Component)]
@@ -31,13 +45,16 @@ struct Title {
     ink: Vec2,
 }
 
-fn placement(tile: Tile, ink: Vec2) -> Transform {
+fn placement(tile: Tile, ink: Vec2) -> Option<Transform> {
     let [a, _, b, _] = tile.ground();
     let size = (b - a).abs();
-    let padding = size.min_element() * PADDING;
-    let scale = ((size - Vec2::splat(2.0 * padding)) / ink).min_element();
-    Transform::from_translation(super::ground(a.midpoint(b)).with_y(PLANE))
-        .with_scale(Vec3::new(scale, 1.0, scale))
+    let scale = (size * (1.0 - 2.0 * PADDING) / ink)
+        .min(size / (ink + Vec2::splat(2.0 * GLYPH_PADDING * ink.y)))
+        .min_element();
+    (ink.y * scale >= MIN_INK_HEIGHT).then(|| {
+        Transform::from_translation(super::ground(a.midpoint(b)).with_y(PLANE))
+            .with_scale(Vec3::new(scale, 1.0, scale))
+    })
 }
 
 pub(super) fn setup(world: &mut World) {
@@ -49,55 +66,62 @@ pub(super) fn setup(world: &mut World) {
     if labels.is_empty() {
         return;
     }
-    world.init_resource::<FontCx>();
-    world.resource_scope(|world, mut fonts: Mut<FontCx>| {
-        fonts.collection.register_fonts(
-            include_bytes!("../../assets/fonts/IBMPlexMono-Regular.ttf")
-                .to_vec()
-                .into(),
-            None,
-        );
-        let mut shaper = LayoutContext::new();
-        let mut scaler = ScaleContext::new();
-        let mut tessellator = FillTessellator::new();
-        let mut remaining = MESH_BYTES;
-        let mut omitted = 0;
-        for (repository, label) in labels.iter().enumerate() {
-            let Some((mesh, ink, bytes)) = title_mesh(
-                label,
-                &mut fonts,
-                &mut shaper,
-                &mut scaler,
-                &mut tessellator,
-                remaining.min(MAX_TITLE_BYTES),
-            ) else {
-                omitted += 1;
-                continue;
-            };
-            remaining -= bytes;
-            let mesh = world.resource_mut::<Assets<Mesh>>().add(mesh);
-            let color = world.resource::<super::Playback>().0.theme().label;
-            let material = world.resource_mut::<Assets<StandardMaterial>>().add(
-                StandardMaterial {
+    let mut fonts = title_fonts();
+    let mut shaper = LayoutContext::new();
+    let mut scaler = ScaleContext::new();
+    let mut tessellator = FillTessellator::new();
+    let mut remaining = MESH_BYTES;
+    let mut omitted = 0;
+    for (repository, label) in labels.iter().enumerate() {
+        let Some((mesh, ink, bytes)) = title_mesh(
+            label,
+            &mut fonts,
+            &mut shaper,
+            &mut scaler,
+            &mut tessellator,
+            remaining.min(MAX_TITLE_BYTES),
+        ) else {
+            omitted += 1;
+            continue;
+        };
+        remaining -= bytes;
+        let mesh = world.resource_mut::<Assets<Mesh>>().add(mesh);
+        let color = world.resource::<super::Playback>().0.theme().label;
+        let material =
+            world
+                .resource_mut::<Assets<StandardMaterial>>()
+                .add(StandardMaterial {
                     base_color: color.with_alpha(OPACITY),
                     alpha_mode: AlphaMode::Blend,
                     unlit: true,
                     cull_mode: None,
                     ..default()
-                },
-            );
-            world.spawn((
-                Title { repository, ink },
-                Mesh3d(mesh),
-                MeshMaterial3d(material),
-                Transform::default(),
-                Visibility::Hidden,
-            ));
-        }
-        if omitted > 0 {
-            warn!("{omitted} repository titles had no usable outline or exceeded the mesh budget");
-        }
+                });
+        world.spawn((
+            Title { repository, ink },
+            Mesh3d(mesh),
+            MeshMaterial3d(material),
+            Transform::default(),
+            Visibility::Hidden,
+        ));
+    }
+    if omitted > 0 {
+        warn!(
+            "{omitted} repository titles had no usable outline or exceeded the mesh budget"
+        );
+    }
+}
+
+fn title_fonts() -> FontContext {
+    let mut collection = Collection::new(CollectionOptions {
+        shared: false,
+        system_fonts: false,
     });
+    collection.register_fonts(BUNDLED_FONT.to_vec().into(), None);
+    FontContext {
+        collection,
+        source_cache: SourceCache::default(),
+    }
 }
 
 pub(super) fn sync(world: &mut World, simulation: &Simulation) {
@@ -110,7 +134,11 @@ pub(super) fn sync(world: &mut World, simulation: &Simulation) {
     world.resource_scope(|world, mut materials: Mut<Assets<StandardMaterial>>| {
         for (title, material, mut transform, mut visibility) in query.iter_mut(world) {
             let region = &simulation.layout().repositories[title.repository];
-            let Some(tile) = region.tile.filter(|_| region.live) else {
+            let Some(placed) = region
+                .tile
+                .filter(|_| region.live)
+                .and_then(|tile| placement(tile, title.ink))
+            else {
                 visibility.set_if_neq(Visibility::Hidden);
                 continue;
             };
@@ -124,7 +152,7 @@ pub(super) fn sync(world: &mut World, simulation: &Simulation) {
                     .expect("title material")
                     .base_color = color;
             }
-            transform.set_if_neq(placement(tile, title.ink));
+            transform.set_if_neq(placed);
             visibility.set_if_neq(Visibility::Visible);
         }
     });
@@ -132,7 +160,7 @@ pub(super) fn sync(world: &mut World, simulation: &Simulation) {
 
 fn title_mesh(
     text: &str,
-    fonts: &mut FontCx,
+    fonts: &mut FontContext,
     shaper: &mut LayoutContext<()>,
     scale: &mut ScaleContext,
     tessellator: &mut FillTessellator,
@@ -141,7 +169,17 @@ fn title_mesh(
     if limit == 0 || text.chars().nth(MAX_TITLE_CHARS).is_some() {
         return None;
     }
-    let text = text.replace(['\r', '\n', '\t'], " ");
+    let bundled = FontRef::from_index(BUNDLED_FONT, 0)?;
+    check_outline_limits(bundled, MAX_GLYPH_POINTS)?;
+    let charmap = bundled.charmap();
+    let text: String = text
+        .chars()
+        .map(|ch| match ch {
+            '\r' | '\n' | '\t' => ' ',
+            ch if charmap.map(ch) == 0 => '?',
+            ch => ch,
+        })
+        .collect();
     let mut builder = shaper.ranged_builder(fonts, &text, 1.0, false);
     builder.push_default(StyleProperty::FontFamily(FontFamily::named(
         "IBM Plex Mono",
@@ -154,12 +192,16 @@ fn title_mesh(
         remaining: limit,
         ..default()
     };
+    let mut edges = MAX_TITLE_EDGES;
     for item in layout.lines().flat_map(|line| line.items()) {
         let PositionedLayoutItem::GlyphRun(glyphs) = item else {
             continue;
         };
         let run = glyphs.run();
         let font = run.font();
+        if run.font_size() != SHAPING_SIZE {
+            return None;
+        }
         let font_ref = FontRef::from_index(font.data.as_ref(), font.index as usize)?;
         let mut scaler = scale
             .builder_with_id(font_ref, [font.data.id(), font.index.into()])
@@ -182,11 +224,16 @@ fn title_mesh(
                 return None;
             }
             let path = path(&outline);
+            let flattened = || path.iter().flattened(TOLERANCE);
+            let allowed = edges.min(MAX_GLYPH_EDGES);
+            let used = flattened().take(allowed + 1).count();
+            edges = edges.checked_sub(used).filter(|_| used <= allowed)?;
             geometry.offset = Vec2::new(glyph.x, -glyph.y) / SHAPING_SIZE;
             tessellator
-                .tessellate_path(
-                    &path,
-                    &FillOptions::tolerance(0.00005).with_fill_rule(FillRule::NonZero),
+                .tessellate(
+                    flattened(),
+                    &FillOptions::tolerance(TOLERANCE)
+                        .with_fill_rule(FillRule::NonZero),
                     &mut geometry,
                 )
                 .ok()?;
@@ -196,39 +243,93 @@ fn title_mesh(
         }
     }
 
-    let first = *geometry.vertices.first()?;
+    mesh_from_geometry(geometry, limit)
+}
+
+fn mesh_from_geometry(
+    mut geometry: Geometry,
+    limit: usize,
+) -> Option<(Mesh, Vec2, usize)> {
+    let to_ink = |&[x, _, z]: &[f32; 3]| Vec2::new(x, z);
+    let first = to_ink(geometry.positions.first()?);
     let (low, high) = geometry
-        .vertices
+        .positions
         .iter()
-        .fold((first, first), |(lo, hi), &p| (lo.min(p), hi.max(p)));
+        .map(to_ink)
+        .fold((first, first), |(lo, hi), p| (lo.min(p), hi.max(p)));
     let ink = high - low;
     if !ink.is_finite() || ink.min_element() <= 0.0 {
         return None;
     }
-    let bytes = limit - geometry.remaining;
     let center = low.midpoint(high);
-    let positions: Vec<_> = geometry
-        .vertices
-        .into_iter()
-        .map(|p| {
-            let p = p - center;
-            [p.x, 0.0, -p.y]
-        })
-        .collect();
-    let normals = vec![Vec3::Y.to_array(); positions.len()];
+    for [x, _, z] in &mut geometry.positions {
+        *x -= center.x;
+        *z -= center.y;
+    }
+    let mut normals = Vec::new();
+    reserve(
+        &mut normals,
+        geometry.positions.len(),
+        &mut geometry.remaining,
+    )?;
+    normals.resize(geometry.positions.len(), Vec3::Y.to_array());
+    // Bevy packs these slices into staging buffers when it uploads the mesh.
+    let upload = geometry.positions.len() * size_of::<[f32; 6]>()
+        + geometry.indices.len() * size_of::<u32>();
+    let bytes = limit - geometry.remaining.checked_sub(upload)?;
     let mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
         RenderAssetUsages::RENDER_WORLD,
     )
-    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, geometry.positions)
     .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
     .with_inserted_indices(Indices::U32(geometry.indices));
     Some((mesh, ink, bytes))
 }
 
+fn check_outline_limits(font: FontRef<'_>, max_points: usize) -> Option<()> {
+    // The embedded TrueType font's maxp table bounds simple and expanded composite glyphs.
+    let maxp = font.table_by_tag(tag_from_bytes(b"maxp"))?;
+    let head = font.table_by_tag(tag_from_bytes(b"head"))?;
+    let read = |table: &[u8], offset| {
+        Some(u16::from_be_bytes(
+            table.get(offset..offset + 2)?.try_into().ok()?,
+        ))
+    };
+    let points = read(maxp, 6)?.max(read(maxp, 10)?);
+    let em = read(head, 18)?;
+    let (bounds, _) = head.get(36..44)?.as_chunks::<2>();
+    (maxp.starts_with(&[0, 1, 0, 0])
+        && font.table_by_tag(tag_from_bytes(b"glyf")).is_some()
+        && usize::from(points) <= max_points
+        && em != 0
+        && bounds.iter().all(|&bytes| {
+            u32::from(i16::from_be_bytes(bytes).unsigned_abs()) <= u32::from(em) * 8
+        }))
+    .then_some(())
+}
+
+fn reserve<T>(
+    values: &mut Vec<T>,
+    additional: usize,
+    remaining: &mut usize,
+) -> Option<()> {
+    let required = values.len() + additional;
+    let old = values.capacity();
+    if required <= old {
+        return Some(());
+    }
+    let capacity = required.max(old * 2);
+    // Growth can require both allocations until the old contents have moved.
+    remaining.checked_sub(capacity * size_of::<T>())?;
+    values.try_reserve_exact(capacity - values.len()).ok()?;
+    *remaining = remaining.checked_sub((values.capacity() - old) * size_of::<T>())?;
+    Some(())
+}
+
 #[derive(Default)]
 struct Geometry {
-    vertices: Vec<Vec2>,
+    positions: Vec<[f32; 3]>,
     indices: Vec<u32>,
     offset: Vec2,
     remaining: usize,
@@ -237,9 +338,10 @@ struct Geometry {
 
 impl GeometryBuilder for Geometry {
     fn add_triangle(&mut self, a: VertexId, b: VertexId, c: VertexId) {
-        if let Some(remaining) = self.remaining.checked_sub(size_of::<[u32; 3]>()) {
+        if !self.exhausted
+            && reserve(&mut self.indices, 3, &mut self.remaining).is_some()
+        {
             self.indices.extend([a.0, b.0, c.0]);
-            self.remaining = remaining;
         } else {
             self.exhausted = true;
         }
@@ -251,16 +353,16 @@ impl FillGeometryBuilder for Geometry {
         &mut self,
         vertex: FillVertex,
     ) -> Result<VertexId, GeometryBuilderError> {
-        let remaining = self
-            .remaining
-            .checked_sub(size_of::<[f32; 6]>())
-            .filter(|_| !self.exhausted)
+        if self.exhausted {
+            return Err(GeometryBuilderError::TooManyVertices);
+        }
+        reserve(&mut self.positions, 1, &mut self.remaining)
             .ok_or(GeometryBuilderError::TooManyVertices)?;
-        self.remaining = remaining;
         let index =
-            u32::try_from(self.vertices.len()).expect("mesh budget fits u32 indices");
-        self.vertices
-            .push(Vec2::from_array(vertex.position().to_array()) + self.offset);
+            u32::try_from(self.positions.len()).expect("mesh budget fits u32 indices");
+        let [x, y] =
+            (Vec2::from_array(vertex.position().to_array()) + self.offset).to_array();
+        self.positions.push([x, 0.0, -y]);
         Ok(VertexId(index))
     }
 }
@@ -305,6 +407,76 @@ mod tests {
     use crate::scene::{Playback, SceneCamera};
 
     #[test]
+    fn thin_title_tiles_keep_a_buffer_on_both_axes() {
+        let tile = Tile {
+            low: Vec2::ZERO,
+            high: Vec2::new(1.0, 0.05),
+        };
+        let ink = Vec2::new(40.0, 1.0);
+        let [a, _, b, _] = tile.ground();
+        let size = (b - a).abs();
+        let drawn = ink * placement(tile, ink).unwrap().scale.x;
+        assert!(
+            (size - drawn)
+                .cmpge(size * (2.0 * PADDING) - Vec2::splat(1e-5))
+                .all()
+        );
+        assert!((size - drawn).min_element() >= 2.0 * GLYPH_PADDING * drawn.y - 1e-5);
+        assert!(
+            placement(
+                Tile {
+                    high: tile.high * 0.01,
+                    ..tile
+                },
+                ink
+            )
+            .is_none()
+        );
+    }
+
+    fn mesh_for_test(text: &str, budget: usize) -> Option<(Mesh, Vec2, usize)> {
+        title_mesh(
+            text,
+            &mut title_fonts(),
+            &mut LayoutContext::new(),
+            &mut ScaleContext::new(),
+            &mut FillTessellator::new(),
+            budget,
+        )
+    }
+
+    #[test]
+    fn uncovered_characters_use_the_bundled_replacement() {
+        let positions = |text| {
+            let (mesh, _, _) = mesh_for_test(text, MAX_TITLE_BYTES).unwrap();
+            mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+                .unwrap()
+                .as_float3()
+                .unwrap()
+                .to_vec()
+        };
+        assert_eq!(positions("a漢b"), positions("a?b"));
+    }
+
+    #[test]
+    fn title_budget_covers_allocated_capacity() {
+        let (mesh, _, _) = mesh_for_test("Repository", MAX_TITLE_BYTES).unwrap();
+        let payload = mesh.count_vertices() * size_of::<[f32; 6]>()
+            + mesh.indices().unwrap().len() * size_of::<u32>();
+        assert!(mesh_for_test("Repository", payload).is_none());
+    }
+
+    #[test]
+    fn outline_and_flattened_edge_limits_omit_oversize_geometry() {
+        let font = FontRef::from_index(BUNDLED_FONT, 0).unwrap();
+        assert!(check_outline_limits(font, MAX_GLYPH_POINTS).is_some());
+        assert!(check_outline_limits(font, 1).is_none());
+        assert!(mesh_for_test("@", MAX_TITLE_BYTES).is_some());
+        assert!(mesh_for_test(&"@".repeat(MAX_TITLE_CHARS), usize::MAX).is_none());
+        assert!(mesh_for_test("next title", MAX_TITLE_BYTES).is_some());
+    }
+
+    #[test]
     fn visible_ink_fills_the_tile_with_equal_opposite_margins() {
         let mut world = World::new();
         world.init_resource::<Assets<Mesh>>();
@@ -326,7 +498,7 @@ mod tests {
             .unwrap();
         let tile = Tile::viewport();
         let [a, _, b, _] = tile.ground();
-        let transform = placement(tile, ink.0);
+        let transform = placement(tile, ink.0).unwrap();
         let (low, high) = positions
             .iter()
             .map(|p| transform.transform_point(Vec3::from_array(*p)))
@@ -338,7 +510,9 @@ mod tests {
         let after = a.max(b) - high.xz();
         assert!(before.abs_diff_eq(after, 1e-5));
         assert!(
-            (before.min_element() - PADDING * (b - a).abs().min_element()).abs() < 1e-5
+            (before - ink.0.y * transform.scale.x * GLYPH_PADDING)
+                .cmpge(Vec2::splat(-1e-5))
+                .all()
         );
         assert_eq!(low.y, PLANE);
         assert_eq!(high.y, PLANE);

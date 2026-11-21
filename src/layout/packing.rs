@@ -14,7 +14,7 @@ const BOUND: f32 = 3.5;
 pub(crate) const BIRTH_TICKS: u32 = 45;
 const OPENING_BIRTH_TICKS: usize = 180;
 const OPENING_TICKS: usize = 360;
-const OPENING_STEP: usize = 30;
+const OPENING_EDGE_PIXELS_PER_TICK: f32 = 4.0;
 
 /// Ticks whose zoom is fitted together; fixed so counts do not depend on the thread count.
 const ZOOM_CHUNK: usize = 256;
@@ -1063,9 +1063,7 @@ impl Packing {
     }
 
     pub(crate) fn reflow_bytes(ticks: u128, repositories: u128) -> u128 {
-        let opening = (1 + OPENING_TICKS / OPENING_STEP) as u128
-            * repositories
-            * size_of::<Option<Tile>>() as u128;
+        let opening = 2 * repositories * size_of::<Option<Tile>>() as u128;
         opening
             + (1 + ticks / held::reflow_spacing() as u128)
                 * (std::mem::size_of::<reflow::Change>() as u128
@@ -1171,7 +1169,7 @@ impl Packing {
             threads,
             growth,
         )?;
-        let opening_end = if activation.is_none() && first.len() > 1 {
+        let opening_end = if first.len() > 1 {
             let end = OPENING_TICKS.min(regions.len() - 1);
             exits
                 .iter()
@@ -1402,7 +1400,7 @@ impl Packing {
             r.low = low.min(high) * scale + origin;
             r.high = low.max(high) * scale + origin;
             r.height *= scale;
-            r.live = tile.is_some();
+            r.live &= tile.is_some();
             r.tile = tile;
             r.gutter = placement[i].gutter.filter(|_| selected(i));
             r.items = sample.weights[i]
@@ -1602,16 +1600,43 @@ impl Packing {
     }
 
     fn plan_opening(mut self) -> Self {
-        if self.opening_end > 0 {
-            let end = self.opening_end;
-            let mut ticks: Vec<_> = (0..end).step_by(OPENING_STEP).collect();
-            ticks.push(end);
-            self.opening = ticks
-                .into_iter()
-                .map(|tick| self.layout_at(tick, None, None, None, tick < end).tiles)
-                .collect();
+        if self.opening_end == 0 {
+            return self;
         }
+        let mut start = self.layout_at(0, None, None, None, true).tiles;
+        let mut end = self
+            .layout_at(self.opening_end, None, None, None, false)
+            .tiles;
+        let growing =
+            active_nodes(&self.nodes, |i| start[i].is_some() || end[i].is_some());
+        collapse_missing(&self.nodes, 0, &mut start, Some(&growing));
+        collapse_missing(&self.nodes, 0, &mut end, Some(&growing));
+        let distance = start
+            .iter()
+            .zip(&end)
+            .filter_map(|(&a, &b)| {
+                let (a, b) = a.zip(b)?;
+                let delta = (a.low - b.low).abs().max((a.high - b.high).abs());
+                Some((delta * framing::VIEWPORT * 0.5).max_element())
+            })
+            .fold(0.0_f32, f32::max);
+        let span = crate::model::count(self.opening_end) * OPENING_EDGE_PIXELS_PER_TICK;
+        // Reserve more of the destination at frame zero if the handoff is too close.
+        if distance > span {
+            let advance = 1.0 - span / distance;
+            for (a, &b) in start.iter_mut().zip(&end) {
+                if let Some((a, b)) = a.as_mut().zip(b) {
+                    a.low = a.low.lerp(b.low, advance);
+                    a.high = a.high.lerp(b.high, advance);
+                }
+            }
+        }
+        self.opening = [start, end].into();
         self
+    }
+
+    pub(crate) fn in_opening(&self, tick: u64) -> bool {
+        tick < self.opening_end as u64
     }
 
     fn opening_layout(
@@ -1619,39 +1644,28 @@ impl Packing {
         tick: usize,
         transition: Option<(u64, f32)>,
     ) -> Option<reflow::Layout> {
-        let last = self.opening_end;
-        if self.opening.len() < 2 || tick >= last {
+        let [start, end] = &*self.opening else {
             return None;
-        }
-        let step = tick / OPENING_STEP;
-        let from = step * OPENING_STEP;
-        let to = (from + OPENING_STEP).min(last);
+        };
         let current = crate::model::count(tick);
         let time = transition.map_or(current, |(start, fraction)| {
             let start = usize::try_from(start).expect("bounded time");
             crate::model::count(start).lerp(current, fraction)
         });
-        let fraction = ((time - crate::model::count(from))
-            / crate::model::count(to - from))
-        .clamp(0.0, 1.0);
-        let mut a = self.opening[step].clone();
-        let mut b = self.opening[step + 1].clone();
-        let growing = active_nodes(&self.nodes, |i| a[i].is_some() || b[i].is_some());
-        collapse_missing(&self.nodes, 0, &mut a, Some(&growing));
-        collapse_missing(&self.nodes, 0, &mut b, Some(&growing));
+        let last = crate::model::count(self.opening_end);
+        if time >= last {
+            return None;
+        }
+        let fraction = time / last;
         let field = self.space().field(framing::MARGIN);
-        let tiles = a
-            .into_iter()
-            .zip(b)
-            .enumerate()
-            .map(|(index, (a, b))| {
+        let tiles = start
+            .iter()
+            .zip(end)
+            .map(|(&a, &b)| {
                 let (a, b) = a.zip(b)?;
-                let active = (fraction < 1.0 && self.opening[step][index].is_some())
-                    || (fraction > 0.0 && self.opening[step + 1][index].is_some());
-                active.then_some(Tile {
-                    low: a.low.lerp(b.low, fraction).clamp(field.low, field.high),
-                    high: a.high.lerp(b.high, fraction).clamp(field.low, field.high),
-                })
+                let low = a.low.lerp(b.low, fraction).clamp(field.low, field.high);
+                let high = a.high.lerp(b.high, fraction).clamp(field.low, field.high);
+                high.cmpgt(low).all().then_some(Tile { low, high })
             })
             .collect();
         Some(reflow::Layout::new(&self.nodes, tiles, self.space()))
@@ -1893,8 +1907,11 @@ mod tests {
         activation[4] = 30;
         let normal = Packing::with_gutter(&rows, 2.0, None).unwrap();
         let waiting = Packing::with_gutter(&rows, 2.0, Some(&activation)).unwrap();
-        assert!(normal.sample(35).unwrap().0[4].tile.is_none());
-        assert!(waiting.sample(35).unwrap().0[4].tile.is_some());
+        assert!(normal.samples[35].presence[4] < 1.0);
+        assert_eq!(waiting.samples[35].presence[4].to_bits(), 1.0_f32.to_bits());
+        let reserved = &waiting.sample(35).unwrap().0[4];
+        assert!(reserved.tile.is_some());
+        assert!(!reserved.live);
     }
 
     #[test]
@@ -2091,19 +2108,38 @@ mod tests {
         }
     }
 
-    #[test]
-    fn tiles_keep_continuous_edges_when_several_repositories_arrive_at_the_opening() {
-        let rows: Vec<_> = fixture()
+    fn opening_fixture() -> Vec<Vec<RepositoryRegion>> {
+        fixture()
             .into_iter()
-            .take(360)
+            .take(400)
             .map(|mut row| {
                 row.truncate(7);
                 row
             })
-            .collect();
-        let packing = Packing::with_gutter(&rows, 4.0, None).unwrap();
+            .collect()
+    }
+
+    #[test]
+    fn tiles_keep_continuous_edges_when_several_repositories_arrive_at_the_opening() {
+        check_opening_edges(&Packing::before_service(&opening_fixture()));
+    }
+
+    #[test]
+    fn walk_travel_uses_the_opening_interpolator() {
+        let rows = opening_fixture();
+        let activation =
+            std::array::from_fn::<_, 7, _>(|i| u32::try_from(i * 40).unwrap());
+        check_opening_edges(
+            &Packing::with_gutter(&rows, 4.0, Some(&activation)).unwrap(),
+        );
+    }
+
+    fn check_opening_edges(packing: &Packing) {
+        assert!(packing.in_opening(359));
+        assert!(!packing.in_opening(360));
         let mut previous = packing.sample(0).unwrap().0;
-        for tick in 0..=90 {
+        let mut appearances = 0;
+        for tick in 1..=361 {
             let current = packing.sample(tick).unwrap().0;
             let tiles: Vec<_> = current.iter().map(|region| region.tile).collect();
             let (field, gutters) = partition(&packing.nodes, 0, &tiles);
@@ -2114,13 +2150,34 @@ mod tests {
             let filled = tiles.iter().flatten().map(|tile| tile.area()).sum::<f32>();
             assert!((filled + gutters - Tile::viewport().area()).abs() < 2e-6);
             for (before, after) in previous.iter().zip(&current) {
+                if !before.live && after.live {
+                    appearances += 1;
+                    assert!(before.tile.is_some(), "no reservation before tick {tick}");
+                }
                 if let Some((a, b)) = before.tile.zip(after.tile) {
                     let edge = (a.low - b.low).abs().max((a.high - b.high).abs());
                     let step = (edge * framing::VIEWPORT * 0.5).max_element();
-                    assert!(step < 16.0, "frame {tick} {}: {step:.2} px", after.label);
+                    assert!(step <= 4.0, "frame {tick} {}: {step:.2} px", after.label);
                 }
             }
             previous = current;
+        }
+        assert_eq!(appearances, 6);
+    }
+
+    #[test]
+    fn opening_reservations_are_hidden_until_the_repository_commits() {
+        let mut rows = fixture();
+        rows.truncate(400);
+        for row in &mut rows {
+            row.truncate(3);
+        }
+        let packing = Packing::before_service(&rows);
+        for tick in [0, 39, 40, 79, 80] {
+            let sampled = packing.sample(u64::try_from(tick).unwrap()).unwrap().0;
+            for (region, input) in sampled.iter().zip(&rows[tick]) {
+                assert_eq!(region.live, input.live, "{} at tick {tick}", input.label);
+            }
         }
     }
 

@@ -1399,7 +1399,10 @@ impl Simulation {
         let window = u64::from(crate::layout::packing::BIRTH_TICKS);
         let mut presence = None;
         for &(repository, begin, history) in &self.births {
-            if content + window < history || tick >= begin + window {
+            if self.packing.in_opening(tiles)
+                || content + window < history
+                || tick >= begin + window
+            {
                 continue;
             }
             let u = (ticks_duration(tick.saturating_sub(begin))
