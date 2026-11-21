@@ -49,6 +49,18 @@ fn tag_meshes(app: &mut App) {
     );
 }
 
+pub(super) fn reset_draw_sequence(world: &mut World) {
+    if world.contains_resource::<DrawSequence>() {
+        let highest_tag = world
+            .query::<&MeshTag>()
+            .iter(world)
+            .map(|tag| tag.value)
+            .max()
+            .unwrap_or_default();
+        world.resource_mut::<DrawSequence>().0 = highest_tag;
+    }
+}
+
 fn sort_transparency(
     mut phases: ResMut<ViewSortedRenderPhases<Transparent3d>>,
     meshes: Res<RenderMeshInstances>,
@@ -144,6 +156,30 @@ mod tests {
         let third = app.world_mut().spawn(Mesh3d::default()).id();
         app.world_mut().flush();
         assert_eq!(app.world().get::<MeshTag>(third).unwrap().value, 3);
+    }
+
+    #[test]
+    fn preview_pool_resets_reuse_mesh_tags_after_near_exhaustion() {
+        let mut app = App::new();
+        tag_meshes(&mut app);
+        let world = app.world_mut();
+        let grid = world.spawn(Mesh3d::default()).id();
+        world.insert_resource(super::super::Pools {
+            grid: vec![grid],
+            ..default()
+        });
+        world.resource_mut::<DrawSequence>().0 = u32::MAX - 2;
+
+        for first_tag in [u32::MAX - 1, 2, 2] {
+            let first = world.spawn(Mesh3d::default()).id();
+            let second = world.spawn(Mesh3d::default()).id();
+            world.resource_mut::<super::super::Pools>().beams = vec![first, second];
+            world.flush();
+            assert_eq!(world.get::<MeshTag>(grid).unwrap().value, 1);
+            assert_eq!(world.get::<MeshTag>(first).unwrap().value, first_tag);
+            assert_eq!(world.get::<MeshTag>(second).unwrap().value, first_tag + 1);
+            super::super::reset_scene_pools(world);
+        }
     }
 
     fn transparent_item(

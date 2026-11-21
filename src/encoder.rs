@@ -254,12 +254,15 @@ fn wait_for_output(
     output: Option<&Path>,
     quiet: Duration,
 ) -> anyhow::Result<ExitStatus> {
-    let mut quiet_for = output_progress(output, Instant::now());
+    let mut quiet_for = output_progress(output, Instant::now);
     loop {
         if let Some(status) = child.try_wait()? {
             return Ok(status);
         }
-        if quiet_for(Instant::now()) >= quiet {
+        if quiet_for() >= quiet {
+            if let Some(status) = child.try_wait()? {
+                return Ok(status);
+            }
             bail!("FFmpeg output made no progress for {quiet:?}");
         }
         thread::sleep(Duration::from_millis(10));
@@ -268,17 +271,27 @@ fn wait_for_output(
 
 fn output_progress(
     output: Option<&Path>,
-    start: Instant,
-) -> impl FnMut(Instant) -> Duration {
-    let fingerprint = move || {
-        output
-            .and_then(|path| std::fs::metadata(path).ok())
-            .map(|metadata| (metadata.len(), metadata.modified().ok()))
-    };
+    now: impl FnMut() -> Instant,
+) -> impl FnMut() -> Duration {
+    track_progress(
+        move || {
+            output
+                .and_then(|path| std::fs::metadata(path).ok())
+                .map(|metadata| (metadata.len(), metadata.modified().ok()))
+        },
+        now,
+    )
+}
+
+fn track_progress<T: PartialEq>(
+    mut fingerprint: impl FnMut() -> T,
+    mut now: impl FnMut() -> Instant,
+) -> impl FnMut() -> Duration {
     let mut previous = fingerprint();
-    let mut last_progress = start;
-    move |now| {
+    let mut last_progress = now();
+    move || {
         let current = fingerprint();
+        let now = now();
         if current != previous {
             previous = current;
             last_progress = now;
@@ -516,15 +529,17 @@ fn main() {
         let modified = output.as_file().metadata().unwrap().modified().unwrap();
         let start = Instant::now();
         let interval = Duration::from_millis(900);
-        let mut quiet_for = output_progress(Some(output.path()), start);
+        let mut clock = (0..=4).map(|step| start + interval * step);
+        let mut quiet_for =
+            output_progress(Some(output.path()), || clock.next().unwrap());
 
-        for step in 1..=3 {
-            std::fs::write(output.path(), vec![0; step as usize]).unwrap();
+        for size in 1..=3 {
+            std::fs::write(output.path(), vec![0; size]).unwrap();
             output.as_file().set_modified(modified).unwrap();
-            assert_eq!(quiet_for(start + interval * step), Duration::ZERO);
+            assert_eq!(quiet_for(), Duration::ZERO);
         }
 
-        assert_eq!(quiet_for(start + interval * 4), interval);
+        assert_eq!(quiet_for(), interval);
     }
 
     #[test]
@@ -532,16 +547,44 @@ fn main() {
         let output = tempfile::NamedTempFile::new().unwrap();
         let start = Instant::now();
         let interval = Duration::from_millis(900);
-        let mut quiet_for = output_progress(Some(output.path()), start);
+        let mut clock = (0..=4).map(|step| start + interval * step);
+        let mut quiet_for =
+            output_progress(Some(output.path()), || clock.next().unwrap());
 
-        for step in 1..=3 {
-            let modified =
-                std::time::UNIX_EPOCH + Duration::from_secs(u64::from(step) * 2);
+        for step in 1_u64..=3 {
+            let modified = std::time::UNIX_EPOCH + Duration::from_secs(step * 2);
             output.as_file().set_modified(modified).unwrap();
-            assert_eq!(quiet_for(start + interval * step), Duration::ZERO);
+            assert_eq!(quiet_for(), Duration::ZERO);
         }
 
-        assert_eq!(quiet_for(start + interval * 4), interval);
+        assert_eq!(quiet_for(), interval);
+    }
+
+    #[test]
+    fn slow_metadata_read_resets_quiet_interval_when_output_grows() {
+        use std::cell::Cell;
+
+        let start = Instant::now();
+        let quiet = Duration::from_secs(1);
+        let clock = Cell::new(start);
+        let mut size = [0, 1, 1, 1].into_iter();
+        let mut quiet_for = track_progress(
+            || {
+                let size = size.next().unwrap();
+                if clock.get() == start + quiet / 2 {
+                    clock.set(start + quiet * 2);
+                }
+                size
+            },
+            || clock.get(),
+        );
+
+        clock.set(start + quiet / 2);
+        assert_eq!(quiet_for(), Duration::ZERO);
+        clock.set(start + quiet * 2 + quiet / 2);
+        assert_eq!(quiet_for(), quiet / 2);
+        clock.set(start + quiet * 3);
+        assert_eq!(quiet_for(), quiet);
     }
 
     #[test]

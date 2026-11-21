@@ -440,6 +440,7 @@ pub(super) fn reset_scene_pools(world: &mut World) {
     }
     world.remove_resource::<GreyTextures>();
     styling::reset_pools(world);
+    ordering::reset_draw_sequence(world);
 }
 
 #[derive(PartialEq)]
