@@ -254,26 +254,36 @@ fn wait_for_output(
     output: Option<&Path>,
     quiet: Duration,
 ) -> anyhow::Result<ExitStatus> {
-    let fingerprint = || {
+    let mut quiet_for = output_progress(output, Instant::now());
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        if quiet_for(Instant::now()) >= quiet {
+            bail!("FFmpeg output made no progress for {quiet:?}");
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn output_progress(
+    output: Option<&Path>,
+    start: Instant,
+) -> impl FnMut(Instant) -> Duration {
+    let fingerprint = move || {
         output
             .and_then(|path| std::fs::metadata(path).ok())
             .map(|metadata| (metadata.len(), metadata.modified().ok()))
     };
     let mut previous = fingerprint();
-    let mut last_progress = Instant::now();
-    loop {
-        if let Some(status) = child.try_wait()? {
-            return Ok(status);
-        }
+    let mut last_progress = start;
+    move |now| {
         let current = fingerprint();
         if current != previous {
             previous = current;
-            last_progress = Instant::now();
+            last_progress = now;
         }
-        if last_progress.elapsed() >= quiet {
-            bail!("FFmpeg output made no progress for {quiet:?}");
-        }
-        thread::sleep(Duration::from_millis(10));
+        now - last_progress
     }
 }
 
@@ -385,21 +395,6 @@ fn main() {
     }
     let mut bytes = Vec::new();
     std::io::stdin().read_to_end(&mut bytes).unwrap();
-    let touch = args.iter().any(|arg| arg == "touch-finish");
-    if touch || args.iter().any(|arg| arg == "slow-finish") {
-        let mut output = std::fs::File::create(args.last().unwrap()).unwrap();
-        output.write_all(b"frame").unwrap();
-        for step in 1..20 {
-            std::thread::sleep(std::time::Duration::from_millis(100));
-            if touch {
-                let seconds = std::time::Duration::from_secs(step);
-                output.set_modified(std::time::UNIX_EPOCH + seconds).unwrap();
-            } else {
-                output.write_all(b"frame").unwrap();
-            }
-        }
-        return;
-    }
     if let Some(path) = args.last().filter(|path| path.as_str() != "-") {
         std::fs::write(path, bytes).unwrap();
     }
@@ -515,36 +510,38 @@ fn main() {
         assert!(!output.exists());
     }
 
-    /// Finishes a fake encoder that changes its output every 100 ms for about two
-    /// seconds, so finishing succeeds only if each change resets the 1 s quiet period.
-    fn finish_slowly(mode: &str) -> Vec<u8> {
-        let (scratch, binary) = fake_ffmpeg();
-        let output = scratch.path().join("slow.mp4");
-        let options = Options {
-            video: Some(output.clone()),
-            ffmpeg: Some(binary),
-            ffmpeg_arg: vec![mode.into()],
-        };
-        let mut encoder = options
-            .start(30, crate::resolution::Resolution::default())
-            .unwrap()
-            .unwrap();
-        encoder.write(vec![0; 12]).unwrap();
-        let quiet = Duration::from_secs(1);
-        let start = Instant::now();
-        encoder.finish_with_quiet_period(quiet).unwrap();
-        assert!(start.elapsed() > quiet);
-        std::fs::read(output).unwrap()
-    }
-
     #[test]
     fn finishing_tracks_growing_output() {
-        assert_eq!(finish_slowly("slow-finish"), b"frame".repeat(20));
+        let output = tempfile::NamedTempFile::new().unwrap();
+        let modified = output.as_file().metadata().unwrap().modified().unwrap();
+        let start = Instant::now();
+        let interval = Duration::from_millis(900);
+        let mut quiet_for = output_progress(Some(output.path()), start);
+
+        for step in 1..=3 {
+            std::fs::write(output.path(), vec![0; step as usize]).unwrap();
+            output.as_file().set_modified(modified).unwrap();
+            assert_eq!(quiet_for(start + interval * step), Duration::ZERO);
+        }
+
+        assert_eq!(quiet_for(start + interval * 4), interval);
     }
 
     #[test]
     fn finishing_tracks_output_whose_modification_time_alone_changes() {
-        assert_eq!(finish_slowly("touch-finish"), b"frame");
+        let output = tempfile::NamedTempFile::new().unwrap();
+        let start = Instant::now();
+        let interval = Duration::from_millis(900);
+        let mut quiet_for = output_progress(Some(output.path()), start);
+
+        for step in 1..=3 {
+            let modified =
+                std::time::UNIX_EPOCH + Duration::from_secs(u64::from(step) * 2);
+            output.as_file().set_modified(modified).unwrap();
+            assert_eq!(quiet_for(start + interval * step), Duration::ZERO);
+        }
+
+        assert_eq!(quiet_for(start + interval * 4), interval);
     }
 
     #[test]

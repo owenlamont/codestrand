@@ -438,6 +438,7 @@ pub(super) fn reset_scene_pools(world: &mut World) {
         }
         world.insert_resource(Pools { grid, ..default() });
     }
+    world.remove_resource::<GreyTextures>();
     styling::reset_pools(world);
 }
 
@@ -3623,6 +3624,42 @@ mod tests {
             .resource_mut::<Time<Real>>()
             .update_with_duration(std::time::Duration::ZERO);
         world
+    }
+
+    #[test]
+    fn grey_portrait_cache_stays_flat_across_preview_rewinds() {
+        let mut events = crate::timeline::synthetic();
+        events.truncate(1);
+        events[0].contributor = Some(crate::contributors::Contributor {
+            bot: None,
+            key: crate::contributors::Key::Config(0),
+            name: "Portrait".to_owned(),
+            email: Vec::new(),
+            accounts: default(),
+            portrait: Some(std::sync::Arc::new(crate::avatars::Portrait {
+                pixels: vec![255; 128 * 128 * 4],
+            })),
+        });
+        let theme = Theme::neon();
+        let mut simulation = Simulation::new(
+            events,
+            &model::Options::default(),
+            &theme,
+            &crate::contributors::Mappings::default(),
+        );
+        simulation.advance_to(30, 30);
+        let avatar = simulation.avatars()[0].clone();
+        let mut world = rewind_preview_world(simulation);
+        let palette = Palette::new(&mut world, &theme);
+
+        for _ in 0..10 {
+            let entity = world.spawn(Transform::default()).id();
+            attach_portrait(&mut world, &palette, entity, &avatar);
+            world.resource_mut::<Pools>().avatars.push(entity);
+            fade(&mut world, entity, 1.0, 1.0);
+            assert_eq!(world.resource::<GreyTextures>().0.len(), 1);
+            reset_scene_pools(&mut world);
+        }
     }
 
     #[test]
