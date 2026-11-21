@@ -39,6 +39,7 @@ pub(crate) struct CapacityError {
 struct Space {
     minimum: Vec2,
     gap: Vec2,
+    growth: f32,
 }
 
 impl Space {
@@ -46,6 +47,25 @@ impl Space {
         Self {
             minimum: MINIMUM * detail,
             gap: Vec2::splat(gutter * detail),
+            growth: 1.0,
+        }
+    }
+
+    fn world(gutter: f32, growth: f32) -> Self {
+        Self {
+            minimum: Vec2::ZERO,
+            gap: Vec2::splat(gutter),
+            growth,
+        }
+    }
+
+    fn field(self, margin: f32) -> Tile {
+        let field = Tile::viewport();
+        let center = field.low.midpoint(field.high);
+        let field = Tile::inset(margin);
+        Tile {
+            low: field.low + (field.low - center) * (self.growth - 1.0),
+            high: field.high + (field.high - center) * (self.growth - 1.0),
         }
     }
 }
@@ -59,7 +79,8 @@ fn plan_tree(
     order: &[usize],
     gutter: f32,
     threads: usize,
-) -> Result<(Vec<Node>, f32), CapacityError> {
+    world_growth: Option<f32>,
+) -> Result<(Vec<Node>, f32, Space), CapacityError> {
     let windows: Vec<_> = order
         .iter()
         .enumerate()
@@ -84,10 +105,24 @@ fn plan_tree(
         }
         Some(nodes)
     };
+    if let Some(mut growth) = world_growth {
+        for _ in 0..DETAIL_ATTEMPTS {
+            let space = Space::world(gutter, growth);
+            if let Some(nodes) = place(space) {
+                return Ok((nodes, 1.0, space));
+            }
+            growth *= DETAIL_SHRINK;
+        }
+        return Err(CapacityError {
+            repositories: order.len(),
+            detail: 1.0,
+        });
+    }
     let mut detail = area_detail(order.len(), gutter).min(1.0);
     for _ in 0..DETAIL_ATTEMPTS {
-        if let Some(nodes) = place(Space::new(detail, gutter)) {
-            return Ok((nodes, detail));
+        let space = Space::new(detail, gutter);
+        if let Some(nodes) = place(space) {
+            return Ok((nodes, detail, space));
         }
         detail /= DETAIL_SHRINK;
     }
@@ -318,7 +353,7 @@ fn update(
     space: Space,
     result: &mut [Feasible],
 ) {
-    let limit = Tile::viewport().pixels();
+    let limit = space.field(framing::MARGIN).pixels();
     let state = match nodes[index] {
         Node::Repository(i) => {
             let p = presence[i];
@@ -508,22 +543,24 @@ fn tiles(
 ) -> Option<Vec<Option<Tile>>> {
     let mut states = vec![Feasible::default(); nodes.len()];
     feasibility(nodes, 0, weights, presence, space, &mut states);
-    allocated(nodes, weights.len(), &states)
+    allocated(nodes, weights.len(), &states, space)
 }
 
 fn allocated(
     nodes: &[Node],
     repositories: usize,
     states: &[Feasible],
+    space: Space,
 ) -> Option<Vec<Option<Tile>>> {
-    let size = Tile::viewport().pixels();
+    let field = space.field(framing::MARGIN);
+    let size = field.pixels();
     let (low, high) = interval(&states[0].sizes, 0, size.y)?;
     if size.x < low - ALLOCATION_TOLERANCE_PX || size.x > high + ALLOCATION_TOLERANCE_PX
     {
         return None;
     }
     let mut output = vec![None; repositories];
-    allocate(nodes, 0, Tile::viewport(), states, Vec2::ONE, &mut output)?;
+    allocate(nodes, 0, field, states, Vec2::ONE, &mut output)?;
     Some(output)
 }
 
@@ -580,7 +617,7 @@ fn insert(
             update(&candidate, index, weights, &presence, space, &mut states);
             ancestor = parents[index];
         }
-        let placement = allocated(&candidate, weights.len(), &states)?;
+        let placement = allocated(&candidate, weights.len(), &states, space)?;
         let total: f32 = weights.iter().sum();
         Some(
             placement
@@ -589,7 +626,7 @@ fn insert(
                 .filter_map(|(i, t)| {
                     t.map(|t| {
                         weights[i]
-                            * ((t.area() / Tile::viewport().area() * total
+                            * ((t.area() / space.field(framing::MARGIN).area() * total
                                 / weights[i])
                                 .ln()
                                 .abs()
@@ -639,7 +676,11 @@ struct Placement {
     scale: f32,
 }
 
-fn gutter_cells(nodes: &[Node], placement: &[Option<Tile>]) -> Vec<Option<Tile>> {
+fn gutter_cells(
+    nodes: &[Node],
+    placement: &[Option<Tile>],
+    space: Space,
+) -> Vec<Option<Tile>> {
     fn bounds(
         nodes: &[Node],
         index: usize,
@@ -695,13 +736,14 @@ fn gutter_cells(nodes: &[Node], placement: &[Option<Tile>]) -> Vec<Option<Tile>>
         }
     }
     let mut result = vec![None; placement.len()];
-    divide(nodes, 0, Tile::inset(16.0), placement, &mut result);
+    divide(nodes, 0, space.field(16.0), placement, &mut result);
     result
 }
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Packing {
     gutter_scale: f32,
+    world_growth: Option<f32>,
     /// Scale of fixed sizes against the reference viewport; zero before planning.
     detail: f32,
     /// Repository title scale; zero before planning.
@@ -883,6 +925,10 @@ impl Packing {
                 u64::try_from(tick).expect("bounded packing tick"),
             );
             for (presence, &end) in sample.presence.iter_mut().zip(endings) {
+                if self.world_growth.is_some() && now >= end + exit {
+                    *presence = 0.0;
+                    continue;
+                }
                 let u = ((now - end - exit) / reflow).clamp(0.0, 1.0);
                 *presence *= 1.0 - u * u * (3.0 - 2.0 * u);
                 // Subpixel regions fall below the feasible-polygon clipping tolerance.
@@ -974,10 +1020,30 @@ impl Packing {
             .collect();
         let mut order: Vec<_> = (0..first.len()).collect();
         order.sort_by_key(|&i| (births[i], i));
-        let (nodes, detail) =
-            plan_tree(&regions, &items, &births, &order, gutter_scale, threads)?;
-        let lettering = detail.min(0.5 * area_detail(first.len(), gutter_scale));
-        let space = Space::new(detail, gutter_scale);
+        let world_growth = crate::model::world_units().then(|| {
+            let peak = items
+                .iter()
+                .map(|row| row.iter().sum::<f32>())
+                .fold(1.0, f32::max);
+            let area =
+                peak * 100.0 + crate::model::count(first.len()) * 96.0_f32.powi(2);
+            (area / Tile::viewport().pixels().element_product())
+                .sqrt()
+                .clamp(1.0, 64.0)
+        });
+        let (nodes, detail, space) = plan_tree(
+            &regions,
+            &items,
+            &births,
+            &order,
+            gutter_scale,
+            threads,
+            world_growth,
+        )?;
+        let lettering = world_growth.map_or_else(
+            || detail.min(0.5 * area_detail(first.len(), gutter_scale)),
+            |_| 1.0,
+        );
         let mut held = held::Weights::new(first.len());
         let earliest = births.iter().copied().min().unwrap_or(0);
         let mut reflows = Vec::<reflow::Change>::new();
@@ -1077,6 +1143,7 @@ impl Packing {
         drop(items);
         Ok(Self {
             gutter_scale,
+            world_growth: world_growth.map(|_| space.growth),
             detail,
             lettering,
             nodes,
@@ -1245,7 +1312,7 @@ impl Packing {
             tiling.states = vec![Feasible::default(); nodes.len()];
             feasibility(nodes, 0, weights, presence, space, &mut tiling.states);
         }
-        allocated(nodes, weights.len(), &tiling.states)
+        allocated(nodes, weights.len(), &tiling.states, space)
     }
 
     /// Tiles with every easing repository moved towards full presence by the least
@@ -1279,7 +1346,14 @@ impl Packing {
     }
 
     fn space(&self) -> Space {
-        Space::new(self.detail(), self.gutter_scale)
+        self.world_growth.map_or_else(
+            || Space::new(self.detail(), self.gutter_scale),
+            |growth| Space::world(self.gutter_scale, growth),
+        )
+    }
+
+    pub(crate) fn overview_growth(&self) -> f32 {
+        self.space().growth
     }
 
     /// Scale of tiles, gutters and avatars against their reference sizes: one while
@@ -1369,12 +1443,12 @@ impl Packing {
                 }
                 .or_else(|| self.firmer_tiles(tree.1, &weights, &presence));
                 if let Some(allocated) = result {
-                    reflow::Layout::new(tree.1, allocated)
+                    reflow::Layout::new(tree.1, allocated, self.space())
                 } else {
                     let allocated = self
                         .firmer_tiles(&self.nodes, &weights, &presence)
                         .expect("tiles at full presence remain feasible");
-                    reflow::Layout::new(&self.nodes, allocated)
+                    reflow::Layout::new(&self.nodes, allocated, self.space())
                 }
             });
         self.inputs[tick]
@@ -1386,13 +1460,15 @@ impl Packing {
                 let tile = layout.tiles[i];
                 // A fixed screen anchor avoids switching between equal-area fit vertices.
                 let fitted = tile.map(|tile| {
-                    fit::anchored(tile.usable(), &shape, r.height, Vec2::splat(0.5))
+                    let height = self.world_growth.map_or(r.height, |_| 0.0);
+                    fit::anchored(tile.usable(), &shape, height, Vec2::splat(0.5))
                 });
                 let raw_scale = fitted.map_or(0.0, |f| f.scale);
                 let scale = self
                     .zoom
                     .get(tile_tick)
                     .map_or(raw_scale, |row| row[i].min(raw_scale));
+                let scale = self.world_growth.map_or(scale, |_| scale.min(1.0));
                 let (low, high) = outline::bounds(&shape);
                 let origin = fitted.map_or(Vec2::ZERO, |f| {
                     f.origin + (low + high) * 0.5 * (raw_scale - scale)

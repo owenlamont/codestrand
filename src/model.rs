@@ -1229,7 +1229,8 @@ impl Simulation {
             lifecycle::REFLOW,
         );
         self.state = SharedState(self.initial.clone());
-        self.state.region_depth = framing::depth_bound();
+        self.state.region_depth =
+            framing::depth_bound() * self.packing.overview_growth();
         self.state.detail = self.packing.detail();
         self.state.lettering = self.packing.lettering();
         if let Some((regions, offsets, scales)) = self.packing.sample(0) {
@@ -1638,7 +1639,11 @@ impl Simulation {
 
     /// Default field camera focus and distance along [`view_direction`].
     pub(super) fn view(&self) -> (Vec3, f32) {
-        (self.state.focus, self.state.distance)
+        let growth = self.packing.overview_growth();
+        (
+            self.state.focus,
+            self.state.distance * growth + (growth - 1.0) * framing::MARGIN / 4.0,
+        )
     }
 
     pub(super) fn view_for_projection(&self, fov: f32, viewport: Vec2) -> (Vec3, f32) {
@@ -2469,6 +2474,11 @@ pub(crate) fn apply_within(
 
 pub(super) fn view_direction() -> Vec3 {
     Vec3::Y
+}
+
+pub(crate) fn world_units() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("CODESTRAND_SPIKE_WORLD_UNITS").is_some())
 }
 
 pub(crate) fn box_corners(low: Vec3, high: Vec3) -> [Vec3; 8] {

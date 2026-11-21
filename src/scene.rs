@@ -2489,7 +2489,15 @@ fn labels(world: &mut World) {
         )
         .into_iter()
         .chain(world.resource::<Pools>().names.labels.iter().cloned())
-        .filter_map(|label| {
+        .filter_map(|mut label| {
+            if model::world_units() {
+                let depth = (label.position - transform.translation())
+                    .dot(*transform.forward());
+                if depth <= 0.0 {
+                    return None;
+                }
+                label.scale *= (model::framing::DISTANCE - label.position.y) / depth;
+            }
             let (point, anchor) = if label.kind == model::LabelKind::Avatar {
                 let avatar = avatars.next()?;
                 (
