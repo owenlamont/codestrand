@@ -67,6 +67,12 @@ impl Clock {
             })
     }
 
+    /// The presentation tick for a history sample after the final commit.
+    pub(super) fn present_tail_tick(&self, history_tick: u64) -> u64 {
+        self.presentation
+            .present_tail_tick(&self.history, history_tick)
+    }
+
     pub(super) fn tile_transition(&self, tick: u64) -> Option<(u64, f32)> {
         let next = self.presentation.applied(tick);
         let service = self.presentation.services.get(next)?;
@@ -100,6 +106,13 @@ impl Clock {
 }
 
 impl Schedule {
+    pub(super) fn present_tail_tick(&self, history: &Self, history_tick: u64) -> u64 {
+        self.services.last().map_or(history_tick, |last| {
+            let history_last = history.services[self.services.len() - 1].tick;
+            history_tick.saturating_add(last.tick - history_last)
+        })
+    }
+
     pub(super) fn padding(&self, index: usize) -> u32 {
         self.services[index].padding
     }
@@ -181,7 +194,7 @@ impl Schedule {
     }
 }
 
-fn first_tick(start: Time) -> u64 {
+pub(super) fn first_tick(start: Time) -> u64 {
     let mut low = 0;
     let mut high = u64::from(u32::MAX) * u64::from(TICK_RATE);
     if start > tick_time(high) {

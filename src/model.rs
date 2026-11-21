@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
     ops::Range,
+    sync::Arc,
     time::Duration,
 };
 
@@ -17,6 +18,9 @@ use crate::{
 pub(crate) mod caption;
 pub(crate) mod framing;
 mod lifecycle;
+pub(crate) use lifecycle::RepositoryExit;
+#[cfg(test)]
+pub(crate) use lifecycle::exits_from_starts;
 #[cfg(test)]
 mod measurement;
 mod names;
@@ -599,6 +603,7 @@ pub(super) struct Simulation {
     finals: Vec<u16>,
     departures: Vec<Time>,
     repository_ends: Vec<Time>,
+    repository_exits: Arc<[Option<RepositoryExit>]>,
     pub caption_style: caption::Style,
     caption_plan: Vec<caption::Transition>,
     packing: crate::layout::packing::Packing,
@@ -665,7 +670,7 @@ impl Simulation {
             options.max_idle_seconds,
             |_| 0,
         );
-        Self::check_schedule(events, options, repositories, &schedule)
+        Self::check_schedule(events, options, repositories, &schedule, None)
     }
 
     fn check_repository_endings(
@@ -707,14 +712,20 @@ impl Simulation {
         options: &Options,
         repositories: &[String],
         schedule: &Schedule,
+        exit_tail: Option<u64>,
     ) -> anyhow::Result<()> {
-        let (_, endings) = lifecycle::plan(
-            events,
-            schedule,
-            options,
-            options.selected_range(events.len()),
-        );
-        let duration = lifecycle::duration(schedule, &endings, options.fragment_pace());
+        let pace = options.fragment_pace();
+        let duration = if let Some(exit_tail) = exit_tail {
+            lifecycle::activity_duration(schedule, pace).max(tick_time(exit_tail))
+        } else {
+            let (_, endings) = lifecycle::plan(
+                events,
+                schedule,
+                options,
+                options.selected_range(events.len()),
+            );
+            lifecycle::duration(schedule, &endings, pace)
+        };
         planning_memory::check(events, options, repositories, schedule, duration)?;
         Ok(())
     }
@@ -903,7 +914,17 @@ impl Simulation {
         };
         {
             let _phase = trace.phase(Phase::CheckSchedule);
-            Self::check_schedule(events, options, repositories, &schedule)?;
+            let exit_tail = schedule.present_tail_tick(
+                history,
+                lifecycle::exit_end(&self.repository_exits),
+            );
+            Self::check_schedule(
+                events,
+                options,
+                repositories,
+                &schedule,
+                Some(exit_tail),
+            )?;
         }
         let preferences = std::mem::take(&mut self.travel).preferences();
         {
@@ -1062,6 +1083,7 @@ impl Simulation {
         let prior_active = prior_activity(&events[..start], repositories.len());
         let (departures, repository_ends) =
             lifecycle::plan(events, &schedule, options, start..end);
+        let repository_exits = lifecycle::repository_exits(&repository_ends);
         let first_arrivals = lifecycle::arrivals(events, start..end);
         let finals =
             lifecycle::finals(&events[start..end], &schedule.starts, &departures);
@@ -1071,6 +1093,7 @@ impl Simulation {
             finals,
             departures,
             repository_ends,
+            repository_exits,
             caption_style: caption::Style::default(),
             caption_plan: Vec::new(),
             packing: crate::layout::packing::Packing::default(),
@@ -1178,7 +1201,7 @@ impl Simulation {
             active[event.repository] = true;
         }
         let mut sampled_events = 0;
-        let ticks = frames_for(self.duration(), 60)
+        let ticks = frames_for_ticks(self.end_tick(), 60)
             .expect("multi-repository playback fits the supported frame range");
         self.trace.count_replay(ticks.into());
         let mut samples = crate::layout::packing::Inputs::new(
@@ -1219,13 +1242,9 @@ impl Simulation {
             }
         }
         self.trace.add_ticks(&mut self.tick_times);
-        samples.fade_from(
-            &self.repository_ends,
-            lifecycle::REPOSITORY_EXIT,
-            lifecycle::REFLOW,
-        );
         self.packing = crate::layout::packing::Packing::from_inputs(
             samples,
+            self.repository_exits.clone(),
             self.state.gutter,
             uncapped.then_some(activation.as_slice()),
             threads,
@@ -1253,11 +1272,17 @@ impl Simulation {
         if let Some(window) = &self.window {
             return self.clock.present(window.end);
         }
-        lifecycle::duration(
-            &self.schedule,
-            &self.repository_ends,
-            self.state.fragment_pace,
-        )
+        self.activity_duration()
+            .max(tick_time(self.exit_tail_tick()))
+    }
+
+    fn activity_duration(&self) -> Time {
+        lifecycle::activity_duration(&self.schedule, self.state.fragment_pace)
+    }
+
+    fn exit_tail_tick(&self) -> u64 {
+        self.clock
+            .present_tail_tick(lifecycle::exit_end(&self.repository_exits))
     }
 
     /// The tick playback ends on, from the same padded schedule eager and streamed
@@ -1265,12 +1290,10 @@ impl Simulation {
     pub(crate) fn end_tick(&self) -> u64 {
         match self.ready_end {
             Some(ready) if !ready.complete => ready.end,
-            _ => lifecycle::duration(
-                &self.schedule,
-                &self.repository_ends,
-                self.state.fragment_pace,
-            )
-            .ticks(true),
+            _ => self
+                .activity_duration()
+                .ticks(true)
+                .max(self.exit_tail_tick()),
         }
     }
 
@@ -3436,7 +3459,8 @@ mod tests {
                 &events,
                 &options,
                 &vec![String::new(); 5],
-                &schedule
+                &schedule,
+                None,
             )
             .is_err()
         );

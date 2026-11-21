@@ -223,8 +223,10 @@ visible.
 An ending before the selected playback interval is already complete when playback starts.
 
 The ending tile, files and directories grey, rise and fade over 2.5 playback seconds.
-Neighbours then reclaim the space over four seconds. Overlapping exits that start at
-different times take five seconds to keep tile edges moving steadily. Text fades in place.
+Neighbours then reclaim the space over four seconds. If two exits start less than four
+seconds apart before adding any travel waits, both take five seconds to keep tile edges
+moving steadily. Exits that start together count as one for this rule. The extra second
+does not extend the overlap test to later exits. Text fades in place.
 
 ## Contributor and file lifecycles
 

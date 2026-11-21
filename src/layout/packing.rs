@@ -16,7 +16,6 @@ pub(crate) const BIRTH_TICKS: u32 = 45;
 const ZOOM_CHUNK: usize = 256;
 const ALLOCATION_TOLERANCE_PX: f32 = 0.25;
 const EXIT_EASE_RAMP: f32 = 1.0 / 32.0;
-pub(crate) const STAGGERED_EXIT_STRETCH: f32 = 1.25;
 
 const FIELD_GROWTH_STEP: f32 = 1.125;
 /// Bisection steps towards full presence for a sample whose easing tiles conflict.
@@ -547,7 +546,12 @@ fn scaled_tile(tile: Tile, center: Vec2, presence: f32) -> Tile {
     }
 }
 
-fn exit_presence(elapsed: f32) -> f32 {
+fn exit_presence(tick: u64, exit: crate::model::RepositoryExit) -> f32 {
+    if tick >= exit.end {
+        return 0.0;
+    }
+    let elapsed = crate::model::ticks_duration(tick.saturating_sub(exit.start))
+        / crate::model::ticks_duration(exit.end - exit.start);
     let progress = |u: f32| {
         // A short acceleration ramp leaves most of the exit at a steady speed.
         let speed = (u / EXIT_EASE_RAMP).min(1.0);
@@ -558,32 +562,6 @@ fn exit_presence(elapsed: f32) -> f32 {
     } else {
         progress(1.0 - elapsed)
     }
-}
-
-fn exit_durations(fades: &[crate::model::Time], duration: f32) -> Vec<f32> {
-    let mut times: Vec<_> = fades.iter().copied().filter(|t| t.is_finite()).collect();
-    times.sort_unstable_by(|a, b| a.partial_cmp(b).expect("finite fade times"));
-    times.dedup();
-    fades
-        .iter()
-        .map(|&start| {
-            let overlaps = times
-                .binary_search_by(|time| {
-                    time.partial_cmp(&start).expect("ordered fade time")
-                })
-                .is_ok_and(|i| {
-                    (i > 0 && start - times[i - 1] < duration)
-                        || times
-                            .get(i + 1)
-                            .is_some_and(|&next| next - start < duration)
-                });
-            if overlaps {
-                duration * STAGGERED_EXIT_STRETCH
-            } else {
-                duration
-            }
-        })
-        .collect()
 }
 
 fn shrink_tiles(tiles: &mut [Option<Tile>], presence: &[f32]) {
@@ -883,7 +861,7 @@ pub(crate) struct Packing {
     samples: Arc<[Sample]>,
     rotated: Vec<bool>,
     zoom: Arc<[Vec<f32>]>,
-    visible_until: Arc<[crate::model::Time]>,
+    exits: Arc<[Option<crate::model::RepositoryExit>]>,
     tiling: TilingCache,
     /// Tiles every sample from scratch; tests compare against it.
     fresh_tiling: bool,
@@ -916,9 +894,6 @@ pub(crate) struct Inputs {
     labels: Vec<String>,
     rows: Vec<Vec<Input>>,
     items: Vec<Vec<f32>>,
-    /// When each repository starts fading out, after which its count no longer moves tiles.
-    fading: Vec<crate::model::Time>,
-    exit_reflow: f32,
 }
 
 impl Inputs {
@@ -927,20 +902,7 @@ impl Inputs {
             labels: Vec::new(),
             rows: Vec::with_capacity(ticks),
             items: Vec::with_capacity(ticks),
-            fading: Vec::new(),
-            exit_reflow: 0.0,
         }
-    }
-
-    /// Stops counting each repository `exit` seconds after its end, when it starts fading.
-    pub(crate) fn fade_from(
-        &mut self,
-        ends: &[crate::model::Time],
-        exit: f32,
-        reflow: f32,
-    ) {
-        self.fading = ends.iter().map(|&end| end + exit).collect();
-        self.exit_reflow = reflow;
     }
 
     pub(crate) fn push(&mut self, regions: Vec<RepositoryRegion>) {
@@ -1056,7 +1018,7 @@ impl Packing {
         for row in regions {
             inputs.push(row.clone());
         }
-        Self::from_inputs(inputs, gutter_scale, activation, 0)
+        Self::from_inputs(inputs, Arc::default(), gutter_scale, activation, 0)
     }
 
     /// Inputs, samples, zoom and tree with floats printed exactly, without the thread count.
@@ -1075,19 +1037,18 @@ impl Packing {
 
     /// The fitted scale of every repository visible on `tick`, zero for the others.
     fn visible_scales(&self, tick: usize, tiling: &mut Tiling) -> Vec<f32> {
+        let now = u64::try_from(tick).expect("bounded packing tick");
         self.fit_rows(tick, tick, None, None, Some(tiling))
             .iter()
             .zip(&self.inputs[tick])
             .enumerate()
             .map(|(i, (p, r))| {
                 if r.live
-                    && crate::model::tick_time(
-                        u64::try_from(tick).expect("bounded packing tick"),
-                    ) < self
-                        .visible_until
+                    && self
+                        .exits
                         .get(i)
-                        .copied()
-                        .unwrap_or(crate::model::Time::INFINITY)
+                        .and_then(|exit| *exit)
+                        .is_none_or(|exit| now < exit.start)
                 {
                     p.scale
                 } else {
@@ -1103,6 +1064,7 @@ impl Packing {
     )]
     pub(crate) fn from_inputs(
         inputs: Inputs,
+        exits: Arc<[Option<crate::model::RepositoryExit>]>,
         gutter_scale: f32,
         activation: Option<&[u32]>,
         threads: usize,
@@ -1111,8 +1073,6 @@ impl Packing {
             labels,
             rows: regions,
             items,
-            fading,
-            exit_reflow,
         } = inputs;
         let Some(first) = regions.first().filter(|r| !r.is_empty()) else {
             return Ok(Self::default());
@@ -1140,7 +1100,6 @@ impl Packing {
             growth,
         )?;
         let mut held = held::Weights::new(first.len());
-        let exit_durations = exit_durations(&fading, exit_reflow);
         let earliest = births.iter().copied().min().unwrap_or(0);
         let mut reflows = Vec::<reflow::Change>::new();
         let samples: Vec<_> = regions
@@ -1181,14 +1140,16 @@ impl Packing {
                 if presence.iter().all(|&p| p == 0.0) {
                     presence[order[0]] = 1.0;
                 }
-                let now = crate::model::tick_time(
-                    u64::try_from(tick).expect("bounded packing tick"),
-                );
+                let now = u64::try_from(tick).expect("bounded packing tick");
                 let shown: Vec<_> = presence
                     .iter()
                     .enumerate()
                     .map(|(i, &p)| {
-                        if fading.get(i).is_some_and(|&fade| now >= fade) {
+                        if exits
+                            .get(i)
+                            .and_then(|exit| *exit)
+                            .is_some_and(|exit| now >= exit.start)
+                        {
                             0.0
                         } else {
                             p
@@ -1200,29 +1161,19 @@ impl Packing {
                     held.step_towards(tick, &items[tick], &items[future], &shown);
                 if let Some(target) = held.target_at_start(tick)
                     && shown.iter().enumerate().all(|(i, &p)| {
-                        let fade = fading
-                            .get(i)
-                            .copied()
-                            .unwrap_or(crate::model::Time::INFINITY);
+                        let exit = exits.get(i).and_then(|exit| *exit);
                         let finish = tick + held::reflow_ticks();
-                        let end = crate::model::tick_time(
-                            u64::try_from(finish).expect("bounded reflow"),
-                        );
+                        let end = u64::try_from(finish).expect("bounded reflow");
                         let birth = activation.map_or(births[i], |a| {
                             births[i]
                                 .min(usize::try_from(a[i]).expect("bounded activation"))
                         });
                         let lead =
                             usize::try_from(BIRTH_TICKS).expect("bounded lead-in");
-                        (p >= 1.0 && end < fade)
+                        (p >= 1.0 && exit.is_none_or(|exit| end < exit.start))
                             || (p == 0.0
                                 && (finish < birth.saturating_sub(lead)
-                                    || now
-                                        >= fade
-                                            + exit_durations
-                                                .get(i)
-                                                .copied()
-                                                .unwrap_or(exit_reflow)))
+                                    || exit.is_some_and(|exit| now >= exit.end)))
                     })
                     && let Some(change) = reflow::plan(
                         tick,
@@ -1237,11 +1188,10 @@ impl Packing {
                 {
                     reflows.push(change);
                 }
-                for ((presence, &fade), &duration) in
-                    presence.iter_mut().zip(&fading).zip(&exit_durations)
-                {
-                    let elapsed = ((now - fade) / duration).clamp(0.0, 1.0);
-                    *presence *= exit_presence(elapsed);
+                for (presence, exit) in presence.iter_mut().zip(exits.iter()) {
+                    if let Some(exit) = exit {
+                        *presence *= exit_presence(now, *exit);
+                    }
                 }
                 Sample { weights, presence }
             })
@@ -1258,7 +1208,7 @@ impl Packing {
             samples: samples.into(),
             rotated,
             zoom: Arc::default(),
-            visible_until: fading.into(),
+            exits,
             tiling: TilingCache::default(),
             fresh_tiling: false,
             threads,
@@ -1499,15 +1449,14 @@ impl Packing {
         tile_tick: usize,
         tiling: Option<&mut Tiling>,
     ) -> Vec<Option<Tile>> {
-        let now = crate::model::tick_time(
-            u64::try_from(tile_tick).expect("bounded packing tick"),
-        );
+        let now = u64::try_from(tile_tick).expect("bounded packing tick");
         let mut exits: Vec<_> = visibility
             .iter()
-            .zip(self.visible_until.iter())
+            .zip(self.exits.iter())
             .enumerate()
-            .filter_map(|(i, (&p, &fade))| {
-                (p > 0.0 && p < 1.0 && now >= fade).then_some((p, i))
+            .filter_map(|(i, (&p, exit))| {
+                (p > 0.0 && p < 1.0 && exit.is_some_and(|exit| now >= exit.start))
+                    .then_some((p, i))
             })
             .collect();
         if exits.is_empty() {
@@ -2129,8 +2078,7 @@ mod tests {
                     phases[(i * stride + offset) % phases.len()]
                 });
                 for spacing in [1, 2, 3] {
-                    let starts = phases
-                        .map(|tick| crate::model::tick_time(u64::from(tick * spacing)));
+                    let starts = phases.map(|tick| Some(u64::from(tick * spacing)));
                     largest =
                         largest.max(staggered_edge_step(&nodes, &weights, &starts));
                 }
@@ -2143,20 +2091,16 @@ mod tests {
     fn staggered_edge_step(
         nodes: &[Node],
         weights: &[f32],
-        starts: &[crate::model::Time],
+        starts: &[Option<u64>],
     ) -> f32 {
-        let durations = exit_durations(starts, 4.0);
-        let samples: Vec<_> = (0..=760)
+        let exits = crate::model::exits_from_starts(starts);
+        let end = exits.iter().flatten().map(|exit| exit.end).max().unwrap();
+        let samples: Vec<_> = (0..=end)
             .map(|tick| Sample {
                 weights: weights.to_vec(),
-                presence: starts
+                presence: exits
                     .iter()
-                    .zip(&durations)
-                    .map(|(&start, &duration)| {
-                        let elapsed =
-                            (crate::model::tick_time(tick) - start) / duration;
-                        exit_presence(elapsed.clamp(0.0, 1.0))
-                    })
+                    .map(|exit| exit.map_or(1.0, |exit| exit_presence(tick, exit)))
                     .collect(),
             })
             .collect();
@@ -2167,7 +2111,7 @@ mod tests {
             rotated: vec![false; weights.len()],
             inputs: vec![vec![content; weights.len()]; samples.len()].into(),
             samples: samples.into(),
-            visible_until: starts.into(),
+            exits: exits.into(),
             ..Packing::default()
         };
         let at = |tick| {
@@ -2177,6 +2121,11 @@ mod tests {
                 .map(|placement| placement.tile)
                 .collect::<Vec<_>>()
         };
+        for (index, exit) in packing.exits.iter().enumerate() {
+            let end = usize::try_from(exit.unwrap().end).unwrap();
+            assert!(packing.samples[end - 1].presence[index] > 0.0);
+            assert_eq!(packing.samples[end].presence[index], 0.0);
+        }
         let mut largest = 0.0_f32;
         let mut previous = at(0);
         for tick in 1..packing.samples.len() {
@@ -2207,8 +2156,6 @@ mod tests {
     }
 
     fn ending_fixture(shared_ending: bool) -> Packing {
-        use crate::model::Time;
-
         let mut row = capacity_fixture();
         row.truncate(3);
         row[0].items = 2.0;
@@ -2222,14 +2169,9 @@ mod tests {
         for _ in 0..301 {
             inputs.push(row.clone());
         }
-        let ending = Time::seconds(1.0);
-        let other = if shared_ending {
-            ending
-        } else {
-            Time::INFINITY
-        };
-        inputs.fade_from(&[ending, other, other], 0.0, 4.0);
-        Packing::from_inputs(inputs, 4.0, None, 1).unwrap()
+        let other = shared_ending.then_some(60);
+        let exits = crate::model::exits_from_starts(&[Some(60), other, other]);
+        Packing::from_inputs(inputs, exits.into(), 4.0, None, 1).unwrap()
     }
 
     #[test]
@@ -2238,15 +2180,8 @@ mod tests {
         for row in fixture().into_iter().take(1600) {
             inputs.push(row.into_iter().take(2).collect());
         }
-        inputs.fade_from(
-            &[
-                crate::model::Time::seconds(20.0),
-                crate::model::Time::INFINITY,
-            ],
-            2.5,
-            4.0,
-        );
-        let packing = Packing::from_inputs(inputs, 4.0, None, 1).unwrap();
+        let exits = crate::model::exits_from_starts(&[Some(1350), None]);
+        let packing = Packing::from_inputs(inputs, exits.into(), 4.0, None, 1).unwrap();
         let tiles = |tick| {
             let regions = packing.sample(tick).unwrap().0;
             [regions[0].tile, regions[1].tile]
