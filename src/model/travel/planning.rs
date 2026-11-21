@@ -205,6 +205,11 @@ fn search(
 ) -> Trip {
     let mut best = template.clone();
     let first = release.min(template.arrival - 1).max(template.free);
+    let birth_begin = template
+        .arrival
+        .saturating_sub(crate::model::BIRTH_TICKS + 1);
+    let birth = capture.row(birth_begin)[template.destination_repository].is_none()
+        && capture.row(template.free)[template.destination_repository].is_none();
     let Some(target_tile) =
         capture.row(template.arrival)[template.destination_repository]
     else {
@@ -259,8 +264,15 @@ fn search(
         candidate.fade =
             candidate.route.duration > ticks_duration(candidate.arrival - begin);
         candidate.failure = Some("moving_network");
-        if let Some(route) =
-            moving_route(capture, &candidate, &points, begin, speed, animation_delay)
+        if (!birth || !candidate.fade)
+            && let Some(route) = moving_route(
+                capture,
+                &candidate,
+                &points,
+                begin,
+                speed,
+                animation_delay,
+            )
         {
             candidate.route = route;
             candidate.failure = None;
@@ -272,13 +284,7 @@ fn search(
             best.cutoff = Some(begin);
         }
     }
-    let birth_begin = template
-        .arrival
-        .saturating_sub(crate::model::BIRTH_TICKS + 1);
-    if best.fade
-        && capture.row(birth_begin)[template.destination_repository].is_none()
-        && capture.row(template.free)[template.destination_repository].is_none()
-    {
+    if best.fade && birth {
         if let Some(approach) = birth_approach(capture, template, first, speed, router)
         {
             return approach;
