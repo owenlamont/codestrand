@@ -818,6 +818,7 @@ impl Simulation {
         let endings = simulation.repository_ends.clone();
         let mut pass = 0;
         let mut compactions = 0;
+        let walk = options.travel_cap == TravelCap::None;
         loop {
             pass += 1;
             check_travel_pass(pass)?;
@@ -841,18 +842,12 @@ impl Simulation {
                     simulation.travel.stats.padding_seconds
                 );
             }
-            if simulation.travel.protect_birth_walks(&mut history) {
+            if walk && simulation.travel.protect_birth_walks(&mut history) {
                 compactions = 0;
                 continue;
             }
             let adjusted = simulation.adjust_travel_padding(options, &padding);
-            let settled = adjusted == padding
-                || (options.travel_cap != TravelCap::None
-                    && pass >= 4
-                    && simulation
-                        .travel
-                        .unresolved_birth(options.bot_travel)
-                        .is_none());
+            let settled = adjusted == padding || (!walk && pass >= 4);
             if !settled {
                 padding = adjusted;
                 continue;
@@ -863,7 +858,7 @@ impl Simulation {
                     padding = refined;
                     continue;
                 }
-                if compactions == 1 && options.travel_cap == TravelCap::None {
+                if compactions == 1 && walk {
                     compactions = 2;
                     padding = simulation.compact_travel_padding(&padding);
                     continue;
@@ -873,7 +868,9 @@ impl Simulation {
             compactions = 1;
             padding = simulation.compact_travel_padding(&padding);
         }
-        simulation.travel.require_birth_routes(options.bot_travel)?;
+        if walk {
+            simulation.travel.require_birth_routes(options.bot_travel)?;
+        }
         {
             let _phase = trace.phase(Phase::Caption);
             simulation.caption_plan =

@@ -185,16 +185,16 @@ impl Simulation {
                 planned = Some(padding.clone());
             }
             self.plan_travel(options, padding);
-            if self.travel.protect_birth_walks(history) {
+            if options.travel_cap == TravelCap::None
+                && self.travel.protect_birth_walks(history)
+            {
                 planned = None;
                 compactions = 0;
                 continue;
             }
             let adjusted = self.adjust_travel_padding(options, padding);
             if adjusted != *padding
-                && (options.travel_cap == TravelCap::None
-                    || pass < 4
-                    || self.travel.unresolved_birth(options.bot_travel).is_some())
+                && (options.travel_cap == TravelCap::None || pass < 4)
             {
                 *padding = adjusted;
                 continue;
@@ -211,7 +211,9 @@ impl Simulation {
             }
             break;
         }
-        self.travel.require_birth_routes(options.bot_travel)?;
+        if options.travel_cap == TravelCap::None {
+            self.travel.require_birth_routes(options.bot_travel)?;
+        }
         Ok(pass)
     }
 

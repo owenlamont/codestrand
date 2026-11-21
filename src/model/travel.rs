@@ -278,15 +278,6 @@ impl Plan {
             .map(|t| t.commit)
     }
 
-    pub(super) fn unresolved_birth(&self, bots: super::BotTravel) -> Option<usize> {
-        self.trips
-            .iter()
-            .find(|trip| {
-                trip.birth && trip.fade && (!trip.bot || bots == super::BotTravel::Walk)
-            })
-            .map(|trip| trip.commit)
-    }
-
     pub(super) fn protect_birth_walks(&self, history: &mut super::Schedule) -> bool {
         let mut changed = false;
         for trip in self.trips.iter().filter(|trip| {
@@ -301,9 +292,12 @@ impl Plan {
         &self,
         bots: super::BotTravel,
     ) -> anyhow::Result<()> {
-        if let Some(commit) = self.unresolved_birth(bots) {
+        if let Some(trip) = self.trips.iter().find(|trip| {
+            trip.birth && trip.fade && (!trip.bot || bots == super::BotTravel::Walk)
+        }) {
             anyhow::bail!(
-                "no safe gutter walk to a repository's first commit (event {commit})"
+                "no safe gutter walk to a repository's first commit (event {})",
+                trip.commit
             );
         }
         Ok(())
@@ -399,14 +393,6 @@ impl Plan {
 }
 
 impl Trip {
-    fn wait_policy(&self, policy: super::TravelCap) -> super::TravelCap {
-        if self.birth {
-            super::TravelCap::None
-        } else {
-            policy
-        }
-    }
-
     fn active(&self, author: usize, tick: u64) -> bool {
         self.author == author
             && self.departure <= tick
@@ -615,7 +601,7 @@ impl Simulation {
                 && (!t.bot || options.bot_travel == super::BotTravel::Walk)
                 && t.fade
         }) {
-            let policy = trip.wait_policy(options.travel_cap);
+            let policy = options.travel_cap;
             let needed = if trip.route.is_empty() {
                 policy.blocked_ticks()
             } else {
@@ -703,7 +689,7 @@ impl Simulation {
                     .starts
                     .partition_point(|&s| s <= tick_time(trip.free))
                     .saturating_sub(1);
-                let policy = trip.wait_policy(options.travel_cap);
+                let policy = options.travel_cap;
                 let needed = if trip.bot && options.bot_travel == super::BotTravel::Fade
                 {
                     0
@@ -1447,7 +1433,7 @@ mod tests {
     }
 
     #[test]
-    fn bots_keep_their_policy_and_walking_births_can_wait() {
+    fn capped_births_fade_and_bots_keep_their_policy() {
         for (cap, bot) in [(0.0, false), (0.4, true)] {
             let mut events = Vec::new();
             for i in 0..4 {
@@ -1475,8 +1461,8 @@ mod tests {
             if bot {
                 assert_eq!(sim.schedule.starts, nominal.starts);
             } else {
-                assert!(sim.schedule.starts[1] > nominal.starts[1]);
-                assert_eq!(sim.travel.stats.birth_fades, 0);
+                assert_eq!(sim.schedule.starts, nominal.starts);
+                assert_eq!(sim.travel.stats.birth_fades, 1);
             }
         }
     }
@@ -1509,11 +1495,7 @@ mod tests {
         assert!(a.schedule.starts.windows(2).all(|s| s[0] < s[1]));
         for event in 0..a.events.len() {
             let birth = a.clock.history.padding(event);
-            if !a.clock.history.births().any(|(index, _)| index == event) {
-                assert!(
-                    a.schedule.padding(event) - birth <= options.travel_cap.ticks()
-                );
-            }
+            assert!(a.schedule.padding(event) - birth <= options.travel_cap.ticks());
         }
         for frame in [0, 15, 30, 45, 60, 90, 120, 20, 80, 0, 110] {
             a.advance_to(frame, 30);

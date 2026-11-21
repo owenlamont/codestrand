@@ -224,6 +224,7 @@ fn search(
     release: u64,
     speed: f32,
     router: &mut Router,
+    mandatory_birth_walk: bool,
 ) -> Trip {
     let mut best = template.clone();
     let first = release.min(template.arrival - 1).max(template.free);
@@ -301,12 +302,12 @@ fn search(
         }
     }
     if best.fade
-        && template.birth
+        && mandatory_birth_walk
         && let Some(approach) = birth_approach(capture, template, first, speed, router)
     {
         return approach;
     }
-    if template.birth
+    if mandatory_birth_walk
         && template.arrival - first >= crate::model::BIRTH_TICKS * 2
         && dock_outpaces_walker(capture, template, speed, target_fraction)
     {
@@ -410,7 +411,7 @@ pub(super) fn trips(
     capture: &Capture,
     speed: f32,
     bots: crate::model::BotTravel,
-    keep_idle: bool,
+    walk: bool,
 ) -> (Vec<Trip>, usize) {
     let mut previous = vec![None; capture.poses.len()];
     let mut result = Vec::<Trip>::new();
@@ -427,7 +428,7 @@ pub(super) fn trips(
             continue;
         }
         if (prior.repository == service.repository && prior.dock == service.dock)
-            || ((!keep_idle || (service.bot && bots == crate::model::BotTravel::Fade))
+            || ((!walk || (service.bot && bots == crate::model::BotTravel::Fade))
                 && ticks_duration(service.tick - prior.tick)
                     >= crate::model::AVATAR_IDLE + 1.2)
         {
@@ -459,7 +460,14 @@ pub(super) fn trips(
             proof: None,
         };
         if !service.bot || bots == crate::model::BotTravel::Walk {
-            best = search(capture, &best, prior.release, speed, &mut router);
+            best = search(
+                capture,
+                &best,
+                prior.release,
+                speed,
+                &mut router,
+                walk && best.birth,
+            );
         }
         if best.route.is_empty() {
             best.departure = service

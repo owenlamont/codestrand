@@ -631,9 +631,9 @@ Walking avatars remain visible during travel until an inferred calendar departur
 With `--contributor-travel walk`, walking trips
 also remain routed across long idle gaps instead of disappearing and re-entering at a
 different repository. After the last service, the normal inactivity fade still applies.
-Walking trips to a repository's first commit can add waiting time under either
-contributor policy. Births follow presentation time, so the gutter can open during
-the wait. A later birth waits when its moving gutter would outrun an active walk.
+Trips to a repository's first commit use the selected travel policy. Births follow
+presentation time, so the gutter can open before the first commit. In `walk` mode,
+a later birth can wait when its moving gutter would outrun an active walk.
 Calendar departures and content follow history time, which holds during
 travel waits. A required walk that cannot fit within the planning budgets reports
 an error.
