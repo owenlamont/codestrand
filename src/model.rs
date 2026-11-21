@@ -817,7 +817,10 @@ impl Simulation {
             check_travel_pass(pass)?;
             options.progress.pass(pass);
             let _pass = trace.phase(Phase::Pass);
-            if pass > 1 || padding.iter().any(|&(_, ticks)| ticks > 0) {
+            if pass > 1
+                || !history.birth_protections.is_empty()
+                || padding.iter().any(|&(_, ticks)| ticks > 0)
+            {
                 simulation.apply_padding(
                     &events,
                     options,
@@ -1094,10 +1097,32 @@ impl Simulation {
         };
         simulation.births = simulation.births_for(&simulation.schedule);
         let snapshots = simulation.plan_repositories(prior_active, options)?;
+        simulation.schedule.birth_protections = simulation.birth_protections();
         if options.travel_window_seconds.is_none() {
             simulation.plan_avatar_envelopes(snapshots);
         }
         Ok(simulation)
+    }
+
+    fn birth_protections(&self) -> Vec<(usize, usize)> {
+        self.schedule
+            .births()
+            .filter_map(|(birth, write)| {
+                let begin = write - BIRTH_TICKS - 1;
+                let first = self.schedule.applied(begin.saturating_sub(1));
+                if first >= birth {
+                    return None;
+                }
+                let growing = self.packing.growing_during(
+                    usize::try_from(begin).expect("bounded birth"),
+                    usize::try_from(write - 1).expect("bounded birth"),
+                );
+                (first..birth)
+                    .rev()
+                    .find(|&index| growing[self.events[index].repository])
+                    .map(|earlier| (birth, earlier))
+            })
+            .collect()
     }
 
     /// Turns a batch of sampled ticks into packing inputs, in tick order, on scoped threads.

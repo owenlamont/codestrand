@@ -1358,6 +1358,25 @@ impl Packing {
         })
     }
 
+    pub(crate) fn growing_during(&self, begin: usize, end: usize) -> Vec<bool> {
+        let before = self.layout_at(begin, None, None, None).tiles;
+        let after = self.layout_at(end, None, None, None).tiles;
+        before
+            .iter()
+            .zip(after)
+            .map(|(&before, after)| {
+                before.zip(after).is_some_and(|(before, after)| {
+                    let start = before.high - before.low;
+                    let finish = after.high - after.low;
+                    let change = finish - start;
+                    [start, finish]
+                        .into_iter()
+                        .any(|size| (change.x * size.y + change.y * size.x) > 1e-6)
+                })
+            })
+            .collect()
+    }
+
     fn sample_rows(
         &self,
         tiles: u64,

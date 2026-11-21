@@ -16,6 +16,7 @@ pub(super) fn padding_at(padding: &[(usize, u32)], index: usize) -> u32 {
 pub(crate) struct Schedule {
     pub(crate) starts: Vec<Time>,
     services: Vec<Service>,
+    pub(super) birth_protections: Vec<(usize, usize)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -101,16 +102,27 @@ impl Schedule {
         padding: impl Fn(usize) -> u32,
     ) -> Self {
         let mut extra = 0;
-        let mut services = Vec::with_capacity(len);
+        let mut services: Vec<Service> = Vec::with_capacity(len);
+        let mut protections = self.birth_protections.iter().peekable();
         let starts = self.starts[..len]
             .iter()
             .enumerate()
             .map(|(index, &start)| {
                 let wait = padding(index);
                 extra += u64::from(wait);
-                let start = start.after(tick_time(extra));
                 let service = &self.services[index];
-                let tick = service.tick.saturating_add(extra);
+                let mut tick = service.tick.saturating_add(extra);
+                let protection = protections
+                    .next_if(|&&(birth, _)| birth == index)
+                    .map_or(0, |&(_, earlier)| {
+                        services[earlier]
+                            .tick
+                            .saturating_add(BIRTH_TICKS + 2)
+                            .saturating_sub(tick)
+                    });
+                extra += protection;
+                tick = tick.saturating_add(protection);
+                let start = start.after(tick_time(extra));
                 services.push(Service {
                     tick,
                     padding: service.padding.saturating_add(wait),
@@ -123,7 +135,11 @@ impl Schedule {
                 }
             })
             .collect();
-        Self { starts, services }
+        Self {
+            starts,
+            services,
+            birth_protections: Vec::new(),
+        }
     }
 
     pub(super) fn births(&self) -> impl Iterator<Item = (usize, u64)> + '_ {
@@ -225,7 +241,11 @@ impl Schedule {
                 start
             })
             .collect();
-        Self { starts, services }
+        Self {
+            starts,
+            services,
+            birth_protections: Vec::new(),
+        }
     }
 
     pub(crate) fn start(&self, index: usize, tick: u64) -> Option<Time> {
@@ -305,6 +325,35 @@ mod tests {
         assert_eq!(actual[2] - actual[1], BIRTH_TICKS + 1);
         assert!(actual.windows(2).all(|pair| pair[0] < pair[1]));
         assert!((3..events.len()).all(|index| replay.padding(index) == 0));
+    }
+
+    #[test]
+    fn a_birth_yields_to_the_last_write_on_an_expanding_neighbour() {
+        let (mut events, _) = super::super::tests::short_repository_history(2);
+        events.swap(1, 2);
+        for (index, event) in events.iter_mut().enumerate() {
+            event.seconds = i64::try_from(index).unwrap() * 86_400;
+        }
+        let mut history = Schedule::for_replay(
+            &events,
+            &super::super::Options {
+                seconds_per_day: 0.5,
+                ..Default::default()
+            },
+        );
+        assert_eq!(history.births().next().unwrap().0, 2);
+        history.birth_protections.push((2, 1));
+        let original: Vec<_> = history.commit_ticks().collect();
+        for travel in [0, 24] {
+            let replay = history
+                .with_travel(events.len(), |index| if index == 2 { travel } else { 0 });
+            let ticks: Vec<_> = replay.commit_ticks().collect();
+            assert_eq!(ticks[1], original[1]);
+            assert_eq!(
+                ticks[2],
+                (original[2] + u64::from(travel)).max(ticks[1] + BIRTH_TICKS + 2)
+            );
+        }
     }
 
     #[test]
