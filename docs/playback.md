@@ -2,7 +2,8 @@
 
 Preview loops the selected history. Export renders the same launch timeline at
 explicit frame times at 1x speed. Export uses a static overview that fits the scene by
-default. Use `--camera-path` for a scripted camera.
+default. Use `--camera-path` for a scripted camera. New tiles grow for 0.75 seconds
+and settle just before their first commit.
 
 Preview renders at the window's physical resolution, including on HiDPI displays.
 Resizing or maximising keeps a 720-logical-pixel-high UI: text scales with height,
@@ -289,12 +290,14 @@ A newcomer splits one existing tile or subtree. Other repositories retain their
 relative order. A reflow can change the split tree between repository arrivals and exits.
 Tiles and their contents ease together when the new tree improves area shares and
 the gutters stay connected throughout the move.
-Splits clamp to a ground-aspect range of 1:3.5 to 3.5:1, inclusive. Packing reserves
-space ahead of arrivals. The opening shows every repository still active from before
-the selected range. If none are active, the first repository has a lead-in tile.
-Later tiles and their titles grow together from the first commit. During the first six
-seconds of compressed history, or until the first exit starts, tile edges interpolate
-within a fixed split tree in both contributor travel modes.
+Splits clamp to a ground-aspect range of 1:3.5 to 3.5:1, inclusive. The opening shows
+every repository still active from before the selected range.
+If none are active, the first repository has a lead-in tile.
+Later tiles grow for 0.75 seconds, one at a time,
+and settle just before their first commit. Neighbouring tiles shrink along shared edges
+and can show commits during the move. Dense arrivals can delay commits while a tile
+makes room. Commits retain their order. Moving edges ease briefly at both ends and
+travel at steady speed in between.
 Between reflows, tiles and shared gutters partition the field.
 `--gutter` sets spacing using the world distance represented by a pixel in the
 1280×720 reference view. The default is `4` and the range is `0`–`20`, inclusive.
@@ -358,15 +361,12 @@ With `--contributor-travel walk`, walking trips
 also remain routed across long idle gaps instead of disappearing and re-entering at a
 different repository. After the last service, the normal inactivity fade still applies.
 Uncapped walking services trips in commit order and adds another second of waiting
-when tile motion or insufficient travel time blocks a route. New repository tiles get
-a full 0.75-second birth window inside their added wait. At the start of a wait,
-tile sizes transition toward the upcoming commit for at most 0.75 seconds,
-finishing before arrival. Tiles then hold their size, using the upcoming commit's
-zoom ceiling while fitting the content from before the commit. The content outline
-switches on arrival without moving the tile. Layout and calendar departures follow
-history time, which holds during travel waits. An uncapped plan
-that cannot find safe routes within the planning budgets reports an error instead of
-silently accepting a travel fade.
+when insufficient travel time blocks a route. When a new gutter opens too late for
+a safe walk to the first write, the contributor fades across. Waiting longer would
+move the birth and its gutter later with the commit. Births follow presentation time.
+Calendar departures and content follow history time, which holds during travel waits.
+Other uncapped trips that cannot find a safe route within the planning budgets
+report an error.
 A plan that cannot converge within 32 replans stops with an error.
 Dormant contributors follow their previous repository's lane while waiting, so later
 tile growth cannot bury the starting point of their next uncapped trip.
@@ -511,8 +511,8 @@ Theme switching restyles active snippets without restarting their motion or fade
 `2`, inclusive). `0.5` doubles the crossing time, giving snippets longer to read.
 A walking contributor stays until its last fragment lands before leaving for its
 next repository, and a slower setting also delays a calendar departure until then.
-Commits keep their timeline spacing unless a walking trip needs the extra wait;
-`--contributor-travel auto` may still fade a contributor across mid-flight.
+Commits keep their timeline spacing unless a new tile or walking trip needs extra
+time. `--contributor-travel auto` may still fade a contributor across mid-flight.
 
 ```sh
 codestrand export frames --fragment-speed 0.5 --frames 90 --fps 30

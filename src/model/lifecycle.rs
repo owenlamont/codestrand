@@ -41,6 +41,10 @@ pub(super) fn repository_exits(
 }
 
 fn reserve_archive_reflows(exits: &mut [Option<RepositoryExit>], schedule: &Schedule) {
+    let births: Vec<_> = schedule
+        .births()
+        .map(|(_, write)| (write - super::BIRTH_TICKS - 1, write))
+        .collect();
     let windows = [REFLOW_TICKS, STAGGERED_REFLOW_TICKS].map(|duration| {
         let mut after = 0;
         schedule
@@ -48,17 +52,38 @@ fn reserve_archive_reflows(exits: &mut [Option<RepositoryExit>], schedule: &Sche
             .chain([u64::MAX])
             .filter_map(|commit| {
                 let start = std::mem::replace(&mut after, commit.saturating_add(1));
-                let latest_start = commit.checked_sub(duration)?;
+                let cutoff = births
+                    .get(births.partition_point(|&(_, write)| write < start))
+                    .map_or(commit, |&(begin, _)| commit.min(begin));
+                let latest_start = cutoff.checked_sub(duration)?;
                 (latest_start >= start).then_some(start..=latest_start)
             })
             .collect::<Vec<_>>()
     });
-    for exit in exits.iter_mut().flatten() {
+    let mut order: Vec<_> = exits
+        .iter()
+        .enumerate()
+        .filter_map(|(i, exit)| exit.map(|exit| (exit.start, i)))
+        .collect();
+    order.sort_unstable();
+    let mut earliest = 0;
+    let mut previous = None;
+    for (start, index) in order {
+        let exit = exits[index].as_mut().expect("scheduled exit");
         let duration = exit.end - exit.start;
         let candidates = &windows[usize::from(duration == STAGGERED_REFLOW_TICKS)];
-        let index = candidates.partition_point(|window| *window.end() < exit.start);
-        exit.start = exit.start.max(*candidates[index].start());
+        exit.start = if let Some((same_start, scheduled)) = previous
+            && same_start == start
+        {
+            scheduled
+        } else {
+            let start = start.max(earliest);
+            let index = candidates.partition_point(|window| *window.end() < start);
+            start.max(*candidates[index].start())
+        };
         exit.end = exit.start.saturating_add(duration);
+        earliest = exit.end;
+        previous = Some((start, exit.start));
     }
 }
 
@@ -448,12 +473,11 @@ mod tests {
         let history = sim.schedule.clone();
         assert_eq!(sim.end_tick(), 721);
         for padding in [0, 37] {
-            sim.schedule = Schedule::with_padding(
-                &events,
-                options.seconds_per_day,
-                options.max_idle_seconds,
-                |index| if index == 1 { padding } else { 0 },
-            );
+            sim.schedule =
+                history.with_travel(
+                    events.len(),
+                    |index| if index == 1 { padding } else { 0 },
+                );
             sim.clock = Clock::new(history.clone(), sim.schedule.clone());
             let end = sim.end_tick();
             assert_eq!(end, 721 + u64::from(padding));

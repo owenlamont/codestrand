@@ -3,6 +3,8 @@ use std::time::Duration;
 use super::{LEAD_IN, TAIL, TICK_RATE, Time, tick_seconds, tick_time};
 use crate::timeline::Event;
 
+pub(crate) const BIRTH_TICKS: u64 = 45;
+
 pub(super) fn padding_at(padding: &[(usize, u32)], index: usize) -> u32 {
     padding
         .iter()
@@ -20,6 +22,7 @@ pub(crate) struct Schedule {
 struct Service {
     tick: u64,
     padding: u32,
+    birth: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -72,40 +75,66 @@ impl Clock {
         self.presentation
             .present_tail_tick(&self.history, history_tick)
     }
-
-    pub(super) fn tile_transition(&self, tick: u64) -> Option<(u64, f32)> {
-        let next = self.presentation.applied(tick);
-        let service = self.presentation.services.get(next)?;
-        service.padding.checked_sub(1)?;
-        let begin = self.wait_begin(next);
-        let span = service.tick.saturating_sub(begin).saturating_sub(1).min(45);
-        if span == 0 || tick < begin || tick >= begin + span {
-            return None;
-        }
-        Some((
-            self.history.services[next].tick.saturating_sub(1),
-            super::ticks_duration(tick - begin) / super::ticks_duration(span),
-        ))
-    }
-
-    pub(super) fn wait_begin(&self, index: usize) -> u64 {
-        let arrival = self.history.services[index].tick;
-        index.checked_sub(1).map_or(arrival, |previous| {
-            self.presentation.services[previous]
-                .tick
-                .saturating_add(arrival - self.history.services[previous].tick)
-        })
-    }
-
-    pub(super) fn service_ticks(&self, index: usize) -> (u64, u64) {
-        (
-            self.presentation.services[index].tick,
-            self.history.services[index].tick,
-        )
-    }
 }
 
 impl Schedule {
+    pub(super) fn for_replay(events: &[Event], options: &super::Options) -> Self {
+        let range = options.selected_range(events.len());
+        let mut seen: std::collections::HashSet<_> = events[..range.start]
+            .iter()
+            .map(|event| event.repository)
+            .collect();
+        let selected = &events[range];
+        let opening = seen.is_empty();
+        Self::build(
+            selected,
+            options.seconds_per_day,
+            options.max_idle_seconds,
+            |_| 0,
+            |index| seen.insert(selected[index].repository) && !(opening && index == 0),
+        )
+    }
+
+    pub(super) fn with_travel(
+        &self,
+        len: usize,
+        padding: impl Fn(usize) -> u32,
+    ) -> Self {
+        let mut extra = 0;
+        let mut services = Vec::with_capacity(len);
+        let starts = self.starts[..len]
+            .iter()
+            .enumerate()
+            .map(|(index, &start)| {
+                let wait = padding(index);
+                extra += u64::from(wait);
+                let start = start.after(tick_time(extra));
+                let service = &self.services[index];
+                let tick = service.tick.saturating_add(extra);
+                services.push(Service {
+                    tick,
+                    padding: service.padding.saturating_add(wait),
+                    birth: service.birth,
+                });
+                if first_tick(start) == tick || tick == u64::MAX {
+                    start
+                } else {
+                    tick_time(tick)
+                }
+            })
+            .collect();
+        Self { starts, services }
+    }
+
+    pub(super) fn births(&self) -> impl Iterator<Item = (usize, u64)> + '_ {
+        self.services
+            .iter()
+            .enumerate()
+            .filter_map(|(index, service)| {
+                service.birth.then_some((index, service.tick))
+            })
+    }
+
     pub(super) fn present_tail_tick(&self, history: &Self, history_tick: u64) -> u64 {
         self.services.last().map_or(history_tick, |last| {
             let history_last = history.services[self.services.len() - 1].tick;
@@ -131,9 +160,22 @@ impl Schedule {
         idle: f32,
         padding: impl Fn(usize) -> u32,
     ) -> Self {
+        Self::build(events, rate, idle, padding, |_| false)
+    }
+
+    fn build(
+        events: &[Event],
+        rate: f32,
+        idle: f32,
+        padding: impl Fn(usize) -> u32,
+        mut is_birth: impl FnMut(usize) -> bool,
+    ) -> Self {
         let mut previous = events.first().map_or(0, |event| event.seconds);
         let mut now = Time::seconds(LEAD_IN);
         let mut extra = 0_u64;
+        let mut next_birth = BIRTH_TICKS + 1;
+        let mut next_service = 0;
+        let mut has_birth = false;
         let mut services = Vec::with_capacity(events.len());
         let starts = events
             .iter()
@@ -148,10 +190,37 @@ impl Schedule {
                 previous = event.seconds;
                 let padding = padding(index);
                 extra += u64::from(padding);
-                let start = now.after(tick_time(extra));
+                let birth = is_birth(index);
+                let mut birth_wait = if birth {
+                    next_birth.saturating_sub(first_tick(now.after(tick_time(extra))))
+                } else {
+                    0
+                };
+                extra += birth_wait;
+                let mut start = now.after(tick_time(extra));
+                let service = first_tick(start);
+                let mut tick = service.max(next_service);
+                if birth {
+                    tick = tick.max(next_birth);
+                    birth_wait += tick - service;
+                    extra += tick - service;
+                }
+                if tick != service {
+                    start = tick_time(tick);
+                }
+                has_birth |= birth;
+                if birth || index == 0 {
+                    next_birth = tick.saturating_add(BIRTH_TICKS + 1);
+                }
+                if has_birth {
+                    next_service = tick.saturating_add(1);
+                }
                 services.push(Service {
-                    tick: first_tick(start),
-                    padding,
+                    tick,
+                    padding: padding.saturating_add(
+                        u32::try_from(birth_wait).expect("bounded birth wait"),
+                    ),
+                    birth,
                 });
                 start
             })
@@ -220,34 +289,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn wait_weights_never_jump_to_arrival_before_blending() {
-        let mut event = crate::timeline::synthetic().remove(0);
-        event.seconds = 0;
-        let events = vec![event; 100];
-        let history = Schedule::new(&events, 0.5, 1.0);
-        let presentation = Schedule::with_padding(&events, 0.5, 1.0, |index| {
-            u32::try_from(index % 4 + 1).unwrap() * 20
-        });
-        let clock = Clock::new(history, presentation);
-        for index in 0..events.len() {
-            let arrival = clock.history.services[index].tick;
-            let start = index
-                .checked_sub(1)
-                .map_or(0, |previous| clock.presentation.services[previous].tick);
-            let mut previous = 0.0;
-            for tick in start..=clock.presentation.services[index].tick {
-                let weight = if clock.rows(tick).0 < arrival {
-                    0.0
-                } else {
-                    clock.tile_transition(tick).map_or(1.0, |(_, blend)| blend)
-                };
-                assert!(
-                    weight >= previous,
-                    "wait {index}, tick {tick}: {previous} -> {weight}"
-                );
-                previous = weight;
-            }
-        }
+    fn dense_births_delay_only_the_first_write_that_needs_room() {
+        let (events, _) = super::super::tests::short_repository_history(3);
+        let options = super::super::Options {
+            seconds_per_day: 0.1,
+            max_idle_seconds: 0.1,
+            ..Default::default()
+        };
+        let nominal =
+            Schedule::new(&events, options.seconds_per_day, options.max_idle_seconds);
+        let replay = Schedule::for_replay(&events, &options);
+        let actual: Vec<_> = replay.commit_ticks().collect();
+        assert_eq!(actual[0], nominal.commit_ticks().next().unwrap());
+        assert_eq!(actual[1] - actual[0], BIRTH_TICKS + 1);
+        assert_eq!(actual[2] - actual[1], BIRTH_TICKS + 1);
+        assert!(actual.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!((3..events.len()).all(|index| replay.padding(index) == 0));
     }
 
     #[test]

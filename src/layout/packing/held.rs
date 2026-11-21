@@ -147,7 +147,17 @@ pub(super) fn reflow_ease(elapsed: usize) -> f32 {
 }
 
 pub(super) fn progress(elapsed: usize, duration: usize) -> f32 {
-    count(elapsed.min(duration)) / count(duration)
+    const RAMP: f32 = 0.125;
+    let phase = count(elapsed.min(duration)) / count(duration);
+    let integrate = |phase: f32| {
+        let ramp = phase.min(RAMP);
+        (phase - ramp + 0.5 * ramp * ramp / RAMP) / (1.0 - RAMP)
+    };
+    if phase <= 0.5 {
+        integrate(phase)
+    } else {
+        1.0 - integrate(1.0 - phase)
+    }
 }
 
 fn span(ticks: u32) -> usize {
@@ -159,6 +169,21 @@ mod tests {
     use super::*;
 
     const BOTH: [f32; 2] = [1.0, 1.0];
+
+    #[test]
+    fn motion_accelerates_symmetrically_and_holds_steady_speed() {
+        let duration = 240;
+        let speed = |tick| progress(tick + 1, duration) - progress(tick, duration);
+        let middle = speed(duration / 2);
+        assert!(speed(0) < middle / 10.0);
+        for tick in 0..duration / 8 {
+            assert!(speed(tick) < speed(tick + 1));
+            assert!((speed(tick) - speed(duration - tick - 1)).abs() < 1e-6);
+        }
+        for tick in duration / 8..duration * 7 / 8 {
+            assert!((speed(tick) - middle).abs() < 1e-6);
+        }
+    }
 
     #[test]
     fn counts_within_the_drift_keep_their_weights() {

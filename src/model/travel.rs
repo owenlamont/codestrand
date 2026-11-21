@@ -19,6 +19,7 @@ const HALF: Vec2 = Vec2::new(640.0, 360.0);
 const NETWORK_EPSILON: f32 = 0.01;
 const JUNCTION_EPSILON: f32 = 0.001;
 const MAX_ROUTE_NODES: usize = 10_000;
+const BIRTH_WINDOW: &str = "birth_window";
 
 pub(super) fn field_rect(tile: crate::layout::packing::Tile) -> Rect {
     Rect::from_corners(tile.low * HALF, tile.high * HALF)
@@ -234,6 +235,7 @@ pub(super) struct Statistics {
     pub idle_human_reentries: usize,
     pub routed: usize,
     pub faded: usize,
+    pub birth_fades: usize,
     pub blocked: usize,
     pub partial: usize,
     pub graph_epochs: usize,
@@ -269,7 +271,11 @@ impl Plan {
     pub(super) fn first_unresolved(&self, bots: super::BotTravel) -> Option<usize> {
         self.trips
             .iter()
-            .find(|t| t.fade && (!t.bot || bots == super::BotTravel::Walk))
+            .find(|t| {
+                t.fade
+                    && t.failure != Some(BIRTH_WINDOW)
+                    && (!t.bot || bots == super::BotTravel::Walk)
+            })
             .map(|t| t.commit)
     }
 
@@ -539,28 +545,6 @@ impl Simulation {
         (trips, epochs)
     }
 
-    fn pad_births(&self, padding: &mut Vec<(usize, u32)>) {
-        let mut born = vec![false; self.initial.layout.repositories.len()];
-        for (_, file) in self.initial.layout.files() {
-            born[self.initial.layout.dir(file.dir).repository] = true;
-        }
-        if let Some(first) = self.events.first() {
-            born[first.repository] = true;
-        }
-        for (index, event) in self.events.iter().enumerate() {
-            if std::mem::replace(&mut born[event.repository], true) {
-                continue;
-            }
-            let commit = self.offset + index;
-            let ticks = crate::layout::packing::BIRTH_TICKS;
-            if let Some((_, wait)) = padding.iter_mut().find(|(i, _)| *i == commit) {
-                *wait = (*wait).max(ticks);
-            } else {
-                padding.push((commit, ticks));
-            }
-        }
-        padding.sort_unstable_by_key(|p| p.0);
-    }
     pub(super) fn adjust_travel_padding(
         &self,
         options: &super::Options,
@@ -573,6 +557,7 @@ impl Simulation {
         let mut deficits = std::collections::BTreeMap::<usize, u32>::new();
         for trip in self.travel.trips.iter().filter(|t| {
             t.commit >= self.travel.frozen
+                && t.failure != Some(BIRTH_WINDOW)
                 && (!t.bot || options.bot_travel == super::BotTravel::Walk)
                 && t.fade
         }) {
@@ -610,7 +595,6 @@ impl Simulation {
     }
     pub(super) fn compact_travel_padding(
         &self,
-        options: &super::Options,
         padding: &[(usize, u32)],
     ) -> Vec<(usize, u32)> {
         let _phase = self.trace.phase(Phase::CompactPadding);
@@ -641,9 +625,6 @@ impl Simulation {
                 *ticks = ticks.saturating_sub(surplus);
             }
         }
-        if options.travel_cap == super::TravelCap::None {
-            self.pad_births(&mut result);
-        }
         result
     }
     pub(super) fn travel_padding(
@@ -667,7 +648,8 @@ impl Simulation {
                     .starts
                     .partition_point(|&s| s <= tick_time(trip.free))
                     .saturating_sub(1);
-                let needed = if trip.bot && options.bot_travel == super::BotTravel::Fade
+                let needed = if trip.failure == Some(BIRTH_WINDOW)
+                    || (trip.bot && options.bot_travel == super::BotTravel::Fade)
                 {
                     0
                 } else if trip.route.is_empty() {
@@ -691,9 +673,6 @@ impl Simulation {
                 extra += u64::from(needed);
             }
             shifts[commit] = extra;
-        }
-        if options.travel_cap == super::TravelCap::None {
-            self.pad_births(&mut padding);
         }
         padding
     }
@@ -752,6 +731,10 @@ impl Simulation {
             graph_epochs,
             routed: trips.iter().filter(|t| !t.fade).count(),
             faded: trips.iter().filter(|t| t.fade).count(),
+            birth_fades: trips
+                .iter()
+                .filter(|t| t.failure == Some(BIRTH_WINDOW))
+                .count(),
             blocked: trips
                 .iter()
                 .filter(|t| !t.bot && t.route.is_empty())
@@ -1369,7 +1352,7 @@ mod tests {
     }
 
     #[test]
-    fn bots_and_zero_cap_preserve_nominal_service_times() {
+    fn bots_and_zero_cap_only_wait_for_the_birth() {
         for (cap, bot) in [(0.0, false), (0.4, true)] {
             let mut events = Vec::new();
             for i in 0..4 {
@@ -1386,11 +1369,7 @@ mod tests {
                 seconds_per_day: 0.3,
                 ..Default::default()
             };
-            let nominal = super::super::Schedule::new(
-                &events,
-                options.seconds_per_day,
-                options.max_idle_seconds,
-            );
+            let nominal = super::super::Schedule::for_replay(&events, &options);
             let sim = Simulation::with_repositories(
                 events,
                 &options,
@@ -1429,7 +1408,8 @@ mod tests {
         assert_eq!(a.travel.report(), b.travel.report());
         assert!(a.schedule.starts.windows(2).all(|s| s[0] < s[1]));
         for event in 0..a.events.len() {
-            assert!(a.schedule.padding(event) <= options.travel_cap.ticks());
+            let birth = a.clock.history.padding(event);
+            assert!(a.schedule.padding(event) - birth <= options.travel_cap.ticks());
         }
         for frame in [0, 15, 30, 45, 60, 90, 120, 20, 80, 0, 110] {
             a.advance_to(frame, 30);

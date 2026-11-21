@@ -1183,8 +1183,12 @@ impl State {
                 },
             );
             let rect = labels::tangent_rect(body, size, distance, angle);
+            let low = Vec2::new(-HALF.x + 0.5, super::caption::BOTTOM + 0.5);
+            let high = Vec2::new(HALF.x - 0.5, super::caption::TOP - 0.5);
+            let offset =
+                (low - rect.min).max(Vec2::ZERO) + (high - rect.max).min(Vec2::ZERO);
             let placement = super::names::Placement {
-                point: Vec2::new(rect.min.x, rect.max.y),
+                point: Vec2::new(rect.min.x, rect.max.y) + offset,
                 body: bodies[index].expect("projected visible avatar"),
                 text: displayed[index].clone(),
                 scale: super::LabelKind::Avatar.font_scale(),

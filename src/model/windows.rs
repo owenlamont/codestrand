@@ -33,14 +33,11 @@ impl Simulation {
         history: &Schedule,
         departures: &[Time],
         endings: &[Time],
-        options: &Options,
     ) {
         self.clock = schedule::Clock::new(history.clone(), self.schedule.clone());
         self.departures = departures.iter().map(|&t| self.clock.present(t)).collect();
         self.repository_ends = endings.iter().map(|&t| self.clock.present(t)).collect();
-        let clock = self.clock.clone();
-        let schedule = self.schedule.clone();
-        self.plan_waiting_births(options, &clock, &schedule);
+        self.births = self.births_for(&self.schedule);
     }
 
     fn finish_window(&mut self, end: Time, complete: bool) -> anyhow::Result<u64> {
@@ -152,18 +149,12 @@ impl Simulation {
                 let _phase = trace.phase(Phase::ScheduleRebuild);
                 trace.count_rebuild(self.events.len(), padding.len());
                 trace.count_rebuild(events.len(), padding.len());
-                self.schedule = Schedule::with_padding(
-                    &self.events,
-                    options.seconds_per_day,
-                    options.max_idle_seconds,
-                    |i| schedule::padding_at(padding, self.offset + i),
-                );
-                Schedule::with_padding(
-                    events,
-                    options.seconds_per_day,
-                    options.max_idle_seconds,
-                    |i| schedule::padding_at(padding, self.offset + i),
-                )
+                self.schedule = history.with_travel(self.events.len(), |i| {
+                    schedule::padding_at(padding, self.offset + i)
+                });
+                history.with_travel(events.len(), |i| {
+                    schedule::padding_at(padding, self.offset + i)
+                })
             };
             {
                 let _phase = trace.phase(Phase::CheckSchedule);
@@ -181,7 +172,7 @@ impl Simulation {
             }
             {
                 let _phase = trace.phase(Phase::WindowClock);
-                self.update_window_clock(history, departures, endings, options);
+                self.update_window_clock(history, departures, endings);
             }
             {
                 let _phase = trace.phase(Phase::Restart);
@@ -203,7 +194,7 @@ impl Simulation {
             }
             if compactions == 0 {
                 compactions = 1;
-                *padding = self.compact_travel_padding(options, padding);
+                *padding = self.compact_travel_padding(padding);
                 continue;
             }
             let refined = self.refine_service_slots(options, padding);

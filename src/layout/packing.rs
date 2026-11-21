@@ -3,7 +3,7 @@ use std::sync::Arc;
 use bevy::math::{FloatExt, Vec2};
 
 use super::{RepositoryRegion, outline};
-use crate::model::{caption, framing};
+use crate::model::{BIRTH_TICKS, caption, framing};
 
 mod fit;
 mod held;
@@ -11,56 +11,14 @@ mod reflow;
 mod zoom;
 
 const BOUND: f32 = 3.5;
-pub(crate) const BIRTH_TICKS: u32 = 45;
-const BIRTH_LEAD: usize = 180;
 const FIT_CHUNK: usize = 256;
 const ALLOCATION_TOLERANCE_PX: f32 = 0.25;
-const EXIT_EASE_RAMP: f32 = 1.0 / 32.0;
 
 const FIELD_GROWTH_STEP: f32 = 1.125;
 /// Bisection steps towards full presence for a sample whose easing tiles conflict.
 const FIRMING_STEPS: u32 = 8;
 /// Insertion candidates each scoring thread takes at least, so small trees stay serial.
 const PARALLEL_SPLITS: usize = 32;
-
-fn birth_windows(ready: &[usize], commits: &[usize]) -> Vec<(usize, usize)> {
-    let mut after = 0;
-    let quiet: Vec<_> = commits
-        .iter()
-        .copied()
-        .chain([usize::MAX])
-        .filter_map(|commit| {
-            let start = std::mem::replace(&mut after, commit.saturating_add(1));
-            (commit.saturating_sub(start) >= BIRTH_TICKS as usize)
-                .then_some((start, commit))
-        })
-        .collect();
-    let mut order: Vec<_> = (0..ready.len()).collect();
-    order.sort_unstable_by_key(|&i| ready[i]);
-    let mut windows = vec![(usize::MAX, usize::MAX); ready.len()];
-    let mut previous = None;
-    for i in order.into_iter().filter(|&i| ready[i] != usize::MAX) {
-        let deadline = ready[i];
-        let Some(latest_start) = deadline.checked_sub(BIRTH_TICKS as usize) else {
-            windows[i] = (0, 0);
-            continue;
-        };
-        let candidate =
-            quiet[..quiet.partition_point(|&(start, _)| start <= latest_start)].last();
-        if let Some(&(idle_start, idle_end)) = candidate {
-            let end = deadline.min(idle_end);
-            let start = end.saturating_sub(BIRTH_LEAD).max(idle_start);
-            let window = previous
-                .filter(|&(_, stop)| start < stop)
-                .unwrap_or((start, end));
-            windows[i] = window;
-            previous = Some(window);
-        } else {
-            windows[i] = (0, 0);
-        }
-    }
-    windows
-}
 
 #[derive(Clone, Copy, Debug)]
 struct Space {
@@ -585,26 +543,21 @@ fn scaled_tile(tile: Tile, center: Vec2, presence: f32) -> Tile {
     }
 }
 
+fn birth_presence(elapsed: u64) -> f32 {
+    held::progress(
+        usize::try_from(elapsed).expect("bounded birth"),
+        usize::try_from(BIRTH_TICKS).expect("bounded birth"),
+    )
+}
+
 fn exit_presence(tick: u64, exit: crate::model::RepositoryExit) -> f32 {
     if tick >= exit.end {
         return 0.0;
     }
-    let elapsed = crate::model::ticks_duration(tick.saturating_sub(exit.start))
-        / crate::model::ticks_duration(exit.end - exit.start);
-    eased_presence(elapsed)
-}
-
-fn eased_presence(elapsed: f32) -> f32 {
-    let progress = |u: f32| {
-        // A short acceleration ramp leaves most of the exit at a steady speed.
-        let speed = (u / EXIT_EASE_RAMP).min(1.0);
-        (u - 0.5 * speed * speed * EXIT_EASE_RAMP) / (1.0 - EXIT_EASE_RAMP)
-    };
-    if elapsed <= 0.5 {
-        1.0 - progress(elapsed)
-    } else {
-        progress(1.0 - elapsed)
-    }
+    let elapsed =
+        usize::try_from(tick.saturating_sub(exit.start)).expect("bounded exit");
+    let duration = usize::try_from(exit.end - exit.start).expect("bounded exit");
+    1.0 - held::progress(elapsed, duration)
 }
 
 fn shrink_tiles(tiles: &mut [Option<Tile>], presence: &[f32]) {
@@ -1016,18 +969,6 @@ impl Inputs {
         self.items.push(items);
     }
 
-    pub(crate) fn anticipate_items(
-        &mut self,
-        repository: usize,
-        begin: usize,
-        arrival: usize,
-    ) {
-        let items = self.items[arrival][repository];
-        for row in &mut self.items[begin..arrival] {
-            row[repository] = items;
-        }
-    }
-
     pub(crate) fn set_commits(&mut self, commits: Vec<usize>) {
         self.commits = commits;
     }
@@ -1120,20 +1061,19 @@ impl Packing {
 
     #[cfg(test)]
     pub(crate) fn before_service(regions: &[Vec<RepositoryRegion>]) -> Self {
-        Self::with_gutter(regions, 4.0, None).unwrap()
+        Self::with_gutter(regions, 4.0).unwrap()
     }
 
     #[cfg(test)]
     pub(crate) fn with_gutter(
         regions: &[Vec<RepositoryRegion>],
         gutter_scale: f32,
-        activation: Option<&[u32]>,
     ) -> anyhow::Result<Self> {
         let mut inputs = Inputs::new(regions.len());
         for row in regions {
             inputs.push(row.clone());
         }
-        Self::from_inputs(inputs, Arc::default(), gutter_scale, activation, 0)
+        Self::from_inputs(inputs, Arc::default(), gutter_scale, 0)
     }
 
     /// Inputs, samples and tree with floats printed exactly.
@@ -1158,7 +1098,6 @@ impl Packing {
         inputs: Inputs,
         exits: Arc<[Option<crate::model::RepositoryExit>]>,
         gutter_scale: f32,
-        activation: Option<&[u32]>,
         threads: usize,
     ) -> anyhow::Result<Self> {
         let Inputs {
@@ -1192,16 +1131,18 @@ impl Packing {
             threads,
             growth,
         )?;
-        let ready: Vec<_> = births
+        let span = usize::try_from(BIRTH_TICKS).expect("bounded birth");
+        let windows: Vec<_> = births
             .iter()
-            .enumerate()
-            .map(|(i, &birth)| {
-                activation.map_or(birth, |a| {
-                    birth.min(usize::try_from(a[i]).expect("bounded activation"))
-                })
+            .map(|&birth| {
+                if birth == usize::MAX {
+                    (birth, birth)
+                } else {
+                    let end = birth.saturating_sub(1);
+                    (end.saturating_sub(span), end)
+                }
             })
             .collect();
-        let windows = birth_windows(&ready, &commits);
         let mut held = held::Weights::new(first.len());
         let mut reflows = Vec::<reflow::Change>::new();
         let samples: Vec<_> = regions
@@ -1303,30 +1244,55 @@ impl Packing {
     }
 
     fn plan_content_reserve(mut self, births: &[usize], threads: usize) -> Self {
-        let field = self.space().field(framing::MARGIN);
-        let reference: Vec<_> = births
+        let bounds = self.samples.len();
+        let mut settled: Vec<_> = births
             .iter()
-            .enumerate()
-            .map(|(i, &birth)| {
-                if birth == usize::MAX {
-                    field.usable()
-                } else {
-                    self.layout_at(birth, None, None, None).tiles[i]
-                        .unwrap_or(field)
-                        .usable()
-                }
-            })
+            .map(|&birth| birth.saturating_sub(1))
+            .chain(
+                self.reflows
+                    .iter()
+                    .map(|change| change.tick + held::reflow_ticks()),
+            )
+            .chain(
+                self.exits
+                    .iter()
+                    .flatten()
+                    .map(|exit| usize::try_from(exit.end).unwrap_or(bounds)),
+            )
+            .filter(|&tick| tick < bounds)
+            .chain([0, bounds])
             .collect();
+        settled.sort_unstable();
+        settled.dedup();
+        let mut reserve = Vec::with_capacity(bounds);
+        for interval in settled.windows(2) {
+            reserve.extend(self.content_reserve(interval[0]..interval[1], threads));
+        }
+        self.fit_reserve = reserve.into();
+        self
+    }
+
+    fn content_reserve(
+        &self,
+        ticks: std::ops::Range<usize>,
+        threads: usize,
+    ) -> Vec<Vec<f32>> {
+        let field = self.space().field(framing::MARGIN);
+        let reference = self.layout_at(ticks.start, None, None, None).tiles;
         let growth = self.overview_growth();
         let reference_scales =
-            super::in_order(&self.inputs, FIT_CHUNK, threads, |chunk| {
+            super::in_order(&self.inputs[ticks], FIT_CHUNK, threads, |chunk| {
                 chunk
                     .iter()
                     .map(|row| {
                         row.iter()
                             .zip(self.rotated.iter().zip(&reference))
-                            .map(|(input, (&rotated, &reference))| {
-                                input.reference_scale(reference, growth, rotated)
+                            .map(|(input, (&rotated, &tile))| {
+                                input.reference_scale(
+                                    tile.unwrap_or(field).usable(),
+                                    growth,
+                                    rotated,
+                                )
                             })
                             .collect::<Vec<_>>()
                     })
@@ -1334,17 +1300,18 @@ impl Packing {
             });
         let mut reserve = reference_scales.clone();
         zoom::plan(&mut reserve);
-        for (row, reference) in reserve.iter_mut().zip(&reference_scales) {
-            for (fraction, &full) in row.iter_mut().zip(reference) {
-                *fraction = if full > 0.0 {
-                    (*fraction / full).min(1.0)
-                } else {
-                    1.0
-                };
-            }
+        for (fraction, &full) in reserve
+            .iter_mut()
+            .flatten()
+            .zip(reference_scales.iter().flatten())
+        {
+            *fraction = if full > 0.0 {
+                (*fraction / full).min(1.0)
+            } else {
+                1.0
+            };
         }
-        self.fit_reserve = reserve.into();
-        self
+        reserve
     }
 
     pub(crate) fn sample(
@@ -1383,11 +1350,10 @@ impl Packing {
         &self,
         tiles: u64,
         content: u64,
-        transition: Option<(u64, f32)>,
-        presence: Option<&[f32]>,
+        birth: Option<(usize, u64)>,
         repositories: Option<&[usize]>,
     ) -> Option<(Vec<RepositoryRegion>, Vec<Vec2>, Vec<f32>)> {
-        self.sample_rows(tiles, content, transition, presence, |index| {
+        self.sample_rows(tiles, content, birth, None, |index| {
             repositories.is_none_or(|selected| selected.contains(&index))
         })
     }
@@ -1396,7 +1362,7 @@ impl Packing {
         &self,
         tiles: u64,
         tick: u64,
-        transition: Option<(u64, f32)>,
+        birth: Option<(usize, u64)>,
         presence: Option<&[f32]>,
         selected: impl Fn(usize) -> bool,
     ) -> Option<(Vec<RepositoryRegion>, Vec<Vec2>, Vec<f32>)> {
@@ -1407,7 +1373,7 @@ impl Packing {
             .unwrap_or(usize::MAX)
             .min(self.samples.len() - 1);
         let sample = &self.samples[tiles];
-        let placement = self.fit_rows(tiles, tick, transition, presence, None);
+        let placement = self.fit_rows(tiles, tick, birth, presence, None);
         let mut regions: Vec<_> = self.inputs[tick]
             .iter()
             .zip(self.labels.iter())
@@ -1436,7 +1402,11 @@ impl Packing {
             r.tile = tile;
             r.gutter = placement[i].gutter.filter(|_| selected(i));
             r.items = sample.weights[i]
-                * (sample.presence[i]
+                * (birth
+                    .filter(|&(repository, _)| repository == i)
+                    .map_or(sample.presence[i], |(_, elapsed)| {
+                        birth_presence(elapsed)
+                    })
                     * presence
                         .and_then(|v| v.get(i))
                         .copied()
@@ -1639,26 +1609,15 @@ impl Packing {
     fn layout_at(
         &self,
         tile_tick: usize,
-        transition: Option<(u64, f32)>,
+        birth: Option<(usize, u64)>,
         presence: Option<&[f32]>,
         tiling: Option<&mut Tiling>,
     ) -> reflow::Layout {
         let sample = &self.samples[tile_tick];
-        let mut weights = sample.weights.clone();
+        let weights = &sample.weights;
         let mut visibility = sample.presence.clone();
-        if let Some((from, fraction)) = transition {
-            let from = usize::try_from(from)
-                .unwrap_or(usize::MAX)
-                .min(self.samples.len() - 1);
-            for (weight, &before) in weights.iter_mut().zip(&self.samples[from].weights)
-            {
-                *weight = before.lerp(*weight, fraction);
-            }
-            for (visible, &before) in
-                visibility.iter_mut().zip(&self.samples[from].presence)
-            {
-                *visible = before.lerp(*visible, fraction);
-            }
+        if let Some((repository, elapsed)) = birth {
+            visibility[repository] = birth_presence(elapsed);
         }
         let presence: Vec<_> = visibility
             .iter()
@@ -1699,7 +1658,7 @@ impl Packing {
                     .collect();
                 let allocated = self.transition_tiles(
                     tree,
-                    &weights,
+                    weights,
                     &presence,
                     transitions,
                     tiling,
@@ -1713,11 +1672,11 @@ impl Packing {
         &self,
         tile_tick: usize,
         tick: usize,
-        transition: Option<(u64, f32)>,
+        birth: Option<(usize, u64)>,
         presence: Option<&[f32]>,
         tiling: Option<&mut Tiling>,
     ) -> Vec<Placement> {
-        let layout = self.layout_at(tile_tick, transition, presence, tiling);
+        let layout = self.layout_at(tile_tick, birth, presence, tiling);
         self.inputs[tick]
             .iter()
             .enumerate()
@@ -1806,7 +1765,7 @@ mod tests {
 
     #[test]
     fn the_field_grows_to_pack_every_tile_without_overlap() {
-        let packing = Packing::with_gutter(&[capacity_fixture()], 4.0, None).unwrap();
+        let packing = Packing::with_gutter(&[capacity_fixture()], 4.0).unwrap();
         let field = packing.space().field(framing::MARGIN);
         assert!(packing.overview_growth() > 1.0);
         let (regions, _, _) = packing.sample(0).unwrap();
@@ -1857,7 +1816,7 @@ mod tests {
             inputs.push(row.clone());
         }
         let exits = crate::model::exits_from_starts(&[Some(60), None]);
-        let packing = Packing::from_inputs(inputs, exits.into(), 4.0, None, 1).unwrap();
+        let packing = Packing::from_inputs(inputs, exits.into(), 4.0, 1).unwrap();
         for tick in [60, 180, 300] {
             let (regions, _, scales) = packing.sample(tick).unwrap();
             let input = &packing.inputs[usize::try_from(tick).unwrap()][1];
@@ -1878,20 +1837,6 @@ mod tests {
             );
             assert!((scales[1] - fit.scale.min(1.0)).abs() < 1e-6, "tick {tick}");
         }
-    }
-
-    #[test]
-    fn a_padded_birth_can_finish_before_the_waiting_contributor_arrives() {
-        let rows = fixture();
-        let mut activation = vec![u32::MAX; 30];
-        activation[4] = 30;
-        let normal = Packing::with_gutter(&rows, 2.0, None).unwrap();
-        let waiting = Packing::with_gutter(&rows, 2.0, Some(&activation)).unwrap();
-        assert!(normal.samples[35].presence[4] < 1.0);
-        assert_eq!(waiting.samples[35].presence[4].to_bits(), 1.0_f32.to_bits());
-        let reserved = &waiting.sample(35).unwrap().0[4];
-        assert!(reserved.tile.is_some());
-        assert!(!reserved.live);
     }
 
     #[test]
@@ -2060,7 +2005,7 @@ mod tests {
             let shares: Vec<_> = [0.0, 4.0, 20.0]
                 .into_iter()
                 .map(|scale| {
-                    let packing = Packing::with_gutter(&rows, scale, None).unwrap();
+                    let packing = Packing::with_gutter(&rows, scale).unwrap();
                     let row = packing
                         .sample(u64::try_from(rows.len() - 1).unwrap())
                         .unwrap()
@@ -2128,12 +2073,13 @@ mod tests {
             let tile = packing.sample(tick).unwrap().0[0].tile.unwrap();
             [tile.low, tile.high]
         };
-        let start = edge(421);
-        let end = edge(600);
-        for tick in 422..600 {
+        let start = edge(561);
+        let end = edge(592);
+        assert_ne!(start, end);
+        for tick in 562..592 {
             let actual = edge(tick);
             let fraction =
-                crate::model::count(usize::try_from(tick - 421).unwrap()) / 179.0;
+                crate::model::count(usize::try_from(tick - 561).unwrap()) / 31.0;
             for axis in 0..2 {
                 assert!(
                     actual[axis]
@@ -2401,7 +2347,7 @@ mod tests {
         }
         let other = shared_ending.then_some(60);
         let exits = crate::model::exits_from_starts(&[Some(60), other, other]);
-        Packing::from_inputs(inputs, exits.into(), 4.0, None, 1).unwrap()
+        Packing::from_inputs(inputs, exits.into(), 4.0, 1).unwrap()
     }
 
     #[test]
@@ -2411,7 +2357,7 @@ mod tests {
             inputs.push(row.into_iter().take(2).collect());
         }
         let exits = crate::model::exits_from_starts(&[Some(1350), None]);
-        let packing = Packing::from_inputs(inputs, exits.into(), 4.0, None, 1).unwrap();
+        let packing = Packing::from_inputs(inputs, exits.into(), 4.0, 1).unwrap();
         let tiles = |tick| {
             let regions = packing.sample(tick).unwrap().0;
             [regions[0].tile, regions[1].tile]

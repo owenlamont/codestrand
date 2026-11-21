@@ -272,8 +272,97 @@ fn search(
             best.cutoff = Some(begin);
         }
     }
+    let birth_begin = template
+        .arrival
+        .saturating_sub(crate::model::BIRTH_TICKS + 1);
+    if best.fade
+        && capture.row(birth_begin)[template.destination_repository].is_none()
+        && capture.row(template.free)[template.destination_repository].is_none()
+    {
+        if let Some(approach) = birth_approach(capture, template, first, speed, router)
+        {
+            return approach;
+        }
+        best.failure = Some(super::BIRTH_WINDOW);
+        best.route = Route::default();
+        best.cutoff = None;
+    }
     best
 }
+
+fn birth_approach(
+    capture: &Capture,
+    template: &Trip,
+    first: u64,
+    speed: f32,
+    router: &mut Router,
+) -> Option<Trip> {
+    let source = capture.pose(template.author, first)?.point;
+    for tick in [first, template.arrival] {
+        let cells = super::network(capture.row(tick).iter().flatten().copied());
+        if let Some(approach) = fixed_approach(
+            capture, template, first, speed, router, source, &cells, tick,
+        ) {
+            return Some(approach);
+        }
+    }
+    None
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a late approach checks a route against the sampled network"
+)]
+fn fixed_approach(
+    capture: &Capture,
+    template: &Trip,
+    first: u64,
+    speed: f32,
+    router: &mut Router,
+    source: Vec2,
+    cells: &[Rect],
+    epoch: u64,
+) -> Option<Trip> {
+    let points = router.route(source, template.destination, cells).ok()?;
+    if points.len() < 2 {
+        return None;
+    }
+    let route = Route::new(&points, speed);
+    let duration = u64::from(super::seconds_ticks(route.duration, true));
+    let departure = template.arrival.checked_sub(duration)?;
+    if departure < first || capture.pose(template.author, departure)?.point != source {
+        return None;
+    }
+    let track: Vec<_> = (departure..=template.arrival)
+        .map(|tick| {
+            route
+                .sample(ticks_duration(tick - departure))
+                .expect("nonempty route")
+        })
+        .collect();
+    if !track.iter().enumerate().all(|(offset, &point)| {
+        let tick = departure + offset as u64;
+        hard_clearance(capture, tick, point)
+            && super::on_network(
+                point,
+                &super::network(capture.row(tick).iter().flatten().copied()),
+            )
+    }) {
+        return None;
+    }
+    let mut trip = template.clone();
+    trip.departure = departure;
+    trip.source = source;
+    trip.fade = false;
+    trip.failure = None;
+    trip.proof = Some(route_proof(&points, epoch));
+    trip.route = Route {
+        track: track.into(),
+        ..route
+    };
+    Some(trip)
+}
+
 pub(super) fn trips(
     capture: &Capture,
     speed: f32,

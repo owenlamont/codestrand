@@ -692,7 +692,9 @@ mod single_source_tests {
                 &names,
             )
             .unwrap();
-            sim.advance_to(60, 60);
+            let commit = usize::from(names.len() > 1);
+            let tick = sim.scheduled_starts()[commit].ticks(true);
+            sim.advance_to(u32::try_from(tick).unwrap(), 60);
             assert_eq!(
                 sim.view(),
                 (bevy::math::Vec3::ZERO, crate::model::framing::DISTANCE)

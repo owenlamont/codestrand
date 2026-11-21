@@ -43,7 +43,8 @@ fn realistic_history_has_stable_framing_and_uniform_icons_at_sixty_hz() {
                 let ratio: f32 = scales[i] / before;
                 assert!(
                     ratio.ln().abs() * 60.0 <= 0.1201,
-                    "zoom rate at {frame}/{i}"
+                    "zoom rate at {frame}/{i}: {before} -> {}",
+                    scales[i]
                 );
             }
             previous_tiles[i] = region.tile;
