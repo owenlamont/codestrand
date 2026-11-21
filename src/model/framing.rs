@@ -43,26 +43,6 @@ pub(crate) fn project_field_at(point: Vec2, height: f32) -> Vec2 {
     project_at(point, height) / GROUND_FACTOR
 }
 
-pub(super) fn label_position(region: &RepositoryRegion) -> Vec3 {
-    if let Some(tile) = region.tile {
-        let limit = crate::layout::packing::Tile::viewport();
-        let padding = Vec2::splat(8.0) * 2.0 / VIEWPORT;
-        let size = label_size(&region.label, 20.0) * 2.0 / VIEWPORT;
-        let anchor = Vec2::new(tile.low.x + padding.x, tile.high.y - padding.y)
-            .clamp(limit.low + Vec2::Y * size.y, limit.high - Vec2::X * size.x);
-        return ground(field_to_world(anchor)) + Vec3::Y * LABEL_Y;
-    }
-    let point = Vec2::new(region.low.x.midpoint(region.high.x), region.high.y - 1.0);
-    ground(point) + Vec3::Y * LABEL_Y
-}
-
-pub(crate) fn label_size(text: &str, height: f32) -> Vec2 {
-    Vec2::new(
-        8.0 + 8.6 * f32::from(u16::try_from(text.chars().count()).unwrap_or(u16::MAX)),
-        height,
-    )
-}
-
 pub(crate) fn distance(
     regions: &[RepositoryRegion],
     focus: Vec3,
@@ -104,13 +84,6 @@ pub(crate) fn distance(
                 include(ground(corner) + Vec3::Y * height, -limit, limit);
             }
         }
-        let label_size = label_size(&region.label, 20.0) * 2.0 / viewport;
-        // UI labels extend right and down from their projected world anchor.
-        include(
-            label_position(region),
-            -limit + Vec2::Y * label_size.y,
-            limit - Vec2::X * label_size.x,
-        );
     }
     distance + 0.001
 }
@@ -175,15 +148,9 @@ mod tests {
                 region.label
             );
         }
-        let anchor = screen(label_position(region));
-        assert!(
-            inside(anchor) && inside(anchor + label_size(&region.label, 20.0)),
-            "frame {frame} {} {viewport:?}: label {anchor:?}",
-            region.label
-        );
     }
     #[test]
-    fn every_frame_contains_live_glass_and_raised_labels_in_real_projections() {
+    fn every_frame_contains_live_tiles_in_real_projections() {
         for name in crate::theme::ThemeName::ALL {
             assert_theme_framing(&name.build(), 5);
         }

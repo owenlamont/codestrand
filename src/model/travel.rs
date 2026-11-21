@@ -20,6 +20,8 @@ const NETWORK_EPSILON: f32 = 0.01;
 const JUNCTION_EPSILON: f32 = 0.001;
 const MAX_ROUTE_NODES: usize = 10_000;
 
+const MOVING_DOCK: &str = "moving_dock";
+
 pub(super) fn field_rect(tile: crate::layout::packing::Tile) -> Rect {
     Rect::from_corners(tile.low * HALF, tile.high * HALF)
 }
@@ -73,6 +75,7 @@ pub(super) struct Service {
 struct Capture {
     begin: u64,
     frozen: usize,
+    births: Vec<usize>,
     field: Rect,
     services: Vec<Service>,
     poses: Vec<Vec<Pose>>,
@@ -214,6 +217,7 @@ struct Trip {
     source: Vec2,
     fade_ticks: u64,
     route: Route,
+    birth: bool,
     fade: bool,
     bot: bool,
     source_repository: usize,
@@ -234,6 +238,7 @@ pub(super) struct Statistics {
     pub idle_human_reentries: usize,
     pub routed: usize,
     pub faded: usize,
+    pub birth_fades: usize,
     pub blocked: usize,
     pub partial: usize,
     pub graph_epochs: usize,
@@ -271,6 +276,43 @@ impl Plan {
             .iter()
             .find(|t| t.fade && (!t.bot || bots == super::BotTravel::Walk))
             .map(|t| t.commit)
+    }
+
+    pub(super) fn protect_birth_walks(&self, history: &mut super::Schedule) -> bool {
+        let mut changed = false;
+        for trip in self.trips.iter().filter(|trip| {
+            trip.commit >= self.frozen && trip.fade && trip.failure == Some(MOVING_DOCK)
+        }) {
+            changed |= history.protect_walk_after(trip.commit);
+        }
+        changed
+    }
+
+    pub(super) fn require_birth_routes(
+        &self,
+        bots: super::BotTravel,
+    ) -> anyhow::Result<()> {
+        if let Some(trip) = self.trips.iter().find(|trip| {
+            trip.birth && trip.fade && (!trip.bot || bots == super::BotTravel::Walk)
+        }) {
+            anyhow::bail!(
+                "no safe gutter walk to a repository's first commit (event {})",
+                trip.commit
+            );
+        }
+        Ok(())
+    }
+
+    pub(super) fn approaching_departure(&self, author: usize, tick: u64) -> bool {
+        let horizon = u64::from(seconds_ticks(super::SETTLE_SECONDS, true));
+        self.trips.iter().any(|trip| {
+            trip.author == author
+                && !trip.fade
+                && !trip.route.is_empty()
+                && trip.free <= tick
+                && trip.departure > tick
+                && trip.departure - tick <= horizon
+        })
     }
 
     pub(super) fn freeze_through(&mut self, tick: u64, applied: usize) {
@@ -344,6 +386,7 @@ impl Plan {
             t.author == author
                 && t.departure <= tick
                 && tick < t.arrival
+                && !t.fade
                 && !t.route.is_empty()
         })
     }
@@ -419,6 +462,11 @@ fn replay(simulation: &mut Simulation, frames: u32) -> Capture {
     let mut capture = Capture {
         begin: simulation.state.tick,
         frozen: simulation.travel.frozen,
+        births: simulation
+            .schedule
+            .births()
+            .map(|(index, _)| index)
+            .collect(),
         field: field_rect(simulation.state.field),
         services: simulation
             .window
@@ -539,28 +587,6 @@ impl Simulation {
         (trips, epochs)
     }
 
-    fn pad_births(&self, padding: &mut Vec<(usize, u32)>) {
-        let mut born = vec![false; self.initial.layout.repositories.len()];
-        for (_, file) in self.initial.layout.files() {
-            born[self.initial.layout.dir(file.dir).repository] = true;
-        }
-        if let Some(first) = self.events.first() {
-            born[first.repository] = true;
-        }
-        for (index, event) in self.events.iter().enumerate() {
-            if std::mem::replace(&mut born[event.repository], true) {
-                continue;
-            }
-            let commit = self.offset + index;
-            let ticks = crate::layout::packing::BIRTH_TICKS;
-            if let Some((_, wait)) = padding.iter_mut().find(|(i, _)| *i == commit) {
-                *wait = (*wait).max(ticks);
-            } else {
-                padding.push((commit, ticks));
-            }
-        }
-        padding.sort_unstable_by_key(|p| p.0);
-    }
     pub(super) fn adjust_travel_padding(
         &self,
         options: &super::Options,
@@ -568,16 +594,16 @@ impl Simulation {
     ) -> Vec<(usize, u32)> {
         let _phase = self.trace.phase(Phase::AdjustPadding);
         let mut result = padding.to_vec();
-        let cap = options.travel_cap.ticks();
         // Co-authors of one commit share its padding, so it covers the largest deficit.
-        let mut deficits = std::collections::BTreeMap::<usize, u32>::new();
+        let mut deficits = std::collections::BTreeMap::<usize, (u32, u32)>::new();
         for trip in self.travel.trips.iter().filter(|t| {
             t.commit >= self.travel.frozen
                 && (!t.bot || options.bot_travel == super::BotTravel::Walk)
                 && t.fade
         }) {
+            let policy = options.travel_cap;
             let needed = if trip.route.is_empty() {
-                options.travel_cap.blocked_ticks()
+                policy.blocked_ticks()
             } else {
                 seconds_ticks(
                     (trip.route.duration
@@ -586,19 +612,20 @@ impl Simulation {
                     true,
                 )
             };
-            let needed = if options.travel_cap == super::TravelCap::None {
+            let needed = if policy == super::TravelCap::None {
                 needed.max(60)
             } else {
                 needed
             }
-            .min(cap);
+            .min(policy.ticks());
             if needed == 0 {
                 continue;
             }
-            let deficit = deficits.entry(self.offset + trip.commit).or_default();
+            let (deficit, cap) = deficits.entry(self.offset + trip.commit).or_default();
             *deficit = (*deficit).max(needed);
+            *cap = (*cap).max(policy.ticks());
         }
-        for (commit, needed) in deficits {
+        for (commit, (needed, cap)) in deficits {
             if let Some((_, ticks)) = result.iter_mut().find(|(i, _)| *i == commit) {
                 *ticks = ticks.saturating_add(needed).min(cap);
             } else {
@@ -610,7 +637,6 @@ impl Simulation {
     }
     pub(super) fn compact_travel_padding(
         &self,
-        options: &super::Options,
         padding: &[(usize, u32)],
     ) -> Vec<(usize, u32)> {
         let _phase = self.trace.phase(Phase::CompactPadding);
@@ -641,9 +667,6 @@ impl Simulation {
                 *ticks = ticks.saturating_sub(surplus);
             }
         }
-        if options.travel_cap == super::TravelCap::None {
-            self.pad_births(&mut result);
-        }
         result
     }
     pub(super) fn travel_padding(
@@ -653,7 +676,6 @@ impl Simulation {
         let _phase = self.trace.phase(Phase::TravelPadding);
         let capture = capture(self);
         let (routes, _) = self.routes(&capture, options);
-        let cap = options.travel_cap.ticks();
         let mut shifts = vec![0_u64; self.events.len()];
         let mut extra = 0_u64;
         let mut padding = Vec::new();
@@ -667,11 +689,12 @@ impl Simulation {
                     .starts
                     .partition_point(|&s| s <= tick_time(trip.free))
                     .saturating_sub(1);
+                let policy = options.travel_cap;
                 let needed = if trip.bot && options.bot_travel == super::BotTravel::Fade
                 {
                     0
                 } else if trip.route.is_empty() {
-                    options.travel_cap.blocked_ticks()
+                    policy.blocked_ticks()
                 } else {
                     seconds_ticks(
                         (tick_time(trip.departure)
@@ -682,7 +705,7 @@ impl Simulation {
                         .max(0.0),
                         true,
                     )
-                    .min(cap)
+                    .min(policy.ticks())
                 };
                 slowest = slowest.max(Some(needed));
             }
@@ -691,9 +714,6 @@ impl Simulation {
                 extra += u64::from(needed);
             }
             shifts[commit] = extra;
-        }
-        if options.travel_cap == super::TravelCap::None {
-            self.pad_births(&mut padding);
         }
         padding
     }
@@ -752,6 +772,7 @@ impl Simulation {
             graph_epochs,
             routed: trips.iter().filter(|t| !t.fade).count(),
             faded: trips.iter().filter(|t| t.fade).count(),
+            birth_fades: trips.iter().filter(|t| t.birth && t.fade).count(),
             blocked: trips
                 .iter()
                 .filter(|t| !t.bot && t.route.is_empty())
@@ -895,25 +916,8 @@ impl Router {
             // Moving anchors need a shared junction for boundaries within the network tolerance.
             values.dedup_by(|a, b| (*a - *b).abs() < JUNCTION_EPSILON);
         }
-        let width = axes[0].len();
-        let nodes = width.saturating_mul(axes[1].len());
-        if nodes > MAX_ROUTE_NODES {
-            return Err(RouteFailure::Budget);
-        }
-        let index = |p: Vec2| {
-            axes[1]
-                .iter()
-                .position(|v| (*v - p.y).abs() < JUNCTION_EPSILON)
-                .expect("inserted y")
-                * width
-                + axes[0]
-                    .iter()
-                    .position(|v| (*v - p.x).abs() < JUNCTION_EPSILON)
-                    .expect("inserted x")
-        };
-        let point = |i: usize| Vec2::new(axes[0][i % width], axes[1][i / width]);
-        let start = index(source);
-        let end = index(target);
+        let (points, edges, start, end) = junctions(cells, source, target, &axes)?;
+        let nodes = points.len();
         let mut distance = vec![u64::MAX; nodes];
         let mut previous = vec![usize::MAX; nodes];
         let mut queue = BinaryHeap::from([Reverse((0_u64, start))]);
@@ -925,20 +929,9 @@ impl Router {
             if cost != distance[i] {
                 continue;
             }
-            let x = i % width;
-            let y = i / width;
-            let neighbors = [
-                (x > 0).then(|| i - 1),
-                (x + 1 < width).then_some(i + 1),
-                (y > 0).then(|| i - width),
-                (y + 1 < axes[1].len()).then_some(i + width),
-            ];
-            for next in neighbors.into_iter().flatten() {
-                let a = point(i);
-                let b = point(next);
-                if !on_network(a.midpoint(b), cells) {
-                    continue;
-                }
+            for &next in edges[i].iter().flatten() {
+                let a = points[i];
+                let b = points[next];
                 #[expect(
                     clippy::cast_possible_truncation,
                     clippy::cast_sign_loss,
@@ -956,15 +949,85 @@ impl Router {
         if distance[end] == u64::MAX {
             return Err(RouteFailure::Disconnected);
         }
-        let mut path = vec![point(end)];
+        let mut path = vec![points[end]];
         let mut node = end;
         while node != start {
             node = previous[node];
-            path.push(point(node));
+            path.push(points[node]);
         }
         path.reverse();
         Ok(simplify_path(&path))
     }
+}
+
+type Neighbours = [Option<usize>; 4];
+
+fn junctions(
+    cells: &[Rect],
+    source: Vec2,
+    target: Vec2,
+    axes: &[Vec<f32>; 2],
+) -> Result<(Vec<Vec2>, Vec<Neighbours>, usize, usize), RouteFailure> {
+    let address = |p: Vec2| {
+        let coordinate = |axis: usize| {
+            axes[axis].partition_point(|v| *v <= p[axis] - JUNCTION_EPSILON)
+        };
+        (coordinate(1), coordinate(0))
+    };
+    let start = address(source);
+    let end = address(target);
+    // Every turn on a rectangular partition is at a tile corner or a trip endpoint.
+    let mut vertices: Vec<_> = cells
+        .iter()
+        .flat_map(|r| {
+            [
+                r.min,
+                r.max,
+                Vec2::new(r.min.x, r.max.y),
+                Vec2::new(r.max.x, r.min.y),
+            ]
+        })
+        .map(address)
+        .chain([start, end])
+        .collect();
+    vertices.sort_unstable();
+    vertices.dedup();
+    if vertices.len() > MAX_ROUTE_NODES {
+        return Err(RouteFailure::Budget);
+    }
+    let points: Vec<_> = vertices
+        .iter()
+        .map(|&(y, x)| Vec2::new(axes[0][x], axes[1][y]))
+        .collect();
+    let mut edges = vec![[None; 4]; points.len()];
+    let mut order: Vec<_> = (0..points.len()).collect();
+    for axis in 0..2 {
+        for pair in order.windows(2) {
+            let [a, b] = [pair[0], pair[1]];
+            if points[a][1 - axis].to_bits() == points[b][1 - axis].to_bits()
+                && cells.iter().any(|cell| {
+                    let normal = 1 - axis;
+                    let middle = points[a][axis].midpoint(points[b][axis]);
+                    let along = (cell.min[axis]..=cell.max[axis]).contains(&middle);
+                    let across = points[a][normal];
+                    along
+                        && [cell.min[normal], cell.max[normal]]
+                            .iter()
+                            .any(|v| (across - v).abs() < JUNCTION_EPSILON)
+                })
+            {
+                edges[a][axis * 2 + 1] = Some(b);
+                edges[b][axis * 2] = Some(a);
+            }
+        }
+        order.sort_unstable_by_key(|&i| (vertices[i].1, vertices[i].0));
+    }
+    Ok((
+        points,
+        edges,
+        vertices.binary_search(&start).expect("inserted source"),
+        vertices.binary_search(&end).expect("inserted target"),
+    ))
 }
 
 #[cfg(test)]
@@ -1083,8 +1146,8 @@ mod tests {
     }
 
     #[test]
-    fn routing_rejects_an_edge_grid_above_the_node_budget() {
-        let cells: Vec<_> = (0..101_u16)
+    fn routing_rejects_a_network_above_the_junction_budget() {
+        let cells: Vec<_> = (0..2501_u16)
             .map(|i| {
                 let low = Vec2::splat(f32::from(i) * 10.0);
                 Rect::from_corners(low, low + Vec2::ONE)
@@ -1304,6 +1367,7 @@ mod tests {
             source: Vec2::ZERO,
             fade_ticks: 0,
             route: Route::default(),
+            birth: false,
             fade: true,
             bot: false,
             source_repository: 0,
@@ -1369,7 +1433,7 @@ mod tests {
     }
 
     #[test]
-    fn bots_and_zero_cap_preserve_nominal_service_times() {
+    fn capped_births_fade_and_bots_keep_their_policy() {
         for (cap, bot) in [(0.0, false), (0.4, true)] {
             let mut events = Vec::new();
             for i in 0..4 {
@@ -1386,11 +1450,7 @@ mod tests {
                 seconds_per_day: 0.3,
                 ..Default::default()
             };
-            let nominal = super::super::Schedule::new(
-                &events,
-                options.seconds_per_day,
-                options.max_idle_seconds,
-            );
+            let nominal = super::super::Schedule::for_replay(&events, &options);
             let sim = Simulation::with_repositories(
                 events,
                 &options,
@@ -1398,7 +1458,12 @@ mod tests {
                 &crate::contributors::Mappings::default(),
                 &["A".into(), "B".into()],
             );
-            assert_eq!(sim.schedule.starts, nominal.starts);
+            if bot {
+                assert_eq!(sim.schedule.starts, nominal.starts);
+            } else {
+                assert_eq!(sim.schedule.starts, nominal.starts);
+                assert_eq!(sim.travel.stats.birth_fades, 1);
+            }
         }
     }
 
@@ -1429,7 +1494,8 @@ mod tests {
         assert_eq!(a.travel.report(), b.travel.report());
         assert!(a.schedule.starts.windows(2).all(|s| s[0] < s[1]));
         for event in 0..a.events.len() {
-            assert!(a.schedule.padding(event) <= options.travel_cap.ticks());
+            let birth = a.clock.history.padding(event);
+            assert!(a.schedule.padding(event) - birth <= options.travel_cap.ticks());
         }
         for frame in [0, 15, 30, 45, 60, 90, 120, 20, 80, 0, 110] {
             a.advance_to(frame, 30);
@@ -1492,6 +1558,7 @@ mod tests {
             source: Vec2::ZERO,
             fade_ticks: 9,
             route: Route::new(&[Vec2::ZERO, Vec2::new(500.0, 100.0)], 480.0),
+            birth: false,
             fade: true,
             bot: false,
             source_repository: 0,
@@ -1518,6 +1585,7 @@ mod tests {
             source: Vec2::new(-100.0, 0.0),
             destination: Vec2::ZERO,
             route: Route::new(&[Vec2::new(-100.0, 0.0), Vec2::ZERO], 480.0),
+            birth: false,
             fade: false,
             bot: false,
             fade_ticks: 9,

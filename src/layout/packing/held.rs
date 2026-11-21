@@ -57,7 +57,7 @@ impl Weights {
         items: &[f32],
         presence: &[f32],
     ) -> Vec<f32> {
-        self.step_towards(tick, items, items, presence)
+        self.step_towards(tick, items, items, presence, true)
     }
 
     pub(super) fn step_towards(
@@ -66,6 +66,7 @@ impl Weights {
         items: &[f32],
         future: &[f32],
         presence: &[f32],
+        can_reflow: bool,
     ) -> Vec<f32> {
         let targets: Vec<_> = items.iter().map(|&count| count.max(1.0)).collect();
         let (mut from, mut to, mut live) = (0.0, 0.0, 0.0);
@@ -87,7 +88,7 @@ impl Weights {
             }
             self.present[i] = p > 0.0;
         }
-        if tick >= self.next && self.drifted(&targets, presence) {
+        if can_reflow && tick >= self.next && self.drifted(&targets, presence) {
             self.from = self.at(tick);
             self.to = future.iter().map(|&count| count.max(1.0)).collect();
             self.start = tick;
@@ -97,7 +98,7 @@ impl Weights {
     }
 
     fn at(&self, tick: usize) -> Vec<f32> {
-        let eased = ease(tick - self.start, self.policy.reflow);
+        let eased = progress(tick - self.start, span(self.policy.reflow));
         self.from
             .iter()
             .zip(&self.to)
@@ -142,13 +143,28 @@ pub(super) fn reflow_spacing() -> usize {
 }
 
 pub(super) fn reflow_ease(elapsed: usize) -> f32 {
-    ease(elapsed, POLICY.reflow)
+    progress(elapsed, reflow_ticks())
 }
 
-fn ease(elapsed: usize, ticks: u32) -> f32 {
-    let duration = span(ticks).max(1);
-    let u = count(elapsed.min(duration)) / count(duration);
-    u * u * (3.0 - 2.0 * u)
+pub(super) fn progress(elapsed: usize, duration: usize) -> f32 {
+    ease(elapsed, duration, 0.125)
+}
+
+pub(super) fn birth_ease(elapsed: usize, duration: usize) -> f32 {
+    ease(elapsed, duration, 0.25)
+}
+
+fn ease(elapsed: usize, duration: usize, ramp_fraction: f32) -> f32 {
+    let phase = count(elapsed.min(duration)) / count(duration);
+    let integrate = |phase: f32| {
+        let ramp = phase.min(ramp_fraction);
+        (phase - ramp + 0.5 * ramp * ramp / ramp_fraction) / (1.0 - ramp_fraction)
+    };
+    if phase <= 0.5 {
+        integrate(phase)
+    } else {
+        1.0 - integrate(1.0 - phase)
+    }
 }
 
 fn span(ticks: u32) -> usize {
@@ -160,6 +176,21 @@ mod tests {
     use super::*;
 
     const BOTH: [f32; 2] = [1.0, 1.0];
+
+    #[test]
+    fn motion_accelerates_symmetrically_and_holds_steady_speed() {
+        let duration = 240;
+        let speed = |tick| progress(tick + 1, duration) - progress(tick, duration);
+        let middle = speed(duration / 2);
+        assert!(speed(0) < middle / 10.0);
+        for tick in 0..duration / 8 {
+            assert!(speed(tick) < speed(tick + 1));
+            assert!((speed(tick) - speed(duration - tick - 1)).abs() < 1e-6);
+        }
+        for tick in duration / 8..duration * 7 / 8 {
+            assert!((speed(tick) - middle).abs() < 1e-6);
+        }
+    }
 
     #[test]
     fn counts_within_the_drift_keep_their_weights() {
@@ -208,11 +239,11 @@ mod tests {
         let mut weights = Weights::new(2);
         weights.step(0, &[100.0, 100.0], &BOTH);
         assert_eq!(
-            weights.step_towards(1, &[100.0, 100.0], &[100.0, 400.0], &BOTH),
+            weights.step_towards(1, &[100.0, 100.0], &[100.0, 400.0], &BOTH, true),
             [100.0, 100.0],
         );
         assert_eq!(
-            weights.step_towards(2, &[100.0, 200.0], &[100.0, 400.0], &BOTH),
+            weights.step_towards(2, &[100.0, 200.0], &[100.0, 400.0], &BOTH, true),
             [100.0, 100.0],
         );
         assert_eq!(

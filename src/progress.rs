@@ -14,7 +14,6 @@ pub(crate) enum Stage {
     Layout,
     Travel,
     Reservations,
-    Titles,
     Checkpoint,
 }
 
@@ -26,7 +25,6 @@ impl Stage {
             Self::Layout => "replaying layout",
             Self::Travel => "planning travel",
             Self::Reservations => "reserving parking",
-            Self::Titles => "placing titles",
             Self::Checkpoint => "preparing playback",
         }
     }
@@ -95,7 +93,12 @@ impl Progress {
 
     /// Reports work within this pass, excluding the already planned prefix.
     pub(crate) fn report_range(&self, stage: Stage, done: u64, begin: u64, end: u64) {
-        self.report(stage, done.saturating_sub(begin), end.saturating_sub(begin));
+        if begin == end {
+            self.report(stage, 0, 1);
+            self.report(stage, 1, 1);
+        } else {
+            self.report(stage, done.saturating_sub(begin), end.saturating_sub(begin));
+        }
     }
 
     fn report_at(&self, elapsed: Duration, stage: Stage, done: u64, total: u64) {
@@ -161,7 +164,7 @@ mod tests {
     fn later_window_progress_starts_at_zero() {
         let (progress, updates) = Progress::channel(Duration::ZERO);
         for tick in [9_000, 9_050, 9_100] {
-            progress.report_range(Stage::Titles, tick, 9_000, 9_100);
+            progress.report_range(Stage::Checkpoint, tick, 9_000, 9_100);
         }
         assert_eq!(
             updates

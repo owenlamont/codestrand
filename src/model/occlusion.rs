@@ -1,7 +1,31 @@
 use bevy::math::{Rect, Vec2, Vec3};
 use serde::Serialize;
 
-use super::{Simulation, framing, project, titles, view_direction};
+use super::{Simulation, framing, project, view_direction};
+
+const HALF: Vec2 = Vec2::new(640.0, 360.0);
+pub(super) fn screen(sim: &Simulation, point: Vec3) -> Vec2 {
+    project(
+        sim.state.focus + view_direction() * sim.state.distance,
+        sim.state.focus,
+        &[point],
+    )
+    .next()
+    .flatten()
+    .expect("visible model point")
+        * HALF
+}
+pub(in crate::model) fn label_bounds(sim: &Simulation, label: &super::Label) -> Rect {
+    let point = screen(sim, label.position);
+    let size = super::names::rect(
+        Vec2::ZERO,
+        &label.text,
+        label.scale,
+        sim.state.geometry.label_height,
+    )
+    .size();
+    Rect::from_corners(point - Vec2::Y * size.y, point + Vec2::X * size.x)
+}
 
 #[derive(Debug, Default, Serialize)]
 pub(crate) struct Audit {
@@ -27,7 +51,7 @@ impl Audit {
             .labels_for_detail(|_| true)
             .into_iter()
             .filter(|label| label.opacity > 0.001 && !label.text.is_empty())
-            .map(|label| (titles::label_bounds(sim, &label), label.text))
+            .map(|label| (label_bounds(sim, &label), label.text))
             .collect();
         let discs: Vec<_> = sim
             .avatars()

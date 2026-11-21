@@ -31,14 +31,73 @@ pub(super) struct View {
     pub viewport: Vec2,
 }
 
-const CLIP_PLANES: [Vec4; 6] = [
-    Vec4::new(0.0, 0.0, -1.0, 1.0),
-    Vec4::Z,
+pub(super) const DEPTH_PLANES: [Vec4; 2] = [Vec4::new(0.0, 0.0, -1.0, 1.0), Vec4::Z];
+pub(super) const CLIP_PLANES: [Vec4; 6] = [
+    DEPTH_PLANES[0],
+    DEPTH_PLANES[1],
     Vec4::new(1.0, 0.0, 0.0, 1.0),
     Vec4::new(-1.0, 0.0, 0.0, 1.0),
     Vec4::new(0.0, 1.0, 0.0, 1.0),
     Vec4::new(0.0, -1.0, 0.0, 1.0),
 ];
+
+pub(super) struct ProjectedQuad {
+    points: [Vec2; MAX_CLIPPED_VERTICES],
+    len: usize,
+}
+
+impl ProjectedQuad {
+    pub(super) fn points(&self) -> &[Vec2] {
+        &self.points[..self.len]
+    }
+
+    pub(super) fn map(&mut self, map: impl Fn(Vec2) -> Vec2) {
+        for point in &mut self.points[..self.len] {
+            *point = map(*point);
+        }
+    }
+}
+
+// Four corners, six frustum planes and up to four inset pane edges.
+const MAX_CLIPPED_VERTICES: usize = 14;
+
+pub(super) fn project_quad(
+    corners: [Vec4; 4],
+    planes: &[Vec4],
+) -> Option<ProjectedQuad> {
+    let mut polygon = [Vec4::ZERO; MAX_CLIPPED_VERTICES];
+    let mut clipped = [Vec4::ZERO; MAX_CLIPPED_VERTICES];
+    polygon[..4].copy_from_slice(&corners);
+    let mut len = 4;
+    for &plane in planes {
+        let mut count = 0;
+        for index in 0..len {
+            let (a, b) = (polygon[index], polygon[(index + 1) % len]);
+            let (da, db) = (plane.dot(a), plane.dot(b));
+            if da >= 0.0 {
+                clipped[count] = a;
+                count += 1;
+            }
+            if (da < 0.0 && db > 0.0) || (da > 0.0 && db < 0.0) {
+                clipped[count] = a.lerp(b, da / (da - db));
+                count += 1;
+            }
+        }
+        if count < 3 {
+            return None;
+        }
+        std::mem::swap(&mut polygon, &mut clipped);
+        len = count;
+    }
+    let mut points = [Vec2::ZERO; MAX_CLIPPED_VERTICES];
+    for (&clip, point) in polygon[..len].iter().zip(&mut points) {
+        if !clip.is_finite() || clip.w <= 0.0 {
+            return None;
+        }
+        *point = clip.xy() / clip.w;
+    }
+    Some(ProjectedQuad { points, len })
+}
 
 struct BroadPhase {
     planes: [(Vec4, f32); 6],
@@ -108,40 +167,13 @@ impl View {
     }
 
     fn face_bounds(&self, corners: [Vec3; 4]) -> Option<Rect> {
-        // A convex quad gains at most one vertex per clipping plane: 4 + 6 < 16.
-        let mut polygon = [Vec4::ZERO; 16];
-        let mut clipped = [Vec4::ZERO; 16];
-        for (slot, p) in polygon.iter_mut().zip(corners) {
-            *slot = self.clip_from_world * p.extend(1.0);
-        }
-        let mut len = 4;
-        for plane in CLIP_PLANES {
-            let mut count = 0;
-            for index in 0..len {
-                let (a, b) = (polygon[index], polygon[(index + 1) % len]);
-                let (da, db) = (plane.dot(a), plane.dot(b));
-                if da >= 0.0 {
-                    clipped[count] = a;
-                    count += 1;
-                }
-                if (da >= 0.0) != (db >= 0.0) {
-                    clipped[count] = a.lerp(b, da / (da - db));
-                    count += 1;
-                }
-            }
-            if count == 0 {
-                return None;
-            }
-            std::mem::swap(&mut polygon, &mut clipped);
-            len = count;
-        }
+        let polygon = project_quad(
+            corners.map(|point| self.clip_from_world * point.extend(1.0)),
+            &CLIP_PLANES,
+        )?;
         let mut low = Vec2::splat(f32::INFINITY);
         let mut high = Vec2::splat(f32::NEG_INFINITY);
-        for &p in &polygon[..len] {
-            if !p.is_finite() || p.w <= 0.0 {
-                return None;
-            }
-            let point = p.truncate().truncate() / p.w;
+        for &point in polygon.points() {
             low = low.min(point);
             high = high.max(point);
         }
@@ -221,6 +253,7 @@ impl Names {
             self.include(
                 (
                     Target::File(id),
+                    dir.repository,
                     point + Vec3::new(-0.2, 0.0, 0.45) * dir.scale,
                     opacity,
                 ),
@@ -240,6 +273,7 @@ impl Names {
             self.include(
                 (
                     Target::Dir(index),
+                    dir.repository,
                     center + Vec3::new(-half.x, 0.1, half.z),
                     opacity,
                 ),
@@ -253,12 +287,12 @@ impl Names {
 
     fn include(
         &mut self,
-        entry: (Target, Vec3, f32),
+        entry: (Target, usize, Vec3, f32),
         pixels: f32,
         selected: &mut BTreeSet<Target>,
         text: impl FnOnce() -> String,
     ) {
-        let (target, position, opacity) = entry;
+        let (target, repository, position, opacity) = entry;
         let threshold = if self.targets.contains(&target) {
             EXIT_PIXELS
         } else {
@@ -267,6 +301,7 @@ impl Names {
         if opacity > 0.001 && pixels >= threshold {
             selected.insert(target);
             self.labels.push(Label {
+                repository: Some(repository),
                 position,
                 text: text(),
                 kind: LabelKind::Detail,
@@ -459,7 +494,7 @@ mod tests {
             let mut selected = BTreeSet::new();
             names.labels.clear();
             names.include(
-                (Target::File(1), anchor, 1.0),
+                (Target::File(1), 0, anchor, 1.0),
                 pixels,
                 &mut selected,
                 || "inactive.rs".into(),

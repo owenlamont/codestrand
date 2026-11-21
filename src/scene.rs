@@ -45,6 +45,7 @@ mod settings;
 #[cfg(test)]
 mod static_tests;
 mod styling;
+mod titles;
 
 pub(super) use loading::Loading;
 
@@ -629,6 +630,7 @@ pub(super) fn preview(loading: Loading) -> anyhow::Result<()> {
             fps: model::PREVIEW_FPS,
         })
         .add_plugins(settings::PreviewSettingsPlugin)
+        .add_plugins(PreviewFrameRate)
         .add_systems(Startup, loading::show)
         .add_systems(loading::Loaded, setup)
         .add_systems(
@@ -662,6 +664,89 @@ pub(super) fn preview(loading: Loading) -> anyhow::Result<()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .take();
     error.map_or(Ok(()), Err)
+}
+
+struct PreviewFrameRate;
+
+impl Plugin for PreviewFrameRate {
+    fn build(&self, app: &mut App) {
+        app.add_plugins(bevy::diagnostic::FrameTimeDiagnosticsPlugin::default())
+            .add_systems(Startup, spawn_frame_rate)
+            .add_systems(Update, update_frame_rate);
+    }
+}
+
+#[derive(Component)]
+struct FrameRateText;
+
+fn spawn_frame_rate(mut commands: Commands) {
+    commands.spawn((
+        FrameRateText,
+        Text::new(""),
+        TextFont::from_font_size(14.0),
+        Visibility::Hidden,
+        GlobalZIndex(100),
+        Node {
+            position_type: PositionType::Absolute,
+            top: px(8),
+            right: px(8),
+            ..default()
+        },
+    ));
+}
+
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Bevy extracts system parameters by value"
+)]
+fn update_frame_rate(
+    keys: Res<ButtonInput<KeyCode>>,
+    diagnostics: Res<bevy::diagnostic::DiagnosticsStore>,
+    mut overlay: Single<(&mut Visibility, &mut Text), With<FrameRateText>>,
+) {
+    if keys.just_pressed(KeyCode::F12) {
+        *overlay.0 = match *overlay.0 {
+            Visibility::Hidden => Visibility::Visible,
+            _ => Visibility::Hidden,
+        };
+    }
+    if *overlay.0 == Visibility::Visible
+        && let Some(fps) = diagnostics
+            .get(&bevy::diagnostic::FrameTimeDiagnosticsPlugin::FPS)
+            .and_then(bevy::diagnostic::Diagnostic::smoothed)
+    {
+        overlay.1.set_if_neq(Text::new(format!("{fps:.0} FPS")));
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn preview_frame_rate_starts_hidden_and_f12_toggles_it() {
+    let mut app = App::new();
+    app.add_plugins((
+        MinimalPlugins,
+        bevy::diagnostic::DiagnosticsPlugin,
+        PreviewFrameRate,
+    ))
+    .init_resource::<ButtonInput<KeyCode>>();
+    let visibility = |world: &mut World| {
+        *world
+            .query_filtered::<&Visibility, With<FrameRateText>>()
+            .single(world)
+            .unwrap()
+    };
+    app.update();
+    assert_eq!(visibility(app.world_mut()), Visibility::Hidden);
+    for expected in [Visibility::Visible, Visibility::Hidden] {
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::F12);
+        app.update();
+        assert_eq!(visibility(app.world_mut()), expected);
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .reset_all();
+    }
 }
 
 pub(super) fn headless(
@@ -853,6 +938,7 @@ fn setup(world: &mut World) {
     let theme = world.resource::<Playback>().0.theme().clone();
     let palette = Palette::new(world, &theme);
     repository_regions(world);
+    titles::setup(world);
     world.spawn((
         Mesh3d(palette.glyph_mesh.clone()),
         MeshMaterial3d(palette.floor.clone()),
@@ -875,7 +961,7 @@ fn setup(world: &mut World) {
     world.resource_mut::<Pools>().grid = grid;
     world.insert_resource(palette);
     let repository_labels = world.resource::<Playback>().0.layout().repositories.len();
-    grow_labels(world, LABELS + repository_labels, &theme, camera);
+    grow_labels(world, LABELS, &theme, camera);
     for _ in 0..crate::diff_samples::PER_COMMIT {
         world.spawn((
             Text::new(""),
@@ -942,9 +1028,8 @@ fn recolor_repository_regions(world: &mut World, theme: &Theme) {
     }
 }
 
-fn glass_positions(region: &crate::layout::RepositoryRegion) -> Vec<[f32; 3]> {
-    let corners = region
-        .tile
+fn glass_positions(tile: Option<crate::layout::packing::Tile>) -> Vec<[f32; 3]> {
+    let corners = tile
         .map_or([Vec2::ZERO; 4], crate::layout::packing::Tile::corners)
         .map(model::framing::field_to_world);
     [0, 1, 2, 0, 2, 3]
@@ -971,7 +1056,7 @@ fn repository_regions(world: &mut World) {
             bevy::render::render_resource::PrimitiveTopology::TriangleList,
             RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
         )
-        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, glass_positions(region))
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, glass_positions(region.tile))
         .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0, 1.0, 0.0]; 6]);
         let mesh = world.resource_mut::<Assets<Mesh>>().add(mesh);
         world.spawn((
@@ -1398,6 +1483,7 @@ pub(super) fn animate(world: &mut World) {
                 }
                 sync_activity(world, &palette, &mut pools, simulation);
                 sync_repository_regions(world, simulation);
+                titles::sync(world, simulation);
             });
         });
     });
@@ -1473,13 +1559,13 @@ fn sync_repository_regions(world: &mut World, simulation: &Simulation) {
     let updates: Vec<_> = query
         .iter_mut(world)
         .map(|(RepositoryGlass(index), mesh, mut visibility)| {
-            let region = &simulation.layout().repositories[*index];
-            *visibility = if region.live {
+            let tile = simulation.visible_repository_tile(*index);
+            *visibility = if tile.is_some() {
                 Visibility::Visible
             } else {
                 Visibility::Hidden
             };
-            (mesh.0.clone(), glass_positions(region))
+            (mesh.0.clone(), glass_positions(tile))
         })
         .collect();
     let mut meshes = world.resource_mut::<Assets<Mesh>>();
@@ -1495,10 +1581,8 @@ fn sync_repository_regions(world: &mut World, simulation: &Simulation) {
         .map(|(entity, glass)| (entity, glass.0))
         .collect();
     for (entity, repository) in entities {
-        let (grey, alpha, rise) = simulation.repository_effect(repository);
-        if let Some(mut transform) = world.get_mut::<Transform>(entity) {
-            transform.translation.y = rise;
-        }
+        let (grey, alpha, _) = simulation.repository_effect(repository);
+
         fade(world, entity, grey, alpha);
     }
 }
@@ -2265,6 +2349,39 @@ fn ground(point: Vec2) -> Vec3 {
     Vec3::new(point.x, 0.0, point.y)
 }
 
+#[cfg(test)]
+fn pane_visibility_views(
+    tile: crate::layout::packing::Tile,
+) -> [(&'static str, Transform); 4] {
+    let [a, _, b, _] = tile.ground();
+    let size = (b - a).abs();
+    let center = ground(a.midpoint(b)).with_y(model::framing::GLASS_BOTTOM);
+    let eye =
+        |x, height, z| center + Vec3::new(x * size.x, height * size.y, z * size.y);
+    [
+        (
+            "overview",
+            Transform::from_translation(eye(0.0, 3.0, 0.0))
+                .looking_at(center, Vec3::NEG_Z),
+        ),
+        (
+            "zoom",
+            Transform::from_translation(eye(0.0, 0.35, 0.0))
+                .looking_at(center, Vec3::NEG_Z),
+        ),
+        (
+            "oblique",
+            Transform::from_translation(eye(-0.34, 0.22, 0.32))
+                .looking_at(center, Vec3::Y),
+        ),
+        (
+            "low",
+            Transform::from_translation(eye(-0.34, 0.07, 0.0))
+                .looking_at(center, Vec3::Y),
+        ),
+    ]
+}
+
 fn grow_labels(world: &mut World, needed: usize, theme: &Theme, camera: Entity) {
     let existing = world
         .query_filtered::<Entity, With<Label>>()
@@ -2489,6 +2606,66 @@ fn faded_label_border(theme: &Theme, opacity: f32) -> BorderColor {
     border
 }
 
+fn label_fits_pane(rect: Rect, pane: &names::ProjectedQuad) -> bool {
+    let pane = pane.points();
+    let edges = || {
+        pane.iter()
+            .copied()
+            .zip(pane.iter().copied().cycle().skip(1))
+    };
+    let area: f32 = edges()
+        .map(|(a, b)| (a - pane[0]).perp_dot(b - pane[0]))
+        .sum();
+    let corners = [
+        rect.min,
+        Vec2::new(rect.max.x, rect.min.y),
+        rect.max,
+        Vec2::new(rect.min.x, rect.max.y),
+    ];
+    area != 0.0
+        && edges().all(|(a, b)| {
+            corners
+                .iter()
+                .all(|&corner| (b - a).perp_dot(corner - a) * area.signum() >= 0.0)
+        })
+}
+
+fn projected_panes(
+    simulation: &Simulation,
+    camera: &Camera,
+    transform: &GlobalTransform,
+) -> Vec<Option<names::ProjectedQuad>> {
+    if !matches!(
+        simulation.repository_boundary,
+        crate::repositories::Boundary::Glass
+    ) {
+        return Vec::new();
+    }
+    let Some(viewport) = camera.logical_viewport_size() else {
+        return Vec::new();
+    };
+    let half = viewport / (2.0 * camera_ui_scale(camera));
+    let clip_from_world = camera.clip_from_view() * transform.to_matrix().inverse();
+    simulation
+        .layout()
+        .repositories
+        .iter()
+        .enumerate()
+        .map(|(index, _)| {
+            let tile = simulation.visible_repository_tile(index)?;
+            let corners = tile.ground().map(|point| {
+                clip_from_world
+                    * ground(point)
+                        .with_y(model::framing::GLASS_BOTTOM)
+                        .extend(1.0)
+            });
+            let mut pane = names::project_quad(corners, &names::DEPTH_PLANES)?;
+            pane.map(|point| (Vec2::ONE + point * Vec2::new(1.0, -1.0)) * half);
+            Some(pane)
+        })
+        .collect()
+}
+
 fn labels(world: &mut World) {
     let mut camera_query =
         world.query_filtered::<(&Camera, &GlobalTransform), With<SceneCamera>>();
@@ -2500,6 +2677,7 @@ fn labels(world: &mut World) {
     let playback = world.resource::<Playback>();
     let geometry = playback.0.theme();
     let lod = &world.resource::<Pools>().lod;
+    let panes = projected_panes(&playback.0, &camera, &transform);
     let mut avatars = playback.0.avatars().iter().filter(|a| a.presence > 0.0);
     let wanted = playback
         .0
@@ -2536,6 +2714,17 @@ fn labels(world: &mut World) {
                     label.position,
                 )
             };
+            if let Some(pane) = label.repository.and_then(|index| panes.get(index)) {
+                let rect = model::label_rect(
+                    point,
+                    &label.text,
+                    label.scale,
+                    geometry.label_height,
+                );
+                if !label_fits_pane(rect, pane.as_ref()?) {
+                    return None;
+                }
+            }
             let distance = transform.translation().distance_squared(anchor);
             Some((label, point, distance))
         });
@@ -3015,6 +3204,7 @@ mod tests {
                 &mut world,
                 vec![(
                     model::Label {
+                        repository: None,
                         position: Vec3::ZERO,
                         text: "Contributor".to_owned(),
                         kind: model::LabelKind::Avatar,
@@ -3093,8 +3283,8 @@ mod tests {
             let mut query = world.query::<(&RepositoryGlass, &Mesh3d, &Visibility)>();
             for (glass, mesh, visibility) in query.iter(&world) {
                 let region = &simulation.layout().repositories[glass.0];
-                assert_eq!(*visibility == Visibility::Visible, region.live);
-                let Some(tile) = region.tile else {
+                assert_eq!(*visibility == Visibility::Visible, region.tile.is_some());
+                let Some(tile) = simulation.visible_repository_tile(glass.0) else {
                     continue;
                 };
                 let mesh = world.resource::<Assets<Mesh>>().get(&mesh.0).unwrap();
@@ -3489,10 +3679,17 @@ mod tests {
         let clock = world.register_system(preview_clock);
         let camera = world.register_system(preview_camera);
         world.run_system(clock).unwrap();
-        for seconds in [3, 60, 60] {
+        let waiting_frame = initial_duration.ticks(true) + 3;
+        let delay = std::time::Duration::from_millis(waiting_frame * 1_000 / 60 + 1);
+        let waiting_frame = model::preview_frame(delay, 60);
+        for delta in [
+            delay,
+            std::time::Duration::from_secs(60),
+            std::time::Duration::from_secs(60),
+        ] {
             world
                 .resource_mut::<Time<Real>>()
-                .update_with_duration(std::time::Duration::from_secs(seconds));
+                .update_with_duration(delta);
             world.run_system(clock).unwrap();
             assert_eq!(world.resource::<Frame>().index, 0);
             assert!(world.resource::<PlanningWait>().0);
@@ -3518,13 +3715,13 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         assert!(!world.resource::<PlanningWait>().0);
-        assert_eq!(world.resource::<Frame>().index, 180);
+        assert_eq!(world.resource::<Frame>().index, waiting_frame);
         assert!(world.resource::<Playback>().0.duration() > initial_duration);
         world
             .resource_mut::<Time<Real>>()
             .update_with_duration(std::time::Duration::from_millis(17));
         world.run_system(clock).unwrap();
-        assert_eq!(world.resource::<Frame>().index, 181);
+        assert_eq!(world.resource::<Frame>().index, waiting_frame + 1);
     }
 
     #[test]
@@ -4278,6 +4475,7 @@ mod tests {
     ) -> (model::Label, Vec2, f32) {
         (
             model::Label {
+                repository: None,
                 text: text.to_owned(),
                 kind,
                 position: Vec3::ZERO,
@@ -4288,6 +4486,53 @@ mod tests {
             point,
             distance,
         )
+    }
+
+    #[test]
+    fn directory_labels_fit_panes_across_camera_angles() {
+        let mut simulation = Simulation::two_synthetic_repositories();
+        simulation.repository_boundary = crate::repositories::Boundary::Glass;
+        let tile = simulation.visible_repository_tile(0).unwrap();
+        let [a, _, b, _] = tile.ground();
+        let camera = Camera {
+            computed: bevy::camera::ComputedCameraValues {
+                clip_from_view: Projection::Perspective(
+                    bevy::camera::PerspectiveProjection::default(),
+                )
+                .get_clip_from_view(),
+                target_info: Some(bevy::camera::RenderTargetInfo {
+                    physical_size: UVec2::new(1280, 720),
+                    scale_factor: 1.0,
+                }),
+                ..default()
+            },
+            ..default()
+        };
+        for (angle, transform) in pane_visibility_views(tile) {
+            let transform = GlobalTransform::from(transform);
+            let center = project_point(
+                &camera,
+                &transform,
+                ground(a.midpoint(b)).with_y(model::framing::GLASS_BOTTOM),
+            )
+            .unwrap();
+            let rect = model::label_rect(center, "src/", 1.0, 20.0);
+            let panes = projected_panes(&simulation, &camera, &transform);
+            let pane = panes[0]
+                .as_ref()
+                .unwrap_or_else(|| panic!("{angle}: visible pane was discarded"));
+            assert!(
+                label_fits_pane(rect, pane),
+                "{angle}: src/ fits within the pane"
+            );
+            assert!(
+                !label_fits_pane(
+                    Rect::from_center_size(center, Vec2::splat(4000.0)),
+                    pane
+                ),
+                "{angle}: oversized label spills outside the pane"
+            );
+        }
     }
 
     #[test]
@@ -4353,31 +4598,6 @@ mod tests {
             ["far", "near"]
         );
         assert_eq!(chosen[0].1, chosen[1].1);
-    }
-
-    #[test]
-    fn repository_labels_use_viewport_bounds_and_hide_offscreen_anchors() {
-        let chosen = place_labels(
-            vec![
-                projected_label(
-                    "outside",
-                    model::LabelKind::Repository,
-                    Vec2::new(-10.0, 100.0),
-                    1.0,
-                ),
-                projected_label(
-                    "inside",
-                    model::LabelKind::Repository,
-                    Vec2::new(1400.0, 800.0),
-                    1.0,
-                ),
-            ],
-            20.0,
-            Vec2::new(1920.0, 1080.0),
-        );
-        assert_eq!(chosen.len(), 1);
-        assert_eq!(chosen[0].0.text, "inside");
-        assert_eq!(chosen[0].1, Vec2::new(1400.0, 800.0));
     }
 
     #[test]

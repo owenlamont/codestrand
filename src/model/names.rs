@@ -151,7 +151,7 @@ mod tests {
             .avatars
             .iter()
             .map(|a| {
-                super::super::titles::label_bounds(&sim, &sim.state.avatar_label(a))
+                super::super::occlusion::label_bounds(&sim, &sim.state.avatar_label(a))
             })
             .collect();
         assert!(
@@ -189,7 +189,7 @@ mod tests {
         assert_eq!(names.last().unwrap().text, "Uncrowded contributor");
         let rectangles: Vec<_> = names
             .iter()
-            .map(|l| super::super::titles::label_bounds(&sim, l))
+            .map(|l| super::super::occlusion::label_bounds(&sim, l))
             .collect();
         for (index, rect) in rectangles.iter().enumerate() {
             assert_eq!(super::super::caption::outside(*rect, 0.0), 0.0);

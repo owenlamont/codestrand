@@ -2,7 +2,8 @@
 
 Preview loops the selected history. Export renders the same launch timeline at
 explicit frame times at 1x speed. Export uses a static overview that fits the scene by
-default. Use `--camera-path` for a scripted camera.
+default. Use `--camera-path` for a scripted camera. New tiles grow over 1.5 seconds
+before their first commit.
 
 Preview renders at the window's physical resolution, including on HiDPI displays.
 Resizing or maximising keeps a 720-logical-pixel-high UI: text scales with height,
@@ -57,6 +58,7 @@ macOS discovers installed fonts through CoreText and Library/Fonts directories.
 | Hold left / right button (captured) | Move along world Y up / down; both cancel |
 | F10 | Open or close settings; release capture and pause camera controls |
 | F11 | Toggle borderless fullscreen on the current monitor |
+| F12 | Toggle the preview frame-rate counter (off at startup) |
 | `[` | Halve live speed, down to 0.125x |
 | `]` | Double live speed, up to 8x |
 | `,` / `.` | Previous or next theme |
@@ -221,7 +223,8 @@ Neither field fetches platform metadata. Without either field the repository rem
 visible.
 An ending before the selected playback interval is already complete when playback starts.
 
-The ending tile, files and directories grey, rise and fade over 2.5 playback seconds.
+The ending tile greys and fades in place over 2.5 playback seconds. Files and
+directories grey, rise and fade over the same interval.
 Neighbours then reclaim the space over four seconds. If two exits start less than four
 seconds apart before adding any travel waits, both take five seconds to keep tile edges
 moving steadily. Exits that start together count as one for this rule. The extra second
@@ -271,28 +274,33 @@ starts. Empty active repositories weigh as one item.
 The split tree and aspect limits also affect each tile's area.
 Each repository keeps file identity,
 local layout and one uniform scale, with a fixed quarter-turn chosen for its history.
-Content zoom anticipates growth with a precomputed safe-fit envelope and half-second
-easing. The log-scale limit is 0.12 per second when zooming out and 0.08 when zooming in
-(about 11.3% shrink or 8.3% growth). A larger future contraction can start the
-adjustment earlier; the chosen scale never exceeds the tile's current safe fit.
-Repository titles and contributor names use a 12-pixel font on screen. Directory and
-touched-file labels use a 10-pixel font. Long titles and detail labels end in an
-ellipsis when space runs out. A title can sit closer to the edge of a small tile or
-disappear if the tile is too short. After an ended repository fades, its tile shrinks
-and neighbouring tiles grow into the space.
+Content scales directly to its tile's current safe fit, up to its original size.
+Each repository title fills the tile as far as its proportions and padding allow.
+The visible letters are centered on the tile surface underneath files and directories.
+The title stays aligned with the tile when you tilt or move the camera. Zooming in can
+reveal titles whose letters are too small on screen in the overview. Titles use bundled
+IBM Plex Mono and replace unsupported characters with a question mark.
+Contributor names use a 12-pixel screen font. Directory and touched-file labels use a
+10-pixel screen font and can end in an ellipsis when space runs out.
 
 A newcomer splits one existing tile or subtree. Other repositories retain their
 relative order. A reflow can change the split tree between repository arrivals and exits.
 Tiles and their contents ease together when the new tree improves area shares and
 the gutters stay connected throughout the move.
-Splits clamp to a ground-aspect range of 1:3.5 to 3.5:1, inclusive. Births ease for
-up to 0.75 playback seconds before their first commit. Births near the lead-in use the
-available lead-in time. Between reflows, tiles and shared gutters partition the field.
+Splits clamp to a ground-aspect range of 1:3.5 to 3.5:1, inclusive. The opening shows
+every repository still active from before the selected range.
+If none are active, the first repository has a lead-in tile.
+Later tiles grow over 1.5 seconds. Growth can overlap when several repositories
+arrive close together. A new tile settles before its first commit. Shrinking neighbours
+can show commits during the move. A split that would enlarge a neighbour waits for
+its earlier writes to finish. Commits retain their order. Each edge eases at both ends
+and travels at steady speed in between.
+Between reflows, tiles and shared gutters partition the field.
 `--gutter` sets spacing using the world distance represented by a pixel in the
 1280×720 reference view. The default is `4` and the range is `0`–`20`, inclusive.
 Tiles touch at `0`. Crowd scaling adjusts avatars when many are active.
-Names prefer clear content rectangles, including repository labels
-and a small margin, but may overlap content near tile edges when space is tight.
+Contributor names prefer clear space outside the file and directory layout, with a
+small margin. Names may overlap content at tile edges when space is tight.
 Different content shapes can leave space inside a uniformly fitted tile.
 
 In treemap diagnostics, `largest_empty_rectangle` measures the largest axis-aligned gap
@@ -349,16 +357,12 @@ Walking avatars remain visible during travel until an inferred calendar departur
 With `--contributor-travel walk`, walking trips
 also remain routed across long idle gaps instead of disappearing and re-entering at a
 different repository. After the last service, the normal inactivity fade still applies.
-Uncapped walking services trips in commit order and adds another second of waiting
-when tile motion or insufficient travel time blocks a route. New repository tiles get
-a full 0.75-second birth window inside their added wait. At the start of a wait,
-tile sizes transition toward the upcoming commit for at most 0.75 seconds,
-finishing before arrival. Tiles then hold their size, using the upcoming commit's
-zoom ceiling while fitting the content from before the commit. The content outline
-switches on arrival without moving the tile. Layout and calendar departures follow
-history time, which holds during travel waits. An uncapped plan
-that cannot find safe routes within the planning budgets reports an error instead of
-silently accepting a travel fade.
+Trips to a repository's first commit use the selected travel policy. Births follow
+presentation time, so the gutter can open before the first commit. In `walk` mode,
+a later birth can wait when its moving gutter would outrun an active walk.
+Calendar departures and content follow history time, which holds during
+travel waits. A required walk that cannot fit within the planning budgets reports
+an error.
 A plan that cannot converge within 32 replans stops with an error.
 Dormant contributors follow their previous repository's lane while waiting, so later
 tile growth cannot bury the starting point of their next uncapped trip.
@@ -376,7 +380,7 @@ Padding is revalidated as scene geometry changes. The automatic policy uses at m
 padded rebuilds, including one cleanup of unused service padding.
 Uncapped padding grows until every walking trip completes, subject to the planning
 memory estimate. Each Dijkstra search is limited to 10,000 graph nodes.
-Numeric caps apply to accumulated extra waiting per commit.
+Numeric caps apply to accumulated extra waiting for trips between existing tiles.
 
 Header and caption remain in the outer frame. Other preview aspect ratios use conservative
 framing;
@@ -410,11 +414,9 @@ To inspect a smaller interval, use inclusive `--start-date` and `--end-date`.
 Playback memory and duration checks use the range selected by `--start-date` and `--end-date`;
 the layout estimate also includes the files present when the range starts.
 
-To choose visual treatments, use
-`--repository-boundary none|glass` and `--repository-label-plane files|raised`.
-Defaults are `glass` and `raised`. Glass is a faint, coloured ground-plane tile for
-each live repository; raised labels stay at a constant height of 1.6 scene units.
-Both options apply to preview and export, including single repositories.
+`--repository-boundary glass` adds a faint, coloured ground-plane tile for each live
+repository in preview and export. Use `--repository-boundary none` to hide the glass.
+Repository titles remain on the ground in either mode.
 
 ## Range and pacing
 
@@ -505,8 +507,8 @@ Theme switching restyles active snippets without restarting their motion or fade
 `2`, inclusive). `0.5` doubles the crossing time, giving snippets longer to read.
 A walking contributor stays until its last fragment lands before leaving for its
 next repository, and a slower setting also delays a calendar departure until then.
-Commits keep their timeline spacing unless a walking trip needs the extra wait;
-`--contributor-travel auto` may still fade a contributor across mid-flight.
+Commits keep their timeline spacing unless a new tile or walking trip needs extra
+time. `--contributor-travel auto` may still fade a contributor across mid-flight.
 
 ```sh
 codestrand export frames --fragment-speed 0.5 --frames 90 --fps 30
