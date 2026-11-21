@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::{HALF, Rect, Vec2};
 use crate::model::{
-    Simulation, titles,
+    Simulation, occlusion,
     trace::{Counter, Phase},
 };
 
@@ -150,7 +150,7 @@ impl Simulation {
                 a.presence > 0.0 && !self.travel.travelling(*i, state.tick)
             })
             .map(|(i, a)| {
-                let point = titles::screen(self, a.position);
+                let point = occlusion::screen(self, a.position);
                 let parked = a
                     .slot
                     .as_ref()
@@ -405,7 +405,7 @@ mod tests {
         passer.slot = None;
         let walker = avatars.len();
         avatars.push(passer);
-        let point = super::titles::screen(&sim, sim.state.avatars[lead].position);
+        let point = super::occlusion::screen(&sim, sim.state.avatars[lead].position);
         let reservations = |sim: &super::Simulation| {
             let mut occupied = super::Reservations::new();
             let (conflicts, _) =
@@ -618,7 +618,7 @@ mod tests {
             .position(|avatar| avatar.slot.is_some())
             .unwrap();
         let position = sim.state.avatars[parked].position;
-        let point = super::titles::screen(&sim, position);
+        let point = super::occlusion::screen(&sim, position);
         let commit = sim.state.avatars[parked].commit;
         let tile = sim.state.layout.repositories[0].gutter.unwrap();
         let mut rows = super::Reservations::new();

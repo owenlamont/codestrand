@@ -12,6 +12,10 @@ mod zoom;
 
 const BOUND: f32 = 3.5;
 pub(crate) const BIRTH_TICKS: u32 = 45;
+const OPENING_BIRTH_TICKS: usize = 180;
+const OPENING_TICKS: usize = 360;
+const OPENING_STEP: usize = 30;
+
 /// Ticks whose zoom is fitted together; fixed so counts do not depend on the thread count.
 const ZOOM_CHUNK: usize = 256;
 const ALLOCATION_TOLERANCE_PX: f32 = 0.25;
@@ -22,6 +26,15 @@ const FIELD_GROWTH_STEP: f32 = 1.125;
 const FIRMING_STEPS: u32 = 8;
 /// Insertion candidates each scoring thread takes at least, so small trees stay serial.
 const PARALLEL_SPLITS: usize = 32;
+
+fn birth_lead(ready: usize, opening: bool) -> usize {
+    let normal = BIRTH_TICKS as usize;
+    if opening {
+        normal.max(OPENING_BIRTH_TICKS.saturating_sub(ready / 2))
+    } else {
+        normal
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 struct Space {
@@ -611,20 +624,81 @@ fn nearest_tiles(
     )
 }
 
+fn active_nodes(nodes: &[Node], visible: impl Fn(usize) -> bool) -> Vec<bool> {
+    fn visit(
+        nodes: &[Node],
+        index: usize,
+        visible: &impl Fn(usize) -> bool,
+        active: &mut [bool],
+    ) -> bool {
+        let used = match nodes[index] {
+            Node::Repository(repository) => visible(repository),
+            Node::Split { first, second, .. } => {
+                let near = visit(nodes, first, visible, active);
+                let far = visit(nodes, second, visible, active);
+                near || far
+            }
+        };
+        active[index] = used;
+        used
+    }
+
+    let mut active = vec![false; nodes.len()];
+    visit(nodes, 0, &visible, &mut active);
+    active
+}
+
 fn collapse_missing(
     nodes: &[Node],
     index: usize,
     tiles: &mut [Option<Tile>],
+    growing: Option<&[bool]>,
 ) -> Option<Tile> {
-    fn fill(nodes: &[Node], index: usize, tile: Tile, tiles: &mut [Option<Tile>]) {
+    fn fill(
+        nodes: &[Node],
+        index: usize,
+        tile: Tile,
+        tiles: &mut [Option<Tile>],
+        growing: Option<&[bool]>,
+    ) {
+        if growing.is_some_and(|active| !active[index]) {
+            return;
+        }
         match nodes[index] {
             Node::Repository(i) => tiles[i] = Some(tile),
-            Node::Split { first, second, .. } => {
-                fill(nodes, first, tile, tiles);
-                fill(nodes, second, tile, tiles);
+            Node::Split {
+                axis,
+                first,
+                second,
+            } => {
+                let cut = match growing {
+                    Some(active) if !active[first] => tile.low[axis],
+                    Some(active) if !active[second] => tile.high[axis],
+                    _ => tile.low[axis].midpoint(tile.high[axis]),
+                };
+                let mut near = tile;
+                let mut far = tile;
+                near.high[axis] = cut;
+                far.low[axis] = cut;
+                fill(nodes, first, near, tiles, growing);
+                fill(nodes, second, far, tiles, growing);
             }
         }
     }
+    let edge = |tile: Tile, axis: usize, position: f32| {
+        let center = tile.low.midpoint(tile.high);
+        let mut zero = if growing.is_some() {
+            tile
+        } else {
+            Tile {
+                low: center,
+                high: center,
+            }
+        };
+        zero.low[axis] = position;
+        zero.high[axis] = position;
+        zero
+    };
     match nodes[index] {
         Node::Repository(i) => tiles[i],
         Node::Split {
@@ -633,38 +707,30 @@ fn collapse_missing(
             second,
         } => {
             match (
-                collapse_missing(nodes, first, tiles),
-                collapse_missing(nodes, second, tiles),
+                collapse_missing(nodes, first, tiles, growing),
+                collapse_missing(nodes, second, tiles, growing),
             ) {
                 (Some(a), Some(b)) => Some(Tile {
                     low: a.low.min(b.low),
                     high: a.high.max(b.high),
                 }),
                 (None, Some(tile)) => {
-                    let mut point = tile.low.midpoint(tile.high);
-                    point[axis] = tile.low[axis];
                     fill(
                         nodes,
                         first,
-                        Tile {
-                            low: point,
-                            high: point,
-                        },
+                        edge(tile, axis, tile.low[axis]),
                         tiles,
+                        growing,
                     );
                     Some(tile)
                 }
                 (Some(tile), None) => {
-                    let mut point = tile.low.midpoint(tile.high);
-                    point[axis] = tile.high[axis];
                     fill(
                         nodes,
                         second,
-                        Tile {
-                            low: point,
-                            high: point,
-                        },
+                        edge(tile, axis, tile.high[axis]),
                         tiles,
+                        growing,
                     );
                     Some(tile)
                 }
@@ -856,6 +922,8 @@ pub(crate) struct Packing {
     growth: f32,
     nodes: Vec<Node>,
     reflows: Arc<[reflow::Change]>,
+    opening: Arc<[Vec<Option<Tile>>]>,
+    opening_end: usize,
     labels: Arc<[String]>,
     inputs: Arc<[Vec<Input>]>,
     samples: Arc<[Sample]>,
@@ -995,12 +1063,16 @@ impl Packing {
     }
 
     pub(crate) fn reflow_bytes(ticks: u128, repositories: u128) -> u128 {
-        (1 + ticks / held::reflow_spacing() as u128)
-            * (std::mem::size_of::<reflow::Change>() as u128
-                + repositories
-                    * (2 * std::mem::size_of::<Node>()
-                        + 4 * std::mem::size_of::<Option<Tile>>())
-                        as u128)
+        let opening = (1 + OPENING_TICKS / OPENING_STEP) as u128
+            * repositories
+            * size_of::<Option<Tile>>() as u128;
+        opening
+            + (1 + ticks / held::reflow_spacing() as u128)
+                * (std::mem::size_of::<reflow::Change>() as u128
+                    + repositories
+                        * (2 * std::mem::size_of::<Node>()
+                            + 4 * std::mem::size_of::<Option<Tile>>())
+                            as u128)
     }
 
     #[cfg(test)]
@@ -1099,6 +1171,16 @@ impl Packing {
             threads,
             growth,
         )?;
+        let opening_end = if activation.is_none() && first.len() > 1 {
+            let end = OPENING_TICKS.min(regions.len() - 1);
+            exits
+                .iter()
+                .flatten()
+                .filter_map(|exit| usize::try_from(exit.start).ok())
+                .fold(end, usize::min)
+        } else {
+            0
+        };
         let mut held = held::Weights::new(first.len());
         let earliest = births.iter().copied().min().unwrap_or(0);
         let mut reflows = Vec::<reflow::Change>::new();
@@ -1115,25 +1197,22 @@ impl Packing {
                             birth
                                 .min(usize::try_from(a[i]).expect("bounded activation"))
                         });
-                        let begin = ready.saturating_sub(
-                            usize::try_from(BIRTH_TICKS)
-                                .expect("birth ticks fit usize"),
-                        );
+                        let preview = ready < opening_end;
+                        let lead = birth_lead(ready, preview);
+                        let begin = ready.saturating_sub(lead);
                         if tick < begin || birth == usize::MAX {
                             return 0.0;
                         }
-                        if births[i] == earliest {
+                        if birth == earliest {
                             return 1.0;
                         }
-                        let elapsed = crate::model::ticks_duration(
-                            u64::try_from(tick.saturating_sub(begin))
-                                .expect("bounded timeline"),
-                        );
-                        let transition = crate::model::ticks_duration(
-                            u64::try_from(ready - begin).expect("bounded birth"),
-                        )
-                        .max(crate::model::tick_seconds());
-                        let u = (elapsed / transition).min(1.0);
+                        let (elapsed, duration) = if preview {
+                            ((tick + lead).saturating_sub(ready), lead)
+                        } else {
+                            (tick - begin, (ready - begin).max(1))
+                        };
+                        let u = crate::model::count(elapsed.min(duration))
+                            / crate::model::count(duration);
                         u * u * (3.0 - 2.0 * u)
                     })
                     .collect();
@@ -1159,7 +1238,8 @@ impl Packing {
                 let future = held::target_tick(tick).min(items.len() - 1);
                 let weights =
                     held.step_towards(tick, &items[tick], &items[future], &shown);
-                if let Some(target) = held.target_at_start(tick)
+                if tick >= opening_end
+                    && let Some(target) = held.target_at_start(tick)
                     && shown.iter().enumerate().all(|(i, &p)| {
                         let exit = exits.get(i).and_then(|exit| *exit);
                         let finish = tick + held::reflow_ticks();
@@ -1168,8 +1248,7 @@ impl Packing {
                             births[i]
                                 .min(usize::try_from(a[i]).expect("bounded activation"))
                         });
-                        let lead =
-                            usize::try_from(BIRTH_TICKS).expect("bounded lead-in");
+                        let lead = birth_lead(birth, birth < opening_end);
                         (p >= 1.0 && exit.is_none_or(|exit| end < exit.start))
                             || (p == 0.0
                                 && (finish < birth.saturating_sub(lead)
@@ -1203,6 +1282,8 @@ impl Packing {
             growth: space.growth,
             nodes,
             reflows: reflows.into(),
+            opening: Arc::default(),
+            opening_end,
             labels: labels.into(),
             inputs: regions.into(),
             samples: samples.into(),
@@ -1213,6 +1294,7 @@ impl Packing {
             fresh_tiling: false,
             threads,
         }
+        .plan_opening()
         .plan_zoom())
     }
 
@@ -1440,31 +1522,21 @@ impl Packing {
             })
     }
 
-    fn exit_tiles(
+    fn transition_tiles(
         &self,
         tree: (usize, &[Node]),
         weights: &[f32],
-        visibility: &[f32],
         presence: &[f32],
-        tile_tick: usize,
+        mut transitions: Vec<(f32, usize)>,
         tiling: Option<&mut Tiling>,
+        split_edges: bool,
     ) -> Vec<Option<Tile>> {
-        let now = u64::try_from(tile_tick).expect("bounded packing tick");
-        let mut exits: Vec<_> = visibility
-            .iter()
-            .zip(self.exits.iter())
-            .enumerate()
-            .filter_map(|(i, (&p, exit))| {
-                (p > 0.0 && p < 1.0 && exit.is_some_and(|exit| now >= exit.start))
-                    .then_some((p, i))
-            })
-            .collect();
-        if exits.is_empty() {
+        if transitions.is_empty() {
             return self.allocated_tiles(tree, weights, presence, tiling);
         }
-        exits.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+        transitions.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
         let mut layer = presence.to_vec();
-        for &(p, i) in &exits {
+        for &(p, i) in &transitions {
             layer[i] /= p;
         }
         let field = self.space().field(framing::MARGIN);
@@ -1476,13 +1548,14 @@ impl Packing {
             };
             weights.len()
         ];
+        let growing = split_edges.then(|| active_nodes(tree.1, |i| presence[i] > 0.0));
         let mut previous = 0.0;
-        // Blending layouts of nested survivor sets gives each disappearing split zero influence at release.
-        for (level, i) in exits.into_iter().chain([(1.0, weights.len())]) {
+        // Blending nested layouts gives a split zero influence when a tile has zero presence.
+        for (level, i) in transitions.into_iter().chain([(1.0, weights.len())]) {
             let fraction = level - previous;
             if fraction > 0.0 && layer.iter().any(|&p| p > 0.0) {
                 let mut placed = self.allocated_tiles(tree, weights, &layer, None);
-                collapse_missing(tree.1, 0, &mut placed);
+                collapse_missing(tree.1, 0, &mut placed, growing.as_deref());
                 for (sum, tile) in result
                     .iter_mut()
                     .zip(placed)
@@ -1528,14 +1601,70 @@ impl Packing {
         }
     }
 
-    fn fit_rows(
+    fn plan_opening(mut self) -> Self {
+        if self.opening_end > 0 {
+            let end = self.opening_end;
+            let mut ticks: Vec<_> = (0..end).step_by(OPENING_STEP).collect();
+            ticks.push(end);
+            self.opening = ticks
+                .into_iter()
+                .map(|tick| self.layout_at(tick, None, None, None, tick < end).tiles)
+                .collect();
+        }
+        self
+    }
+
+    fn opening_layout(
+        &self,
+        tick: usize,
+        transition: Option<(u64, f32)>,
+    ) -> Option<reflow::Layout> {
+        let last = self.opening_end;
+        if self.opening.len() < 2 || tick >= last {
+            return None;
+        }
+        let step = tick / OPENING_STEP;
+        let from = step * OPENING_STEP;
+        let to = (from + OPENING_STEP).min(last);
+        let current = crate::model::count(tick);
+        let time = transition.map_or(current, |(start, fraction)| {
+            let start = usize::try_from(start).expect("bounded time");
+            crate::model::count(start).lerp(current, fraction)
+        });
+        let fraction = ((time - crate::model::count(from))
+            / crate::model::count(to - from))
+        .clamp(0.0, 1.0);
+        let mut a = self.opening[step].clone();
+        let mut b = self.opening[step + 1].clone();
+        let growing = active_nodes(&self.nodes, |i| a[i].is_some() || b[i].is_some());
+        collapse_missing(&self.nodes, 0, &mut a, Some(&growing));
+        collapse_missing(&self.nodes, 0, &mut b, Some(&growing));
+        let field = self.space().field(framing::MARGIN);
+        let tiles = a
+            .into_iter()
+            .zip(b)
+            .enumerate()
+            .map(|(index, (a, b))| {
+                let (a, b) = a.zip(b)?;
+                let active = (fraction < 1.0 && self.opening[step][index].is_some())
+                    || (fraction > 0.0 && self.opening[step + 1][index].is_some());
+                active.then_some(Tile {
+                    low: a.low.lerp(b.low, fraction).clamp(field.low, field.high),
+                    high: a.high.lerp(b.high, fraction).clamp(field.low, field.high),
+                })
+            })
+            .collect();
+        Some(reflow::Layout::new(&self.nodes, tiles, self.space()))
+    }
+
+    fn layout_at(
         &self,
         tile_tick: usize,
-        tick: usize,
         transition: Option<(u64, f32)>,
         presence: Option<&[f32]>,
         tiling: Option<&mut Tiling>,
-    ) -> Vec<Placement> {
+        blend_births: bool,
+    ) -> reflow::Layout {
         let sample = &self.samples[tile_tick];
         let mut weights = sample.weights.clone();
         let mut visibility = sample.presence.clone();
@@ -1567,22 +1696,58 @@ impl Packing {
         let reflow = self.reflows
             [..self.reflows.partition_point(|r| r.tick <= tile_tick)]
             .last();
-        let layout = reflow
+        reflow
             .filter(|change| change.matches_presence(&presence))
             .and_then(|change| change.sample(tile_tick))
             .unwrap_or_else(|| {
                 let tree = reflow.map_or((0, self.nodes.as_slice()), |c| {
                     (c.tick, c.nodes.as_slice())
                 });
-                let allocated = self.exit_tiles(
+                let now = u64::try_from(tile_tick).expect("bounded packing tick");
+                let transitions = visibility
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, &p)| {
+                        let exiting = self
+                            .exits
+                            .get(i)
+                            .and_then(|exit| *exit)
+                            .is_some_and(|exit| now >= exit.start);
+                        (p > 0.0
+                            && p < 1.0
+                            && presence[i] > 0.0
+                            && (blend_births || exiting))
+                            .then_some((p, i))
+                    })
+                    .collect();
+                let allocated = self.transition_tiles(
                     tree,
                     &weights,
-                    &visibility,
                     &presence,
-                    tile_tick,
+                    transitions,
                     tiling,
+                    blend_births,
                 );
                 reflow::Layout::new(tree.1, allocated, self.space())
+            })
+    }
+
+    fn fit_rows(
+        &self,
+        tile_tick: usize,
+        tick: usize,
+        transition: Option<(u64, f32)>,
+        presence: Option<&[f32]>,
+        tiling: Option<&mut Tiling>,
+    ) -> Vec<Placement> {
+        let layout =
+            if presence.is_none_or(|values| values.iter().all(|&p| p >= 1.0)) {
+                self.opening_layout(tile_tick, transition)
+            } else {
+                None
+            }
+            .unwrap_or_else(|| {
+                self.layout_at(tile_tick, transition, presence, tiling, false)
             });
         self.inputs[tick]
             .iter()
@@ -1725,11 +1890,11 @@ mod tests {
     fn a_padded_birth_can_finish_before_the_waiting_contributor_arrives() {
         let rows = fixture();
         let mut activation = vec![u32::MAX; 30];
-        activation[3] = 30;
+        activation[4] = 30;
         let normal = Packing::with_gutter(&rows, 2.0, None).unwrap();
         let waiting = Packing::with_gutter(&rows, 2.0, Some(&activation)).unwrap();
-        assert!(normal.sample(35).unwrap().0[3].tile.is_none());
-        assert!(waiting.sample(35).unwrap().0[3].tile.is_some());
+        assert!(normal.sample(35).unwrap().0[4].tile.is_none());
+        assert!(waiting.sample(35).unwrap().0[4].tile.is_some());
     }
 
     #[test]
@@ -1923,6 +2088,39 @@ mod tests {
                 shares[1],
                 Tile::viewport().area()
             );
+        }
+    }
+
+    #[test]
+    fn tiles_keep_continuous_edges_when_several_repositories_arrive_at_the_opening() {
+        let rows: Vec<_> = fixture()
+            .into_iter()
+            .take(360)
+            .map(|mut row| {
+                row.truncate(7);
+                row
+            })
+            .collect();
+        let packing = Packing::with_gutter(&rows, 4.0, None).unwrap();
+        let mut previous = packing.sample(0).unwrap().0;
+        for tick in 0..=90 {
+            let current = packing.sample(tick).unwrap().0;
+            let tiles: Vec<_> = current.iter().map(|region| region.tile).collect();
+            let (field, gutters) = partition(&packing.nodes, 0, &tiles);
+            let field = field.unwrap();
+            let viewport = Tile::viewport();
+            assert!(field.low.abs_diff_eq(viewport.low, 1e-6));
+            assert!(field.high.abs_diff_eq(viewport.high, 1e-6));
+            let filled = tiles.iter().flatten().map(|tile| tile.area()).sum::<f32>();
+            assert!((filled + gutters - Tile::viewport().area()).abs() < 2e-6);
+            for (before, after) in previous.iter().zip(&current) {
+                if let Some((a, b)) = before.tile.zip(after.tile) {
+                    let edge = (a.low - b.low).abs().max((a.high - b.high).abs());
+                    let step = (edge * framing::VIEWPORT * 0.5).max_element();
+                    assert!(step < 16.0, "frame {tick} {}: {step:.2} px", after.label);
+                }
+            }
+            previous = current;
         }
     }
 

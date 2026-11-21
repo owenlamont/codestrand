@@ -495,7 +495,8 @@ Neither field fetches platform metadata. Without either field the repository rem
 visible.
 An ending before the selected playback interval is already complete when playback starts.
 
-The ending tile, files and directories grey, rise and fade over 2.5 playback seconds.
+The ending tile greys and fades in place over 2.5 playback seconds. Files and
+directories grey, rise and fade over the same interval.
 Neighbours then reclaim the space over four seconds. If two exits start less than four
 seconds apart before adding any travel waits, both take five seconds to keep tile edges
 moving steadily. Exits that start together count as one for this rule. The extra second
@@ -549,24 +550,27 @@ Content zoom anticipates growth with a precomputed safe-fit envelope and half-se
 easing. The log-scale limit is 0.12 per second when zooming out and 0.08 when zooming in
 (about 11.3% shrink or 8.3% growth). A larger future contraction can start the
 adjustment earlier; the chosen scale never exceeds the tile's current safe fit.
-Repository titles and contributor names use a 12-pixel font on screen. Directory and
-touched-file labels use a 10-pixel font. Long titles and detail labels end in an
-ellipsis when space runs out. A title can sit closer to the edge of a small tile or
-disappear if the tile is too short. After an ended repository fades, its tile shrinks
-and neighbouring tiles grow into the space.
+Each repository title fills the tile as far as its proportions and padding allow.
+The visible letters are centered on the tile surface underneath files and directories.
+The title stays aligned with the tile when you tilt or move the camera. Contributor
+names use a 12-pixel screen font. Directory and touched-file labels use a 10-pixel
+screen font and can end in an ellipsis when space runs out.
 
 A newcomer splits one existing tile or subtree. Other repositories retain their
 relative order. A reflow can change the split tree between repository arrivals and exits.
 Tiles and their contents ease together when the new tree improves area shares and
 the gutters stay connected throughout the move.
-Splits clamp to a ground-aspect range of 1:3.5 to 3.5:1, inclusive. Births ease for
-up to 0.75 playback seconds before their first commit. Births near the lead-in use the
-available lead-in time. Between reflows, tiles and shared gutters partition the field.
+Splits clamp to a ground-aspect range of 1:3.5 to 3.5:1, inclusive. Births normally
+ease for up to 0.75 playback seconds before their first commit. With capped travel,
+tiles can begin easing before the first frame for early commits. For the first six
+seconds of compressed history, or until the first exit starts, tiles ease within a
+fixed split tree.
+Between reflows, tiles and shared gutters partition the field.
 `--gutter` sets spacing using the world distance represented by a pixel in the
 1280×720 reference view. The default is `4` and the range is `0`–`20`, inclusive.
 Tiles touch at `0`. Crowd scaling adjusts avatars when many are active.
-Names prefer clear content rectangles, including repository labels
-and a small margin, but may overlap content near tile edges when space is tight.
+Contributor names prefer clear space outside the file and directory layout, with a
+small margin. Names may overlap content at tile edges when space is tight.
 Different content shapes can leave space inside a uniformly fitted tile.
 
 In treemap diagnostics, `largest_empty_rectangle` measures the largest axis-aligned gap
@@ -684,11 +688,9 @@ To inspect a smaller interval, use inclusive `--start-date` and `--end-date`.
 Playback memory and duration checks use the range selected by `--start-date` and `--end-date`;
 the layout estimate also includes the files present when the range starts.
 
-To choose visual treatments, use
-`--repository-boundary none|glass` and `--repository-label-plane files|raised`.
-Defaults are `glass` and `raised`. Glass is a faint, coloured ground-plane tile for
-each live repository; raised labels stay at a constant height of 1.6 scene units.
-Both options apply to preview and export, including single repositories.
+`--repository-boundary glass` adds a faint, coloured ground-plane tile for each live
+repository in preview and export. Use `--repository-boundary none` to hide the glass.
+Repository titles remain on the ground in either mode.
 
 ## Range and pacing
 

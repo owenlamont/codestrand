@@ -14,7 +14,6 @@ pub(crate) enum Stage {
     Layout,
     Travel,
     Reservations,
-    Titles,
     Checkpoint,
 }
 
@@ -26,7 +25,6 @@ impl Stage {
             Self::Layout => "replaying layout",
             Self::Travel => "planning travel",
             Self::Reservations => "reserving parking",
-            Self::Titles => "placing titles",
             Self::Checkpoint => "preparing playback",
         }
     }
@@ -161,7 +159,7 @@ mod tests {
     fn later_window_progress_starts_at_zero() {
         let (progress, updates) = Progress::channel(Duration::ZERO);
         for tick in [9_000, 9_050, 9_100] {
-            progress.report_range(Stage::Titles, tick, 9_000, 9_100);
+            progress.report_range(Stage::Checkpoint, tick, 9_000, 9_100);
         }
         assert_eq!(
             updates

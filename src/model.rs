@@ -38,7 +38,6 @@ mod slots;
 pub(crate) use slots::diagnostics::MovingBeams;
 pub(crate) mod streaming;
 mod time;
-mod titles;
 mod trace;
 mod travel;
 #[cfg(test)]
@@ -519,7 +518,6 @@ impl Fragment {
 /// Placement priority, highest first, when labels would overlap on screen.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum LabelKind {
-    Repository,
     Avatar,
     Detail,
     Landmark,
@@ -529,7 +527,7 @@ pub(super) enum LabelKind {
 impl LabelKind {
     pub(super) const fn font_scale(self) -> f32 {
         match self {
-            Self::Repository | Self::Avatar => 12.0 / 14.0,
+            Self::Avatar => 12.0 / 14.0,
             Self::Detail | Self::Landmark | Self::Activity => 10.0 / 14.0,
         }
     }
@@ -566,7 +564,6 @@ struct State {
     gutter: f32,
     fragment_pace: FragmentPace,
     slot_records: BTreeMap<usize, slots::Record>,
-    titles: BTreeMap<usize, titles::Title>,
     /// Seats in each avatar's group as last placed, 1 for an avatar alone.
     capacities: Vec<u8>,
 }
@@ -611,7 +608,6 @@ pub(super) struct Simulation {
     pub repository_boundary: crate::repositories::Boundary,
     pub(super) collapse_directories: bool,
     pub(super) diff_text_distance: f32,
-    pub repository_label_plane: crate::repositories::LabelPlane,
     events: windows::Events,
     offset: usize,
     /// Commits before `offset` that import never read, counted only in commit numbers.
@@ -627,7 +623,6 @@ pub(super) struct Simulation {
     theme: Theme,
     travel: travel::Plan,
     visuals: Visuals,
-    title_plan: Vec<Vec<u8>>,
     progress: Progress,
     trace: Trace,
     tick_times: trace::TickTimes,
@@ -636,7 +631,6 @@ pub(super) struct Simulation {
     windowed: bool,
     stream: Option<std::sync::Arc<std::sync::Mutex<windows::Stream>>>,
     ready_end: Option<streaming::Ready>,
-    title_start: usize,
     /// Lets a test advance every file in every replay, to compare against holding them.
     #[cfg(test)]
     advance_all_files: bool,
@@ -646,8 +640,6 @@ pub(super) struct Simulation {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Visuals {
     None,
-    /// Repository titles only: all the title pass reads.
-    Titles,
     All,
 }
 
@@ -880,7 +872,6 @@ impl Simulation {
                 caption::plan(&simulation.schedule, &simulation.events);
         }
         options.progress.pass(1);
-        simulation.plan_titles();
         simulation.progress = Progress::default();
         simulation.report_global(pass, global_started.elapsed());
         Ok(simulation)
@@ -1101,7 +1092,6 @@ impl Simulation {
             repository_boundary: crate::repositories::Boundary::default(),
             collapse_directories: true,
             diff_text_distance: 1.0,
-            repository_label_plane: crate::repositories::LabelPlane::default(),
             events: events.range(start..end),
             offset: start,
             unread_before: options.unread.before,
@@ -1116,7 +1106,6 @@ impl Simulation {
             theme: theme.clone(),
             travel: travel::Plan::default(),
             visuals: Visuals::All,
-            title_plan: Vec::new(),
             progress: options.progress.clone(),
             trace: options.trace.clone(),
             tick_times: trace::TickTimes::default(),
@@ -1125,7 +1114,6 @@ impl Simulation {
             windowed: options.travel_window_seconds.is_some(),
             stream: None,
             ready_end: None,
-            title_start: 0,
             #[cfg(test)]
             advance_all_files: options.advance_all_files,
         };
@@ -1445,7 +1433,6 @@ impl Simulation {
     pub(crate) fn tick_layout(&mut self) {
         let files = self.file_motion(match self.visuals {
             Visuals::None => FileMotion::Hold,
-            Visuals::Titles => FileMotion::Glide,
             Visuals::All => FileMotion::Advance,
         });
         self.tick_layout_with_files(files);
@@ -1609,10 +1596,6 @@ impl Simulation {
             }
         }
         self.tick_times.laps.end(Phase::TickAvatars);
-        if self.visuals != Visuals::None {
-            self.place_titles();
-            self.tick_times.laps.end(Phase::TickTitles);
-        }
         if self.visuals == Visuals::All {
             let texts: Vec<_> = self
                 .labels_for_detail(|_| true)
@@ -1912,44 +1895,6 @@ impl Simulation {
         self.labels_for_detail(|_| true)
     }
 
-    fn repository_labels(&self) -> impl Iterator<Item = Label> {
-        self.state
-            .layout
-            .repositories
-            .iter()
-            .enumerate()
-            .filter(|(_, r)| r.live)
-            .flat_map(move |(index, region)| {
-                let height = match self.repository_label_plane {
-                    crate::repositories::LabelPlane::Files => 0.15,
-                    crate::repositories::LabelPlane::Raised => framing::LABEL_Y,
-                };
-                let positions: Vec<_> = if region.tile.is_some() {
-                    self.state
-                        .titles
-                        .get(&index)
-                        .into_iter()
-                        .flat_map(|t| {
-                            t.positions(height).map(|(p, a)| (p, &t.text, t.scale, a))
-                        })
-                        .collect()
-                } else {
-                    let mut point = framing::label_position(region);
-                    point.y = height;
-                    vec![(point, &region.label, 1.0, 1.0)]
-                };
-                positions
-                    .into_iter()
-                    .map(move |(position, text, scale, opacity)| Label {
-                        position,
-                        text: text.clone(),
-                        kind: LabelKind::Repository,
-                        scale,
-                        opacity: opacity * self.repository_effect(index).1,
-                        priority: 0.0,
-                    })
-            })
-    }
     /// Elides a detail label to its tile's overview width at the reference resolution.
     fn tile_label(&self, dir: usize, text: String) -> (String, f32) {
         let repository = self.state.layout.dir(dir).repository;
@@ -2036,7 +1981,6 @@ impl Simulation {
                 }
             })
             .collect();
-        labels.extend(self.repository_labels());
         for pulse in &self.state.pulses {
             if pulse.targets.len() > 8 && !pulse.aggregated {
                 continue;
@@ -2106,7 +2050,6 @@ impl State {
             gutter: options.gutter,
             fragment_pace: options.fragment_pace(),
             slot_records: BTreeMap::new(),
-            titles: BTreeMap::new(),
             capacities: Vec::new(),
         }
     }
@@ -2533,6 +2476,7 @@ pub(super) fn view_direction() -> Vec3 {
     Vec3::Y
 }
 
+#[cfg(test)]
 pub(crate) fn box_corners(low: Vec3, high: Vec3) -> [Vec3; 8] {
     [
         low,

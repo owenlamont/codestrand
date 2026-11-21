@@ -45,6 +45,7 @@ mod settings;
 #[cfg(test)]
 mod static_tests;
 mod styling;
+mod titles;
 
 pub(super) use loading::Loading;
 
@@ -853,6 +854,7 @@ fn setup(world: &mut World) {
     let theme = world.resource::<Playback>().0.theme().clone();
     let palette = Palette::new(world, &theme);
     repository_regions(world);
+    titles::setup(world);
     world.spawn((
         Mesh3d(palette.glyph_mesh.clone()),
         MeshMaterial3d(palette.floor.clone()),
@@ -875,7 +877,7 @@ fn setup(world: &mut World) {
     world.resource_mut::<Pools>().grid = grid;
     world.insert_resource(palette);
     let repository_labels = world.resource::<Playback>().0.layout().repositories.len();
-    grow_labels(world, LABELS + repository_labels, &theme, camera);
+    grow_labels(world, LABELS, &theme, camera);
     for _ in 0..crate::diff_samples::PER_COMMIT {
         world.spawn((
             Text::new(""),
@@ -1398,6 +1400,7 @@ pub(super) fn animate(world: &mut World) {
                 }
                 sync_activity(world, &palette, &mut pools, simulation);
                 sync_repository_regions(world, simulation);
+                titles::sync(world, simulation);
             });
         });
     });
@@ -1495,10 +1498,8 @@ fn sync_repository_regions(world: &mut World, simulation: &Simulation) {
         .map(|(entity, glass)| (entity, glass.0))
         .collect();
     for (entity, repository) in entities {
-        let (grey, alpha, rise) = simulation.repository_effect(repository);
-        if let Some(mut transform) = world.get_mut::<Transform>(entity) {
-            transform.translation.y = rise;
-        }
+        let (grey, alpha, _) = simulation.repository_effect(repository);
+
         fade(world, entity, grey, alpha);
     }
 }
@@ -4353,31 +4354,6 @@ mod tests {
             ["far", "near"]
         );
         assert_eq!(chosen[0].1, chosen[1].1);
-    }
-
-    #[test]
-    fn repository_labels_use_viewport_bounds_and_hide_offscreen_anchors() {
-        let chosen = place_labels(
-            vec![
-                projected_label(
-                    "outside",
-                    model::LabelKind::Repository,
-                    Vec2::new(-10.0, 100.0),
-                    1.0,
-                ),
-                projected_label(
-                    "inside",
-                    model::LabelKind::Repository,
-                    Vec2::new(1400.0, 800.0),
-                    1.0,
-                ),
-            ],
-            20.0,
-            Vec2::new(1920.0, 1080.0),
-        );
-        assert_eq!(chosen.len(), 1);
-        assert_eq!(chosen[0].0.text, "inside");
-        assert_eq!(chosen[0].1, Vec2::new(1400.0, 800.0));
     }
 
     #[test]

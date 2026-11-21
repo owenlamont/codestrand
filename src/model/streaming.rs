@@ -255,7 +255,6 @@ impl Simulation {
             next.playback_multiplier = self.playback_multiplier;
             next.caption_style = self.caption_style;
             next.repository_boundary = self.repository_boundary;
-            next.repository_label_plane = self.repository_label_plane;
             next.collapse_directories = self.collapse_directories;
             next.diff_text_distance = self.diff_text_distance;
             next.stream = Some(shared.clone());
@@ -463,7 +462,7 @@ pub(crate) mod tests {
         #[serde(skip)]
         avatars: Vec<(bevy::math::Vec3, Option<bevy::math::Vec2>)>,
         #[serde(skip)]
-        titles: std::collections::BTreeMap<usize, bevy::math::Vec2>,
+        tiles: Vec<Option<crate::layout::packing::Tile>>,
         #[serde(skip)]
         caption: Option<bevy::color::LinearRgba>,
     }
@@ -478,11 +477,23 @@ pub(crate) mod tests {
                     steps[1] = steps[1].max(slot.point.distance(*old));
                 }
             }
-            for (id, title) in &sim.state.titles {
-                if let Some(old) = self.titles.get(id) {
-                    steps[2] = steps[2].max(title.point.distance(*old));
+            let tiles: Vec<_> = sim
+                .layout()
+                .repositories
+                .iter()
+                .map(|region| region.tile)
+                .collect();
+            for (previous, current) in self.tiles.iter().zip(&tiles) {
+                if let Some((a, b)) = previous.zip(*current) {
+                    steps[2] = steps[2].max(
+                        (a.low - b.low)
+                            .abs()
+                            .max((a.high - b.high).abs())
+                            .max_element(),
+                    );
                 }
             }
+            self.tiles = tiles;
             let color = sim.caption_background().to_linear();
             if let Some(old) = self.caption {
                 steps[3] = (color.red - old.red)
@@ -505,12 +516,6 @@ pub(crate) mod tests {
                 .map(|avatar| {
                     (avatar.position, avatar.slot.as_ref().map(|slot| slot.point))
                 })
-                .collect();
-            self.titles = sim
-                .state
-                .titles
-                .iter()
-                .map(|(&id, title)| (id, title.point))
                 .collect();
             self.caption = Some(color);
         }

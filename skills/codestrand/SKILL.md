@@ -103,6 +103,10 @@ covers; install fonts for it and export again.
 
 ## Several repositories and config files
 
+Repository titles fill their tiles with even padding around the visible letters. The
+titles lie underneath files and directories and stay on the tile when the camera tilts.
+`--repository-boundary none` hides the glass without hiding the title.
+
 Repeat `--repository`, or list repositories in a TOML file:
 
 ```toml

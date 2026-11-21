@@ -330,25 +330,6 @@ pub(super) fn content_obstacles(state: &State) -> Vec<(usize, Rect)> {
         if low.is_finite() && high.is_finite() {
             result.push((index, Rect::from_corners(low, high).inflate(HALO)));
         }
-        if let Some(title) = state.titles.get(&index) {
-            result.push((index, title.rect().inflate(HALO)));
-            continue;
-        }
-        let anchor = project(
-            view_direction() * framing::DISTANCE,
-            Vec3::ZERO,
-            &[framing::label_position(region)],
-        )
-        .next()
-        .flatten()
-        .expect("visible region")
-            * HALF;
-        let size = framing::label_size(&region.label, 20.0);
-        result.push((
-            index,
-            Rect::from_corners(anchor - Vec2::Y * size.y, anchor + Vec2::X * size.x)
-                .inflate(HALO),
-        ));
     }
     result
 }

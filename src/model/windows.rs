@@ -54,7 +54,6 @@ impl Simulation {
                 &mut self.caption_plan,
             );
         }
-        self.plan_titles();
         let boundary = if complete {
             self.end_tick()
         } else {
@@ -366,7 +365,6 @@ impl Simulation {
             repository_boundary: self.repository_boundary,
             collapse_directories: self.collapse_directories,
             diff_text_distance: self.diff_text_distance,
-            repository_label_plane: self.repository_label_plane,
             events,
             offset: self.offset,
             unread_before: self.unread_before,
@@ -381,7 +379,6 @@ impl Simulation {
             theme: self.theme.clone(),
             travel: self.travel.clone(),
             visuals: self.visuals,
-            title_plan: self.title_plan.clone(),
             progress: crate::progress::Progress::default(),
             trace: super::Trace::default(),
             tick_times: super::trace::TickTimes::default(),
@@ -390,7 +387,6 @@ impl Simulation {
             windowed: true,
             stream: None,
             ready_end: Some(ready),
-            title_start: self.title_start,
             #[cfg(test)]
             advance_all_files: self.advance_all_files,
         }
@@ -407,14 +403,6 @@ impl Simulation {
                 *envelope = super::slots::Envelope::default();
             }
         }
-        let first = usize::try_from(boundary / 15)
-            .expect("bounded timeline")
-            .saturating_sub(2);
-        for row in &mut self.title_plan {
-            let count = first.saturating_sub(self.title_start).min(row.len());
-            row.drain(..count);
-        }
-        self.title_start = first;
         caption::discard_before(&mut self.caption_plan, boundary);
         let window = self.window.as_mut().expect("planning window");
         let mut last = std::collections::BTreeMap::new();
@@ -454,7 +442,7 @@ mod tests {
         for update in updates.try_iter().filter(|update| {
             matches!(
                 update.stage,
-                Stage::Travel | Stage::Reservations | Stage::Titles | Stage::Checkpoint
+                Stage::Travel | Stage::Reservations | Stage::Checkpoint
             )
         }) {
             let beginning = previous.is_none_or(|old| {
@@ -544,13 +532,10 @@ mod tests {
                 2 * passes
             );
             assert_eq!(window.calls(&[Phase::PlanTravel, Phase::Capture]), passes);
-            assert_eq!(window.calls(&[Phase::PlanTitles]), 1);
             assert_eq!(
                 window.calls(&[Phase::CheckpointReplay, Phase::TickNames]),
                 1
             );
-            assert_eq!(window.calls(&[Phase::PlanTitles, Phase::TickTitles]), 1);
-            assert_eq!(window.calls(&[Phase::PlanTitles, Phase::TickNames]), 0);
             assert!(window.counter(&[], Counter::Files) > 0);
             let capture = [Phase::PlanTravel, Phase::Capture];
             assert_eq!(
@@ -691,7 +676,6 @@ mod tests {
             );
             assert_eq!(held.envelopes, advanced.envelopes);
             assert_eq!(held.packing.exact_state(), advanced.packing.exact_state());
-            assert_eq!(held.title_plan, advanced.title_plan);
             let layouts = |sim: &Simulation| -> Vec<_> {
                 sim.boundaries
                     .iter()
@@ -857,7 +841,6 @@ mod tests {
         assert_eq!(report.calls(&[Phase::TravelPadding]), 1);
         assert_eq!(report.calls(&[Phase::Pass]), passes);
         assert_eq!(report.calls(&[Phase::Pass, Phase::PlanTravel]), passes);
-        assert_eq!(report.calls(&[Phase::PlanTitles]), 1);
         assert!(report.counter(&[], Counter::Tilings) > 0);
     }
 
@@ -1061,22 +1044,13 @@ mod tests {
                     })
                     .cloned()
                     .collect::<Vec<_>>();
-                let titles = sim
-                    .title_plan
-                    .iter()
-                    .map(|row| {
-                        row[..usize::try_from(boundary.tick / 15 + 1).unwrap()].to_vec()
-                    })
-                    .collect::<Vec<_>>();
                 frozen.push(format!(
-                    "{:?}{:?}{:?}{:?}{:?}{:?}{:?}{}",
+                    "{:?}{:?}{:?}{:?}{:?}{}",
                     boundary.avatars,
-                    boundary.titles,
                     boundary.pulses,
                     &sim.schedule.starts[..count],
                     sim.travel.docks.range(..(count, 0)).collect::<Vec<_>>(),
                     trips,
-                    titles,
                     caption::frozen(&sim.caption_plan, boundary.tick)
                 ));
             }
