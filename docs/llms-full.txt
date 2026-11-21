@@ -275,9 +275,8 @@ Source: https://codestrand.pages.dev/playback/
 # Playback
 
 Preview loops the selected history. Export renders the same launch timeline at
-explicit frame times at 1x speed. The export camera fits the scene by default.
-Use `--follow-activity` to follow the latest commit's repository or `--camera-path`
-for a scripted camera.
+explicit frame times at 1x speed. Export uses a static overview that fits the scene by
+default. Use `--camera-path` for a scripted camera.
 
 Preview renders at the window's physical resolution, including on HiDPI displays.
 Resizing or maximising keeps a 720-logical-pixel-high UI: text scales with height,
@@ -957,19 +956,13 @@ them manually after checking the video.
 
 ## Export framing
 
-Export uses a static overview that fits the whole field. Add `--follow-activity` to
-ease towards the repository of the most recent commit and show more file detail.
-
-```sh
-codestrand export activity-frames --follow-activity --frames 90 --fps 30
-```
+Export uses a static overview that fits the whole field by default.
 
 ## Scripted camera
 
-`--camera-path` replaces the export overview with TOML keys. Choose either a camera path
-or `--follow-activity`. Save the
-[example path](examples/camera-path.toml) as `camera-path.toml` in a Git working
-tree, then run there:
+`--camera-path` replaces the export overview with TOML keys. Save the
+[example path](examples/camera-path.toml) as `camera-path.toml` in a Git working tree,
+then run there:
 
 ```sh
 codestrand export camera-frames --camera-path camera-path.toml \

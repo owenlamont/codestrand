@@ -239,47 +239,21 @@ fn prepare_after_captures<T>(
     prepare(context)
 }
 
-#[derive(bevy::prelude::Resource)]
-pub(super) struct FollowActivity;
-
 fn place_export_camera(
     app: &mut App,
     path: Option<&crate::camera_path::CameraPath>,
     previous: &mut Option<bevy::prelude::Transform>,
     (index, fps): (u32, u16),
 ) -> anyhow::Result<()> {
-    let projection = app
-        .world()
-        .contains_resource::<FollowActivity>()
-        .then(|| scene::camera_projection(app.world_mut()))
-        .flatten();
-    if path.is_none() && projection.is_none() {
+    let Some(path) = path else {
         return Ok(());
-    }
+    };
     let mut playback = app.world_mut().resource_mut::<scene::Playback>();
     playback.0.advance_to(index, fps);
-    let pose = if let Some(path) = path {
-        let pose = path.pose(&playback.0, index, fps)?;
-        if let Some(previous) = previous {
-            path.validate_step(previous, &pose, index)?;
-        }
-        pose
-    } else {
-        let (fov, viewport) = projection.expect("activity camera projection");
-        let overview = || {
-            let (focus, distance) = playback.0.overview_for_projection(fov, viewport);
-            focus + bevy::math::Vec3::Y * distance
-        };
-        let eye = previous.map_or_else(overview, |pose| pose.translation);
-        let next = playback
-            .0
-            .activity_camera_eye(fov, viewport)
-            .map_or(eye, |goal| {
-                eye.lerp(goal, 1.0 - (-1.5 / f32::from(fps)).exp())
-            });
-        bevy::prelude::Transform::from_translation(next)
-            .looking_to(bevy::math::Vec3::NEG_Y, bevy::math::Vec3::NEG_Z)
-    };
+    let pose = path.pose(&playback.0, index, fps)?;
+    if let Some(previous) = previous {
+        path.validate_step(previous, &pose, index)?;
+    }
     *previous = Some(pose);
     app.world_mut().insert_resource(scene::ScriptedCamera(pose));
     Ok(())
@@ -979,7 +953,6 @@ mod pacing_tests {
     enum Framing {
         Overview,
         Scripted,
-        FollowActivity,
     }
 
     #[test]
@@ -1091,14 +1064,12 @@ mod pacing_tests {
     }
 
     #[test]
-    #[ignore = "requires a graphics adapter; renders four short PNG sequences"]
-    fn overview_and_follow_activity_exports_are_independent_of_render_pacing() {
-        let overview = assert_paced_export(Framing::Overview);
-        let follow = assert_paced_export(Framing::FollowActivity);
-        assert_ne!(overview, follow, "activity framing matched the overview");
+    #[ignore = "requires a graphics adapter; renders two short PNG sequences"]
+    fn overview_export_is_independent_of_render_pacing() {
+        assert_paced_export(Framing::Overview);
     }
 
-    fn assert_paced_export(framing: Framing) -> Vec<u8> {
+    fn assert_paced_export(framing: Framing) {
         let scratch = tempfile::tempdir().expect("temporary directory is available");
         let fast = scratch.path().join("fast");
         let slow = scratch.path().join("slow");
@@ -1139,29 +1110,21 @@ mod pacing_tests {
             fs::read_to_string(slow.join("frames.csv")).expect("manifest exists");
         assert_eq!(fast_manifest.lines().count(), 9);
         assert_eq!(fast_manifest, slow_manifest);
-        last
     }
 
     /// Exports eight synthetic frames, sleeping `delay` in every app update.
     fn export(directory: &Path, delay: Duration, framing: Framing) {
         let camera = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/camera-targets.toml");
-        let mut args = vec![
+        let args = [
             "codestrand",
             "export",
             "unused",
             "--test-input",
             "synthetic",
         ];
-        if framing == Framing::FollowActivity {
-            args.push("--follow-activity");
-        }
-        let Some(crate::Command::Export {
-            source,
-            theme,
-            follow_activity,
-            ..
-        }) = crate::Cli::try_parse_from(args).unwrap().command
+        let Some(crate::Command::Export { source, theme, .. }) =
+            crate::Cli::try_parse_from(args).unwrap().command
         else {
             panic!("export command");
         };
@@ -1186,7 +1149,7 @@ mod pacing_tests {
                 &crate::contributors::Mappings::default(),
                 &["First".into(), "Second".into()],
             );
-            (simulation, "Activity framing".into())
+            (simulation, "Repository overview".into())
         };
         simulation.set_theme(theme.build());
         let camera_path = (framing == Framing::Scripted).then(|| {
@@ -1196,9 +1159,6 @@ mod pacing_tests {
         });
         let resolution = crate::resolution::Resolution::default();
         let (mut app, target) = scene::headless(simulation, title, 2, resolution);
-        if follow_activity {
-            app.insert_resource(super::FollowActivity);
-        }
         app.add_systems(bevy::prelude::Update, move || thread::sleep(delay));
         prepare(directory).unwrap();
         render(

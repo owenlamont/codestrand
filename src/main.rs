@@ -144,9 +144,6 @@ enum Command {
         /// TOML camera keyframes, with semantic targets resolved at every frame.
         #[arg(long)]
         camera_path: Option<PathBuf>,
-        /// Follow repository activity with smooth camera motion during export.
-        #[arg(long, conflicts_with = "camera_path")]
-        follow_activity: bool,
         #[command(flatten)]
         source: Source,
         /// Frames to write; defaults to the whole playback.
@@ -901,7 +898,6 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
             encoding,
             resolution,
             camera_path,
-            follow_activity,
         }) => {
             export::check(&directory)?;
             let camera_path = camera_path
@@ -927,10 +923,7 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
             }
             let encoder = encoding.start(fps, resolution)?;
             export::prepare(&directory)?;
-            let (mut app, target) = scene::headless(simulation, title, fps, resolution);
-            if follow_activity {
-                app.insert_resource(export::FollowActivity);
-            }
+            let (app, target) = scene::headless(simulation, title, fps, resolution);
             export::render(
                 &directory,
                 (app, target),

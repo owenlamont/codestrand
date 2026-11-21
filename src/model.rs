@@ -1701,22 +1701,6 @@ impl Simulation {
         )
     }
 
-    pub(super) fn activity_camera_eye(&self, fov: f32, viewport: Vec2) -> Option<Vec3> {
-        let index = self.state.next_event.checked_sub(1)?;
-        let repository = self.events.get(index)?.repository;
-        let region = self.layout().repositories.get(repository)?;
-        let tile = region.tile?;
-        let focus = ground(framing::field_to_world(tile.low.midpoint(tile.high)));
-        let overview = self.overview_for_projection(fov, viewport).1;
-        let corners = tile.ground();
-        let half = (corners[2] - corners[0]).abs() * 0.5;
-        let distance = (half.x * viewport.y / viewport.x).max(half.y)
-            / ((fov * 0.5).tan() * 0.88)
-            + framing::FIELD_HEIGHT;
-        let distance = distance.clamp(overview * 0.4, overview);
-        Some(focus + Vec3::Y * distance)
-    }
-
     pub(super) fn scale(&self) -> f32 {
         self.state.scale()
     }

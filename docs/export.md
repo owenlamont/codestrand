@@ -138,19 +138,13 @@ them manually after checking the video.
 
 ## Export framing
 
-Export uses a static overview that fits the whole field. Add `--follow-activity` to
-ease towards the repository of the most recent commit and show more file detail.
-
-```sh
-codestrand export activity-frames --follow-activity --frames 90 --fps 30
-```
+Export uses a static overview that fits the whole field by default.
 
 ## Scripted camera
 
-`--camera-path` replaces the export overview with TOML keys. Choose either a camera path
-or `--follow-activity`. Save the
-[example path](examples/camera-path.toml) as `camera-path.toml` in a Git working
-tree, then run there:
+`--camera-path` replaces the export overview with TOML keys. Save the
+[example path](examples/camera-path.toml) as `camera-path.toml` in a Git working tree,
+then run there:
 
 ```sh
 codestrand export camera-frames --camera-path camera-path.toml \

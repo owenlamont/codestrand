@@ -1,9 +1,8 @@
 # Playback
 
 Preview loops the selected history. Export renders the same launch timeline at
-explicit frame times at 1x speed. The export camera fits the scene by default.
-Use `--follow-activity` to follow the latest commit's repository or `--camera-path`
-for a scripted camera.
+explicit frame times at 1x speed. Export uses a static overview that fits the scene by
+default. Use `--camera-path` for a scripted camera.
 
 Preview renders at the window's physical resolution, including on HiDPI displays.
 Resizing or maximising keeps a 720-logical-pixel-high UI: text scales with height,

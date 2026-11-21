@@ -2193,7 +2193,7 @@ fn place_camera(world: &mut World, simulation: &Simulation) {
     }
 }
 
-pub(super) fn camera_projection(world: &mut World) -> Option<(f32, Vec2)> {
+fn camera_projection(world: &mut World) -> Option<(f32, Vec2)> {
     let mut query = world.query_filtered::<(&Camera, &Projection), With<SceneCamera>>();
     query.single(world).ok().and_then(|(camera, projection)| {
         let Projection::Perspective(projection) = projection else {
