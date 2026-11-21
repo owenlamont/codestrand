@@ -314,6 +314,30 @@ pub(super) struct Styles {
     leaders: Vec<Entity>,
 }
 
+pub(super) fn reset_pools(world: &mut World) {
+    if world.contains_resource::<Styles>() {
+        world.resource_scope(|world, mut styles: Mut<Styles>| {
+            for entity in std::mem::take(&mut styles.territory_pool)
+                .into_iter()
+                .chain(std::mem::take(&mut styles.leaders))
+            {
+                world.despawn(entity);
+            }
+            styles.territory_layout = Territories::default();
+        });
+    }
+}
+
+#[cfg(test)]
+pub(super) fn seed_replay_pools(world: &mut World) -> [Entity; 2] {
+    let territory = world.spawn_empty().id();
+    let leader = world.spawn_empty().id();
+    let mut styles = world.resource_mut::<Styles>();
+    styles.territory_pool.push(territory);
+    styles.leaders.push(leader);
+    [territory, leader]
+}
+
 fn svg_image(svg: &str) -> Image {
     let tree = resvg::usvg::Tree::from_str(svg, &resvg::usvg::Options::default())
         .expect("theme ground SVG is valid");

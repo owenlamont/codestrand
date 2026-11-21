@@ -21,6 +21,7 @@ mod lifecycle;
 pub(crate) use lifecycle::RepositoryExit;
 #[cfg(test)]
 pub(crate) use lifecycle::exits_from_starts;
+pub(crate) mod checkpoint_memory;
 #[cfg(test)]
 mod measurement;
 mod names;

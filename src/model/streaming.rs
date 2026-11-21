@@ -1,12 +1,14 @@
 use std::{
-    mem::size_of,
+    mem::size_of_val,
     ops::Deref,
     sync::{Arc, Mutex, mpsc},
     thread,
 };
 
-use super::{Options, Simulation, Time};
-use crate::contributors::Key;
+use super::{
+    Options, Simulation, Time,
+    checkpoint_memory::{buffer_bytes, hash_table_bytes, retained_fields},
+};
 use crate::timeline::Event;
 
 // Consumer, worker, and the completed handoff while the consumer catches up.
@@ -76,7 +78,6 @@ pub(crate) enum Error {
 struct Packet {
     generation: u64,
     simulation: Simulation,
-    replay_bytes: u128,
 }
 /// How far a planned window lets playback run.
 #[derive(Clone, Copy, Debug)]
@@ -103,7 +104,6 @@ pub(crate) struct Replay {
     windows: Vec<Simulation>,
     used: u128,
     limit: u128,
-    packet_bytes: u128,
     exceeded: bool,
 }
 
@@ -113,14 +113,12 @@ impl Replay {
             windows: Vec::new(),
             used: 0,
             limit: REPLAY_LIMIT,
-            packet_bytes: 0,
             exceeded: false,
         }
     }
 
-    pub(super) fn set_budget(&mut self, limit: u128, packet_bytes: u128) {
+    pub(super) fn set_budget(&mut self, limit: u128) {
         self.limit = self.limit.min(limit);
-        self.packet_bytes = packet_bytes;
         self.check_limit(self.used);
     }
 
@@ -137,10 +135,7 @@ impl Replay {
         if self.exceeded {
             return;
         }
-        let used = self
-            .used
-            .saturating_add(packet.replay_bytes)
-            .saturating_add(packet.simulation.replay_identity_bytes());
+        let used = self.used.saturating_add(packet.simulation.replay_bytes());
         if self.check_limit(used) {
             self.windows.push(packet.simulation.clone());
             self.used = used;
@@ -174,18 +169,10 @@ fn work(
                 next = Some(request);
                 return Ok(false);
             }
-            let replay_bytes = options.replay.as_ref().map_or(0, |replay| {
-                let base = replay
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .packet_bytes;
-                base + simulation.replay_plan_bytes()
-            });
             connected = sender
                 .send(Ok(Packet {
                     generation,
                     simulation,
-                    replay_bytes,
                 }))
                 .is_ok();
             Ok(connected)
@@ -301,47 +288,78 @@ impl Stream {
 }
 
 impl Simulation {
-    fn replay_identity_bytes(&self) -> u128 {
-        fn key_bytes(key: &Key) -> u128 {
-            match key {
-                Key::Email(bytes) | Key::Name(bytes) => bytes.capacity() as u128,
-                Key::GitHubLogin(login) => login.capacity() as u128,
-                Key::Config(_) | Key::GitHubId(_) => 0,
-            }
-        }
-
-        // A window packet shares its initial checkpoint with its current state.
-        let checkpoint = &self.initial;
-        let avatars = checkpoint
-            .avatars
+    fn replay_bytes(&self) -> u128 {
+        let (
+            file_ids,
+            first_arrivals,
+            finals,
+            departures,
+            repository_ends,
+            caption_plan,
+            packing,
+            envelopes,
+            schedule,
+            clock,
+            births,
+            initial,
+            state,
+            theme,
+            travel,
+            title_plan,
+        ) = retained_fields!(self, Simulation {
+            file_ids, first_arrivals, finals, departures, repository_ends, caption_plan,
+            packing, envelopes, schedule, clock, births, initial, state, theme, travel,
+            title_plan;
+            repository_exits, caption_style, repository_boundary, collapse_directories,
+            diff_text_distance, repository_label_plane, events, offset, unread_before,
+            total, playback_multiplier, heat_half_life, visuals, progress, trace,
+            tick_times, window, boundaries, windowed, stream, ready_end, title_start,
+            #[cfg(test)]
+            advance_all_files,
+        });
+        debug_assert!(
+            self.window.is_none()
+                && self.boundaries.is_empty()
+                && self.stream.is_none()
+        );
+        let checkpoint = initial.replay_bytes();
+        let current = if Arc::ptr_eq(initial, &state.0) {
+            0
+        } else {
+            state.replay_bytes()
+        };
+        let titles = buffer_bytes::<Vec<u8>>(title_plan.capacity())
+            + title_plan
+                .iter()
+                .map(|row| row.capacity() as u128)
+                .sum::<u128>();
+        let rays = envelopes
             .iter()
-            .map(|avatar| {
-                let placement = avatar
-                    .name_visibility
-                    .placement
-                    .as_ref()
-                    .map_or(0, |placement| placement.text.capacity());
-                let slot = avatar.slot.as_ref().map_or(0, |slot| slot.text.capacity());
-                avatar.name.capacity() as u128
-                    + key_bytes(&avatar.key)
-                    + placement as u128
-                    + slot as u128
-            })
+            .map(|row| row.ray_bytes() as u128)
             .sum::<u128>();
-        avatars + checkpoint.authors.keys().map(key_bytes).sum::<u128>()
-    }
-
-    fn replay_plan_bytes(&self) -> u128 {
-        let titles = self.title_plan.capacity() * size_of::<Vec<u8>>()
-            + self.title_plan.iter().map(Vec::capacity).sum::<usize>();
-        let captions =
-            self.caption_plan.capacity() * size_of::<super::caption::Transition>();
-        let rays = self
-            .envelopes
-            .iter()
-            .map(super::slots::Envelope::ray_bytes)
-            .sum::<usize>();
-        (titles + captions + rays) as u128 + self.travel.replay_bytes()
+        // The replay vector can reserve four slots at its first push and double thereafter.
+        4 * size_of_val(self) as u128
+            + checkpoint
+            + current
+            + hash_table_bytes::<String, super::FileIdentity>(file_ids.capacity())
+            + file_ids
+                .keys()
+                .map(|path| path.capacity() as u128)
+                .sum::<u128>()
+            + buffer_bytes::<u16>(first_arrivals.capacity())
+            + buffer_bytes::<u16>(finals.capacity())
+            + buffer_bytes::<Time>(departures.capacity())
+            + buffer_bytes::<Time>(repository_ends.capacity())
+            + buffer_bytes::<super::caption::Transition>(caption_plan.capacity())
+            + packing.replay_bytes()
+            + buffer_bytes::<super::slots::Envelope>(envelopes.capacity())
+            + rays
+            + schedule.replay_bytes()
+            + clock.replay_bytes()
+            + buffer_bytes::<(usize, u64, u64)>(births.capacity())
+            + theme.replay_bytes()
+            + travel.replay_bytes()
+            + titles
     }
 
     #[cfg(test)]
@@ -947,6 +965,59 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn long_repository_labels_exhaust_the_replay_budget() {
+        let mut simulation = fixture(true);
+        simulation.window = None;
+        simulation.boundaries = Vec::new();
+        let limit = 1024 * 1024;
+        let mut replay = Replay::new();
+        replay.set_budget(limit);
+        for label in ['a', 'b'] {
+            let checkpoint = Arc::make_mut(&mut simulation.initial);
+            checkpoint.layout.repositories[0].label =
+                label.to_string().repeat(600 * 1024);
+            simulation.state = super::super::SharedState(simulation.initial.clone());
+            replay.retain(&Packet {
+                generation: 0,
+                simulation: simulation.clone(),
+            });
+            if label == 'a' {
+                assert_eq!(replay.windows.len(), 1);
+            }
+        }
+        assert!(replay.exceeded);
+        assert!(replay.windows.is_empty());
+    }
+
+    #[test]
+    fn checkpoint_charge_covers_reserved_payloads() {
+        let mut simulation = fixture(true);
+        simulation.advance_to(60, 60);
+        let checkpoint = &mut *simulation.state;
+        let before = checkpoint.replay_bytes();
+        let region = &mut checkpoint.layout.repositories[0];
+        let label_before = region.label.capacity();
+        let outline_before = region.outline.capacity();
+        region.label.reserve(64 * 1024);
+        region.outline.reserve(512);
+        let region_growth = (region.label.capacity() - label_before) as u128
+            + buffer_bytes::<bevy::math::Vec2>(
+                region.outline.capacity() - outline_before,
+            );
+        let avatar = &mut checkpoint.avatars[0];
+        let name_before = avatar.name.capacity();
+        let touched_before = avatar.touched.capacity();
+        avatar.name.reserve(8192);
+        avatar.touched.reserve(256);
+        let avatar_growth = (avatar.name.capacity() - name_before) as u128
+            + buffer_bytes::<u64>(avatar.touched.capacity() - touched_before);
+        assert_eq!(
+            checkpoint.replay_bytes() - before,
+            region_growth + avatar_growth
+        );
+    }
+
+    #[test]
     fn long_contributor_identities_exhaust_the_replay_budget() {
         let mut sim = fixture(true);
         sim.advance_to(60, 60);
@@ -959,7 +1030,8 @@ pub(crate) mod tests {
         for author in 0..contributors {
             let mut avatar = avatar.clone();
             avatar.name = format!("{author:0>string_bytes$}");
-            avatar.key = Key::Name(avatar.name.as_bytes().to_vec());
+            avatar.key =
+                crate::contributors::Key::Name(avatar.name.as_bytes().to_vec());
             avatar.name_visibility.placement.as_mut().unwrap().text =
                 avatar.name.clone();
             avatar.slot.as_mut().unwrap().text = avatar.name.clone();
@@ -967,14 +1039,16 @@ pub(crate) mod tests {
             checkpoint.avatars.push(avatar);
         }
         sim.state = super::super::SharedState(sim.initial.clone());
+        sim.window = None;
+        sim.boundaries = Vec::new();
         let packet = Packet {
             generation: 0,
             simulation: sim,
-            replay_bytes: 0,
         };
-        let checkpoint_bytes = (contributors * 5 * string_bytes) as u128;
+        let checkpoint_bytes = packet.simulation.replay_bytes();
+        assert!(checkpoint_bytes >= (contributors * 5 * string_bytes) as u128);
         let mut replay = Replay::new();
-        replay.set_budget(checkpoint_bytes, 0);
+        replay.set_budget(checkpoint_bytes);
         replay.retain(&packet);
         assert_eq!(replay.windows.len(), 1);
         assert_eq!(replay.used, checkpoint_bytes);
@@ -1033,7 +1107,7 @@ pub(crate) mod tests {
         assert_eq!(sim.initial.tick, u64::from(second_start));
         assert!(sim.prepare_frame(0, 60, false).unwrap());
         assert_eq!(sim.initial.tick, 0);
-        replay.lock().unwrap().set_budget(0, 0);
+        replay.lock().unwrap().set_budget(0);
 
         let (done, result) = mpsc::sync_channel(1);
         let worker = thread::spawn(move || {
@@ -1068,7 +1142,7 @@ pub(crate) mod tests {
         );
         let first = visible(&sim);
         assert_eq!(replay.lock().unwrap().windows.len(), 1);
-        replay.lock().unwrap().set_budget(0, 0);
+        replay.lock().unwrap().set_budget(0);
         assert!(replay.lock().unwrap().windows.is_empty());
         assert!(!sim.replanning_after_replay_limit());
         sim.advance_to(fixture(true).frames(60).unwrap() - 1, 60);

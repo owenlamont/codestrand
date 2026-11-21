@@ -1,5 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+use crate::model::checkpoint_memory::{
+    buffer_bytes, hash_table_bytes, retained_fields, tree_bytes,
+};
 use bevy::math::Vec2;
 use planner::Plan;
 
@@ -25,6 +28,13 @@ pub(super) struct RepositoryRegion {
 }
 
 impl RepositoryRegion {
+    fn replay_bytes(&self) -> u128 {
+        let (label, outline) = retained_fields!(self, Self {
+            label, outline; low, high, live, items, tile, gutter, height, rotated,
+        });
+        label.capacity() as u128 + buffer_bytes::<Vec2>(outline.capacity())
+    }
+
     pub(super) fn corners(&self) -> [Vec2; 4] {
         [
             self.low,
@@ -67,6 +77,14 @@ pub(super) struct File {
 }
 
 impl File {
+    fn replay_bytes(&self) -> u128 {
+        let (path,) = retained_fields!(self, Self {
+            path; local_position, dir, slot, slot_offset, position, velocity, presence,
+            state, delay, heat, activity, author,
+        });
+        path.capacity() as u128
+    }
+
     pub(super) fn draw_scale(&self, dir: &Dir) -> f32 {
         match self.state {
             Presence::Present => self.visible_presence(dir),
@@ -112,6 +130,14 @@ pub(super) struct Dir {
 }
 
 impl Dir {
+    fn replay_bytes(&self) -> u128 {
+        let (path, slots) = retained_fields!(self, Self {
+            path, slots; local_position, scale, repository, parent, depth, position, files,
+            children, live, touch_age, reserve,
+        });
+        path.capacity() as u128 + buffer_bytes::<Option<u64>>(slots.capacity())
+    }
+
     fn new(path: String, parent: Option<usize>, depth: u16, repository: usize) -> Self {
         Self {
             local_position: Vec2::ZERO,
@@ -158,6 +184,53 @@ pub(super) struct Layout {
     pub repositories: Vec<RepositoryRegion>,
     placed: bool,
     reserve_fixed_points: Vec<Option<u32>>,
+}
+
+impl Layout {
+    pub(super) fn replay_bytes(&self) -> u128 {
+        let (
+            dirs,
+            dir_index,
+            files,
+            fading,
+            file_index,
+            next_id,
+            plan,
+            repositories,
+            reserve_fixed_points,
+        ) = retained_fields!(self, Self {
+            dirs, dir_index, files, fading, file_index, next_id, plan, repositories,
+            reserve_fixed_points; revision, placed,
+        });
+        // Tombstones can trigger growth at half load and later hide buckets from capacity().
+        let file_capacity = file_index.capacity().max(
+            usize::try_from(*next_id)
+                .unwrap_or(usize::MAX)
+                .saturating_mul(3),
+        );
+        buffer_bytes::<Dir>(dirs.capacity())
+            + dirs.iter().map(Dir::replay_bytes).sum::<u128>()
+            + hash_table_bytes::<String, usize>(dir_index.capacity())
+            + dir_index
+                .keys()
+                .map(|path| path.capacity() as u128)
+                .sum::<u128>()
+            + tree_bytes::<u64, File>(files.len())
+            + files.values().map(File::replay_bytes).sum::<u128>()
+            + tree_bytes::<u64, ()>(fading.len())
+            + hash_table_bytes::<String, u64>(file_capacity)
+            + file_index
+                .keys()
+                .map(|path| path.capacity() as u128)
+                .sum::<u128>()
+            + plan.replay_bytes()
+            + buffer_bytes::<RepositoryRegion>(repositories.capacity())
+            + repositories
+                .iter()
+                .map(RepositoryRegion::replay_bytes)
+                .sum::<u128>()
+            + buffer_bytes::<Option<u32>>(reserve_fixed_points.capacity())
+    }
 }
 
 /// How much of a file shows, from its presence and how far inside its directory disc it sits.

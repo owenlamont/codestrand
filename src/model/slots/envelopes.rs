@@ -11,7 +11,9 @@ use crate::{
 
 impl Envelope {
     pub(in crate::model) fn ray_bytes(&self) -> usize {
-        self.rays.capacity() * size_of::<Vec2>()
+        2 * size_of::<usize>()
+            + size_of::<Vec<Vec2>>()
+            + self.rays.capacity() * size_of::<Vec2>()
     }
 }
 
