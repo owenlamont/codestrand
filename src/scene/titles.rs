@@ -21,6 +21,8 @@ use swash::{
 
 use crate::{layout::packing::Tile, model::Simulation};
 
+use super::names::{CLIP_PLANES, DEPTH_PLANES, View, project_quad};
+
 const MESH_BYTES: usize = 64 * 1024 * 1024;
 const MAX_TITLE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_TITLE_CHARS: usize = 1024;
@@ -56,23 +58,31 @@ pub(super) fn placement(tile: Tile, ink: Vec2) -> Transform {
         .with_scale(Vec3::new(scale, 1.0, scale))
 }
 
-fn projected_quad(view: &super::names::View, corners: [Vec3; 4]) -> Option<[Vec2; 4]> {
-    let [a, b, c, d] = corners.map(|point| view.project(point));
-    Some([a?, b?, c?, d?])
+fn screen_line(a: Vec4, b: Vec4, half_viewport: Vec2) -> Vec3 {
+    // Project the edge as a line even when an endpoint is behind the camera.
+    let homogeneous = |point: Vec4| (point.xy() * half_viewport).extend(point.w);
+    let line = homogeneous(a).cross(homogeneous(b));
+    line / line.xy().length()
 }
 
-fn edge_distance(a: Vec2, b: Vec2, point: Vec2) -> f32 {
-    (b - a).normalize_or_zero().perp_dot(point - a).abs()
+fn screen_span(points: &[Vec2], normal: Vec2) -> f32 {
+    let (low, high) = points
+        .iter()
+        .map(|&point| point.dot(normal))
+        .fold((f32::INFINITY, f32::NEG_INFINITY), |(low, high), value| {
+            (low.min(value), high.max(value))
+        });
+    high - low
 }
 
 fn screen_fit(
-    view: &super::names::View,
+    view: &View,
     tile: Tile,
     placed: Transform,
     ink: Vec2,
 ) -> Option<(f32, f32)> {
-    let pane =
-        projected_quad(view, tile.ground().map(|p| super::ground(p).with_y(PLANE)))?;
+    let clip = |point: Vec3| view.clip_from_world * point.extend(1.0);
+    let pane = tile.ground().map(|p| clip(super::ground(p).with_y(PLANE)));
     let half = ink * 0.5;
     let corners = [
         Vec2::new(-half.x, half.y),
@@ -80,33 +90,72 @@ fn screen_fit(
         Vec2::new(half.x, -half.y),
         -half,
     ];
-    let ink = projected_quad(
-        view,
-        corners.map(|p| placed.transform_point(super::ground(p))),
-    )?;
-    let height = [
-        edge_distance(ink[0], ink[1], ink[2]),
-        edge_distance(ink[0], ink[1], ink[3]),
-        edge_distance(ink[2], ink[3], ink[0]),
-        edge_distance(ink[2], ink[3], ink[1]),
-    ]
-    .into_iter()
-    .fold(f32::INFINITY, f32::min);
-    let clearance = (0..4)
-        .flat_map(|i| ink.map(|point| edge_distance(pane[i], pane[(i + 1) % 4], point)))
-        .fold(f32::INFINITY, f32::min);
+    let ink = corners.map(|p| clip(placed.transform_point(super::ground(p))));
+    let half_viewport = view.viewport * 0.5;
+    let mut visible = project_quad(ink, &CLIP_PLANES)?;
+    visible.map(|point| point * half_viewport);
+    let visible = visible.points();
+    let line = |a, b| screen_line(a, b, half_viewport);
+    let top = line(ink[0], ink[1]);
+    let bottom = line(ink[2], ink[3]);
+    let projected_height =
+        |points| screen_span(points, top.xy()).min(screen_span(points, bottom.xy()));
+    let mut height = projected_height(visible);
+    if ink
+        .iter()
+        .all(|&point| DEPTH_PLANES.iter().all(|plane| plane.dot(point) >= 0.0))
+    {
+        // Preserve the minimum edge separation for fully projectable ink.
+        let distance = |line: Vec3, point: Vec4| {
+            line.dot((point.xy() / point.w * half_viewport).extend(1.0))
+                .abs()
+        };
+        height = height
+            .min(distance(top, ink[2]))
+            .min(distance(top, ink[3]))
+            .min(distance(bottom, ink[0]))
+            .min(distance(bottom, ink[1]));
+    }
+    // Viewport and near-plane cuts do not form physical pane edges.
+    let pane_edges: [Vec3; 4] =
+        std::array::from_fn(|i| line(pane[i], pane[(i + 1) % 4]));
+    let clearance = pane_edges
+        .into_iter()
+        .fold(f32::INFINITY, |clearance, edge| {
+            visible.iter().fold(clearance, |clearance, &point| {
+                clearance.min(edge.dot(point.extend(1.0)).abs())
+            })
+        });
+    let required = minimum_clearance(height);
+    if clearance < required
+        && ink
+            .iter()
+            .any(|&point| CLIP_PLANES.iter().any(|plane| plane.dot(point) < 0.0))
+    {
+        // A grazing view can put one end too close to a pane edge while leaving
+        // plenty of readable space elsewhere. Measure the visible region with clearance.
+        let mut planes = [Vec4::ZERO; 10];
+        planes[..6].copy_from_slice(&CLIP_PLANES);
+        for (plane, edge) in planes[6..].iter_mut().zip(pane_edges) {
+            let inside = edge.dot(visible[0].extend(1.0)).signum();
+            let edge = edge * inside;
+            let normal = edge.xy() * half_viewport;
+            *plane = Vec4::new(normal.x, normal.y, 0.0, edge.z - required);
+        }
+        let mut inset = project_quad(ink, &planes)?;
+        inset.map(|point| point * half_viewport);
+        return Some((height.min(projected_height(inset.points())), required));
+    }
     Some((height, clearance))
 }
 
-fn legible(
-    view: &super::names::View,
-    tile: Tile,
-    placed: Transform,
-    ink: Vec2,
-) -> bool {
+fn minimum_clearance(height: f32) -> f32 {
+    (height * MIN_INK_CLEARANCE).max(MIN_CLEARANCE_PIXELS)
+}
+
+fn legible(view: &View, tile: Tile, placed: Transform, ink: Vec2) -> bool {
     screen_fit(view, tile, placed, ink).is_some_and(|(height, clearance)| {
-        height >= MIN_INK_PIXELS
-            && clearance >= (height * MIN_INK_CLEARANCE).max(MIN_CLEARANCE_PIXELS)
+        height >= MIN_INK_PIXELS && clearance >= minimum_clearance(height)
     })
 }
 
@@ -703,6 +752,29 @@ mod tests {
             ..view
         };
         assert!(legible(&zoomed, birth, born, ink));
+    }
+
+    #[test]
+    fn title_ink_stays_legible_across_camera_angles() {
+        let simulation = Simulation::two_synthetic_repositories();
+        let tile = simulation.visible_repository_tile(0).unwrap();
+        let ink = Vec2::new(tile.ground_aspect(), 1.0);
+        let placed = placement(tile, ink);
+        let projection =
+            Projection::Perspective(bevy::camera::PerspectiveProjection::default());
+        for (angle, camera) in super::super::pane_visibility_views(tile) {
+            let view = super::super::names::View {
+                clip_from_world: projection.get_clip_from_view()
+                    * camera.to_matrix().inverse(),
+                viewport: crate::model::framing::VIEWPORT,
+            };
+            let behind_camera = tile.ground().into_iter().any(|point| {
+                let point = super::super::ground(point).with_y(PLANE);
+                (view.clip_from_world * point.extend(1.0)).w < 0.0
+            });
+            assert_eq!(behind_camera, matches!(angle, "oblique" | "low"), "{angle}");
+            assert!(legible(&view, tile, placed, ink), "{angle}");
+        }
     }
 
     #[test]

@@ -2293,6 +2293,39 @@ fn ground(point: Vec2) -> Vec3 {
     Vec3::new(point.x, 0.0, point.y)
 }
 
+#[cfg(test)]
+fn pane_visibility_views(
+    tile: crate::layout::packing::Tile,
+) -> [(&'static str, Transform); 4] {
+    let [a, _, b, _] = tile.ground();
+    let size = (b - a).abs();
+    let center = ground(a.midpoint(b)).with_y(model::framing::GLASS_BOTTOM);
+    let eye =
+        |x, height, z| center + Vec3::new(x * size.x, height * size.y, z * size.y);
+    [
+        (
+            "overview",
+            Transform::from_translation(eye(0.0, 3.0, 0.0))
+                .looking_at(center, Vec3::NEG_Z),
+        ),
+        (
+            "zoom",
+            Transform::from_translation(eye(0.0, 0.35, 0.0))
+                .looking_at(center, Vec3::NEG_Z),
+        ),
+        (
+            "oblique",
+            Transform::from_translation(eye(-0.34, 0.22, 0.32))
+                .looking_at(center, Vec3::Y),
+        ),
+        (
+            "low",
+            Transform::from_translation(eye(-0.34, 0.07, 0.0))
+                .looking_at(center, Vec3::Y),
+        ),
+    ]
+}
+
 fn grow_labels(world: &mut World, needed: usize, theme: &Theme, camera: Entity) {
     let existing = world
         .query_filtered::<Entity, With<Label>>()
@@ -2517,35 +2550,46 @@ fn faded_label_border(theme: &Theme, opacity: f32) -> BorderColor {
     border
 }
 
-fn label_fits_pane(rect: Rect, pane: [Vec2; 4]) -> bool {
-    let center = pane[0].midpoint(pane[2]);
+fn label_fits_pane(rect: Rect, pane: &names::ProjectedQuad) -> bool {
+    let pane = pane.points();
+    let edges = || {
+        pane.iter()
+            .copied()
+            .zip(pane.iter().copied().cycle().skip(1))
+    };
+    let area: f32 = edges()
+        .map(|(a, b)| (a - pane[0]).perp_dot(b - pane[0]))
+        .sum();
     let corners = [
         rect.min,
         Vec2::new(rect.max.x, rect.min.y),
         rect.max,
         Vec2::new(rect.min.x, rect.max.y),
     ];
-    (0..4).all(|index| {
-        let a = pane[index];
-        let edge = pane[(index + 1) % 4] - a;
-        let orientation = edge.perp_dot(center - a).signum();
-        corners
-            .iter()
-            .all(|&corner| edge.perp_dot(corner - a) * orientation >= 0.0)
-    })
+    area != 0.0
+        && edges().all(|(a, b)| {
+            corners
+                .iter()
+                .all(|&corner| (b - a).perp_dot(corner - a) * area.signum() >= 0.0)
+        })
 }
 
 fn projected_panes(
     simulation: &Simulation,
     camera: &Camera,
     transform: &GlobalTransform,
-) -> Vec<Option<[Vec2; 4]>> {
+) -> Vec<Option<names::ProjectedQuad>> {
     if !matches!(
         simulation.repository_boundary,
         crate::repositories::Boundary::Glass
     ) {
         return Vec::new();
     }
+    let Some(viewport) = camera.logical_viewport_size() else {
+        return Vec::new();
+    };
+    let half = viewport / (2.0 * camera_ui_scale(camera));
+    let clip_from_world = camera.clip_from_view() * transform.to_matrix().inverse();
     simulation
         .layout()
         .repositories
@@ -2553,14 +2597,15 @@ fn projected_panes(
         .enumerate()
         .map(|(index, _)| {
             let tile = simulation.visible_repository_tile(index)?;
-            let [a, b, c, d] = tile.ground().map(|point| {
-                project_point(
-                    camera,
-                    transform,
-                    ground(point).with_y(model::framing::GLASS_BOTTOM),
-                )
+            let corners = tile.ground().map(|point| {
+                clip_from_world
+                    * ground(point)
+                        .with_y(model::framing::GLASS_BOTTOM)
+                        .extend(1.0)
             });
-            Some([a?, b?, c?, d?])
+            let mut pane = names::project_quad(corners, &names::DEPTH_PLANES)?;
+            pane.map(|point| (Vec2::ONE + point * Vec2::new(1.0, -1.0)) * half);
+            Some(pane)
         })
         .collect()
 }
@@ -2620,7 +2665,7 @@ fn labels(world: &mut World) {
                     label.scale,
                     geometry.label_height,
                 );
-                if !label_fits_pane(rect, (*pane)?) {
+                if !label_fits_pane(rect, pane.as_ref()?) {
                     return None;
                 }
             }
@@ -4378,6 +4423,53 @@ mod tests {
             point,
             distance,
         )
+    }
+
+    #[test]
+    fn directory_labels_fit_panes_across_camera_angles() {
+        let mut simulation = Simulation::two_synthetic_repositories();
+        simulation.repository_boundary = crate::repositories::Boundary::Glass;
+        let tile = simulation.visible_repository_tile(0).unwrap();
+        let [a, _, b, _] = tile.ground();
+        let camera = Camera {
+            computed: bevy::camera::ComputedCameraValues {
+                clip_from_view: Projection::Perspective(
+                    bevy::camera::PerspectiveProjection::default(),
+                )
+                .get_clip_from_view(),
+                target_info: Some(bevy::camera::RenderTargetInfo {
+                    physical_size: UVec2::new(1280, 720),
+                    scale_factor: 1.0,
+                }),
+                ..default()
+            },
+            ..default()
+        };
+        for (angle, transform) in pane_visibility_views(tile) {
+            let transform = GlobalTransform::from(transform);
+            let center = project_point(
+                &camera,
+                &transform,
+                ground(a.midpoint(b)).with_y(model::framing::GLASS_BOTTOM),
+            )
+            .unwrap();
+            let rect = model::label_rect(center, "src/", 1.0, 20.0);
+            let panes = projected_panes(&simulation, &camera, &transform);
+            let pane = panes[0]
+                .as_ref()
+                .unwrap_or_else(|| panic!("{angle}: visible pane was discarded"));
+            assert!(
+                label_fits_pane(rect, pane),
+                "{angle}: src/ fits within the pane"
+            );
+            assert!(
+                !label_fits_pane(
+                    Rect::from_center_size(center, Vec2::splat(4000.0)),
+                    pane
+                ),
+                "{angle}: oversized label spills outside the pane"
+            );
+        }
     }
 
     #[test]
