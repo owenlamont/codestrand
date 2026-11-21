@@ -138,6 +138,7 @@ pub(super) struct Options {
     pub unread: Unread,
     pub travel_cap: TravelCap,
     pub travel_window_seconds: Option<f32>,
+    pub replay: Option<Arc<std::sync::Mutex<streaming::Replay>>>,
     #[cfg(test)]
     pub eager_windows: bool,
     #[cfg(test)]
@@ -210,6 +211,10 @@ pub(super) enum BotTravel {
 }
 
 impl Options {
+    pub(super) fn retain_preview_windows(&mut self) {
+        self.replay = Some(Arc::new(std::sync::Mutex::new(streaming::Replay::new())));
+    }
+
     pub(super) fn choose_window(&mut self, events: &[Event]) -> Time {
         let history = Schedule::with_padding(
             &events[self.selected_range(events.len())],
@@ -252,6 +257,7 @@ impl Default for Options {
             unread: Unread::default(),
             travel_cap: TravelCap::Seconds(0.4),
             travel_window_seconds: None,
+            replay: None,
             #[cfg(test)]
             eager_windows: false,
             #[cfg(test)]

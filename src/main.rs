@@ -184,6 +184,9 @@ impl ContributorTravel {
     reason = "each bool is an independent clap switch"
 )]
 struct Source {
+    #[arg(skip)]
+    #[serde(skip)]
+    retain_preview_windows: bool,
     /// Assume departure after this many calendar days; default 60 marks two quiet months.
     #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u32).range(1..=36500))]
     contributor_inactivity_days: u32,
@@ -500,6 +503,7 @@ impl Source {
             unread,
             travel_cap: self.contributor_travel.cap(),
             travel_window_seconds: None,
+            replay: None,
             #[cfg(test)]
             eager_windows: false,
             #[cfg(test)]
@@ -517,6 +521,9 @@ impl Source {
             progress: progress.clone(),
             trace: self.trace.clone(),
         };
+        if self.retain_preview_windows {
+            options.retain_preview_windows();
+        }
         let history_duration = options.choose_window(&events);
         #[cfg(test)]
         if let Some(window) = self.window_override {
@@ -819,6 +826,7 @@ fn termination(result: anyhow::Result<()>) -> std::process::ExitCode {
 
 /// Opens the preview window while a worker thread loads and plans `source`.
 fn preview(mut source: Source, theme: theme::ThemeName) -> anyhow::Result<()> {
+    source.retain_preview_windows = true;
     // Outside a repository, fail before a window opens.
     source.repository = source.repositories()?;
     let (progress, updates) = Progress::channel(std::time::Duration::from_millis(50));

@@ -351,6 +351,16 @@ fn check_streaming(
     let windows = super::streaming::PLAN_COPIES * window;
     let global_states = super::streaming::GLOBAL_STATE_COPIES * checkpoint;
     let bytes = (global + global_states).max(retained + states + windows);
+    if let Some(replay) = &options.replay {
+        let available = u128::from(options.available_memory);
+        let limit = available.saturating_sub(bytes).min(available / 8);
+        // The checkpoint and file ID index are independent, while input and packing rows are shared.
+        let packet = checkpoint * 2 + selected.len() as u128 * 256 + 4096;
+        replay
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .set_budget(limit, packet);
+    }
     if options.trace.on() {
         eprintln!(
             "streaming_memory global_peak={global} global_retained={retained} window={window} checkpoint={checkpoint} global_states={global_states} window_states={states} total={bytes}"

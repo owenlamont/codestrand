@@ -1,4 +1,4 @@
-use std::ops::Range;
+use std::{mem::size_of, ops::Range};
 
 use bevy::math::{Vec2, Vec3};
 
@@ -8,6 +8,12 @@ use crate::{
     model::{FragmentPace, State},
     timeline::Event,
 };
+
+impl Envelope {
+    pub(in crate::model) fn ray_bytes(&self) -> usize {
+        self.rays.capacity() * size_of::<Vec2>()
+    }
+}
 
 struct ServiceFrame {
     tick: u64,

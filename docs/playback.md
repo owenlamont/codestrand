@@ -1,8 +1,9 @@
 # Playback
 
-Preview loops the selected history. Export renders the same launch timeline at
-explicit frame times at 1x speed. Export uses a static overview that fits the scene by
-default. Use `--camera-path` for a scripted camera.
+Preview loops the selected history and reuses planned windows within the run while
+they fit within the replay memory limit. Export renders the same launch timeline at
+explicit frame times at 1x speed. Export uses a static overview that fits the scene
+by default. Use `--camera-path` for a scripted camera.
 
 Preview renders at the window's physical resolution, including on HiDPI displays.
 Resizing or maximising keeps a 720-logical-pixel-high UI: text scales with height,
@@ -12,7 +13,9 @@ Preview opens its window at once and shows planning progress until playback is r
 For long histories, the first frame appears while later history is still being
 planned. Playback pauses if planning falls behind, then resumes without skipping
 history. Camera controls remain active during the pause, and a small label shows
-the planning stage and percentage. Rewinding or looping may need another planning pause.
+the planning stage and percentage. Rewinds also reuse planned windows. If the replay
+memory limit is reached, preview releases all retained windows and displays
+`Replay memory limit reached` when it pauses to plan them again.
 Export prints the stage and its percentage to standard error at most once a second.
 
 Commit application times are planned ahead for the selected history and pacing.
