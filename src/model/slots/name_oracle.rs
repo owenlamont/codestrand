@@ -259,7 +259,7 @@ fn label_domains(
         let size = names::rect(
             Vec2::ZERO,
             &displayed[index],
-            state.name_scale(),
+            crate::model::LabelKind::Avatar.font_scale(),
             state.geometry.label_height,
         )
         .size();

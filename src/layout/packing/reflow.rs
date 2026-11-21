@@ -18,9 +18,9 @@ pub(super) struct Layout {
 }
 
 impl Layout {
-    pub fn new(nodes: &[Node], tiles: Vec<Option<Tile>>) -> Self {
+    pub fn new(nodes: &[Node], tiles: Vec<Option<Tile>>, space: Space) -> Self {
         Self {
-            gutters: gutter_cells(nodes, &tiles),
+            gutters: gutter_cells(nodes, &tiles, space),
             tiles,
         }
     }
@@ -73,7 +73,7 @@ pub(super) fn plan(
         return None;
     }
     let from = tiles(nodes, weights, presence, space)?;
-    let from = Layout::new(nodes, from);
+    let from = Layout::new(nodes, from, space);
     let unchanged = tiles(nodes, target, presence, space)?;
     let mut best = mismatch(&unchanged, target);
     if best <= 0.005 {
@@ -84,7 +84,7 @@ pub(super) fn plan(
         if let Some(to) = tiles(&trial, target, presence, space) {
             let cost = mismatch(&to, target);
             if cost + 0.005 < best {
-                let to = Layout::new(&trial, to);
+                let to = Layout::new(&trial, to, space);
                 if compatible(&from.gutters, &to.gutters) && connected(&from, &to) {
                     best = cost;
                     chosen = Some((trial, to));
@@ -297,7 +297,7 @@ mod tests {
         let weights = [50.0; 4];
         let target = [80.0, 20.0, 20.0, 80.0];
         let presence = [1.0; 4];
-        let space = Space::new(1.0, 4.0);
+        let space = Space::new(4.0, 1.0);
         let change = plan(12, &nodes, &weights, &target, &presence, space).unwrap();
         assert!(matches!(change.nodes[0], Node::Split { axis: 1, .. }));
         let unchanged = tiles(&nodes, &target, &presence, space).unwrap();
@@ -319,7 +319,6 @@ mod tests {
             .collect();
         let packing = Packing {
             gutter_scale: 4.0,
-            detail: 1.0,
             nodes: nodes.to_vec(),
             reflows: vec![change.clone()].into(),
             labels: ["a", "b", "c", "d"].map(str::to_owned).to_vec().into(),

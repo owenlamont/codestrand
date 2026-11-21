@@ -15,6 +15,13 @@ pub(super) fn label_font(primary: Handle<Font>, fallback: Handle<Font>) -> FontS
     FontSource::list([primary.into(), fallback.into(), FontSource::sans_serif()])
 }
 
+const MAX_FONT_ATLAS_PAGES: usize = 64;
+
+#[derive(Default, Resource)]
+pub(super) struct FontAtlasBudget {
+    pub(super) exceeded: bool,
+}
+
 /// Drops font atlases that no laid-out text uses, unless their font is a loaded asset.
 ///
 /// Bevy evicts a system fallback font after two unused frames and reloads it under a
@@ -25,8 +32,11 @@ pub(super) fn drop_stale_font_atlases(
     mut kept: Local<usize>,
     fonts: Res<Assets<Font>>,
     layouts: Query<&bevy::text::TextLayoutInfo>,
+    mut budget: ResMut<FontAtlasBudget>,
+    mut exits: MessageWriter<AppExit>,
 ) {
-    if atlases.len() <= *kept {
+    let pages: usize = atlases.values().map(Vec::len).sum();
+    if pages <= *kept && pages <= MAX_FONT_ATLAS_PAGES {
         return;
     }
     #[expect(
@@ -49,7 +59,16 @@ pub(super) fn drop_stale_font_atlases(
                 .iter()
                 .any(|atlas| used.contains(&atlas.texture.id()))
     });
-    *kept = atlases.len();
+    *kept = atlases.values().map(Vec::len).sum();
+    if *kept > MAX_FONT_ATLAS_PAGES {
+        atlases.clear();
+        *kept = 0;
+        if !budget.exceeded {
+            budget.exceeded = true;
+            bevy::log::error!("font atlas exceeded {MAX_FONT_ATLAS_PAGES} pages");
+            exits.write(AppExit::error());
+        }
+    }
 }
 
 #[derive(Default)]
@@ -638,6 +657,8 @@ mod tests {
         let mut world = World::new();
         world.init_resource::<Assets<Image>>();
         world.init_resource::<FontAtlasSet>();
+        world.init_resource::<FontAtlasBudget>();
+        world.init_resource::<Messages<AppExit>>();
         let font = Font::from_bytes(Vec::new());
         let loaded = u32::try_from(font.data.id()).unwrap();
         let mut fonts = Assets::<Font>::default();
@@ -688,6 +709,44 @@ mod tests {
             .collect();
         kept.sort_unstable();
         assert_eq!(kept, [loaded, laid_out]);
+    }
+
+    #[test]
+    fn active_font_pages_cannot_exceed_the_atlas_budget() {
+        use bevy::{
+            ecs::system::RunSystemOnce,
+            text::{FontAtlas, FontAtlasKey, FontAtlasSet},
+        };
+        let mut world = World::new();
+        world.init_resource::<Assets<Image>>();
+        world.init_resource::<Assets<Font>>();
+        world.init_resource::<FontAtlasSet>();
+        world.init_resource::<FontAtlasBudget>();
+        world.init_resource::<Messages<AppExit>>();
+        let font = Font::from_bytes(Vec::new());
+        let id = u32::try_from(font.data.id()).unwrap();
+        world.resource_mut::<Assets<Font>>().add(font);
+        let key = FontAtlasKey {
+            id,
+            index: 0,
+            font_size_bits: 14.0_f32.to_bits(),
+            variations_hash: 0,
+            hinting: default(),
+            font_smoothing: FontSmoothing::default(),
+        };
+        let pages = (0..=MAX_FONT_ATLAS_PAGES)
+            .map(|_| {
+                FontAtlas::new(
+                    &mut world.resource_mut::<Assets<Image>>(),
+                    UVec2::splat(4),
+                    FontSmoothing::default(),
+                )
+            })
+            .collect();
+        world.resource_mut::<FontAtlasSet>().insert(key, pages);
+        world.run_system_once(drop_stale_font_atlases).unwrap();
+        assert!(world.resource::<FontAtlasSet>().is_empty());
+        assert!(world.resource::<FontAtlasBudget>().exceeded);
     }
 
     fn active_code_world() -> World {

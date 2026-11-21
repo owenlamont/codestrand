@@ -254,51 +254,39 @@ select from the merged history. Single-repository playback retains first-parent
 order. Contributor mappings apply across all repositories, so a matched contributor
 uses one avatar that moves between regions.
 
-Live repositories share the inset viewport inside a 24-pixel frame margin. The
-same frame-scaled avatar sizing and gutter placement apply to single repositories.
-The top wordmark has a separate 26-pixel reserved strip, including
-a four-pixel buffer;
-avatars, gutter routes and name labels stay below the strip, matching caption clearance.
-The default 16:9 export camera stays fixed. Spacing and size floors use a fixed world scale
-calibrated in reference pixels; apparent ground spacing is slightly smaller to reserve
-room for elevated portraits. Preview orbit changes the projection, not the packing.
+Live repositories share a field that grows with the amount of content. The overview
+camera pulls back to keep the field in view. Files, avatars and gutters keep their world
+scale as the camera pulls back. Fly in during preview to see smaller details. The top
+wordmark and bottom caption reserve their own strips in the overview.
 Shared gutters separate neighbouring tiles, with no contributor band. Each tile's weight
 comes from its live file and directory count. A reflow starts when the ratio between a
 tile's held and live shares exceeds 1.5 in either direction, or when more than 5% of the
 total weight would need to shift between tiles. The weights ease over two seconds towards
 the counts in the middle of the next hold, with at least six seconds between reflow
 starts. Empty active repositories weigh as one item.
-The split tree, size floors and aspect limits also affect each tile's area.
+The split tree and aspect limits also affect each tile's area.
 Each repository keeps file identity,
 local layout and one uniform scale, with a fixed quarter-turn chosen for its history.
 Content zoom anticipates growth with a precomputed safe-fit envelope and half-second
 easing. The log-scale limit is 0.12 per second when zooming out and 0.08 when zooming in
 (about 11.3% shrink or 8.3% growth). A larger future contraction can start the
 adjustment earlier; the chosen scale never exceeds the tile's current safe fit.
-The usable content area leaves an eight-pixel edge inset. Corner titles share one
-character size, which shrinks once each repository's share of the field holds fewer
-than four minimum tiles, reaching about half size at 72 repositories and never below
-6 pixels. They end in an ellipsis when wider than their tile and sit 4 pixels from the
-tile edge, instead of one avatar diameter, on tiles too small for that clearance; they
-are omitted only from tiles too short for the text.
-Directory and touched-file labels shrink with their tile's files, are never larger than
-the corner titles, stop at the same 6 pixel floor, and end in an ellipsis when wider than
-their tile. Invisible archived
-content cannot constrain earlier zoom.
+Repository titles and contributor names use a 12-pixel font on screen. Directory and
+touched-file labels use a 10-pixel font. Long titles and detail labels end in an
+ellipsis when space runs out. A title can sit closer to the edge of a small tile or
+disappear if the tile is too short. After an ended repository fades, its tile shrinks
+over four playback seconds and neighbouring tiles grow into the space.
 
 A newcomer splits one existing tile or subtree. Other repositories retain their
 relative order. A reflow can change the split tree between repository arrivals and exits.
 Tiles and their contents ease together when the new tree improves area shares and
 the gutters stay connected throughout the move.
-Splits clamp to a ground-aspect range of 1:3.5 to 3.5:1, inclusive,
-and a 144-by-64 reference-pixel floor at full detail. Births ease for up to 0.75
-playback seconds before their first commit; births near the lead-in use the available
-lead-in time. Aspect and size clamps scale with presence during the transition.
-Between reflows, tiles and shared gutters partition the whole inset field.
-`--gutter` sets the visible spacing in 1280×720 reference pixels: default `4`,
-range `0`–`20`, inclusive,
-including touching tiles at `0`. Crowd scaling shrinks avatars and names when many are
-active.
+Splits clamp to a ground-aspect range of 1:3.5 to 3.5:1, inclusive. Births ease for
+up to 0.75 playback seconds before their first commit. Births near the lead-in use the
+available lead-in time. Between reflows, tiles and shared gutters partition the field.
+`--gutter` sets spacing using the world distance represented by a pixel in the
+1280×720 reference view. The default is `4` and the range is `0`–`20`, inclusive.
+Tiles touch at `0`. Crowd scaling adjusts avatars when many are active.
 Names prefer clear content rectangles, including repository labels
 and a small margin, but may overlap content near tile edges when space is tight.
 Different content shapes can leave space inside a uniformly fitted tile.
@@ -321,9 +309,9 @@ its beam and frame checks remain valid.
 Placement checks the touched files throughout service, including
 additions and deletions, for an open half-plane and beams crossing another repository
 or its label.
-Other edges provide fallback docks. Avatars spread along edges; names shrink to a readable
-minimum, then move to free nearby lanes before truncating as a last resort. Names remain
-visible with their avatars. Portrait size accounts for perspective.
+Other edges provide fallback docks. Avatars spread along edges. Names try nearby clear
+lanes at a fixed 12-pixel font size before truncating. Names remain visible with their
+avatars. Portrait size accounts for perspective.
 
 Avatar travel follows gutter centrelines and the outer margin. Parking slots
 sit on the same network. Routes never cross tile interiors, including unused areas;
@@ -334,7 +322,7 @@ Parking still spreads avatars when clear slots are available.
 A contributor can depart once its previous commit's last fragment has arrived and the
 moving gutter route can meet the speed limit. Travel overlaps other contributors'
 animations; commits remain strictly chronological. Routes stop at corners and accelerate
-toward `--avatar-max-speed` reference pixels/second (default `480`, minimum `1`).
+toward `--avatar-max-speed` world units per second (default `31.4`, inclusive minimum `0.1`).
 Moving junctions follow the gutter network, with every canonical sample checked against
 the speed limit, frame bounds and tile guards. A shared parking point creates no trip.
 Contributors follow their parked gutter slot until their inferred calendar departure,
@@ -371,7 +359,7 @@ continue in presentation seconds.
 
 ```sh
 codestrand export frames --repositories-file repositories.toml \
-  --contributor-travel walk --bot-travel walk --avatar-max-speed 480 --frames 90 --fps 30
+  --contributor-travel walk --bot-travel walk --avatar-max-speed 31.4 --frames 90 --fps 30
 ```
 
 Planning tests departure ticks from the contributor's fragment completion onward.

@@ -97,7 +97,10 @@ fn framing_metrics(
     (usable_fill, cropped)
 }
 
-pub(crate) fn measure(layout: &Layout) -> Metrics {
+fn measure(layout: &Layout, growth: f32) -> Metrics {
+    let viewport = Tile::viewport();
+    let center = viewport.low.midpoint(viewport.high);
+    let normalize = |point: Vec2| center + (point - center) / growth;
     let mut repositories = Vec::new();
     let mut tiles = Vec::new();
     let mut content = 0.0;
@@ -150,7 +153,7 @@ pub(crate) fn measure(layout: &Layout) -> Metrics {
                     crate::layout::outline::clip(&polygon, -axis, -axis.dot(tile.low));
             }
             let area = crate::layout::outline::area(&polygon) * 0.25;
-            polygons.push(polygon);
+            polygons.push(polygon.into_iter().map(normalize).collect());
             area
         } else {
             0.0
@@ -158,8 +161,11 @@ pub(crate) fn measure(layout: &Layout) -> Metrics {
         let tile_area = tile.area();
         let (usable_fill, cropped) = framing_metrics(region, tile);
         content += content_area;
-        coverage += tile_area;
-        tiles.push(tile);
+        coverage += tile_area / growth.powi(2);
+        tiles.push(Tile {
+            low: normalize(tile.low),
+            high: normalize(tile.high),
+        });
         repositories.push(Repository {
             label: region.label.clone(),
             tile_low: tile.low.to_array(),
@@ -186,7 +192,7 @@ pub(crate) fn measure(layout: &Layout) -> Metrics {
         coverage,
         blank_fraction: 1.0 - coverage,
         largest_empty_rectangle: largest_empty(&tiles),
-        content_fill: content / coverage.max(1e-12),
+        content_fill: content / (coverage * growth.powi(2)).max(1e-12),
         repositories,
         content_largest_empty_inset: gaps::largest(&polygons),
     }
@@ -199,7 +205,7 @@ pub(crate) fn run(
     serde_json::to_writer(
         &mut *writer,
         &serde_json::json!({"definitions":
-        "All areas and coverage fractions use the fixed reference field, normalised to its full 1280x720 reference-unit rectangle; they are not rendered-frame fractions. Glass tiles are disjoint world rectangles represented in this field, inside a 24 reference-pixel margin plus the caption reservation below, separated by shared gutters. Largest empty rectangle is the exact maximum axis-aligned rectangle outside their union, including the margin. Content is the world-XZ AABB of current directory discs and file positions padded by their model footprint size, converted with the fixed affine field scale; not projected ground-plane area, glyph ink or opaque pixel occupancy. Content fill divides content-envelope area by tile area; overall fill is area weighted. The first repository owns the empty lead-in tile. Weights are live file and directory counts, held until their shares drift and then eased over two seconds; empty active repositories weigh one until archived. Files and directories count live files not leaving and live directories. Samples include every canonical 1/60 second. Content AABBs are clipped to their own tiles; actual footprints use convex outlines. Content largest-empty rectangles use fully covered cells on a 160x90 grid inside the usable tile viewport, excluding the caption reservation, with 8 reference-pixel boundary uncertainty."}),
+        "Tile and content areas use fixed world coordinates expressed in reference-field units. Coverage and empty fractions normalize the grown field back to the reference viewport. Glass tiles are disjoint world rectangles represented in this field, inside a 24 reference-pixel margin plus the caption reservation below, separated by shared gutters. Largest empty rectangle is the exact maximum axis-aligned rectangle outside their union, including the margin. Content is the world-XZ AABB of current directory discs and file positions padded by their model footprint size, converted with the fixed affine field scale; not projected ground-plane area, glyph ink or opaque pixel occupancy. Content fill divides content-envelope area by tile area; overall fill is area weighted. The first repository owns the empty lead-in tile. Weights are live file and directory counts, held until their shares drift and then eased over two seconds; empty active repositories weigh one until archived. Files and directories count live files not leaving and live directories. Samples include every canonical 1/60 second. Content AABBs are clipped to their own tiles; actual footprints use convex outlines. Content largest-empty rectangles use fully covered cells on a 160x90 grid inside the usable tile viewport, excluding the caption reservation, with one grid cell of boundary uncertainty."}),
     )?;
     writeln!(writer)?;
     let mut frames = simulation.frames(60)?;
@@ -224,7 +230,7 @@ pub(crate) fn run(
             &mut *writer,
             &serde_json::json!({
                 "frame": frame, "seconds": super::tick_time(u64::from(frame)).lossy_secs_f32(),
-                "commit": simulation.commit(), "metrics": measure(simulation.layout())
+                "commit": simulation.commit(), "metrics": measure(simulation.layout(), simulation.packing.overview_growth())
             }),
         )?;
         writeln!(writer)?;
@@ -341,12 +347,20 @@ mod tests {
             }
         }
         assert_eq!(simulation.state.slot_records.len(), simulation.events.len());
-        let snapshot = serde_json::to_vec(&measure(simulation.layout())).unwrap();
+        let snapshot = serde_json::to_vec(&measure(
+            simulation.layout(),
+            simulation.packing.overview_growth(),
+        ))
+        .unwrap();
         simulation.advance_to(0, 60);
         simulation.advance_to(frames, 60);
         assert_eq!(
             snapshot,
-            serde_json::to_vec(&measure(simulation.layout())).unwrap()
+            serde_json::to_vec(&measure(
+                simulation.layout(),
+                simulation.packing.overview_growth()
+            ))
+            .unwrap()
         );
     }
 }

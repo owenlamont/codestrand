@@ -239,19 +239,47 @@ fn prepare_after_captures<T>(
     prepare(context)
 }
 
+#[derive(bevy::prelude::Resource)]
+pub(super) struct FollowActivity;
+
 fn place_export_camera(
     app: &mut App,
     path: Option<&crate::camera_path::CameraPath>,
     previous: &mut Option<bevy::prelude::Transform>,
     (index, fps): (u32, u16),
 ) -> anyhow::Result<()> {
-    let Some(path) = path else { return Ok(()) };
+    let projection = app
+        .world()
+        .contains_resource::<FollowActivity>()
+        .then(|| scene::camera_projection(app.world_mut()))
+        .flatten();
+    if path.is_none() && projection.is_none() {
+        return Ok(());
+    }
     let mut playback = app.world_mut().resource_mut::<scene::Playback>();
     playback.0.advance_to(index, fps);
-    let pose = path.pose(&playback.0, index, fps)?;
-    if let Some(previous) = previous {
-        path.validate_step(previous, &pose, index)?;
-    }
+    let pose = if let Some(path) = path {
+        let pose = path.pose(&playback.0, index, fps)?;
+        if let Some(previous) = previous {
+            path.validate_step(previous, &pose, index)?;
+        }
+        pose
+    } else {
+        let (fov, viewport) = projection.expect("activity camera projection");
+        let overview = || {
+            let (focus, distance) = playback.0.overview_for_projection(fov, viewport);
+            focus + bevy::math::Vec3::Y * distance
+        };
+        let eye = previous.map_or_else(overview, |pose| pose.translation);
+        let next = playback
+            .0
+            .activity_camera_eye(fov, viewport)
+            .map_or(eye, |goal| {
+                eye.lerp(goal, 1.0 - (-1.5 / f32::from(fps)).exp())
+            });
+        bevy::prelude::Transform::from_translation(next)
+            .looking_to(bevy::math::Vec3::NEG_Y, bevy::math::Vec3::NEG_Z)
+    };
     *previous = Some(pose);
     app.world_mut().insert_resource(scene::ScriptedCamera(pose));
     Ok(())
@@ -417,6 +445,10 @@ impl Captures {
 
 fn update(app: &mut App) -> anyhow::Result<()> {
     app.update();
+    anyhow::ensure!(
+        !scene::font_atlas_limit_exceeded(app.world()),
+        "export stopped at the font atlas page limit"
+    );
     app.world()
         .resource::<RenderDevice>()
         .wgpu_device()
@@ -685,6 +717,7 @@ mod tests {
             encoding,
             frames,
             camera_path,
+            ..
         }) = crate::Cli::try_parse_from(args).unwrap().command
         else {
             panic!("explicit export command required");
@@ -730,7 +763,10 @@ mod tests {
         )
         .unwrap();
         result.unwrap();
-        audit.1.assert_clear(source.avatar_max_speed);
+        audit.1.assert_clear(
+            source.avatar_max_speed
+                / crate::model::framing::WORLD_UNITS_PER_REFERENCE_PIXEL,
+        );
     }
 
     #[test]

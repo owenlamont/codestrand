@@ -334,7 +334,15 @@ pub(super) fn content_obstacles(state: &State) -> Vec<(usize, Rect)> {
             result.push((index, title.rect().inflate(HALO)));
             continue;
         }
-        let anchor = state.screen(framing::label_position(region)).unwrap();
+        let anchor = project(
+            view_direction() * framing::DISTANCE,
+            Vec3::ZERO,
+            &[framing::label_position(region)],
+        )
+        .next()
+        .flatten()
+        .expect("visible region")
+            * HALF;
         let size = framing::label_size(&region.label, 20.0);
         result.push((
             index,
@@ -598,13 +606,13 @@ impl State {
         now: super::Time,
         plan: &super::travel::Plan,
     ) {
-        let gap = Vec2::splat(self.gutter * self.detail);
+        let gap = Vec2::splat(self.gutter);
         let beams = tile_obstacles(self);
         let cells = super::travel::network(
             self.layout.repositories.iter().filter_map(|r| r.gutter),
         );
         let radius = self.avatar_radius();
-        let name_scale = self.name_scale();
+        let name_scale = super::LabelKind::Avatar.font_scale() * self.field_growth;
         let capacities = self.compute_capacities();
         let mut occupied = self.hold_idle(now, &capacities, radius);
         let retained = self.retained_slots(now, radius);
@@ -644,6 +652,7 @@ impl State {
             );
             let peers = self.slot_peers(index, plan, choosing);
             let choice = Choice {
+                field: super::travel::field_rect(self.field),
                 tile,
                 gutter: self.layout.repositories[avatar.repository].gutter,
                 gap,
@@ -790,27 +799,51 @@ impl State {
 }
 
 impl State {
-    pub(super) fn name_scale(&self) -> f32 {
-        self.avatar_scale * 0.95
+    pub(super) fn screen(&self, point: Vec3) -> Option<Vec2> {
+        let (focus, distance) = self.overview();
+        project(focus + view_direction() * distance, focus, &[point])
+            .next()
+            .flatten()
+            .map(|p| p * HALF)
     }
 
-    /// Reference-viewport pixel position of a world point.
-    pub(super) fn screen(&self, point: Vec3) -> Option<Vec2> {
-        project(
-            self.focus + view_direction() * self.distance,
-            self.focus,
-            &[point],
+    pub(super) fn overlay_label_bounds(&self, label: &super::Label) -> Option<Rect> {
+        let point = self.screen(label.position)?;
+        let size = super::names::rect(
+            Vec2::ZERO,
+            &label.text,
+            label.kind.font_scale(),
+            self.geometry.label_height,
         )
-        .next()
-        .flatten()
-        .map(|p| p * HALF)
+        .size();
+        Some(Rect::from_corners(
+            point - Vec2::Y * size.y,
+            point + Vec2::X * size.x,
+        ))
+    }
+
+    fn name_radius(&self) -> f32 {
+        self.avatar_radius() / self.field_growth
+    }
+
+    fn project_forecast(&self, mut points: Vec<Vec2>) -> Vec<Vec2> {
+        if self.field_growth > 1.0 {
+            points.retain_mut(|point| {
+                let Some(screen) = self.screen(world(*point)) else {
+                    return false;
+                };
+                *point = screen;
+                true
+            });
+        }
+        points
     }
 
     fn name_size(&self, text: &str) -> Vec2 {
         super::names::rect(
             Vec2::ZERO,
             text,
-            self.name_scale(),
+            super::LabelKind::Avatar.font_scale(),
             self.geometry.label_height,
         )
         .size()
@@ -903,7 +936,7 @@ impl State {
         obstacles: &[(usize, Rect)],
         rays: &[(Vec2, Vec2)],
     ) -> LabelSpace {
-        let radius = self.avatar_radius();
+        let radius = self.name_radius();
         let margin = 4.0 / 3.0;
         // Every candidate rect lies within this reach, so nothing outside it can
         // touch one; the skipped terms would each have added exactly zero.
@@ -953,6 +986,14 @@ impl State {
         displayed: &[String],
     ) -> (Vec<usize>, Vec<Vec<labels::Candidate>>) {
         let mut obstacles = tile_obstacles(self);
+        if self.field_growth > 1.0 {
+            for (_, rect) in &mut obstacles {
+                *rect = Rect::from_corners(
+                    self.screen(world(rect.min)).expect("visible tile"),
+                    self.screen(world(rect.max)).expect("visible tile"),
+                );
+            }
+        }
         obstacles.extend(texts.iter().map(|&rect| (usize::MAX, rect)));
         let rays = self.name_rays(bodies, travel);
         let preferred = self.name_preferences();
@@ -974,26 +1015,29 @@ impl State {
             let velocity = previous
                 .map_or(Vec2::ZERO, |p| (body - p.body) / dt.max(1e-6))
                 .clamp_length_max(480.0);
-            let future = travel.forecast(index, self.tick).unwrap_or_else(|| {
-                (1..=30_u8)
-                    .map(|step| {
-                        (body
-                            + velocity
-                                * (f32::from(step) * 4.0 * super::tick_seconds())
-                                    .min(1.0))
-                        .clamp(
-                            Vec2::new(
-                                -HALF.x + space.radius,
-                                super::caption::BOTTOM + space.radius,
-                            ),
-                            Vec2::new(
-                                HALF.x - space.radius,
-                                super::caption::TOP - space.radius,
-                            ),
-                        )
-                    })
-                    .collect()
-            });
+            let future = travel.forecast(index, self.tick).map_or_else(
+                || {
+                    (1..=30_u8)
+                        .map(|step| {
+                            (body
+                                + velocity
+                                    * (f32::from(step) * 4.0 * super::tick_seconds())
+                                        .min(1.0))
+                            .clamp(
+                                Vec2::new(
+                                    -HALF.x + space.radius,
+                                    super::caption::BOTTOM + space.radius,
+                                ),
+                                Vec2::new(
+                                    HALF.x - space.radius,
+                                    super::caption::TOP - space.radius,
+                                ),
+                            )
+                        })
+                        .collect()
+                },
+                |points| self.project_forecast(points),
+            );
             let rotation = Rotation {
                 body,
                 size,
@@ -1125,7 +1169,7 @@ impl State {
             let selected = candidates[choice];
             let body = bodies[index].expect("projected visible avatar");
             let size = self.name_size(&displayed[index]);
-            let distance = self.avatar_radius() + 4.0 / 3.0;
+            let distance = self.name_radius() + 4.0 / 3.0;
             // A body that jumps further than its name's width has no on-screen motion to follow.
             let previous = self.avatars[index]
                 .name_visibility
@@ -1162,7 +1206,7 @@ impl State {
                 point: Vec2::new(rect.min.x, rect.max.y),
                 body: bodies[index].expect("projected visible avatar"),
                 text: displayed[index].clone(),
-                scale: self.name_scale(),
+                scale: super::LabelKind::Avatar.font_scale(),
                 angle,
                 angular_velocity,
                 motion,
@@ -1191,7 +1235,7 @@ impl State {
                     labels::tangent_rect(
                         body,
                         size,
-                        self.avatar_radius() + 4.0 / 3.0,
+                        self.name_radius() + 4.0 / 3.0,
                         placement.angle,
                     )
                 })
@@ -1242,7 +1286,7 @@ impl State {
                 continue;
             }
             if let Some(body) = bodies[other] {
-                covered += overlap(disk(body, self.avatar_radius()));
+                covered += overlap(disk(body, self.name_radius()));
             }
             if let Some(name) = &avatar.name_visibility.placement {
                 covered += overlap(name.bounds(self.geometry.label_height));
@@ -1416,6 +1460,7 @@ fn attached_rect(body: Vec2, size: Vec2, distance: f32, attachment: u8) -> Rect 
     )
 }
 struct Choice<'a> {
+    field: Rect,
     tile: Tile,
     gutter: Option<Tile>,
     gap: Vec2,
@@ -1564,11 +1609,15 @@ impl Choice<'_> {
     }
     fn assess(&self, dock: Dock) -> (Placement, f32) {
         let point = self.point(dock);
+        let centre = point + ring_offset(self.capacity, dock.edge, self.radius);
+        let ring = group_radius(self.capacity, self.radius);
         let corners = self.envelope.corners(self.tile);
         let span = fan(point, &corners);
         let (low, high) = corners
             .iter()
-            .fold((point, point), |(low, high), &p| (low.min(p), high.max(p)));
+            .fold((point.min(centre), point.max(centre)), |(low, high), &p| {
+                (low.min(p), high.max(p))
+            });
         let crossings = self
             .beams
             .iter()
@@ -1577,15 +1626,13 @@ impl Choice<'_> {
                     && *repo != self.repository
                     && low.cmple(rect.max).all()
                     && high.cmpge(rect.min).all()
-                    && swept_crosses(point, &corners, rect.inflate(0.02))
+                    && (swept_crosses(point, &corners, rect.inflate(0.02))
+                        || swept_crosses(centre, &corners, rect.inflate(0.02)))
             })
             .count();
-        let ring = group_radius(self.capacity, self.radius);
-        let centre = point + ring_offset(self.capacity, dock.edge, self.radius);
         let overlaps = usize::from(
-            !centre.abs().cmple(HALF - Vec2::splat(ring)).all()
-                || centre.y - ring < super::caption::BOTTOM
-                || centre.y + ring > super::caption::TOP,
+            !centre.cmpge(self.field.min + Vec2::splat(ring)).all()
+                || !centre.cmple(self.field.max - Vec2::splat(ring)).all(),
         );
         (
             Placement {
@@ -1693,11 +1740,13 @@ impl Choice<'_> {
                 edge,
                 fraction: 0.0,
             });
-            if origin[cross].abs() + self.radius > HALF[cross] {
+            if origin[cross] - self.radius < self.field.min[cross]
+                || origin[cross] + self.radius > self.field.max[cross]
+            {
                 continue;
             }
-            let low = (tile.low * HALF)[axis].max(-HALF[axis] + self.radius);
-            let high = (tile.high * HALF)[axis].min(HALF[axis] - self.radius);
+            let low = (tile.low * HALF)[axis].max(self.field.min[axis] + self.radius);
+            let high = (tile.high * HALF)[axis].min(self.field.max[axis] - self.radius);
             if low > high {
                 continue;
             }
@@ -1756,8 +1805,11 @@ impl State {
             } else {
                 fade.max(0.0)
             };
+            let (focus, distance) = self.overview();
+            let reference = (distance - MIN_AVATAR_HEIGHT)
+                / (framing::DISTANCE - MIN_AVATAR_HEIGHT);
             return super::Label {
-                position: world(point.unwrap_or(name.point)),
+                position: world(point.unwrap_or(name.point) * reference) + focus,
                 text: name.text.clone(),
                 kind: super::LabelKind::Avatar,
                 scale: name.scale,
@@ -1772,7 +1824,7 @@ impl State {
                 .as_ref()
                 .map_or_else(|| avatar.name.clone(), |s| s.text.clone()),
             kind: super::LabelKind::Avatar,
-            scale: self.name_scale(),
+            scale: super::LabelKind::Avatar.font_scale(),
             opacity: avatar.name_visibility.opacity
                 * avatar.presence
                 * f32::from(u8::from(avatar.name_visibility.visible)),
@@ -1987,6 +2039,7 @@ mod tests {
     }
     fn choice<'a>(obstacles: &'a [(usize, Rect)], occupied: &'a [Rect]) -> Choice<'a> {
         Choice {
+            field: super::super::travel::field_rect(Tile::inset(0.0)),
             gutter: None,
             tile: Tile {
                 low: Vec2::splat(-0.3),
@@ -2647,11 +2700,8 @@ mod tests {
         for (index, name) in names.iter().enumerate() {
             let (angle, _) = preferred[index].expect("each member sits in the ring");
             let turn = labels::difference(name.angle, angle).abs();
-            // Discrete candidate angles and the label's own shape leave some turn; the
-            // author, with a free side, sits at its nearest point.
-            let tolerance = if index == 0 { 0.2 } else { 0.8 };
             assert!(
-                turn < tolerance,
+                turn < 0.8,
                 "name {index} turned {turn} from its nearest point"
             );
         }

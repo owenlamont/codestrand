@@ -25,14 +25,14 @@ pub(crate) struct MovingBeams {
     first: Option<serde_json::Value>,
     missing_tile_beams: u64,
     travelling_disc_foreign_tile: u64,
-    travelling_disc_max_depth_px: f32,
+    travelling_disc_max_depth_world: f32,
     travelling_avatar_frames: u64,
     travelling_avatar_overlaps: u64,
     avatar_overlap_max_px: f32,
     worst_overlap_tick: u64,
     travelling_centre_interior: u64,
     travelling_off_network: u64,
-    maximum_travel_speed: f32,
+    maximum_travel_speed_world_per_second: f32,
     first_disc: Option<serde_json::Value>,
     first_overlap: Option<serde_json::Value>,
     observed_beams: u64,
@@ -74,10 +74,11 @@ impl MovingBeams {
             "travel outside gutter centrelines"
         );
 
+        let speed = speed * framing::WORLD_UNITS_PER_REFERENCE_PIXEL;
         assert!(
-            self.maximum_travel_speed <= speed + 0.1,
+            self.maximum_travel_speed_world_per_second <= speed + 0.01,
             "maximum travel speed {} exceeds {speed}",
-            self.maximum_travel_speed
+            self.maximum_travel_speed_world_per_second
         );
     }
     fn observe_content(
@@ -96,7 +97,6 @@ impl MovingBeams {
                 * state.scale()
                 * state.avatar_scale
                 * state.avatar_size
-                * state.detail
                 * avatar.projection_scale
                 * avatar.lifecycle_scale
                 * avatar.presence;
@@ -318,10 +318,12 @@ impl MovingBeams {
                 && (moving || was_moving)
                 && state.tick > before
             {
-                self.maximum_travel_speed = self.maximum_travel_speed.max(
-                    point.distance(position)
-                        / crate::model::ticks_duration(state.tick - before),
-                );
+                self.maximum_travel_speed_world_per_second =
+                    self.maximum_travel_speed_world_per_second.max(
+                        point.distance(position)
+                            * framing::WORLD_UNITS_PER_REFERENCE_PIXEL
+                            / crate::model::ticks_duration(state.tick - before),
+                    );
             }
             for (other, position) in projected.iter().enumerate().skip(author + 1) {
                 if avatar.presence > 0.0
@@ -361,8 +363,8 @@ impl MovingBeams {
                     continue;
                 }
                 self.travelling_disc_foreign_tile += 1;
-                self.travelling_disc_max_depth_px = self
-                    .travelling_disc_max_depth_px
+                self.travelling_disc_max_depth_world = self
+                    .travelling_disc_max_depth_world
                     .max(radius - point.distance(nearest));
                 self.first_disc.get_or_insert_with(|| serde_json::json!({"frame":state.tick,"author":author,"commit":avatar.commit,"point":point.to_array(),"radius":radius,"foreign":index,"tile":[tile.low.to_array(),tile.high.to_array()],"travel_sample":simulation.travel.sample(author,state.tick).map(|(p,a)| (p.to_array(),a))}));
             }
@@ -385,7 +387,7 @@ impl MovingBeams {
             })
             .flat_map(|p| p.targets.iter().map(move |&(target, ..)| (p, target)))
         {
-            let Some(to) = state.point(target) else {
+            let Some((from, to)) = simulation.visible_ray(pulse, target) else {
                 continue;
             };
             self.observed_beams += 1;
@@ -400,12 +402,7 @@ impl MovingBeams {
             };
             self.missing_tile_beams +=
                 u64::from(state.layout.repositories[own].tile.is_none());
-            // A group's beams leave its camera-facing ring, so their ground track starts
-            // at the ring's centre.
-            let position = state
-                .beam_ring(pulse.author)
-                .map_or(state.avatars[pulse.author].position, |(centre, _)| centre);
-            let from = bevy::math::Vec2::new(position.x, position.z);
+            let from = bevy::math::Vec2::new(from.x, from.z);
             let to = bevy::math::Vec2::new(to.x, to.z);
             let footprint = match target {
                 Target::File(id) => {

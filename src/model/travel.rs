@@ -18,6 +18,15 @@ use planning::trips;
 const HALF: Vec2 = Vec2::new(640.0, 360.0);
 const NETWORK_EPSILON: f32 = 0.01;
 const JUNCTION_EPSILON: f32 = 0.001;
+const MAX_ROUTE_NODES: usize = 10_000;
+
+pub(super) fn field_rect(tile: crate::layout::packing::Tile) -> Rect {
+    Rect::from_corners(tile.low * HALF, tile.high * HALF)
+}
+
+fn ground_position(point: Vec2) -> [f32; 2] {
+    super::framing::field_to_world(point / HALF).to_array()
+}
 
 pub(super) fn interior(tile: crate::layout::packing::Tile, radius: f32) -> Rect {
     let rect = Rect::from_corners(tile.low * HALF, tile.high * HALF);
@@ -64,6 +73,7 @@ pub(super) struct Service {
 struct Capture {
     begin: u64,
     frozen: usize,
+    field: Rect,
     services: Vec<Service>,
     poses: Vec<Vec<Pose>>,
     tiles: Vec<Vec<Option<crate::layout::packing::Tile>>>,
@@ -288,7 +298,12 @@ impl Plan {
         }
     }
     pub fn report(&self) -> serde_json::Value {
-        serde_json::json!({"statistics":self.stats,"trips":self.trips.iter().map(|t| serde_json::json!({"author":t.author,"commit":t.commit,"bot":t.bot,"source_repository":t.source_repository,"destination_repository":t.destination_repository,"free":tick_time(t.free).lossy_secs_f32(),"slack":ticks_duration(t.arrival-t.free),"departure":tick_time(t.departure).lossy_secs_f32(),"service":tick_time(t.arrival).lossy_secs_f32(),"fade":t.fade,"failure":t.failure,"proof":t.proof,"source":t.source.to_array(),"target":t.destination.to_array(),"visible_distance":planning::progress(t),"travel_seconds":t.route.duration,"points":t.route.points()})).collect::<Vec<_>>()})
+        let mut stats =
+            serde_json::to_value(&self.stats).expect("serializable travel statistics");
+        stats["max_speed"] = serde_json::json!(
+            self.stats.max_speed * super::framing::WORLD_UNITS_PER_REFERENCE_PIXEL
+        );
+        serde_json::json!({"coordinate_space":"world_ground","statistics":stats,"trips":self.trips.iter().map(|t| serde_json::json!({"author":t.author,"commit":t.commit,"bot":t.bot,"source_repository":t.source_repository,"destination_repository":t.destination_repository,"free":tick_time(t.free).lossy_secs_f32(),"slack":ticks_duration(t.arrival-t.free),"departure":tick_time(t.departure).lossy_secs_f32(),"service":tick_time(t.arrival).lossy_secs_f32(),"fade":t.fade,"failure":t.failure,"proof":t.proof,"source":ground_position(t.source),"target":ground_position(t.destination),"visible_distance":planning::progress(t) * super::framing::WORLD_UNITS_PER_REFERENCE_PIXEL,"travel_seconds":t.route.duration,"points":t.route.points().into_iter().map(|point| ground_position(Vec2::from_array(point))).collect::<Vec<_>>()})).collect::<Vec<_>>()})
     }
     pub fn sample(&self, author: usize, tick: u64) -> Option<(Vec2, f32)> {
         let trip = self.trips.iter().find(|t| t.active(author, tick))?;
@@ -404,6 +419,7 @@ fn replay(simulation: &mut Simulation, frames: u32) -> Capture {
     let mut capture = Capture {
         begin: simulation.state.tick,
         frozen: simulation.travel.frozen,
+        field: field_rect(simulation.state.field),
         services: simulation
             .window
             .as_ref()
@@ -880,8 +896,8 @@ impl Router {
             values.dedup_by(|a, b| (*a - *b).abs() < JUNCTION_EPSILON);
         }
         let width = axes[0].len();
-        let nodes = width * axes[1].len();
-        if nodes > 10_000 {
+        let nodes = width.saturating_mul(axes[1].len());
+        if nodes > MAX_ROUTE_NODES {
             return Err(RouteFailure::Budget);
         }
         let index = |p: Vec2| {
@@ -1064,6 +1080,18 @@ mod tests {
             (captured, conflicts, sim.travel.round_state(None))
         });
         assert_eq!(held, advanced);
+    }
+
+    #[test]
+    fn routing_rejects_an_edge_grid_above_the_node_budget() {
+        let cells: Vec<_> = (0..101_u16)
+            .map(|i| {
+                let low = Vec2::splat(f32::from(i) * 10.0);
+                Rect::from_corners(low, low + Vec2::ONE)
+            })
+            .collect();
+        let result = Router::default().route(Vec2::ZERO, Vec2::ONE, &cells);
+        assert!(matches!(result, Err(RouteFailure::Budget)));
     }
 
     #[test]

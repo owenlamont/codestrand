@@ -16,6 +16,7 @@ use crate::{
 
 const TTL: u64 = 7 * 24 * 60 * 60;
 const MAX_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_PORTRAITS: usize = 512;
 const CACHE_BYTES: u64 = 128 * 1024;
 const FETCH_BUDGET: Duration = Duration::from_secs(30);
 /// Account lookups stop while this much of the fetch budget remains, so images for
@@ -662,6 +663,12 @@ impl<N: Network> Resolver<N> {
         let total = order.len();
         let mut portraits = HashMap::new();
         for (processed, key) in order.into_iter().enumerate() {
+            if portraits.len() == MAX_PORTRAITS {
+                eprintln!(
+                    "avatars: portrait limit reached; remaining contributors use default portraits"
+                );
+                break;
+            }
             if self.fetch {
                 eprintln!("avatars: fetching portrait {}/{total}", processed + 1);
             }

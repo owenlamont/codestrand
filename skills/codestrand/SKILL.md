@@ -86,6 +86,8 @@ codestrand export clip --repository /path/to/repository --video history.mp4 --fr
   `CODESTRAND_FFMPEG` or `--ffmpeg`; the default encoder is libx264, so an odd
   `--resolution` needs PNGs or `--ffmpeg-arg` options. Codestrand never downloads an
   encoder.
+- Export defaults to a static overview. `--follow-activity` eases toward the most
+  recent commit's repository and shows more file detail.
 - `--camera-path camera.toml` scripts the export camera; see
   [export](https://codestrand.pages.dev/export/#scripted-camera).
 
