@@ -533,9 +533,23 @@ impl LabelKind {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct RepositorySurface {
+    pub tile: Option<crate::layout::packing::Tile>,
+    pub scale: f32,
+    center: Vec2,
+}
+
+impl RepositorySurface {
+    pub fn point(self, point: Vec2) -> Vec2 {
+        self.center.lerp(point, self.scale)
+    }
+}
+
 #[derive(Clone)]
 #[cfg_attr(test, derive(Debug))]
 pub(super) struct Label {
+    pub repository: Option<usize>,
     pub position: Vec3,
     pub text: String,
     pub kind: LabelKind,
@@ -1307,8 +1321,9 @@ impl Simulation {
     ) -> (Vec3, f32, f32) {
         let dir = self.layout().dir(file.dir);
         let (grey, alpha, rise) = self.repository_effect(dir.repository);
+        let surface = self.repository_surface(dir.repository);
         let position = ground(file.position) + Vec3::Y * rise;
-        match file.state {
+        let (position, grey, alpha) = match file.state {
             crate::layout::Presence::Arriving => {
                 (self.arrival_position(id, file, position), grey, alpha)
             }
@@ -1318,7 +1333,30 @@ impl Simulation {
                 alpha * file.presence,
             ),
             crate::layout::Presence::Present => (position, grey, alpha),
+        };
+        let mut point = surface.point(Vec2::new(position.x, position.z));
+        if file.state == crate::layout::Presence::Arriving
+            && (surface.scale < 1.0
+                || matches!(
+                    self.repository_boundary,
+                    crate::repositories::Boundary::Glass
+                ))
+            && let Some(tile) = surface.tile
+        {
+            let [a, _, b, _] = tile.ground();
+            let scale = file.draw_scale(dir) * surface.scale;
+            let min = self.state.geometry.file_min * scale;
+            let max = self.state.geometry.file_max * scale;
+            let low = a.min(b) - Vec2::new(min.x, min.z);
+            let high = a.max(b) - Vec2::new(max.x, max.z);
+            let center = low.midpoint(high);
+            point = point.clamp(low.min(center), high.max(center));
         }
+        (
+            ground(point).with_y(position.y * surface.scale),
+            grey,
+            alpha,
+        )
     }
 
     fn arrival_position(&self, id: u64, file: &crate::layout::File, to: Vec3) -> Vec3 {
@@ -1425,11 +1463,24 @@ impl Simulation {
         &self,
         repository: usize,
     ) -> Option<crate::layout::packing::Tile> {
+        self.repository_surface(repository).tile
+    }
+
+    pub(super) fn repository_surface(&self, repository: usize) -> RepositorySurface {
+        let region = &self.layout().repositories[repository];
         let (_, content) = self.clock.rows(self.state.tick);
-        self.packing.visible_tile(
-            repository,
-            usize::try_from(content).unwrap_or(usize::MAX),
-            &self.layout().repositories[repository],
+        let tick = usize::try_from(content).unwrap_or(usize::MAX);
+        self.packing.visible_tile(repository, tick, region).map_or(
+            RepositorySurface {
+                tile: None,
+                scale: 1.0,
+                center: Vec2::ZERO,
+            },
+            |(tile, scale)| RepositorySurface {
+                tile: Some(tile),
+                scale,
+                center: framing::field_to_world(tile.low.midpoint(tile.high)),
+            },
         )
     }
 
@@ -1795,8 +1846,16 @@ impl Simulation {
             && !self.travel.travelling(pulse.author, self.state.tick)
     }
 
+    fn surface_target(&self, repository: usize, target: Target) -> Option<Vec3> {
+        let point = self.state.point(target)?;
+        Some(ground(
+            self.repository_surface(repository)
+                .point(Vec2::new(point.x, point.z)),
+        ))
+    }
+
     fn visible_ray(&self, pulse: &Pulse, target: Target) -> Option<(Vec3, Vec3)> {
-        let to = self.state.point(target)?;
+        let to = self.surface_target(pulse.repository, target)?;
         let from = self.state.beam_start(pulse.author, to);
         let low = Vec2::new(from.x, from.z);
         let high = Vec2::new(to.x, to.z);
@@ -1987,7 +2046,11 @@ impl Simulation {
             .map(|(index, dir)| {
                 let (text, scale) = self.tile_label(index, format!("{}/", dir.name()));
                 Label {
-                    position: ground(centroids[index] / count(subtree[index].max(1))),
+                    repository: Some(dir.repository),
+                    position: ground(
+                        self.repository_surface(dir.repository)
+                            .point(centroids[index] / count(subtree[index].max(1))),
+                    ),
                     text,
                     kind: LabelKind::Landmark,
                     scale,
@@ -2004,27 +2067,7 @@ impl Simulation {
                 if permanent.contains(&target) {
                     continue;
                 }
-                let text = match target {
-                    Target::File(id) => layout
-                        .file(id)
-                        .map(|file| (file.dir, file.name().to_owned())),
-                    Target::Dir(index) => {
-                        Some((index, format!("{}/", layout.directory_label(index))))
-                    }
-                };
-                if let (Some((dir, text)), Some(position)) =
-                    (text, self.state.point(target))
-                {
-                    let (text, scale) = self.tile_label(dir, text);
-                    labels.push(Label {
-                        position: position + Vec3::new(-0.2, 0.0, 0.45),
-                        text,
-                        kind: LabelKind::Activity,
-                        scale,
-                        opacity: 1.0,
-                        priority: 0.0,
-                    });
-                }
+                labels.extend(self.activity_label(target));
             }
         }
         for avatar in &self.state.avatars {
@@ -2033,6 +2076,32 @@ impl Simulation {
             }
         }
         labels
+    }
+
+    fn activity_label(&self, target: Target) -> Option<Label> {
+        let layout = self.layout();
+        let (index, text) = match target {
+            Target::File(id) => {
+                let file = layout.file(id)?;
+                (file.dir, file.name().to_owned())
+            }
+            Target::Dir(index) => {
+                (index, format!("{}/", layout.directory_label(index)))
+            }
+        };
+        let (text, scale) = self.tile_label(index, text);
+        let dir = layout.dir(index);
+        let surface = self.repository_surface(dir.repository);
+        let position = self.surface_target(dir.repository, target)?;
+        Some(Label {
+            repository: Some(dir.repository),
+            position: position + Vec3::new(-0.2, 0.0, 0.45) * dir.scale * surface.scale,
+            text,
+            kind: LabelKind::Activity,
+            scale,
+            opacity: self.repository_effect(dir.repository).1,
+            priority: 0.0,
+        })
     }
 }
 
@@ -2666,6 +2735,97 @@ fn prior_activity(events: &[Event], count: usize) -> Vec<bool> {
 mod tests {
     thread_local! {
         pub(super) static LAYOUT_COUNTS: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+    }
+
+    #[test]
+    fn tile_content_stays_inside_visible_births_and_exits() {
+        for day_rate in [0.02, 0.05, 0.18] {
+            let day = 86_400;
+            let histories = [0, 4 * day, 8 * day]
+                .into_iter()
+                .enumerate()
+                .map(|(repository, start)| {
+                    let mut events = crate::timeline::synthetic();
+                    for (index, event) in events.iter_mut().enumerate() {
+                        event.seconds = start + i64::try_from(index).unwrap();
+                    }
+                    crate::repositories::namespace(&mut events, repository);
+                    events
+                })
+                .collect();
+            let mut simulation = Simulation::with_repositories(
+                crate::repositories::merge(histories),
+                &Options {
+                    seconds_per_day: day_rate,
+                    max_idle_seconds: 0.1,
+                    repository_archived: vec![false, true, false],
+                    repository_ends: vec![None; 3],
+                    ..Default::default()
+                },
+                &Theme::neon(),
+                &Mappings::default(),
+                &["One".into(), "Two".into(), "Three".into()],
+            );
+            simulation.repository_boundary = crate::repositories::Boundary::Glass;
+            let mut saw_second = false;
+            let mut saw_exit = false;
+            for frame in 0..=simulation.frames(60).unwrap() {
+                simulation.advance_to(frame, 60);
+                assert_tile_content(&simulation, frame);
+                let visible = simulation.visible_repository_tile(1).is_some();
+                saw_exit |= saw_second && !visible;
+                saw_second |= visible;
+            }
+            assert!(saw_second && saw_exit);
+        }
+    }
+
+    fn assert_tile_content(simulation: &Simulation, frame: u32) {
+        let inside = |repository, point: Vec2| {
+            let Some(tile) = simulation.visible_repository_tile(repository) else {
+                return;
+            };
+            let point = framing::world_to_field(point);
+            let tolerance = Vec2::splat(1e-5);
+            assert!(
+                point.cmpge(tile.low - tolerance).all()
+                    && point.cmple(tile.high + tolerance).all(),
+                "frame {frame}, repository {repository}: {point} outside {tile:?}",
+            );
+        };
+        for (_, dir) in simulation.layout().dirs() {
+            let surface = simulation.repository_surface(dir.repository);
+            inside(dir.repository, surface.point(dir.position));
+            if let Some(parent) = dir.parent {
+                inside(
+                    dir.repository,
+                    surface.point(simulation.layout().dir(parent).position),
+                );
+            }
+        }
+        for (id, file) in simulation.layout().files() {
+            let repository = simulation.layout().dir(file.dir).repository;
+            let (position, _, alpha) = simulation.file_effect(id, file);
+            if alpha > 0.001 {
+                inside(repository, Vec2::new(position.x, position.z));
+            }
+            let anchor = simulation
+                .surface_target(repository, Target::File(id))
+                .unwrap();
+            inside(repository, Vec2::new(anchor.x, anchor.z));
+        }
+        for pulse in &simulation.state.pulses {
+            for &(target, ..) in &pulse.targets {
+                if let Some((_, anchor)) = simulation.visible_ray(pulse, target) {
+                    inside(pulse.repository, Vec2::new(anchor.x, anchor.z));
+                }
+            }
+        }
+        for label in simulation.labels() {
+            if let Some(repository) = label.repository {
+                inside(repository, Vec2::new(label.position.x, label.position.z));
+            }
+        }
     }
 
     #[test]

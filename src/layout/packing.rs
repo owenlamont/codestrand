@@ -1667,20 +1667,29 @@ impl Packing {
         repository: usize,
         tick: usize,
         region: &RepositoryRegion,
-    ) -> Option<Tile> {
+    ) -> Option<(Tile, f32)> {
         let tile = region.tile.filter(|_| region.live)?;
-        let &(birth, opening_radius) = self.births.get(repository)?;
+        let growth = self.birth_scale(repository, tick, tile);
+        Some((
+            scaled_tile(tile, tile.low.midpoint(tile.high), growth),
+            growth,
+        ))
+    }
+
+    fn birth_scale(&self, repository: usize, tick: usize, tile: Tile) -> f32 {
+        let Some(&(birth, opening_radius)) = self.births.get(repository) else {
+            return 1.0;
+        };
         if birth == 0 || tick < birth {
-            return Some(tile);
+            return 1.0;
         }
         let radius = opening_radius.max(tile.pixels().max_element() * 0.5);
         let duration = radius / (BIRTH_EDGE_PIXELS_PER_TICK * (1.0 - EXIT_EASE_RAMP));
         let elapsed = crate::model::count(tick - birth + 1);
         if elapsed >= duration {
-            return Some(tile);
+            return 1.0;
         }
-        let scale = eased_presence(1.0 - elapsed / duration);
-        Some(scaled_tile(tile, tile.low.midpoint(tile.high), scale))
+        eased_presence(1.0 - elapsed / duration)
     }
 
     pub(crate) fn in_opening(&self, tick: u64) -> bool {
@@ -2276,11 +2285,13 @@ mod tests {
                 .iter()
                 .enumerate()
                 .map(|(repository, region)| {
-                    packing.visible_tile(
-                        repository,
-                        usize::try_from(tick).unwrap(),
-                        region,
-                    )
+                    packing
+                        .visible_tile(
+                            repository,
+                            usize::try_from(tick).unwrap(),
+                            region,
+                        )
+                        .map(|(tile, _)| tile)
                 })
                 .collect::<Vec<_>>()
         };

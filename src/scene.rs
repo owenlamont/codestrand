@@ -1538,9 +1538,15 @@ fn sync_files(
         set_visible(world, entity, true);
         let (position, grey, alpha) = simulation.file_effect(id, file);
         if let Some(mut transform) = world.get_mut::<Transform>(entity) {
-            transform.set_if_neq(Transform::from_translation(position).with_scale(
-                Vec3::splat(file.draw_scale(layout.dir(file.dir)) * detail),
-            ));
+            transform.set_if_neq(
+                Transform::from_translation(position).with_scale(Vec3::splat(
+                    file.draw_scale(layout.dir(file.dir))
+                        * detail
+                        * simulation
+                            .repository_surface(layout.dir(file.dir).repository)
+                            .scale,
+                )),
+            );
         }
         let visual = world
             .get::<FileVisual>(entity)
@@ -1780,14 +1786,19 @@ fn sync_directory_edges(
                 return None;
             }
             let parent = layout.dir(dir.parent?);
+            let surface = simulation.repository_surface(dir.repository);
             let width = simulation.theme().directory_edge_width(dir.depth) * dir.scale;
             let height =
                 palette.directory_edge_height(pools.hues.slots[index], dir.depth);
             Some((
-                ground(parent.position) + Vec3::Y * (height - 0.05),
-                ground(dir.position) + Vec3::Y * (height - 0.05),
+                ground(surface.point(parent.position))
+                    + Vec3::Y * (height - 0.05) * surface.scale,
+                ground(surface.point(dir.position))
+                    + Vec3::Y * (height - 0.05) * surface.scale,
                 (pools.hues.slots[index], dir.depth),
-                width * dir.parent.map_or(1.0, |parent| pools.lod.detail[parent]),
+                width
+                    * dir.parent.map_or(1.0, |parent| pools.lod.detail[parent])
+                    * surface.scale,
                 dir.repository,
             ))
         })
@@ -1815,7 +1826,8 @@ fn sync_directory_edges(
                     .looking_to(delta.normalize_or(Vec3::Z), Vec3::Y)
                     .with_scale(Vec3::new(
                         *width,
-                        simulation.theme().directory_edge_height,
+                        simulation.theme().directory_edge_height
+                            * simulation.repository_surface(*repository).scale,
                         delta.length(),
                     )),
             );
@@ -1854,12 +1866,15 @@ fn sync_structure(
         );
         let (grey, alpha, rise) = simulation.repository_effect(dir.repository);
         if let Some(mut transform) = world.get_mut::<Transform>(*entity) {
-            let mut translation = ground(dir.position) - Vec3::Y * 0.05;
+            let surface = simulation.repository_surface(dir.repository);
+            let mut translation =
+                ground(surface.point(dir.position)) - Vec3::Y * 0.05 * surface.scale;
             translation.y += rise;
             transform.set_if_neq(Transform::from_translation(translation).with_scale(
                 simulation.theme().directory_node_scale
                     * pools.lod.detail[index]
-                    * dir.scale,
+                    * dir.scale
+                    * surface.scale,
             ));
         }
         set_visible(world, *entity, pools.lod.detail[index] > 0.0);
@@ -1881,13 +1896,15 @@ fn sync_structure(
         set_material(world, entity, palette.directory(slot, dir.depth));
         let (grey, alpha, rise) = simulation.repository_effect(dir.repository);
         if let Some(mut transform) = world.get_mut::<Transform>(entity) {
+            let surface = simulation.repository_surface(dir.repository);
             let mut folder = folder_transform(
                 simulation.theme(),
-                dir.position,
+                surface.point(dir.position),
                 pools.lod.size[index],
                 pools.lod.glyph[index],
             );
-            folder.translation.y += rise;
+            folder.scale *= surface.scale;
+            folder.translation.y = folder.translation.y * surface.scale + rise;
             transform.set_if_neq(folder);
         }
         set_visible(world, entity, true);
@@ -2500,6 +2517,54 @@ fn faded_label_border(theme: &Theme, opacity: f32) -> BorderColor {
     border
 }
 
+fn label_fits_pane(rect: Rect, pane: [Vec2; 4]) -> bool {
+    let center = pane[0].midpoint(pane[2]);
+    let corners = [
+        rect.min,
+        Vec2::new(rect.max.x, rect.min.y),
+        rect.max,
+        Vec2::new(rect.min.x, rect.max.y),
+    ];
+    (0..4).all(|index| {
+        let a = pane[index];
+        let edge = pane[(index + 1) % 4] - a;
+        let orientation = edge.perp_dot(center - a).signum();
+        corners
+            .iter()
+            .all(|&corner| edge.perp_dot(corner - a) * orientation >= 0.0)
+    })
+}
+
+fn projected_panes(
+    simulation: &Simulation,
+    camera: &Camera,
+    transform: &GlobalTransform,
+) -> Vec<Option<[Vec2; 4]>> {
+    if !matches!(
+        simulation.repository_boundary,
+        crate::repositories::Boundary::Glass
+    ) {
+        return Vec::new();
+    }
+    simulation
+        .layout()
+        .repositories
+        .iter()
+        .enumerate()
+        .map(|(index, _)| {
+            let tile = simulation.visible_repository_tile(index)?;
+            let [a, b, c, d] = tile.ground().map(|point| {
+                project_point(
+                    camera,
+                    transform,
+                    ground(point).with_y(model::framing::GLASS_BOTTOM),
+                )
+            });
+            Some([a?, b?, c?, d?])
+        })
+        .collect()
+}
+
 fn labels(world: &mut World) {
     let mut camera_query =
         world.query_filtered::<(&Camera, &GlobalTransform), With<SceneCamera>>();
@@ -2511,6 +2576,7 @@ fn labels(world: &mut World) {
     let playback = world.resource::<Playback>();
     let geometry = playback.0.theme();
     let lod = &world.resource::<Pools>().lod;
+    let panes = projected_panes(&playback.0, &camera, &transform);
     let mut avatars = playback.0.avatars().iter().filter(|a| a.presence > 0.0);
     let wanted = playback
         .0
@@ -2547,6 +2613,17 @@ fn labels(world: &mut World) {
                     label.position,
                 )
             };
+            if let Some(pane) = label.repository.and_then(|index| panes.get(index)) {
+                let rect = model::label_rect(
+                    point,
+                    &label.text,
+                    label.scale,
+                    geometry.label_height,
+                );
+                if !label_fits_pane(rect, (*pane)?) {
+                    return None;
+                }
+            }
             let distance = transform.translation().distance_squared(anchor);
             Some((label, point, distance))
         });
@@ -3026,6 +3103,7 @@ mod tests {
                 &mut world,
                 vec![(
                     model::Label {
+                        repository: None,
                         position: Vec3::ZERO,
                         text: "Contributor".to_owned(),
                         kind: model::LabelKind::Avatar,
@@ -4289,6 +4367,7 @@ mod tests {
     ) -> (model::Label, Vec2, f32) {
         (
             model::Label {
+                repository: None,
                 text: text.to_owned(),
                 kind,
                 position: Vec3::ZERO,

@@ -1790,6 +1790,7 @@ impl State {
             let reference = (distance - MIN_AVATAR_HEIGHT)
                 / (framing::DISTANCE - MIN_AVATAR_HEIGHT);
             return super::Label {
+                repository: None,
                 position: world(point.unwrap_or(name.point) * reference) + focus,
                 text: name.text.clone(),
                 kind: super::LabelKind::Avatar,
@@ -1799,6 +1800,7 @@ impl State {
             };
         }
         super::Label {
+            repository: None,
             position: avatar.position,
             text: avatar
                 .slot

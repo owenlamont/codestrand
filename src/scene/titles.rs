@@ -36,6 +36,8 @@ const OPACITY: f32 = 0.18;
 const PADDING: f32 = 0.04;
 const GLYPH_PADDING: f32 = 0.08;
 const MIN_INK_PIXELS: f32 = 4.0;
+const MIN_CLEARANCE_PIXELS: f32 = 1.0;
+const MIN_INK_CLEARANCE: f32 = 0.06;
 const PLANE: f32 = crate::model::framing::GLASS_BOTTOM;
 
 #[derive(Component)]
@@ -54,16 +56,58 @@ pub(super) fn placement(tile: Tile, ink: Vec2) -> Transform {
         .with_scale(Vec3::new(scale, 1.0, scale))
 }
 
-fn legible(view: &super::names::View, center: Vec3, ink_height: f32) -> bool {
-    let half = Vec3::Z * (ink_height * 0.5);
-    let [a, b] = [center - half, center + half]
-        .map(|point| view.clip_from_world * point.extend(1.0));
-    a.w > 0.0
-        && b.w > 0.0
-        && ((a.truncate() / a.w - b.truncate() / b.w).truncate()
-            * (view.viewport * 0.5))
-            .length_squared()
-            >= MIN_INK_PIXELS * MIN_INK_PIXELS
+fn projected_quad(view: &super::names::View, corners: [Vec3; 4]) -> Option<[Vec2; 4]> {
+    let [a, b, c, d] = corners.map(|point| view.project(point));
+    Some([a?, b?, c?, d?])
+}
+
+fn edge_distance(a: Vec2, b: Vec2, point: Vec2) -> f32 {
+    (b - a).normalize_or_zero().perp_dot(point - a).abs()
+}
+
+fn screen_fit(
+    view: &super::names::View,
+    tile: Tile,
+    placed: Transform,
+    ink: Vec2,
+) -> Option<(f32, f32)> {
+    let pane =
+        projected_quad(view, tile.ground().map(|p| super::ground(p).with_y(PLANE)))?;
+    let half = ink * 0.5;
+    let corners = [
+        Vec2::new(-half.x, half.y),
+        half,
+        Vec2::new(half.x, -half.y),
+        -half,
+    ];
+    let ink = projected_quad(
+        view,
+        corners.map(|p| placed.transform_point(super::ground(p))),
+    )?;
+    let height = [
+        edge_distance(ink[0], ink[1], ink[2]),
+        edge_distance(ink[0], ink[1], ink[3]),
+        edge_distance(ink[2], ink[3], ink[0]),
+        edge_distance(ink[2], ink[3], ink[1]),
+    ]
+    .into_iter()
+    .fold(f32::INFINITY, f32::min);
+    let clearance = (0..4)
+        .flat_map(|i| ink.map(|point| edge_distance(pane[i], pane[(i + 1) % 4], point)))
+        .fold(f32::INFINITY, f32::min);
+    Some((height, clearance))
+}
+
+fn legible(
+    view: &super::names::View,
+    tile: Tile,
+    placed: Transform,
+    ink: Vec2,
+) -> bool {
+    screen_fit(view, tile, placed, ink).is_some_and(|(height, clearance)| {
+        height >= MIN_INK_PIXELS
+            && clearance >= (height * MIN_INK_CLEARANCE).max(MIN_CLEARANCE_PIXELS)
+    })
 }
 
 pub(super) fn setup(world: &mut World) {
@@ -142,7 +186,9 @@ pub(super) fn sync(world: &mut World, simulation: &Simulation) {
         .map(|(camera, transform, projection)| super::names::View {
             clip_from_world: projection.get_clip_from_view()
                 * transform.to_matrix().inverse(),
-            viewport: super::reference_viewport(camera),
+            viewport: camera
+                .physical_viewport_size()
+                .map_or(crate::model::framing::VIEWPORT, UVec2::as_vec2),
         });
     let mut query = world.query::<(
         &Title,
@@ -152,20 +198,12 @@ pub(super) fn sync(world: &mut World, simulation: &Simulation) {
     )>();
     world.resource_scope(|world, mut materials: Mut<Assets<StandardMaterial>>| {
         for (title, material, mut transform, mut visibility) in query.iter_mut(world) {
-            let region = &simulation.layout().repositories[title.repository];
             let Some(tile) = simulation.visible_repository_tile(title.repository)
             else {
                 visibility.set_if_neq(Visibility::Hidden);
                 continue;
             };
             let placed = placement(tile, title.ink);
-            let ink_height = title.ink.y
-                * placement(
-                    region.tile.expect("visible tile has a reservation"),
-                    title.ink,
-                )
-                .scale
-                .z;
             let (_, opacity, _) = simulation.repository_effect(title.repository);
             let color = simulation.theme().label.with_alpha(OPACITY * opacity);
             if let Some(current) = materials.get(&material.0)
@@ -180,7 +218,7 @@ pub(super) fn sync(world: &mut World, simulation: &Simulation) {
             visibility.set_if_neq(
                 if view
                     .as_ref()
-                    .is_some_and(|view| legible(view, placed.translation, ink_height))
+                    .is_some_and(|view| legible(view, tile, placed, title.ink))
                 {
                     Visibility::Visible
                 } else {
@@ -560,12 +598,12 @@ mod tests {
         let mut query = world.query::<(&Title, &Transform, &Visibility)>();
         let before: Vec<_> = query
             .iter(&world)
-            .map(|(_, transform, visible)| (*transform, *visible))
+            .map(|(_, transform, _)| *transform)
             .collect();
         assert!(
-            before
-                .iter()
-                .any(|(_, visibility)| *visibility == Visibility::Visible)
+            query
+                .iter(&world)
+                .any(|(_, _, visibility)| *visibility == Visibility::Visible)
         );
 
         *world.get_mut::<Transform>(camera).unwrap() =
@@ -574,9 +612,97 @@ mod tests {
         assert!(
             query
                 .iter(&world)
-                .map(|(_, transform, visible)| (*transform, *visible))
+                .map(|(_, transform, _)| *transform)
                 .eq(before)
         );
+    }
+
+    #[test]
+    fn title_visibility_requires_displayed_ink_and_clearance() {
+        let mut world = World::new();
+        world.init_resource::<Assets<StandardMaterial>>();
+        let simulation = Simulation::two_synthetic_repositories();
+        let tile = simulation.visible_repository_tile(0).unwrap();
+        let [a, _, b, _] = tile.ground();
+        let size = (b - a).abs();
+        let ink = Vec2::new(size.x / size.y, 1.0);
+        let material = world
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial::default());
+        let entity = world
+            .spawn((
+                Title { repository: 0, ink },
+                MeshMaterial3d(material),
+                Transform::default(),
+                Visibility::Hidden,
+            ))
+            .id();
+        let camera = world
+            .spawn((
+                SceneCamera,
+                Camera::default(),
+                Projection::Perspective(bevy::camera::PerspectiveProjection::default()),
+                Transform::from_translation(placement(tile, ink).translation + Vec3::Y)
+                    .looking_to(Vec3::NEG_Y, Vec3::NEG_Z),
+            ))
+            .id();
+
+        let drawn_height = ink.y * placement(tile, ink).scale.z;
+        let distance =
+            drawn_height * 360.0 / (4.1 * (std::f32::consts::FRAC_PI_8).tan());
+        let camera_height = PLANE + distance;
+        world.get_mut::<Transform>(camera).unwrap().translation.y = camera_height;
+        sync(&mut world, &simulation);
+        assert_eq!(
+            *world.get::<Visibility>(entity).unwrap(),
+            Visibility::Hidden
+        );
+        let placement = *world.get::<Transform>(entity).unwrap();
+
+        world.get_mut::<Transform>(camera).unwrap().translation.y =
+            PLANE + distance * 0.25;
+        sync(&mut world, &simulation);
+        assert_eq!(
+            *world.get::<Visibility>(entity).unwrap(),
+            Visibility::Visible
+        );
+        assert_eq!(*world.get::<Transform>(entity).unwrap(), placement);
+    }
+
+    #[test]
+    fn a_birth_hides_title_until_the_displayed_ink_fits() {
+        let mut simulation = Simulation::two_synthetic_repositories();
+        let birth = (0..simulation.frames(60).unwrap())
+            .find_map(|frame| {
+                simulation.advance_to(frame, 60);
+                let surface = simulation.repository_surface(1);
+                surface.tile.filter(|_| surface.scale < 0.5)
+            })
+            .expect("the second repository grows into view");
+        let ink = Vec2::new(8.0, 1.0);
+        let born = placement(birth, ink);
+        let [low, _, high, _] = birth.ground();
+        let pane_height = (high.y - low.y).abs();
+        let distance = pane_height * 360.0 / (3.0 * std::f32::consts::FRAC_PI_8.tan());
+        let camera = Transform::from_translation(born.translation + Vec3::Y * distance)
+            .looking_to(Vec3::NEG_Y, Vec3::NEG_Z);
+        let projection =
+            Projection::Perspective(bevy::camera::PerspectiveProjection::default());
+        let view = super::super::names::View {
+            clip_from_world: projection.get_clip_from_view()
+                * camera.to_matrix().inverse(),
+            viewport: crate::model::framing::VIEWPORT,
+        };
+        assert!(!legible(&view, birth, born, ink));
+        let zoom =
+            Transform::from_translation(born.translation + Vec3::Y * distance * 0.025)
+                .looking_to(Vec3::NEG_Y, Vec3::NEG_Z);
+        let zoomed = super::super::names::View {
+            clip_from_world: projection.get_clip_from_view()
+                * zoom.to_matrix().inverse(),
+            ..view
+        };
+        assert!(legible(&zoomed, birth, born, ink));
     }
 
     #[test]

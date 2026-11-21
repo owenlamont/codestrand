@@ -97,6 +97,12 @@ impl BroadPhase {
 }
 
 impl View {
+    pub(super) fn project(&self, point: Vec3) -> Option<Vec2> {
+        let clip = self.clip_from_world * point.extend(1.0);
+        (clip.w > 0.0 && clip.is_finite())
+            .then(|| clip.truncate().truncate() / clip.w * (self.viewport * 0.5))
+    }
+
     fn footprint(&self, faces: impl IntoIterator<Item = [Vec3; 4]>) -> f32 {
         faces
             .into_iter()
@@ -206,7 +212,8 @@ impl Names {
         let glyph = theme.glyph_transform();
         for (id, file) in layout.files() {
             let dir = layout.dir(file.dir);
-            let scale = file.draw_scale(dir);
+            let surface = simulation.repository_surface(dir.repository);
+            let scale = file.draw_scale(dir) * surface.scale;
             let (point, _, opacity) = simulation.file_effect(id, file);
             let center = point + glyph.translation * scale;
             let half = glyph.scale * scale * 0.5;
@@ -221,7 +228,8 @@ impl Names {
             self.include(
                 (
                     Target::File(id),
-                    point + Vec3::new(-0.2, 0.0, 0.45) * dir.scale,
+                    dir.repository,
+                    point + Vec3::new(-0.2, 0.0, 0.45) * dir.scale * surface.scale,
                     opacity,
                 ),
                 view.footprint([bounds]),
@@ -231,8 +239,10 @@ impl Names {
         }
         for (index, dir) in layout.dirs().filter(|(_, dir)| dir.depth > 0) {
             let (_, opacity, rise) = simulation.repository_effect(dir.repository);
-            let center = super::ground(dir.position) + Vec3::Y * (rise - 0.05);
-            let half = theme.directory_node_scale * dir.scale * 0.5;
+            let surface = simulation.repository_surface(dir.repository);
+            let center = super::ground(surface.point(dir.position))
+                + Vec3::Y * (rise - 0.05 * surface.scale);
+            let half = theme.directory_node_scale * dir.scale * surface.scale * 0.5;
             if opacity <= 0.001 || broad.rejects(center, half.length()) {
                 continue;
             }
@@ -240,6 +250,7 @@ impl Names {
             self.include(
                 (
                     Target::Dir(index),
+                    dir.repository,
                     center + Vec3::new(-half.x, 0.1, half.z),
                     opacity,
                 ),
@@ -253,12 +264,12 @@ impl Names {
 
     fn include(
         &mut self,
-        entry: (Target, Vec3, f32),
+        entry: (Target, usize, Vec3, f32),
         pixels: f32,
         selected: &mut BTreeSet<Target>,
         text: impl FnOnce() -> String,
     ) {
-        let (target, position, opacity) = entry;
+        let (target, repository, position, opacity) = entry;
         let threshold = if self.targets.contains(&target) {
             EXIT_PIXELS
         } else {
@@ -267,6 +278,7 @@ impl Names {
         if opacity > 0.001 && pixels >= threshold {
             selected.insert(target);
             self.labels.push(Label {
+                repository: Some(repository),
                 position,
                 text: text(),
                 kind: LabelKind::Detail,
@@ -459,7 +471,7 @@ mod tests {
             let mut selected = BTreeSet::new();
             names.labels.clear();
             names.include(
-                (Target::File(1), anchor, 1.0),
+                (Target::File(1), 0, anchor, 1.0),
                 pixels,
                 &mut selected,
                 || "inactive.rs".into(),
