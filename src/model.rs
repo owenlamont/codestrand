@@ -369,6 +369,7 @@ fn attach_samples<'a>(
         .collect()
 }
 
+#[cfg_attr(test, derive(Debug))]
 pub(super) struct DiffLine {
     pub fragment: usize,
     pub detail: f32,

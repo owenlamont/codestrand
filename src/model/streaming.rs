@@ -6,6 +6,7 @@ use std::{
 };
 
 use super::{Options, Simulation, Time};
+use crate::contributors::Key;
 use crate::timeline::Event;
 
 // Consumer, worker, and the completed handoff while the consumer catches up.
@@ -92,7 +93,7 @@ pub(super) struct Stream {
     reset: mpsc::SyncSender<u64>,
     generation: u64,
     resetting: bool,
-    latest_start: u64,
+    latest_ready: Option<Ready>,
     replay: Option<Arc<Mutex<Replay>>>,
 }
 
@@ -133,7 +134,13 @@ impl Replay {
     }
 
     fn retain(&mut self, packet: &Packet) {
-        let used = self.used.saturating_add(packet.replay_bytes);
+        if self.exceeded {
+            return;
+        }
+        let used = self
+            .used
+            .saturating_add(packet.replay_bytes)
+            .saturating_add(packet.simulation.replay_identity_bytes());
         if self.check_limit(used) {
             self.windows.push(packet.simulation.clone());
             self.used = used;
@@ -246,7 +253,7 @@ impl Stream {
             reset,
             generation: 0,
             resetting: false,
-            latest_start: 0,
+            latest_ready: None,
             replay,
         };
         let mut first = stream
@@ -280,7 +287,7 @@ impl Stream {
             }?;
             if packet.generation == self.generation {
                 self.resetting = false;
-                self.latest_start = packet.simulation.initial.tick;
+                self.latest_ready = packet.simulation.ready_end;
                 if let Some(replay) = &self.replay {
                     replay
                         .lock()
@@ -294,6 +301,36 @@ impl Stream {
 }
 
 impl Simulation {
+    fn replay_identity_bytes(&self) -> u128 {
+        fn key_bytes(key: &Key) -> u128 {
+            match key {
+                Key::Email(bytes) | Key::Name(bytes) => bytes.capacity() as u128,
+                Key::GitHubLogin(login) => login.capacity() as u128,
+                Key::Config(_) | Key::GitHubId(_) => 0,
+            }
+        }
+
+        // A window packet shares its initial checkpoint with its current state.
+        let checkpoint = &self.initial;
+        let avatars = checkpoint
+            .avatars
+            .iter()
+            .map(|avatar| {
+                let placement = avatar
+                    .name_visibility
+                    .placement
+                    .as_ref()
+                    .map_or(0, |placement| placement.text.capacity());
+                let slot = avatar.slot.as_ref().map_or(0, |slot| slot.text.capacity());
+                avatar.name.capacity() as u128
+                    + key_bytes(&avatar.key)
+                    + placement as u128
+                    + slot as u128
+            })
+            .sum::<u128>();
+        avatars + checkpoint.authors.keys().map(key_bytes).sum::<u128>()
+    }
+
     fn replay_plan_bytes(&self) -> u128 {
         let titles = self.title_plan.capacity() * size_of::<Vec<u8>>()
             + self.title_plan.iter().map(Vec::capacity).sum::<usize>();
@@ -346,7 +383,11 @@ impl Simulation {
             self.install_window(next, &shared);
             return Ok(true);
         }
-        if tick < self.initial.tick || tick < stream.latest_start {
+        if tick < self.initial.tick
+            || stream
+                .latest_ready
+                .is_some_and(|ready| tick < ready.end || ready.complete)
+        {
             stream.rewind()?;
         }
         while stream.resetting || !self.frame_ready(frame, fps) {
@@ -840,7 +881,7 @@ pub(crate) mod tests {
         let first: Vec<_> = (0..frames)
             .map(|frame| {
                 sim.advance_to(frame, 60);
-                visible(&sim)
+                rendered_frame(&sim)
             })
             .collect();
         assert!(sim.planning_complete());
@@ -849,9 +890,171 @@ pub(crate) mod tests {
         for (frame, expected) in (0..frames).zip(first) {
             assert!(sim.prepare_frame(frame, 60, false).unwrap());
             sim.advance_to(frame, 60);
-            assert_eq!(visible(&sim), expected, "loop frame {frame}");
+            assert_eq!(rendered_frame(&sim), expected, "loop frame {frame}");
         }
         assert_eq!(calls.load(Ordering::Relaxed), planned);
+    }
+
+    fn rendered_frame(sim: &Simulation) -> String {
+        let layout = sim.layout();
+        let files: Vec<_> = layout
+            .files()
+            .map(|(id, file)| sim.file_effect(id, file))
+            .collect();
+        let repositories: Vec<_> = (0..layout.repositories.len())
+            .map(|repository| sim.repository_effect(repository))
+            .collect();
+        let settings = (
+            sim.theme().name,
+            sim.caption_style,
+            sim.repository_boundary,
+            sim.repository_label_plane,
+            sim.collapse_directories,
+            sim.diff_text_distance,
+            sim.playback_multiplier(),
+        );
+        let placement = (
+            sim.seconds(),
+            layout.revision(),
+            sim.state.region_depth,
+            sim.groups(),
+            sim.scale(),
+            sim.avatar_disc_scale(),
+            sim.member_scales(),
+            &sim.state.pulses,
+            &sim.state.titles,
+        );
+        let caption = (sim.caption_fields(), sim.caption_background());
+        format!(
+            "{}|{}|{files:?}|{repositories:?}|{settings:?}|{placement:?}|{caption:?}|{:?}",
+            visible(sim),
+            layout.exact_state(),
+            sim.diff_lines()
+        )
+    }
+
+    #[test]
+    fn replay_comparison_detects_file_layout_and_presentation_changes() {
+        let mut sim = fixture(true);
+        sim.advance_to(60, 60);
+        let expected = rendered_frame(&sim);
+        let mut heated = sim.clone();
+        let file = heated.layout().files().next().unwrap().0;
+        heated.state.layout.heat(file, 1.0);
+        assert_ne!(rendered_frame(&heated), expected, "file heat");
+        sim.collapse_directories = !sim.collapse_directories;
+        assert_ne!(rendered_frame(&sim), expected, "directory presentation");
+    }
+
+    #[test]
+    fn long_contributor_identities_exhaust_the_replay_budget() {
+        let mut sim = fixture(true);
+        sim.advance_to(60, 60);
+        let avatar = sim.avatars()[0].clone();
+        let contributors = 128;
+        let string_bytes = 4096;
+        let checkpoint = Arc::make_mut(&mut sim.initial);
+        checkpoint.avatars.clear();
+        checkpoint.authors.clear();
+        for author in 0..contributors {
+            let mut avatar = avatar.clone();
+            avatar.name = format!("{author:0>string_bytes$}");
+            avatar.key = Key::Name(avatar.name.as_bytes().to_vec());
+            avatar.name_visibility.placement.as_mut().unwrap().text =
+                avatar.name.clone();
+            avatar.slot.as_mut().unwrap().text = avatar.name.clone();
+            checkpoint.authors.insert(avatar.key.clone(), author);
+            checkpoint.avatars.push(avatar);
+        }
+        sim.state = super::super::SharedState(sim.initial.clone());
+        let packet = Packet {
+            generation: 0,
+            simulation: sim,
+            replay_bytes: 0,
+        };
+        let checkpoint_bytes = (contributors * 5 * string_bytes) as u128;
+        let mut replay = Replay::new();
+        replay.set_budget(checkpoint_bytes, 0);
+        replay.retain(&packet);
+        assert_eq!(replay.windows.len(), 1);
+        assert_eq!(replay.used, checkpoint_bytes);
+        let mut next = Packet {
+            simulation: packet.simulation.clone(),
+            ..packet
+        };
+        Arc::make_mut(&mut next.simulation.initial).tick += 1;
+        next.simulation.state =
+            super::super::SharedState(next.simulation.initial.clone());
+        replay.retain(&next);
+        assert!(replay.exceeded);
+        assert!(replay.windows.is_empty());
+    }
+
+    #[test]
+    fn seeking_to_an_evicted_window_resets_blocking_prepare() {
+        seek_after_eviction(true);
+    }
+
+    #[test]
+    fn seeking_to_an_evicted_window_resets_nonblocking_prepare() {
+        seek_after_eviction(false);
+    }
+
+    #[test]
+    fn seeking_past_retained_windows_resumes_the_worker() {
+        let replay = Arc::new(Mutex::new(Replay::new()));
+        let mut sim = fixture_with_replay(
+            false,
+            None,
+            super::super::TravelCap::Seconds(0.4),
+            Some(replay.clone()),
+        );
+        let second_start = u32::try_from(sim.ready_end.unwrap().end).unwrap();
+        assert!(sim.prepare_frame(second_start, 60, true).unwrap());
+        let third_start = u32::try_from(sim.ready_end.unwrap().end).unwrap();
+        assert!(sim.prepare_frame(0, 60, false).unwrap());
+        assert!(sim.prepare_frame(third_start, 60, true).unwrap());
+        assert_eq!(sim.initial.tick, u64::from(third_start));
+        let stream = sim.stream.as_ref().unwrap().lock().unwrap();
+        assert_eq!(stream.generation, 0);
+        assert_eq!(replay.lock().unwrap().windows.len(), 3);
+    }
+
+    fn seek_after_eviction(wait: bool) {
+        let replay = Arc::new(Mutex::new(Replay::new()));
+        let mut sim = fixture_with_replay(
+            false,
+            None,
+            super::super::TravelCap::Seconds(0.4),
+            Some(replay.clone()),
+        );
+        let second_start = u32::try_from(sim.ready_end.unwrap().end).unwrap();
+        assert!(sim.prepare_frame(second_start, 60, true).unwrap());
+        assert_eq!(sim.initial.tick, u64::from(second_start));
+        assert!(sim.prepare_frame(0, 60, false).unwrap());
+        assert_eq!(sim.initial.tick, 0);
+        replay.lock().unwrap().set_budget(0, 0);
+
+        let (done, result) = mpsc::sync_channel(1);
+        let worker = thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            loop {
+                let ready = sim.prepare_frame(second_start, 60, wait).unwrap();
+                assert!(sim.initial.tick <= u64::from(second_start));
+                if ready {
+                    assert_eq!(sim.initial.tick, u64::from(second_start));
+                    assert!(sim.replanning_after_replay_limit());
+                    done.send(()).unwrap();
+                    break;
+                }
+                assert!(std::time::Instant::now() < deadline);
+                thread::sleep(Duration::from_millis(1));
+            }
+        });
+        result
+            .recv_timeout(Duration::from_secs(3))
+            .expect("prepare must finish after resetting the worker");
+        worker.join().unwrap();
     }
 
     #[test]

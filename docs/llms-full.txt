@@ -275,9 +275,11 @@ Source: https://codestrand.pages.dev/playback/
 # Playback
 
 Preview loops the selected history and reuses planned windows within the run while
-they fit within the replay memory limit. Export renders the same launch timeline at
-explicit frame times at 1x speed. Export uses a static overview that fits the scene
-by default. Use `--camera-path` for a scripted camera.
+they fit within the replay memory limit. At the limit, preview discards the cached
+windows, replans as needed, and shows `Replay memory limit reached` during replanning
+pauses. Export renders the same launch timeline at explicit frame times at 1x speed.
+Export uses a static overview that fits the scene by default. Use `--camera-path`
+for a scripted camera.
 
 Preview renders at the window's physical resolution, including on HiDPI displays.
 Resizing or maximising keeps a 720-logical-pixel-high UI: text scales with height,
