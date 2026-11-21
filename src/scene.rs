@@ -45,6 +45,7 @@ mod settings;
 #[cfg(test)]
 mod static_tests;
 mod styling;
+pub(super) mod title_spike;
 
 pub(super) use loading::Loading;
 
@@ -702,6 +703,12 @@ pub(super) fn headless(
     app.insert_resource(ExportResolution(resolution))
         .insert_resource(SceneTarget(target.clone().into()))
         .insert_resource(Frame { index: 0, fps });
+    if let Some(mode) = title_spike::Mode::selected() {
+        app.insert_resource(mode);
+    }
+    if std::env::var_os("CODESTRAND_SPIKE_METRICS").is_some() {
+        app.init_resource::<title_spike::Samples>();
+    }
     (app, target)
 }
 
@@ -2500,6 +2507,7 @@ fn labels(world: &mut World) {
     let playback = world.resource::<Playback>();
     let geometry = playback.0.theme();
     let lod = &world.resource::<Pools>().lod;
+    let replace_titles = world.contains_resource::<title_spike::Mode>();
     let mut avatars = playback.0.avatars().iter().filter(|a| a.presence > 0.0);
     let wanted = playback
         .0
@@ -2512,6 +2520,7 @@ fn labels(world: &mut World) {
         )
         .into_iter()
         .chain(world.resource::<Pools>().names.labels.iter().cloned())
+        .filter(|label| !replace_titles || label.kind != model::LabelKind::Repository)
         .filter_map(|mut label| {
             let physical_height = camera
                 .physical_viewport_size()
@@ -2545,6 +2554,7 @@ fn labels(world: &mut World) {
         reference_viewport(&camera),
     );
     let theme = geometry.clone();
+    title_spike::update(world, &camera, &transform, &chosen);
     let points: Vec<_> = chosen
         .iter()
         .map(|(label, point, _)| (*point, label.opacity))

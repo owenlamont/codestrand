@@ -58,6 +58,10 @@ pub(super) fn prepare(directory: &Path) -> anyhow::Result<()> {
         .with_context(|| format!("create new export directory {}", directory.display()))
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "temporary title metrics share the capture frame index"
+)]
 pub(super) fn render(
     directory: &Path,
     (mut app, target): (App, Handle<Image>),
@@ -68,15 +72,45 @@ pub(super) fn render(
 ) -> anyhow::Result<()> {
     let mut manifest = BufWriter::new(File::create(directory.join("frames.csv"))?);
     writeln!(manifest, "{MANIFEST_HEADER}")?;
+    let mut title_metrics = app
+        .world()
+        .contains_resource::<scene::title_spike::Samples>()
+        .then(|| File::create(directory.join("titles.csv")).map(BufWriter::new))
+        .transpose()?;
+    if let Some(metrics) = &mut title_metrics {
+        writeln!(metrics, "frame,repository,status,x,y,em,retargeted,reflow")?;
+    }
+    let stills: Vec<u32> = std::env::var("CODESTRAND_SPIKE_STILLS")
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|frame| frame.parse().ok())
+        .collect();
     initialize(&mut app, &target)?;
-    let mut png = encoder.is_none().then(png::Writer::new).transpose()?;
+    let mut png = (encoder.is_none() || !stills.is_empty())
+        .then(png::Writer::new)
+        .transpose()?;
     let started = Instant::now();
     let mut report = report::Report::new(started, fps);
     let (mut previous_camera, mut captures) = (None, Captures::default());
     let mut index = 0;
     let rendered = (|| -> anyhow::Result<()> {
         let mut write = |index, image| {
-            write_frame(directory, &mut encoder, png.as_mut(), index, image)
+            let selected = stills.contains(&index);
+            if encoder.is_some() {
+                if selected {
+                    write_frame(
+                        directory,
+                        &mut None,
+                        png.as_mut(),
+                        index,
+                        Image::clone(&image),
+                    )?;
+                }
+                write_frame(directory, &mut encoder, None, index, image)?;
+            } else if stills.is_empty() || selected {
+                write_frame(directory, &mut encoder, png.as_mut(), index, image)?;
+            }
+            Ok(())
         };
         loop {
             if frames.is_some_and(|count| index >= count) {
@@ -120,6 +154,21 @@ pub(super) fn render(
             update(&mut app)?;
             captures.write_ready(&mut write)?;
             record_frame(&mut app, &mut manifest, index)?;
+            if let Some(metrics) = &mut title_metrics {
+                for sample in &app.world().resource::<scene::title_spike::Samples>().0 {
+                    writeln!(
+                        metrics,
+                        "{index},{},{},{:.4},{:.4},{:.4},{},{:.4}",
+                        sample.repository,
+                        sample.status,
+                        sample.center.x,
+                        sample.center.y,
+                        sample.em,
+                        u8::from(sample.retargeted),
+                        sample.reflow
+                    )?;
+                }
+            }
             while captures.pending.len() >= MAX_PENDING_CAPTURES {
                 update(&mut app)?;
                 captures.write_ready(&mut write)?;
@@ -148,6 +197,9 @@ pub(super) fn render(
         started.elapsed().as_secs_f32()
     );
     manifest.flush()?;
+    if let Some(metrics) = &mut title_metrics {
+        metrics.flush()?;
+    }
     encoder.as_mut().map_or(Ok(()), Encoder::finish)?;
     eprintln!(
         "Export complete: {}",
@@ -345,12 +397,13 @@ fn glyph_coverage(app: &mut App) -> (usize, usize) {
 
 fn ready(app: &mut App) -> bool {
     let world = app.world_mut();
+    let mesh_titles = world.contains_resource::<scene::title_spike::Mode>();
     let mut query = world.query::<(&Text, &TextLayoutInfo)>();
     let mut layouts = query
         .iter(world)
         .filter(|(text, _)| !text.0.trim().is_empty())
         .peekable();
-    let labels_ready = layouts.peek().is_some()
+    let labels_ready = (mesh_titles || layouts.peek().is_some())
         && layouts.all(|(_, layout)| !layout.glyphs.is_empty());
     labels_ready
         && app
