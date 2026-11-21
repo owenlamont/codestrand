@@ -8,6 +8,7 @@ use crate::layout::{Layout, packing::Tile};
 mod gaps;
 
 const EMPTY_RECTANGLE_WORK: usize = 1_000_000;
+const DEFINITIONS: &str = "Tile and content areas use fixed world coordinates expressed in reference-field units. Coverage and empty fractions normalize the grown field back to the reference viewport. Glass tiles are disjoint world rectangles represented in this field, inside a 24 reference-pixel margin plus the caption reservation below, separated by shared gutters. Largest empty rectangle is the exact maximum axis-aligned rectangle outside their union, including the margin, or null when the work budget is reached. Content is the world-XZ AABB of current directory discs and file positions padded by their model footprint size, converted with the fixed affine field scale; not projected ground-plane area, glyph ink or opaque pixel occupancy. Content fill divides content-envelope area by tile area; overall fill is area weighted. The first repository owns the empty lead-in tile. Weights are live file and directory counts, held until their shares drift and then eased over two seconds; empty active repositories weigh one until archived. Files and directories count live files not leaving and live directories. Samples include every canonical 1/60 second. Content AABBs are clipped to their own tiles; actual footprints use convex outlines. Content largest-empty rectangles use fully covered cells on a 160x90 grid inside the usable tile viewport, excluding the caption reservation, with one grid cell of boundary uncertainty.";
 
 fn largest_empty(tiles: &[Tile]) -> Option<f32> {
     let count = tiles.len().max(1);
@@ -210,7 +211,7 @@ pub(crate) fn run(
     serde_json::to_writer(
         &mut *writer,
         &serde_json::json!({"definitions":
-        "Tile and content areas use fixed world coordinates expressed in reference-field units. Coverage and empty fractions normalize the grown field back to the reference viewport. Glass tiles are disjoint world rectangles represented in this field, inside a 24 reference-pixel margin plus the caption reservation below, separated by shared gutters. Largest empty rectangle is the exact maximum axis-aligned rectangle outside their union, including the margin. Content is the world-XZ AABB of current directory discs and file positions padded by their model footprint size, converted with the fixed affine field scale; not projected ground-plane area, glyph ink or opaque pixel occupancy. Content fill divides content-envelope area by tile area; overall fill is area weighted. The first repository owns the empty lead-in tile. Weights are live file and directory counts, held until their shares drift and then eased over two seconds; empty active repositories weigh one until archived. Files and directories count live files not leaving and live directories. Samples include every canonical 1/60 second. Content AABBs are clipped to their own tiles; actual footprints use convex outlines. Content largest-empty rectangles use fully covered cells on a 160x90 grid inside the usable tile viewport, excluding the caption reservation, with one grid cell of boundary uncertainty."}),
+        DEFINITIONS}),
     )?;
     writeln!(writer)?;
     let mut frames = simulation.frames(60)?;
@@ -266,6 +267,7 @@ mod tests {
                 high: Vec2::new(f32::from(i + 1) / 100.0 - 1.0, 0.5),
             })
             .collect();
+        assert!(DEFINITIONS.contains("null when the work budget is reached"));
         assert_eq!(
             serde_json::to_value(largest_empty(&tiles)).unwrap(),
             serde_json::Value::Null

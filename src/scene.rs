@@ -600,8 +600,7 @@ fn add_scene_systems(app: &mut App) {
                 .before(bevy::ui::widget::text_system)
                 .before(bevy::asset::AssetEventSystems)
                 .run_if(resource_exists::<bevy::text::ScaleCx>),
-        )
-        .add_systems(Last, styling::drop_stale_font_atlases);
+        );
 }
 
 #[derive(Resource)]

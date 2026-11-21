@@ -15,6 +15,8 @@ pub(crate) const BIRTH_TICKS: u32 = 45;
 /// Ticks whose zoom is fitted together; fixed so counts do not depend on the thread count.
 const ZOOM_CHUNK: usize = 256;
 const ALLOCATION_TOLERANCE_PX: f32 = 0.25;
+const EXIT_EASE_RAMP: f32 = 1.0 / 32.0;
+pub(crate) const STAGGERED_EXIT_STRETCH: f32 = 1.25;
 
 const FIELD_GROWTH_STEP: f32 = 1.125;
 /// Bisection steps towards full presence for a sample whose easing tiles conflict.
@@ -545,6 +547,45 @@ fn scaled_tile(tile: Tile, center: Vec2, presence: f32) -> Tile {
     }
 }
 
+fn exit_presence(elapsed: f32) -> f32 {
+    let progress = |u: f32| {
+        // A short acceleration ramp leaves most of the exit at a steady speed.
+        let speed = (u / EXIT_EASE_RAMP).min(1.0);
+        (u - 0.5 * speed * speed * EXIT_EASE_RAMP) / (1.0 - EXIT_EASE_RAMP)
+    };
+    if elapsed <= 0.5 {
+        1.0 - progress(elapsed)
+    } else {
+        progress(1.0 - elapsed)
+    }
+}
+
+fn exit_durations(fades: &[crate::model::Time], duration: f32) -> Vec<f32> {
+    let mut times: Vec<_> = fades.iter().copied().filter(|t| t.is_finite()).collect();
+    times.sort_unstable_by(|a, b| a.partial_cmp(b).expect("finite fade times"));
+    times.dedup();
+    fades
+        .iter()
+        .map(|&start| {
+            let overlaps = times
+                .binary_search_by(|time| {
+                    time.partial_cmp(&start).expect("ordered fade time")
+                })
+                .is_ok_and(|i| {
+                    (i > 0 && start - times[i - 1] < duration)
+                        || times
+                            .get(i + 1)
+                            .is_some_and(|&next| next - start < duration)
+                });
+            if overlaps {
+                duration * STAGGERED_EXIT_STRETCH
+            } else {
+                duration
+            }
+        })
+        .collect()
+}
+
 fn shrink_tiles(tiles: &mut [Option<Tile>], presence: &[f32]) {
     for (tile, &p) in tiles.iter_mut().zip(presence) {
         *tile = tile
@@ -590,6 +631,69 @@ fn nearest_tiles(
             high: center + radius,
         },
     )
+}
+
+fn collapse_missing(
+    nodes: &[Node],
+    index: usize,
+    tiles: &mut [Option<Tile>],
+) -> Option<Tile> {
+    fn fill(nodes: &[Node], index: usize, tile: Tile, tiles: &mut [Option<Tile>]) {
+        match nodes[index] {
+            Node::Repository(i) => tiles[i] = Some(tile),
+            Node::Split { first, second, .. } => {
+                fill(nodes, first, tile, tiles);
+                fill(nodes, second, tile, tiles);
+            }
+        }
+    }
+    match nodes[index] {
+        Node::Repository(i) => tiles[i],
+        Node::Split {
+            axis,
+            first,
+            second,
+        } => {
+            match (
+                collapse_missing(nodes, first, tiles),
+                collapse_missing(nodes, second, tiles),
+            ) {
+                (Some(a), Some(b)) => Some(Tile {
+                    low: a.low.min(b.low),
+                    high: a.high.max(b.high),
+                }),
+                (None, Some(tile)) => {
+                    let mut point = tile.low.midpoint(tile.high);
+                    point[axis] = tile.low[axis];
+                    fill(
+                        nodes,
+                        first,
+                        Tile {
+                            low: point,
+                            high: point,
+                        },
+                        tiles,
+                    );
+                    Some(tile)
+                }
+                (Some(tile), None) => {
+                    let mut point = tile.low.midpoint(tile.high);
+                    point[axis] = tile.high[axis];
+                    fill(
+                        nodes,
+                        second,
+                        Tile {
+                            low: point,
+                            high: point,
+                        },
+                        tiles,
+                    );
+                    Some(tile)
+                }
+                (None, None) => None,
+            }
+        }
+    }
 }
 
 fn insert(
@@ -1036,6 +1140,7 @@ impl Packing {
             growth,
         )?;
         let mut held = held::Weights::new(first.len());
+        let exit_durations = exit_durations(&fading, exit_reflow);
         let earliest = births.iter().copied().min().unwrap_or(0);
         let mut reflows = Vec::<reflow::Change>::new();
         let samples: Vec<_> = regions
@@ -1112,7 +1217,12 @@ impl Packing {
                         (p >= 1.0 && end < fade)
                             || (p == 0.0
                                 && (finish < birth.saturating_sub(lead)
-                                    || now >= fade + exit_reflow))
+                                    || now
+                                        >= fade
+                                            + exit_durations
+                                                .get(i)
+                                                .copied()
+                                                .unwrap_or(exit_reflow)))
                     })
                     && let Some(change) = reflow::plan(
                         tick,
@@ -1127,12 +1237,11 @@ impl Packing {
                 {
                     reflows.push(change);
                 }
-                for (presence, &fade) in presence.iter_mut().zip(&fading) {
-                    let elapsed = ((now - fade) / exit_reflow).clamp(0.0, 1.0);
-                    *presence *= 1.0 - elapsed * elapsed * (3.0 - 2.0 * elapsed);
-                    if elapsed > 0.0 && *presence < 0.001 {
-                        *presence = 0.0;
-                    }
+                for ((presence, &fade), &duration) in
+                    presence.iter_mut().zip(&fading).zip(&exit_durations)
+                {
+                    let elapsed = ((now - fade) / duration).clamp(0.0, 1.0);
+                    *presence *= exit_presence(elapsed);
                 }
                 Sample { weights, presence }
             })
@@ -1345,6 +1454,107 @@ impl Packing {
         Space::new(self.gutter_scale, self.overview_growth())
     }
 
+    fn allocated_tiles(
+        &self,
+        tree: (usize, &[Node]),
+        weights: &[f32],
+        presence: &[f32],
+        tiling: Option<&mut Tiling>,
+    ) -> Vec<Option<Tile>> {
+        let (.., nodes) = tree;
+        let space = self.space();
+        let result = if self.fresh_tiling {
+            tiles(nodes, weights, presence, space)
+        } else if let Some(tiling) = tiling {
+            self.tiles_in(tiling, tree, weights, presence)
+        } else {
+            self.tiles_in(&mut self.tiling.lock(), tree, weights, presence)
+        };
+        result
+            .or_else(|| nearest_tiles(nodes, weights, presence, space))
+            .or_else(|| self.firmer_tiles(nodes, weights, presence))
+            .unwrap_or_else(|| {
+                let mut allocated =
+                    tiles(nodes, weights, &vec![1.0; presence.len()], space)
+                        .or_else(|| {
+                            tiles(
+                                &self.nodes,
+                                weights,
+                                &vec![1.0; presence.len()],
+                                space,
+                            )
+                        })
+                        .unwrap_or_else(|| vec![None; presence.len()]);
+                shrink_tiles(&mut allocated, presence);
+                allocated
+            })
+    }
+
+    fn exit_tiles(
+        &self,
+        tree: (usize, &[Node]),
+        weights: &[f32],
+        visibility: &[f32],
+        presence: &[f32],
+        tile_tick: usize,
+        tiling: Option<&mut Tiling>,
+    ) -> Vec<Option<Tile>> {
+        let now = crate::model::tick_time(
+            u64::try_from(tile_tick).expect("bounded packing tick"),
+        );
+        let mut exits: Vec<_> = visibility
+            .iter()
+            .zip(self.visible_until.iter())
+            .enumerate()
+            .filter_map(|(i, (&p, &fade))| {
+                (p > 0.0 && p < 1.0 && now >= fade).then_some((p, i))
+            })
+            .collect();
+        if exits.is_empty() {
+            return self.allocated_tiles(tree, weights, presence, tiling);
+        }
+        exits.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+        let mut layer = presence.to_vec();
+        for &(p, i) in &exits {
+            layer[i] /= p;
+        }
+        let field = self.space().field(framing::MARGIN);
+        let center = field.low.midpoint(field.high);
+        let mut result = vec![
+            Tile {
+                low: center,
+                high: center
+            };
+            weights.len()
+        ];
+        let mut previous = 0.0;
+        // Blending layouts of nested survivor sets gives each disappearing split zero influence at release.
+        for (level, i) in exits.into_iter().chain([(1.0, weights.len())]) {
+            let fraction = level - previous;
+            if fraction > 0.0 && layer.iter().any(|&p| p > 0.0) {
+                let mut placed = self.allocated_tiles(tree, weights, &layer, None);
+                collapse_missing(tree.1, 0, &mut placed);
+                for (sum, tile) in result
+                    .iter_mut()
+                    .zip(placed)
+                    .filter_map(|(sum, tile)| Some((sum, tile?)))
+                {
+                    sum.low += (tile.low - center) * fraction;
+                    sum.high += (tile.high - center) * fraction;
+                }
+            }
+            previous = level;
+            if let Some(p) = layer.get_mut(i) {
+                *p = 0.0;
+            }
+        }
+        result
+            .into_iter()
+            .zip(presence)
+            .map(|(tile, &p)| (p > 0.0).then_some(tile))
+            .collect()
+    }
+
     pub(crate) fn overview_growth(&self) -> f32 {
         self.growth.max(1.0)
     }
@@ -1415,28 +1625,15 @@ impl Packing {
                 let tree = reflow.map_or((0, self.nodes.as_slice()), |c| {
                     (c.tick, c.nodes.as_slice())
                 });
-                let result = if self.fresh_tiling {
-                    tiles(tree.1, &weights, &presence, self.space())
-                } else if let Some(tiling) = tiling {
-                    self.tiles_in(tiling, tree, &weights, &presence)
-                } else {
-                    self.tiles_in(&mut self.tiling.lock(), tree, &weights, &presence)
-                }
-                .or_else(|| nearest_tiles(tree.1, &weights, &presence, self.space()))
-                .or_else(|| self.firmer_tiles(tree.1, &weights, &presence));
-                if let Some(allocated) = result {
-                    reflow::Layout::new(tree.1, allocated, self.space())
-                } else {
-                    let mut allocated = tiles(
-                        &self.nodes,
-                        &weights,
-                        &vec![1.0; presence.len()],
-                        self.space(),
-                    )
-                    .unwrap_or_else(|| vec![None; presence.len()]);
-                    shrink_tiles(&mut allocated, &presence);
-                    reflow::Layout::new(&self.nodes, allocated, self.space())
-                }
+                let allocated = self.exit_tiles(
+                    tree,
+                    &weights,
+                    &visibility,
+                    &presence,
+                    tile_tick,
+                    tiling,
+                );
+                reflow::Layout::new(tree.1, allocated, self.space())
             });
         self.inputs[tick]
             .iter()
@@ -1911,6 +2108,102 @@ mod tests {
             previous = current;
         }
         assert!(previous.iter().all(|region| region.tile.is_none()));
+    }
+
+    #[test]
+    fn staggered_exits_keep_tile_edges_continuous() {
+        let weights = [20.0, 39.0, 4.0, 37.0, 25.0, 29.0, 5.0, 21.0];
+        let aspects = [1.9, 1.2, 0.7, 2.7, 1.1, 2.9, 2.4, 1.6];
+        let phases = [79_u32, 8, 51, 153, 58, 21, 52, 146];
+        let space = Space::new(4.0, 1.0);
+        let mut nodes = Vec::new();
+        for index in 0..weights.len() {
+            let mut born = weights;
+            born[index + 1..].fill(0.0);
+            assert!(insert(&mut nodes, index, &born, &aspects, space, 1));
+        }
+        let mut largest = 0.0_f32;
+        for stride in [1, 3, 5, 7] {
+            for offset in 0..phases.len() {
+                let phases = std::array::from_fn::<_, 8, _>(|i| {
+                    phases[(i * stride + offset) % phases.len()]
+                });
+                for spacing in [1, 2, 3] {
+                    let starts = phases
+                        .map(|tick| crate::model::tick_time(u64::from(tick * spacing)));
+                    largest =
+                        largest.max(staggered_edge_step(&nodes, &weights, &starts));
+                }
+            }
+        }
+        println!("Largest per-tick tile edge step: {largest:.3} reference px");
+        assert!(largest <= 4.5, "tile jumped {largest:.3} reference px");
+    }
+
+    fn staggered_edge_step(
+        nodes: &[Node],
+        weights: &[f32],
+        starts: &[crate::model::Time],
+    ) -> f32 {
+        let durations = exit_durations(starts, 4.0);
+        let samples: Vec<_> = (0..=760)
+            .map(|tick| Sample {
+                weights: weights.to_vec(),
+                presence: starts
+                    .iter()
+                    .zip(&durations)
+                    .map(|(&start, &duration)| {
+                        let elapsed =
+                            (crate::model::tick_time(tick) - start) / duration;
+                        exit_presence(elapsed.clamp(0.0, 1.0))
+                    })
+                    .collect(),
+            })
+            .collect();
+        let content = Input::from(capacity_fixture().swap_remove(0));
+        let packing = Packing {
+            gutter_scale: 4.0,
+            nodes: nodes.to_vec(),
+            rotated: vec![false; weights.len()],
+            inputs: vec![vec![content; weights.len()]; samples.len()].into(),
+            samples: samples.into(),
+            visible_until: starts.into(),
+            ..Packing::default()
+        };
+        let at = |tick| {
+            packing
+                .fit_rows(tick, tick, None, None, None)
+                .into_iter()
+                .map(|placement| placement.tile)
+                .collect::<Vec<_>>()
+        };
+        let mut largest = 0.0_f32;
+        let mut previous = at(0);
+        for tick in 1..packing.samples.len() {
+            let current = at(tick);
+            for (index, (&before, &after)) in previous.iter().zip(&current).enumerate()
+            {
+                assert_eq!(
+                    after.is_some(),
+                    packing.samples[tick].presence[index] > 0.0
+                );
+                largest = largest.max(match (before, after) {
+                    (Some(a), Some(b)) => {
+                        let step = (a.low - b.low).abs().max((a.high - b.high).abs());
+                        (step * framing::VIEWPORT * 0.5).max_element()
+                    }
+                    (Some(a), None) => a.pixels().max_element(),
+                    (None, _) => 0.0,
+                });
+                let Some(a) = after else { continue };
+                assert!(current[..index].iter().flatten().all(|b| {
+                    (a.high.min(b.high) - a.low.max(b.low)).min_element() < 1e-5
+                }));
+            }
+            previous = current;
+        }
+        assert!(previous.iter().all(Option::is_none));
+        largest
     }
 
     fn ending_fixture(shared_ending: bool) -> Packing {

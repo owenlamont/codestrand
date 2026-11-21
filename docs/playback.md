@@ -223,7 +223,8 @@ visible.
 An ending before the selected playback interval is already complete when playback starts.
 
 The ending tile, files and directories grey, rise and fade over 2.5 playback seconds.
-Neighbours then reclaim the space over four seconds. Text fades in place.
+Neighbours then reclaim the space over four seconds. Overlapping exits that start at
+different times take five seconds to keep tile edges moving steadily. Text fades in place.
 
 ## Contributor and file lifecycles
 
@@ -277,7 +278,7 @@ Repository titles and contributor names use a 12-pixel font on screen. Directory
 touched-file labels use a 10-pixel font. Long titles and detail labels end in an
 ellipsis when space runs out. A title can sit closer to the edge of a small tile or
 disappear if the tile is too short. After an ended repository fades, its tile shrinks
-over four playback seconds and neighbouring tiles grow into the space.
+and neighbouring tiles grow into the space.
 
 A newcomer splits one existing tile or subtree. Other repositories retain their
 relative order. A reflow can change the split tree between repository arrivals and exits.
@@ -292,6 +293,10 @@ Tiles touch at `0`. Crowd scaling adjusts avatars when many are active.
 Names prefer clear content rectangles, including repository labels
 and a small margin, but may overlap content near tile edges when space is tight.
 Different content shapes can leave space inside a uniformly fitted tile.
+
+In treemap diagnostics, `largest_empty_rectangle` measures the largest axis-aligned gap
+outside the tiles, including the margin. The value is `null` when the rectangle search
+reaches its work budget.
 
 Contributor names orbit at no more than 30 degrees per playback second, with a
 three-second minimum between direction reversals. A new position must reduce the

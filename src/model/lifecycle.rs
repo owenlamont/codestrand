@@ -14,12 +14,21 @@ pub(super) fn duration(
         .starts
         .last()
         .map_or(Time::ZERO, |&start| pace.pulse_end(start));
-    endings
+    let base = schedule.duration().max(last_pulse);
+    let Some(last) = endings
         .iter()
+        .copied()
         .filter(|end| end.is_finite())
-        .fold(schedule.duration().max(last_pulse), |duration, &end| {
-            duration.max(end + REPOSITORY_EXIT + REFLOW)
-        })
+        .max_by(|a, b| a.partial_cmp(b).expect("finite ending times"))
+    else {
+        return base;
+    };
+    let reflow = if endings.iter().any(|&end| end < last && last - end < REFLOW) {
+        REFLOW * crate::layout::packing::STAGGERED_EXIT_STRETCH
+    } else {
+        REFLOW
+    };
+    base.max(last + REPOSITORY_EXIT + reflow)
 }
 
 /// For each played event, bit `rank` is set when its participant at that rank (the author

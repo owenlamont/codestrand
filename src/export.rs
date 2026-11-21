@@ -1091,12 +1091,14 @@ mod pacing_tests {
     }
 
     #[test]
-    #[ignore = "requires a graphics adapter; renders short PNG sequences"]
-    fn follow_activity_export_is_independent_of_render_pacing() {
-        assert_paced_export(Framing::FollowActivity);
+    #[ignore = "requires a graphics adapter; renders four short PNG sequences"]
+    fn overview_and_follow_activity_exports_are_independent_of_render_pacing() {
+        let overview = assert_paced_export(Framing::Overview);
+        let follow = assert_paced_export(Framing::FollowActivity);
+        assert_ne!(overview, follow, "activity framing matched the overview");
     }
 
-    fn assert_paced_export(framing: Framing) {
+    fn assert_paced_export(framing: Framing) -> Vec<u8> {
         let scratch = tempfile::tempdir().expect("temporary directory is available");
         let fast = scratch.path().join("fast");
         let slow = scratch.path().join("slow");
@@ -1137,12 +1139,7 @@ mod pacing_tests {
             fs::read_to_string(slow.join("frames.csv")).expect("manifest exists");
         assert_eq!(fast_manifest.lines().count(), 9);
         assert_eq!(fast_manifest, slow_manifest);
-        if framing == Framing::FollowActivity {
-            let overview = scratch.path().join("overview");
-            export(&overview, Duration::ZERO, Framing::Overview);
-            let overview_last = fs::read(overview.join(&expected[7])).unwrap();
-            assert_ne!(last, overview_last, "activity framing matched the overview");
-        }
+        last
     }
 
     /// Exports eight synthetic frames, sleeping `delay` in every app update.
