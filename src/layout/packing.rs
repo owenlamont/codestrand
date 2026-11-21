@@ -978,6 +978,18 @@ fn rotations(
 }
 
 impl Packing {
+    pub(crate) fn replay_bytes(&self) -> u128 {
+        use crate::model::checkpoint_memory::{buffer_bytes, retained_fields};
+
+        let (nodes, rotated) = retained_fields!(self, Packing {
+            nodes, rotated;
+            gutter_scale, growth, reflows, labels, inputs, samples, zoom, exits,
+            tiling, fresh_tiling, threads,
+        });
+        buffer_bytes::<Node>(nodes.capacity())
+            + buffer_bytes::<bool>(rotated.capacity())
+    }
+
     pub(crate) fn input_bytes() -> usize {
         std::mem::size_of::<Input>()
             + outline::NORMALS.len() * std::mem::size_of::<Vec2>()

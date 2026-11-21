@@ -404,6 +404,45 @@ struct Pools {
     grid: Vec<Entity>,
 }
 
+pub(super) fn reset_scene_pools(world: &mut World) {
+    if let Some(pools) = world.remove_resource::<Pools>() {
+        let Pools {
+            sync_stamp: _,
+            lod: _,
+            names: _,
+            hues: _,
+            grid,
+            aggregates,
+            files,
+            beams,
+            fragments,
+            edges,
+            directories,
+            avatars,
+            groups,
+        } = pools;
+        for entity in [
+            aggregates,
+            beams,
+            fragments,
+            edges,
+            directories,
+            avatars,
+            groups,
+        ]
+        .into_iter()
+        .flatten()
+        .chain(files.into_values())
+        {
+            world.despawn(entity);
+        }
+        world.insert_resource(Pools { grid, ..default() });
+    }
+    world.remove_resource::<GreyTextures>();
+    styling::reset_pools(world);
+    ordering::reset_draw_sequence(world);
+}
+
 #[derive(PartialEq)]
 struct SyncStamp {
     seconds: model::Time,
@@ -1066,10 +1105,7 @@ fn preview_clock(
     }
     if std::mem::take(&mut *looping) {
         world.resource_mut::<Playback>().0.restart();
-        if let Some(mut pools) = world.get_resource_mut::<Pools>() {
-            pools.sync_stamp = None;
-            pools.names.invalidate();
-        }
+        reset_scene_pools(world);
     }
     *pending = None;
     *elapsed = next;
@@ -3589,6 +3625,108 @@ mod tests {
             .resource_mut::<Time<Real>>()
             .update_with_duration(std::time::Duration::ZERO);
         world
+    }
+
+    #[test]
+    fn grey_portrait_cache_stays_flat_across_preview_rewinds() {
+        let mut events = crate::timeline::synthetic();
+        events.truncate(1);
+        events[0].contributor = Some(crate::contributors::Contributor {
+            bot: None,
+            key: crate::contributors::Key::Config(0),
+            name: "Portrait".to_owned(),
+            email: Vec::new(),
+            accounts: default(),
+            portrait: Some(std::sync::Arc::new(crate::avatars::Portrait {
+                pixels: vec![255; 128 * 128 * 4],
+            })),
+        });
+        let theme = Theme::neon();
+        let mut simulation = Simulation::new(
+            events,
+            &model::Options::default(),
+            &theme,
+            &crate::contributors::Mappings::default(),
+        );
+        simulation.advance_to(30, 30);
+        let avatar = simulation.avatars()[0].clone();
+        let mut world = rewind_preview_world(simulation);
+        let palette = Palette::new(&mut world, &theme);
+
+        for _ in 0..10 {
+            let entity = world.spawn(Transform::default()).id();
+            attach_portrait(&mut world, &palette, entity, &avatar);
+            world.resource_mut::<Pools>().avatars.push(entity);
+            fade(&mut world, entity, 1.0, 1.0);
+            assert_eq!(world.resource::<GreyTextures>().0.len(), 1);
+            reset_scene_pools(&mut world);
+        }
+    }
+
+    #[test]
+    fn preview_loop_resets_scene_pools() {
+        use std::time::Duration;
+
+        let simulation = model::streaming::tests::fixture_with(
+            true,
+            None,
+            model::TravelCap::Seconds(0.4),
+        );
+        let mut world = rewind_preview_world(simulation);
+        let mut clock = Schedule::default();
+        clock.add_systems(preview_clock);
+        clock.run(&mut world);
+        animate(&mut world);
+        let grid = world.resource::<Pools>().grid.clone();
+        let grid_transform = *world.get::<Transform>(grid[0]).unwrap();
+        *world.get_mut::<Transform>(grid[0]).unwrap() = Transform::IDENTITY;
+        let stale = [(); 8].map(|()| world.spawn_empty().id());
+        let stale_styles = styling::seed_replay_pools(&mut world);
+        {
+            let mut pools = world.resource_mut::<Pools>();
+            pools.aggregates.push(stale[0]);
+            pools.files.insert(u64::MAX, stale[1]);
+            pools.beams.push(stale[2]);
+            pools.fragments.push(stale[3]);
+            pools.edges.push(stale[4]);
+            pools.directories.push(stale[5]);
+            pools.avatars.push(stale[6]);
+            pools.groups.push(stale[7]);
+            pools.lod.detail.push(0.5);
+            pools.names.targets.insert(model::Target::File(0));
+            pools.hues.slots.push(1);
+        }
+        let last = world.resource::<Playback>().0.frames(60).unwrap();
+        world
+            .resource_mut::<Time<Real>>()
+            .update_with_duration(Duration::from_nanos(
+                (u64::from(last) * 1_000_000_000).div_ceil(60),
+            ));
+        clock.run(&mut world);
+        assert_eq!(world.resource::<Frame>().index, 0);
+        let pools = world.resource::<Pools>();
+        let empty = [] as [Entity; 0];
+        assert_eq!(pools.aggregates, empty);
+        assert!(pools.files.is_empty());
+        assert_eq!(pools.beams, empty);
+        assert_eq!(pools.fragments, empty);
+        assert_eq!(pools.edges, empty);
+        assert_eq!(pools.directories, empty);
+        assert_eq!(pools.avatars, empty);
+        assert_eq!(pools.groups, empty);
+        assert_eq!(pools.lod.detail, [] as [f32; 0]);
+        assert!(pools.names.targets.is_empty());
+        assert_eq!(pools.hues.slots, [] as [usize; 0]);
+        assert!(pools.sync_stamp.is_none());
+        assert_eq!(pools.grid, grid);
+        assert!(
+            stale
+                .into_iter()
+                .chain(stale_styles)
+                .all(|entity| world.get_entity(entity).is_err())
+        );
+        animate(&mut world);
+        assert_eq!(*world.get::<Transform>(grid[0]).unwrap(), grid_transform);
     }
 
     #[test]

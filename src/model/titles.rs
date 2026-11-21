@@ -78,6 +78,13 @@ pub(super) struct Title {
     opacity: f32,
 }
 impl Title {
+    pub(super) fn replay_bytes(&self) -> u128 {
+        let (text,) = super::checkpoint_memory::retained_fields!(self, Title {
+            text; point, size, scale, old, opacity,
+        });
+        text.capacity() as u128
+    }
+
     pub fn rect(&self) -> Rect {
         Rect::from_corners(
             self.point - Vec2::Y * self.size.y,

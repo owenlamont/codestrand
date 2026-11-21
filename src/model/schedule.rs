@@ -29,6 +29,10 @@ pub(super) struct Clock {
 }
 
 impl Clock {
+    pub(super) fn replay_bytes(&self) -> u128 {
+        self.history.replay_bytes() + self.presentation.replay_bytes()
+    }
+
     pub(super) fn new(history: Schedule, presentation: Schedule) -> Self {
         Self {
             history,
@@ -106,6 +110,14 @@ impl Clock {
 }
 
 impl Schedule {
+    pub(super) fn replay_bytes(&self) -> u128 {
+        use super::checkpoint_memory::{buffer_bytes, retained_fields};
+
+        let (starts, services) = retained_fields!(self, Schedule { starts, services; });
+        buffer_bytes::<Time>(starts.capacity())
+            + buffer_bytes::<Service>(services.capacity())
+    }
+
     pub(super) fn present_tail_tick(&self, history: &Self, history_tick: u64) -> u64 {
         self.services.last().map_or(history_tick, |last| {
             let history_last = history.services[self.services.len() - 1].tick;

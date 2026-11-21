@@ -149,7 +149,7 @@ pub(super) fn check(
             events,
             selected,
             options,
-            repositories.len(),
+            repositories,
             (&history, history_duration),
             schedule,
             (retained, global),
@@ -163,7 +163,7 @@ pub(super) fn check(
     check_bytes(bytes, options.available_memory)
 }
 
-fn checkpoint_bytes(events: &[Event], repositories: usize) -> u128 {
+fn checkpoint_bytes(events: &[Event], repositories: &[String]) -> u128 {
     let paths: HashSet<_> = events
         .iter()
         .flat_map(|e| &e.changes)
@@ -206,7 +206,10 @@ fn checkpoint_bytes(events: &[Event], repositories: usize) -> u128 {
         + directory_bytes
         + pulse_data
         + services
-        + repositories as u128 * 1024
+        + repositories
+            .iter()
+            .map(|label| 1024 + label.capacity() as u128)
+            .sum::<u128>()
         + std::mem::size_of::<super::State>() as u128
 }
 
@@ -321,7 +324,7 @@ fn check_streaming(
     events: &[Event],
     selected: &[Event],
     options: &Options,
-    repositories: usize,
+    repositories: &[String],
     (history, history_duration): (&Schedule, super::Time),
     schedule: &Schedule,
     (retained, global): (u128, u128),
@@ -351,6 +354,14 @@ fn check_streaming(
     let windows = super::streaming::PLAN_COPIES * window;
     let global_states = super::streaming::GLOBAL_STATE_COPIES * checkpoint;
     let bytes = (global + global_states).max(retained + states + windows);
+    if let Some(replay) = &options.replay {
+        let available = u128::from(options.available_memory);
+        let limit = available.saturating_sub(bytes).min(available / 8);
+        replay
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .set_budget(limit);
+    }
     if options.trace.on() {
         eprintln!(
             "streaming_memory global_peak={global} global_retained={retained} window={window} checkpoint={checkpoint} global_states={global_states} window_states={states} total={bytes}"

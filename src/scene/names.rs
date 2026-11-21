@@ -171,10 +171,6 @@ fn cuboid_faces(center: Vec3, half: Vec3) -> [[Vec3; 4]; 6] {
 }
 
 impl Names {
-    pub(super) fn invalidate(&mut self) {
-        self.sampled = None;
-    }
-
     pub(super) fn sample(&mut self, simulation: &Simulation, view: &View) {
         let sampled = Sample {
             seconds: simulation.seconds(),

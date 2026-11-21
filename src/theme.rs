@@ -152,6 +152,27 @@ pub(super) struct FileTile {
 }
 
 impl Theme {
+    pub(super) fn replay_bytes(&self) -> u128 {
+        use crate::model::checkpoint_memory::{buffer_bytes, retained_fields};
+
+        let (directories, directory_edge_widths) = retained_fields!(self, Theme {
+            directories, directory_edge_widths;
+            glyph_style, beam_style, avatar_style, font, blackbody, textured_ground, edge_dash,
+            label_style, territories, name, glyph_ink, glyphs, glyph_material, heat_gain,
+            glyph_texture, file_glyph_transform, file_tile, membership_radii, membership_transform,
+            activity_radii, activity_transform, activity_growth, clear, edge, grid, descending,
+            rising, floor, avatars, glass, directory_node_scale, directory_edge_height,
+            label, diff_added, diff_removed, label_shadow, heading, label_emphasis,
+            label_landmark, avatar_radius, label_height,
+        });
+        buffer_bytes::<f32>(directory_edge_widths.capacity())
+            + buffer_bytes::<Vec<StandardMaterial>>(directories.capacity())
+            + directories
+                .iter()
+                .map(|row| buffer_bytes::<StandardMaterial>(row.capacity()))
+                .sum::<u128>()
+    }
+
     pub(super) fn heat_color(&self, heat: f32) -> Color {
         if self.blackbody {
             let heat = heat.clamp(0.0, 1.0);

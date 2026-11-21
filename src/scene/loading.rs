@@ -188,6 +188,7 @@ fn finish(
 pub(super) fn waiting(
     mut progress: ResMut<WindowProgress>,
     wait: Option<Res<super::PlanningWait>>,
+    playback: Option<Res<Playback>>,
     mut labels: Query<(&mut Text, &mut Node), With<WaitLabel>>,
 ) {
     let latest = progress
@@ -200,14 +201,22 @@ pub(super) fn waiting(
         progress.latest = latest;
     }
     let waiting = wait.is_some_and(|wait| wait.0);
+    let replanning = waiting
+        && playback.is_some_and(|playback| playback.0.replanning_after_replay_limit());
     for (mut text, mut node) in &mut labels {
-        node.display = if waiting {
-            Display::Flex
+        if waiting {
+            node.display = Display::Flex;
+            let planning = progress.latest.map_or_else(
+                || "Planning next window".to_owned(),
+                |update| update.to_string(),
+            );
+            text.0 = if replanning {
+                format!("Replay memory limit reached · {planning}")
+            } else {
+                planning
+            };
         } else {
-            Display::None
-        };
-        if let Some(update) = progress.latest {
-            text.0 = update.to_string();
+            node.display = Display::None;
         }
     }
 }
