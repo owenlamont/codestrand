@@ -35,8 +35,7 @@ const SHAPING_SIZE: f32 = 1024.0;
 const OPACITY: f32 = 0.18;
 const PADDING: f32 = 0.04;
 const GLYPH_PADDING: f32 = 0.08;
-const MIN_INK_HEIGHT: f32 =
-    4.0 * crate::model::framing::WORLD_UNITS_PER_REFERENCE_PIXEL;
+const MIN_INK_PIXELS: f32 = 4.0;
 const PLANE: f32 = crate::model::framing::GLASS_BOTTOM;
 
 #[derive(Component)]
@@ -45,16 +44,26 @@ struct Title {
     ink: Vec2,
 }
 
-fn placement(tile: Tile, ink: Vec2) -> Option<Transform> {
+pub(super) fn placement(tile: Tile, ink: Vec2) -> Transform {
     let [a, _, b, _] = tile.ground();
     let size = (b - a).abs();
     let scale = (size * (1.0 - 2.0 * PADDING) / ink)
         .min(size / (ink + Vec2::splat(2.0 * GLYPH_PADDING * ink.y)))
         .min_element();
-    (ink.y * scale >= MIN_INK_HEIGHT).then(|| {
-        Transform::from_translation(super::ground(a.midpoint(b)).with_y(PLANE))
-            .with_scale(Vec3::new(scale, 1.0, scale))
-    })
+    Transform::from_translation(super::ground(a.midpoint(b)).with_y(PLANE))
+        .with_scale(Vec3::new(scale, 1.0, scale))
+}
+
+fn legible(view: &super::names::View, center: Vec3, ink_height: f32) -> bool {
+    let half = Vec3::Z * (ink_height * 0.5);
+    let [a, b] = [center - half, center + half]
+        .map(|point| view.clip_from_world * point.extend(1.0));
+    a.w > 0.0
+        && b.w > 0.0
+        && ((a.truncate() / a.w - b.truncate() / b.w).truncate()
+            * (view.viewport * 0.5))
+            .length_squared()
+            >= MIN_INK_PIXELS * MIN_INK_PIXELS
 }
 
 pub(super) fn setup(world: &mut World) {
@@ -125,6 +134,16 @@ fn title_fonts() -> FontContext {
 }
 
 pub(super) fn sync(world: &mut World, simulation: &Simulation) {
+    let view = world
+        .query_filtered::<(&Camera, &Transform, &Projection), With<super::SceneCamera>>(
+        )
+        .single(world)
+        .ok()
+        .map(|(camera, transform, projection)| super::names::View {
+            clip_from_world: projection.get_clip_from_view()
+                * transform.to_matrix().inverse(),
+            viewport: super::reference_viewport(camera),
+        });
     let mut query = world.query::<(
         &Title,
         &MeshMaterial3d<StandardMaterial>,
@@ -134,14 +153,19 @@ pub(super) fn sync(world: &mut World, simulation: &Simulation) {
     world.resource_scope(|world, mut materials: Mut<Assets<StandardMaterial>>| {
         for (title, material, mut transform, mut visibility) in query.iter_mut(world) {
             let region = &simulation.layout().repositories[title.repository];
-            let Some(placed) = region
-                .tile
-                .filter(|_| region.live)
-                .and_then(|tile| placement(tile, title.ink))
+            let Some(tile) = simulation.visible_repository_tile(title.repository)
             else {
                 visibility.set_if_neq(Visibility::Hidden);
                 continue;
             };
+            let placed = placement(tile, title.ink);
+            let ink_height = title.ink.y
+                * placement(
+                    region.tile.expect("visible tile has a reservation"),
+                    title.ink,
+                )
+                .scale
+                .z;
             let (_, opacity, _) = simulation.repository_effect(title.repository);
             let color = simulation.theme().label.with_alpha(OPACITY * opacity);
             if let Some(current) = materials.get(&material.0)
@@ -153,7 +177,16 @@ pub(super) fn sync(world: &mut World, simulation: &Simulation) {
                     .base_color = color;
             }
             transform.set_if_neq(placed);
-            visibility.set_if_neq(Visibility::Visible);
+            visibility.set_if_neq(
+                if view
+                    .as_ref()
+                    .is_some_and(|view| legible(view, placed.translation, ink_height))
+                {
+                    Visibility::Visible
+                } else {
+                    Visibility::Hidden
+                },
+            );
         }
     });
 }
@@ -415,23 +448,13 @@ mod tests {
         let ink = Vec2::new(40.0, 1.0);
         let [a, _, b, _] = tile.ground();
         let size = (b - a).abs();
-        let drawn = ink * placement(tile, ink).unwrap().scale.x;
+        let drawn = ink * placement(tile, ink).scale.x;
         assert!(
             (size - drawn)
                 .cmpge(size * (2.0 * PADDING) - Vec2::splat(1e-5))
                 .all()
         );
         assert!((size - drawn).min_element() >= 2.0 * GLYPH_PADDING * drawn.y - 1e-5);
-        assert!(
-            placement(
-                Tile {
-                    high: tile.high * 0.01,
-                    ..tile
-                },
-                ink
-            )
-            .is_none()
-        );
     }
 
     fn mesh_for_test(text: &str, budget: usize) -> Option<(Mesh, Vec2, usize)> {
@@ -498,7 +521,7 @@ mod tests {
             .unwrap();
         let tile = Tile::viewport();
         let [a, _, b, _] = tile.ground();
-        let transform = placement(tile, ink.0).unwrap();
+        let transform = placement(tile, ink.0);
         let (low, high) = positions
             .iter()
             .map(|p| transform.transform_point(Vec3::from_array(*p)))
@@ -528,6 +551,8 @@ mod tests {
         let camera = world
             .spawn((
                 SceneCamera,
+                Camera::default(),
+                Projection::Perspective(bevy::camera::PerspectiveProjection::default()),
                 Transform::from_xyz(0.0, 60.0, 0.0).looking_at(Vec3::ZERO, Vec3::NEG_Z),
             ))
             .id();
@@ -552,5 +577,45 @@ mod tests {
                 .map(|(_, transform, visible)| (*transform, *visible))
                 .eq(before)
         );
+    }
+
+    #[test]
+    fn zoom_reveals_small_ink_without_resizing_the_title() {
+        let mut world = World::new();
+        world.init_resource::<Assets<Mesh>>();
+        world.init_resource::<Assets<StandardMaterial>>();
+        world.insert_resource(Playback(Simulation::two_synthetic_repositories()));
+        setup(&mut world);
+        let camera = world
+            .spawn((
+                SceneCamera,
+                Camera::default(),
+                Projection::Perspective(bevy::camera::PerspectiveProjection::default()),
+                Transform::from_xyz(0.0, 20_000.0, 0.0)
+                    .looking_at(Vec3::ZERO, Vec3::NEG_Z),
+            ))
+            .id();
+        let mut query = world.query::<(&Transform, &Visibility, &Title)>();
+        world.resource_scope(|world, playback: Mut<Playback>| sync(world, &playback.0));
+        let (transform, visibility, _) = query
+            .iter(&world)
+            .find(|(_, _, title)| {
+                world.resource::<Playback>().0.layout().repositories[title.repository]
+                    .live
+            })
+            .unwrap();
+        let before = *transform;
+        assert_eq!(*visibility, Visibility::Hidden);
+        world.get_mut::<Transform>(camera).unwrap().translation.y = 60.0;
+        world.resource_scope(|world, playback: Mut<Playback>| sync(world, &playback.0));
+        let (transform, visibility, _) = query
+            .iter(&world)
+            .find(|(_, _, title)| {
+                world.resource::<Playback>().0.layout().repositories[title.repository]
+                    .live
+            })
+            .unwrap();
+        assert_eq!(*visibility, Visibility::Visible);
+        assert_eq!(*transform, before);
     }
 }

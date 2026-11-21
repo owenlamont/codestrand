@@ -944,14 +944,24 @@ fn recolor_repository_regions(world: &mut World, theme: &Theme) {
     }
 }
 
-fn glass_positions(region: &crate::layout::RepositoryRegion) -> Vec<[f32; 3]> {
-    let corners = region
-        .tile
+fn glass_positions(tile: Option<crate::layout::packing::Tile>) -> Vec<[f32; 3]> {
+    let corners = tile
         .map_or([Vec2::ZERO; 4], crate::layout::packing::Tile::corners)
         .map(model::framing::field_to_world);
     [0, 1, 2, 0, 2, 3]
         .map(|i| [corners[i].x, model::framing::GLASS_BOTTOM, corners[i].y])
         .to_vec()
+}
+
+#[cfg(test)]
+pub(crate) fn title_test_bounds(
+    tile: crate::layout::packing::Tile,
+    ink: Vec2,
+) -> [Vec2; 2] {
+    let transform = titles::placement(tile, ink);
+    let center = transform.translation.xz();
+    let half = ink * transform.scale.xz() * 0.5;
+    [center - half, center + half].map(model::framing::world_to_field)
 }
 
 fn repository_regions(world: &mut World) {
@@ -973,7 +983,7 @@ fn repository_regions(world: &mut World) {
             bevy::render::render_resource::PrimitiveTopology::TriangleList,
             RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
         )
-        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, glass_positions(region))
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, glass_positions(region.tile))
         .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0, 1.0, 0.0]; 6]);
         let mesh = world.resource_mut::<Assets<Mesh>>().add(mesh);
         world.spawn((
@@ -1476,13 +1486,13 @@ fn sync_repository_regions(world: &mut World, simulation: &Simulation) {
     let updates: Vec<_> = query
         .iter_mut(world)
         .map(|(RepositoryGlass(index), mesh, mut visibility)| {
-            let region = &simulation.layout().repositories[*index];
-            *visibility = if region.live {
+            let tile = simulation.visible_repository_tile(*index);
+            *visibility = if tile.is_some() {
                 Visibility::Visible
             } else {
                 Visibility::Hidden
             };
-            (mesh.0.clone(), glass_positions(region))
+            (mesh.0.clone(), glass_positions(tile))
         })
         .collect();
     let mut meshes = world.resource_mut::<Assets<Mesh>>();
@@ -3095,7 +3105,7 @@ mod tests {
             for (glass, mesh, visibility) in query.iter(&world) {
                 let region = &simulation.layout().repositories[glass.0];
                 assert_eq!(*visibility == Visibility::Visible, region.live);
-                let Some(tile) = region.tile else {
+                let Some(tile) = simulation.visible_repository_tile(glass.0) else {
                     continue;
                 };
                 let mesh = world.resource::<Assets<Mesh>>().get(&mesh.0).unwrap();

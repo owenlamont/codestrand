@@ -14,7 +14,8 @@ const BOUND: f32 = 3.5;
 pub(crate) const BIRTH_TICKS: u32 = 45;
 const OPENING_BIRTH_TICKS: usize = 180;
 const OPENING_TICKS: usize = 360;
-const OPENING_EDGE_PIXELS_PER_TICK: f32 = 4.0;
+const OPENING_EDGE_PIXELS_PER_TICK: f32 = 2.0;
+const BIRTH_EDGE_PIXELS_PER_TICK: f32 = 2.0;
 
 /// Ticks whose zoom is fitted together; fixed so counts do not depend on the thread count.
 const ZOOM_CHUNK: usize = 256;
@@ -565,6 +566,10 @@ fn exit_presence(tick: u64, exit: crate::model::RepositoryExit) -> f32 {
     }
     let elapsed = crate::model::ticks_duration(tick.saturating_sub(exit.start))
         / crate::model::ticks_duration(exit.end - exit.start);
+    eased_presence(elapsed)
+}
+
+fn eased_presence(elapsed: f32) -> f32 {
     let progress = |u: f32| {
         // A short acceleration ramp leaves most of the exit at a steady speed.
         let speed = (u / EXIT_EASE_RAMP).min(1.0);
@@ -923,6 +928,7 @@ pub(crate) struct Packing {
     nodes: Vec<Node>,
     reflows: Arc<[reflow::Change]>,
     opening: Arc<[Vec<Option<Tile>>]>,
+    births: Arc<[(usize, f32)]>,
     opening_end: usize,
     labels: Arc<[String]>,
     inputs: Arc<[Vec<Input>]>,
@@ -1063,7 +1069,8 @@ impl Packing {
     }
 
     pub(crate) fn reflow_bytes(ticks: u128, repositories: u128) -> u128 {
-        let opening = 2 * repositories * size_of::<Option<Tile>>() as u128;
+        let opening = repositories
+            * (2 * size_of::<Option<Tile>>() + size_of::<(usize, f32)>()) as u128;
         opening
             + (1 + ticks / held::reflow_spacing() as u128)
                 * (std::mem::size_of::<reflow::Change>() as u128
@@ -1174,6 +1181,7 @@ impl Packing {
             exits
                 .iter()
                 .flatten()
+                .filter(|exit| exit.start < exit.end)
                 .filter_map(|exit| usize::try_from(exit.start).ok())
                 .fold(end, usize::min)
         } else {
@@ -1281,6 +1289,7 @@ impl Packing {
             nodes,
             reflows: reflows.into(),
             opening: Arc::default(),
+            births: Arc::default(),
             opening_end,
             labels: labels.into(),
             inputs: regions.into(),
@@ -1293,6 +1302,7 @@ impl Packing {
             threads,
         }
         .plan_opening()
+        .plan_births(&births)
         .plan_zoom())
     }
 
@@ -1633,6 +1643,44 @@ impl Packing {
         }
         self.opening = [start, end].into();
         self
+    }
+
+    fn plan_births(mut self, births: &[usize]) -> Self {
+        self.births = births
+            .iter()
+            .enumerate()
+            .map(|(repository, &birth)| {
+                let radius = self
+                    .opening
+                    .iter()
+                    .filter_map(|tiles| tiles[repository])
+                    .map(|tile| tile.pixels().max_element() * 0.5)
+                    .fold(0.0_f32, f32::max);
+                (birth, radius)
+            })
+            .collect();
+        self
+    }
+
+    pub(crate) fn visible_tile(
+        &self,
+        repository: usize,
+        tick: usize,
+        region: &RepositoryRegion,
+    ) -> Option<Tile> {
+        let tile = region.tile.filter(|_| region.live)?;
+        let &(birth, opening_radius) = self.births.get(repository)?;
+        if birth == 0 || tick < birth {
+            return Some(tile);
+        }
+        let radius = opening_radius.max(tile.pixels().max_element() * 0.5);
+        let duration = radius / (BIRTH_EDGE_PIXELS_PER_TICK * (1.0 - EXIT_EASE_RAMP));
+        let elapsed = crate::model::count(tick - birth + 1);
+        if elapsed >= duration {
+            return Some(tile);
+        }
+        let scale = eased_presence(1.0 - elapsed / duration);
+        Some(scaled_tile(tile, tile.low.midpoint(tile.high), scale))
     }
 
     pub(crate) fn in_opening(&self, tick: u64) -> bool {
@@ -2178,6 +2226,101 @@ mod tests {
             for (region, input) in sampled.iter().zip(&rows[tick]) {
                 assert_eq!(region.live, input.live, "{} at tick {tick}", input.label);
             }
+        }
+    }
+
+    #[test]
+    fn visible_opening_tiles_grow_from_their_centres() {
+        let mut rows = opening_fixture();
+        for (tick, row) in rows.iter_mut().enumerate() {
+            for (region, birth) in row.iter_mut().zip([0, 1, 15, 56, 112, 239, 359]) {
+                region.live = tick >= birth;
+            }
+        }
+        check_visible_edges(&Packing::before_service(&rows));
+    }
+
+    #[test]
+    fn already_ended_repository_keeps_the_date_range_opening_smooth() {
+        let rows = opening_fixture();
+        let mut inputs = Inputs::new(rows.len());
+        for (tick, mut row) in rows.into_iter().enumerate() {
+            row.truncate(5);
+            for (region, birth) in row.iter_mut().zip([0, 0, 0, 0, 60]) {
+                region.live = tick >= birth;
+            }
+            inputs.push(row);
+        }
+        let mut exits = vec![None; 5];
+        exits[0] = Some(crate::model::RepositoryExit { start: 0, end: 0 });
+        let packing = Packing::from_inputs(inputs, exits.into(), 4.0, None, 1).unwrap();
+        assert_eq!(
+            packing
+                .sample(0)
+                .unwrap()
+                .0
+                .iter()
+                .filter(|region| region.live)
+                .count(),
+            3
+        );
+        check_visible_edges(&packing);
+    }
+
+    fn check_visible_edges(packing: &Packing) {
+        let visible = |tick| {
+            packing
+                .sample(tick)
+                .unwrap()
+                .0
+                .iter()
+                .enumerate()
+                .map(|(repository, region)| {
+                    packing.visible_tile(
+                        repository,
+                        usize::try_from(tick).unwrap(),
+                        region,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut previous = visible(0);
+        for tick in 1..=361 {
+            let current = visible(tick);
+            for (repository, (&before, &after)) in
+                previous.iter().zip(&current).enumerate()
+            {
+                let Some(after) = after else { continue };
+                let before = before.unwrap_or_else(|| {
+                    let center = after.low.midpoint(after.high);
+                    Tile {
+                        low: center,
+                        high: center,
+                    }
+                });
+                let edge = (before.low - after.low)
+                    .abs()
+                    .max((before.high - after.high).abs());
+                let step = (edge * framing::VIEWPORT * 0.5).max_element();
+                assert!(
+                    step <= 4.01,
+                    "tick {tick} repository {repository}: {step:.2} px"
+                );
+                for aspect in [3.0, 12.0, 35.0] {
+                    let ink = Vec2::new(aspect, 1.0);
+                    let a = crate::scene::title_test_bounds(before, ink);
+                    let b = crate::scene::title_test_bounds(after, ink);
+                    let step = ((a[0] - b[0]).abs().max((a[1] - b[1]).abs())
+                        * framing::VIEWPORT
+                        * 0.5)
+                        .max_element();
+                    assert!(
+                        step <= 4.01,
+                        "tick {tick} repository {repository} title: {step:.2} px"
+                    );
+                }
+            }
+            previous = current;
         }
     }
 

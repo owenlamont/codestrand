@@ -278,9 +278,9 @@ easing. The log-scale limit is 0.12 per second when zooming out and 0.08 when zo
 adjustment earlier; the chosen scale never exceeds the tile's current safe fit.
 Each repository title fills the tile as far as its proportions and padding allow.
 The visible letters are centered on the tile surface underneath files and directories.
-The title stays aligned with the tile when you tilt or move the camera. A title is
-hidden until the tile has room for legible letters and padding on every side. Titles
-use bundled IBM Plex Mono and replace unsupported characters with a question mark.
+The title stays aligned with the tile when you tilt or move the camera. Zooming in can
+reveal titles whose letters are too small on screen in the overview. Titles use bundled
+IBM Plex Mono and replace unsupported characters with a question mark.
 Contributor names use a 12-pixel screen font. Directory and touched-file labels use a
 10-pixel screen font and can end in an ellipsis when space runs out.
 
@@ -289,10 +289,11 @@ relative order. A reflow can change the split tree between repository arrivals a
 Tiles and their contents ease together when the new tree improves area shares and
 the gutters stay connected throughout the move.
 Splits clamp to a ground-aspect range of 1:3.5 to 3.5:1, inclusive. Packing reserves
-space ahead of arrivals. The first tile is visible at the start, and later tiles appear
-with their first commit. For the first six seconds of compressed history, or until the
-first exit starts, tile edges interpolate within a fixed split tree in both contributor
-travel modes.
+space ahead of arrivals. The opening shows every repository still active from before
+the selected range. If none are active, the first repository has a lead-in tile.
+Later tiles and their titles grow together from the first commit. During the first six
+seconds of compressed history, or until the first exit starts, tile edges interpolate
+within a fixed split tree in both contributor travel modes.
 Between reflows, tiles and shared gutters partition the field.
 `--gutter` sets spacing using the world distance represented by a pixel in the
 1280×720 reference view. The default is `4` and the range is `0`–`20`, inclusive.

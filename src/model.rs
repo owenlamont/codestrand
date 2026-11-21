@@ -1421,6 +1421,18 @@ impl Simulation {
         )
     }
 
+    pub(super) fn visible_repository_tile(
+        &self,
+        repository: usize,
+    ) -> Option<crate::layout::packing::Tile> {
+        let (_, content) = self.clock.rows(self.state.tick);
+        self.packing.visible_tile(
+            repository,
+            usize::try_from(content).unwrap_or(usize::MAX),
+            &self.layout().repositories[repository],
+        )
+    }
+
     #[cfg_attr(
         not(test),
         expect(clippy::unused_self, reason = "only tests override the needed motion")
