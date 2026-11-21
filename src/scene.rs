@@ -63,6 +63,10 @@ struct PlanningWait(bool);
 #[derive(Resource)]
 pub(super) struct ScriptedCamera(pub Transform);
 
+pub(super) fn font_atlas_limit_exceeded(world: &World) -> bool {
+    world.resource::<styling::FontAtlasBudget>().exceeded
+}
+
 #[derive(Resource)]
 struct SceneTarget(RenderTarget);
 
@@ -588,7 +592,15 @@ fn add_scene_systems(app: &mut App) {
                 .run_if(resource_exists::<Playback>),
         )
         .add_systems(PostUpdate, label_system.run_if(resource_exists::<Playback>))
-        .add_systems(Last, styling::drop_stale_font_atlases);
+        .init_resource::<styling::FontAtlasBudget>()
+        .add_systems(
+            PostUpdate,
+            styling::reserve_font_atlases
+                .in_set(UiSystems::PostLayout)
+                .before(bevy::ui::widget::text_system)
+                .before(bevy::asset::AssetEventSystems)
+                .run_if(resource_exists::<bevy::text::ScaleCx>),
+        );
 }
 
 #[derive(Resource)]
@@ -2153,9 +2165,16 @@ fn sync_fragments(
 }
 
 fn place_camera(world: &mut World, simulation: &Simulation) {
+    let exporting = world.contains_resource::<ExportResolution>();
     let (focus, distance) = camera_projection(world).map_or_else(
         || simulation.view(),
-        |(fov, viewport)| simulation.view_for_projection(fov, viewport),
+        |(fov, viewport)| {
+            if exporting {
+                simulation.overview_for_projection(fov, viewport)
+            } else {
+                simulation.view_for_projection(fov, viewport)
+            }
+        },
     );
     let fitted = PreviewCamera::new((focus, distance));
     let camera = world.get_resource::<PreviewCamera>().unwrap_or(&fitted);
@@ -2164,9 +2183,13 @@ fn place_camera(world: &mut World, simulation: &Simulation) {
         || Transform::from_translation(eye).with_rotation(camera.rotation()),
         |camera| camera.0,
     );
-    let mut query = world.query_filtered::<&mut Transform, With<SceneCamera>>();
-    if let Ok(mut transform) = query.single_mut(world) {
+    let mut query =
+        world.query_filtered::<(&mut Transform, &mut Projection), With<SceneCamera>>();
+    if let Ok((mut transform, mut projection)) = query.single_mut(world) {
         *transform = pose;
+        if let Projection::Perspective(perspective) = &mut *projection {
+            perspective.far = (distance * 4.0).max(1000.0);
+        }
     }
 }
 
@@ -2489,7 +2512,12 @@ fn labels(world: &mut World) {
         )
         .into_iter()
         .chain(world.resource::<Pools>().names.labels.iter().cloned())
-        .filter_map(|label| {
+        .filter_map(|mut label| {
+            let physical_height = camera
+                .physical_viewport_size()
+                .map_or(720.0, |size| model::count_u32(size.y));
+            let pixels_per_ui_unit = physical_height / reference_viewport(&camera).y;
+            label.scale = label.kind.font_scale() / pixels_per_ui_unit;
             let (point, anchor) = if label.kind == model::LabelKind::Avatar {
                 let avatar = avatars.next()?;
                 (

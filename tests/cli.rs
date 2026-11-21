@@ -230,6 +230,19 @@ fn playback_help_describes_calendar_controls_and_rejects_old_flag() {
 }
 
 #[test]
+fn playback_docs_describe_overview_framing_and_world_sizes() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let playback = std::fs::read_to_string(root.join("docs/playback.md")).unwrap();
+    let index = std::fs::read_to_string(root.join("docs/llms.txt")).unwrap();
+    let full = std::fs::read_to_string(root.join("docs/llms-full.txt")).unwrap();
+    for guide in [&playback, &index, &full] {
+        assert!(guide.contains("static overview"));
+        assert!(!guide.contains("detail scale"));
+    }
+    assert!(playback.contains("world-space sizes"));
+}
+
+#[test]
 fn invalid_timing_is_rejected_before_creating_output() {
     for (flag, value) in [
         ("--fps", "0"),

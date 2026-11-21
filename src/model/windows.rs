@@ -43,7 +43,7 @@ impl Simulation {
         self.plan_waiting_births(options, &clock, &schedule);
     }
 
-    fn finish_window(&mut self, end: Time) -> anyhow::Result<u64> {
+    fn finish_window(&mut self, end: Time, complete: bool) -> anyhow::Result<u64> {
         let begin = self.window.as_ref().expect("planning window").state.tick;
         {
             let _phase = self.trace.phase(Phase::Caption);
@@ -55,7 +55,11 @@ impl Simulation {
             );
         }
         self.plan_titles();
-        let boundary = self.clock.present(end).ticks(true);
+        let boundary = if complete {
+            self.end_tick()
+        } else {
+            self.clock.present(end).ticks(true)
+        };
         {
             let _phase = self.trace.phase(Phase::CheckpointReplay);
             self.trace.count_replay(boundary.saturating_sub(begin));
@@ -164,11 +168,16 @@ impl Simulation {
             };
             {
                 let _phase = trace.phase(Phase::CheckSchedule);
+                let exit_tail = complete_schedule.present_tail_tick(
+                    history,
+                    super::lifecycle::exit_end(&self.repository_exits),
+                );
                 Self::check_schedule(
                     all_events,
                     options,
                     repositories,
                     &complete_schedule,
+                    Some(exit_tail),
                 )?;
             }
             {
@@ -260,7 +269,8 @@ impl Simulation {
                     commit + self.offset
                 );
             }
-            let boundary = self.finish_window(end)?;
+            let complete = end >= duration;
+            let boundary = self.finish_window(end, complete)?;
             let elapsed = started.elapsed();
             if options.trace.on() {
                 eprintln!(
@@ -279,7 +289,7 @@ impl Simulation {
             if let Some(publish) = &mut publish {
                 let ready = super::streaming::Ready {
                     end: boundary,
-                    complete: end >= duration,
+                    complete,
                     unpadded: duration,
                 };
                 let frame = self.window_packet(events.clone(), ready);
@@ -287,7 +297,7 @@ impl Simulation {
                     return Ok(self);
                 }
             }
-            if end >= duration {
+            if complete {
                 break;
             }
             self.travel
@@ -348,6 +358,7 @@ impl Simulation {
             finals: self.finals.clone(),
             departures: self.departures.clone(),
             repository_ends: self.repository_ends.clone(),
+            repository_exits: self.repository_exits.clone(),
             caption_style: self.caption_style,
             caption_plan: self.caption_plan.clone(),
             packing: self.packing.clone(),

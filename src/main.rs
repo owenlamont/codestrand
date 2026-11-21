@@ -252,13 +252,13 @@ struct Source {
     /// Bot travel policy: fade across or walk the shortest gutter route.
     #[arg(long, value_enum, default_value = "fade")]
     bot_travel: model::BotTravel,
-    /// Maximum avatar travel speed in pixels/second at the 1280x720 reference size.
-    #[arg(long, default_value_t = 480.0, value_parser = avatar_speed)]
+    /// Maximum avatar travel speed in world units per second.
+    #[arg(long, default_value_t = 31.4, value_parser = avatar_speed)]
     avatar_max_speed: f32,
     /// Avatar disc diameter relative to the original size, in both playback modes (0.5–2).
     #[arg(long, default_value_t = 2.0, value_parser = avatar_size)]
     avatar_scale: f32,
-    /// Visible spacing between repository tiles in reference pixels at full detail (0–20).
+    /// Visible spacing between repository tiles in 1280×720 reference pixels (0–20).
     #[arg(long, default_value_t = 4.0, value_parser = gutter_pixels)]
     gutter: f32,
     /// File heat half-life in canonical playback seconds.
@@ -509,7 +509,8 @@ impl Source {
             replay_everything: false,
             region_threads: 0,
             bot_travel: self.bot_travel,
-            avatar_max_speed: self.avatar_max_speed,
+            avatar_max_speed: self.avatar_max_speed
+                / model::framing::WORLD_UNITS_PER_REFERENCE_PIXEL,
             avatar_size: self.avatar_scale,
             gutter: self.gutter,
             fragment_speed: self.fragment_speed,
@@ -773,10 +774,10 @@ fn idle_seconds(value: &str) -> Result<f32, String> {
 
 fn avatar_speed(value: &str) -> Result<f32, String> {
     let speed = positive_seconds(value)?;
-    if speed >= 1.0 {
+    if speed >= 0.1 {
         Ok(speed)
     } else {
-        Err("avatar speed must be at least one reference pixel/second".to_owned())
+        Err("avatar speed must be at least 0.1 world units per second".to_owned())
     }
 }
 
@@ -922,9 +923,10 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
             }
             let encoder = encoding.start(fps, resolution)?;
             export::prepare(&directory)?;
+            let (app, target) = scene::headless(simulation, title, fps, resolution);
             export::render(
                 &directory,
-                scene::headless(simulation, title, fps, resolution),
+                (app, target),
                 frames,
                 fps,
                 encoder,

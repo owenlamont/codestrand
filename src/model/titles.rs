@@ -63,9 +63,8 @@ pub(super) fn obstacles(sim: &Simulation) -> Vec<(usize, Rect)> {
 }
 
 const INSET: f32 = 34.0;
-/// Title text scale at a 6 pixel floor, against 14 pixels.
-pub(super) const MIN_SCALE: f32 = 6.0 / 14.0;
 const EDGE_INSET: f32 = 4.0;
+const ELISION_HYSTERESIS: f32 = 2.0;
 const STEP: u32 = 15;
 const CHANGE_COST: f64 = 20_000.0;
 
@@ -110,26 +109,39 @@ impl Title {
         })
     }
 }
-/// A title at one size for every tile, elided to the tile width; `None` when too short.
-///
-/// `detail` scales the corner inset with the avatars, falling back to [`EDGE_INSET`] on
-/// tiles too small to keep an avatar diameter clear; `lettering` scales the text, never
-/// below [`MIN_SCALE`].
 fn title(
     tile: crate::layout::packing::Tile,
     label: &str,
     height: f32,
     corner: u8,
-    detail: f32,
-    lettering: f32,
+    growth: f32,
+) -> Option<Title> {
+    stable_title(tile, label, height, corner, growth, None)
+}
+
+fn stable_title(
+    tile: crate::layout::packing::Tile,
+    label: &str,
+    height: f32,
+    corner: u8,
+    growth: f32,
+    previous_length: Option<usize>,
 ) -> Option<Title> {
     let bounds = Rect::from_corners(tile.low * HALF, tile.high * HALF);
-    let scale = lettering.max(MIN_SCALE);
+    let scale = super::LabelKind::Repository.font_scale() * growth;
     let width = 8.6 * scale * super::count(label.chars().count()) + 8.01;
     let room = ((bounds.width() - width) * 0.5)
         .min((bounds.height() - height * scale - 4.0) * 0.5);
-    let inset = (INSET * detail).min(room.max(EDGE_INSET));
-    inset_title(bounds.inflate(-inset), label, height, corner, lettering)
+    let inset = INSET.min(room.max(EDGE_INSET));
+    inset_title(
+        bounds.inflate(-inset),
+        label,
+        height,
+        corner,
+        scale,
+        growth,
+        previous_length,
+    )
 }
 
 fn inset_title(
@@ -137,13 +149,22 @@ fn inset_title(
     label: &str,
     height: f32,
     corner: u8,
-    lettering: f32,
+    scale: f32,
+    growth: f32,
+    previous_length: Option<usize>,
 ) -> Option<Title> {
-    let scale = lettering.max(MIN_SCALE);
-    let fits = ((tile.width() - 8.0) / (8.6 * scale)).floor();
+    let character_width = 8.6 * scale;
+    let available = tile.width() - 8.0;
+    let fits = (available / character_width).floor();
     if fits < 1.0 || tile.height() < height * scale + 4.0 {
         return None;
     }
+    let stable_fit = ((available - ELISION_HYSTERESIS * growth) / character_width)
+        .floor()
+        .max(1.0);
+    let fits = previous_length.map_or(fits, |length| {
+        fits.min(stable_fit.max(super::count(length)))
+    });
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
@@ -155,7 +176,9 @@ fn inset_title(
         if corner & 1 == 0 {
             tile.min.x
         } else {
-            tile.max.x - size.x
+            let full_width =
+                8.0 + character_width * super::count(label.chars().count());
+            (tile.max.x - full_width).max(tile.min.x)
         },
         if corner & 2 == 0 {
             tile.min.y + size.y
@@ -226,8 +249,7 @@ impl Simulation {
                 &region.label,
                 self.state.geometry.label_height,
                 corner,
-                self.state.detail,
-                self.state.lettering,
+                self.state.field_growth,
             )
         }) else {
             return 0.0;
@@ -345,7 +367,9 @@ impl Simulation {
         let state = &mut *self.state;
         let sample =
             usize::try_from(state.tick / u64::from(STEP)).expect("bounded tick");
-        state.titles.clear();
+        state
+            .titles
+            .retain(|&index, _| state.layout.repositories[index].tile.is_some());
         for (index, region) in state.layout.repositories.iter().enumerate() {
             let Some(tile) = region.tile else { continue };
             let row = self.title_plan.get(index).map_or(&[][..], Vec::as_slice);
@@ -358,14 +382,19 @@ impl Simulation {
                     .unwrap_or(0)
             };
             let corner = at(sample);
-            let Some(mut current) = title(
+            let previous = state
+                .titles
+                .get(&index)
+                .map(|title| title.text.chars().count());
+            let Some(mut current) = stable_title(
                 tile,
                 &region.label,
                 state.geometry.label_height,
                 corner,
-                state.detail,
-                state.lettering,
+                state.field_growth,
+                previous,
             ) else {
+                state.titles.remove(&index);
                 continue;
             };
             if let Some(change) =
@@ -379,8 +408,7 @@ impl Simulation {
                         &region.label,
                         state.geometry.label_height,
                         at(change - 1),
-                        state.detail,
-                        state.lettering,
+                        state.field_growth,
                     )
                     .map(|t| t.point);
                     current.opacity = super::ticks_duration(age) / 0.3;
@@ -428,7 +456,6 @@ mod tests {
             "repo",
             20.0,
             0,
-            1.0,
             1.0,
         )
         .unwrap();
@@ -485,13 +512,35 @@ mod tests {
             high: Vec2::new(width, 0.5),
         };
         let label = "a-long-repository-name";
-        let wide = title(tile(0.9), label, 20.0, 0, 1.0, 1.0).unwrap();
-        let narrow_tile = tile(0.14);
-        let narrow = title(narrow_tile, label, 20.0, 0, 1.0, 1.0).unwrap();
+        let wide = title(tile(0.9), label, 20.0, 0, 1.0).unwrap();
+        let narrow_tile = tile(0.12);
+        let narrow = title(narrow_tile, label, 20.0, 0, 1.0).unwrap();
         assert_eq!(wide.text, label);
         assert!(narrow.text.ends_with('…'));
         assert_eq!(wide.size.y, narrow.size.y);
         assert!(narrow.rect().max.x <= narrow_tile.high.x * HALF.x - EDGE_INSET);
+    }
+
+    #[test]
+    fn right_title_origin_moves_continuously_through_elision() {
+        let scale = super::super::LabelKind::Repository.font_scale();
+        let threshold = 8.0 + 8.6 * scale * 6.0;
+        let title = |width: f32| {
+            inset_title(
+                Rect::new(-width, 0.0, 0.0, 30.0),
+                "repository",
+                10.0,
+                1,
+                scale,
+                1.0,
+                None,
+            )
+            .unwrap()
+        };
+        let narrow = title(threshold - 0.01);
+        let wide = title(threshold + 0.01);
+        assert_ne!(narrow.text, wide.text);
+        assert!((narrow.point.x - wide.point.x).abs() < 0.03);
     }
 
     #[test]
@@ -500,7 +549,7 @@ mod tests {
             low: Vec2::ZERO,
             high: Vec2::new(135.0, 150.0) / HALF,
         };
-        let caption = title(tile, "codestrand", 20.0, 0, 1.0, 1.0).unwrap();
+        let caption = title(tile, "codestrand", 20.0, 0, 1.0).unwrap();
         assert_eq!(caption.text, "codestrand");
         assert!(caption.point.x < INSET);
         let mut previous = caption.point;
@@ -509,7 +558,7 @@ mod tests {
                 high: Vec2::new(f32::from(width), 150.0) / HALF,
                 ..tile
             };
-            let next = title(growing, "codestrand", 20.0, 0, 1.0, 1.0).unwrap();
+            let next = title(growing, "codestrand", 20.0, 0, 1.0).unwrap();
             assert_eq!(next.text, "codestrand");
             assert!(next.point.distance(previous) < 1.0);
             previous = next.point;
@@ -522,68 +571,9 @@ mod tests {
             low: Vec2::new(-0.2, -0.05),
             high: Vec2::new(0.2, 0.05),
         };
-        let edge = title(tile, "repository", 20.0, 0, 1.0, 1.0).unwrap();
+        let edge = title(tile, "repository", 20.0, 0, 1.0).unwrap();
         assert!(edge.rect().min.cmpge(tile.low * HALF + EDGE_INSET).all());
         assert!(edge.rect().max.cmple(tile.high * HALF - EDGE_INSET).all());
-    }
-
-    #[test]
-    fn titles_stop_shrinking_at_the_name_floor() {
-        let low = title(
-            crate::layout::packing::Tile::viewport(),
-            "repo",
-            20.0,
-            0,
-            1.0,
-            0.3,
-        );
-        assert_eq!(low.unwrap().scale, MIN_SCALE);
-    }
-
-    #[test]
-    fn directory_and_file_labels_shrink_with_their_tile_and_fit_its_width() {
-        let count = 16;
-        let mut events: Vec<_> = (0..count)
-            .flat_map(|index| {
-                let mut history = crate::timeline::synthetic();
-                crate::repositories::namespace(&mut history, index);
-                for event in &mut history {
-                    event.seconds += i64::try_from(index).unwrap() * 86_400;
-                }
-                history
-            })
-            .collect();
-        events.sort_by_key(|event| event.seconds);
-        let labels: Vec<_> = (0..count).map(|index| format!("repo{index}")).collect();
-        let options = crate::model::Options {
-            seconds_per_day: 0.05,
-            max_idle_seconds: 0.05,
-            ..crate::model::Options::default()
-        };
-        let mut sim = crate::model::Simulation::build(
-            events,
-            &options,
-            &crate::theme::Theme::neon(),
-            &crate::contributors::Mappings::default(),
-            &[],
-            &labels,
-            &mut None,
-        )
-        .unwrap();
-        sim.advance_to(crate::model::frames_for(sim.duration(), 60).unwrap(), 60);
-        let long = "a-very-long-directory-name/".repeat(8);
-        let mut shrunk = false;
-        for (index, dir) in sim.state.layout.dirs() {
-            let (text, scale) = sim.tile_label(index, long.clone());
-            let tile = sim.state.layout.repositories[dir.repository].tile.unwrap();
-            let width =
-                super::super::names::rect(Vec2::ZERO, &text, scale, 20.0).width();
-            assert!(scale <= dir.scale.max(MIN_SCALE));
-            assert!(scale <= sim.state.lettering.max(MIN_SCALE));
-            assert!(width <= (tile.high.x - tile.low.x) * HALF.x, "{text}");
-            shrunk |= scale < 1.0;
-        }
-        assert!(shrunk);
     }
 
     #[test]
@@ -593,7 +583,7 @@ mod tests {
             high: Vec2::splat(0.5),
         };
         for corner in 0..4 {
-            let t = title(tile, "repository", 24.0, corner, 1.0, 1.0).unwrap();
+            let t = title(tile, "repository", 24.0, corner, 1.0).unwrap();
             assert!(
                 t.rect()
                     .min

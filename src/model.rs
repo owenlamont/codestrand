@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
     ops::Range,
+    sync::Arc,
     time::Duration,
 };
 
@@ -17,6 +18,9 @@ use crate::{
 pub(crate) mod caption;
 pub(crate) mod framing;
 mod lifecycle;
+pub(crate) use lifecycle::RepositoryExit;
+#[cfg(test)]
+pub(crate) use lifecycle::exits_from_starts;
 #[cfg(test)]
 mod measurement;
 mod names;
@@ -522,6 +526,15 @@ pub(super) enum LabelKind {
     Activity,
 }
 
+impl LabelKind {
+    pub(super) const fn font_scale(self) -> f32 {
+        match self {
+            Self::Repository | Self::Avatar => 12.0 / 14.0,
+            Self::Detail | Self::Landmark | Self::Activity => 10.0 / 14.0,
+        }
+    }
+}
+
 #[derive(Clone)]
 #[cfg_attr(test, derive(Debug))]
 pub(super) struct Label {
@@ -535,11 +548,9 @@ pub(super) struct Label {
 
 #[derive(Clone, Debug)]
 struct State {
+    field_growth: f32,
+    field: crate::layout::packing::Tile,
     region_depth: f32,
-    /// Packing detail scale: fixed sizes shrink with it as if the camera pulled back.
-    detail: f32,
-    /// Repository title scale, shared by every tile.
-    lettering: f32,
     tick: u64,
     layout: Layout,
     avatars: Vec<Avatar>,
@@ -592,6 +603,7 @@ pub(super) struct Simulation {
     finals: Vec<u16>,
     departures: Vec<Time>,
     repository_ends: Vec<Time>,
+    repository_exits: Arc<[Option<RepositoryExit>]>,
     pub caption_style: caption::Style,
     caption_plan: Vec<caption::Transition>,
     packing: crate::layout::packing::Packing,
@@ -658,7 +670,7 @@ impl Simulation {
             options.max_idle_seconds,
             |_| 0,
         );
-        Self::check_schedule(events, options, repositories, &schedule)
+        Self::check_schedule(events, options, repositories, &schedule, None)
     }
 
     fn check_repository_endings(
@@ -700,14 +712,20 @@ impl Simulation {
         options: &Options,
         repositories: &[String],
         schedule: &Schedule,
+        exit_tail: Option<u64>,
     ) -> anyhow::Result<()> {
-        let (_, endings) = lifecycle::plan(
-            events,
-            schedule,
-            options,
-            options.selected_range(events.len()),
-        );
-        let duration = lifecycle::duration(schedule, &endings, options.fragment_pace());
+        let pace = options.fragment_pace();
+        let duration = if let Some(exit_tail) = exit_tail {
+            lifecycle::activity_duration(schedule, pace).max(tick_time(exit_tail))
+        } else {
+            let (_, endings) = lifecycle::plan(
+                events,
+                schedule,
+                options,
+                options.selected_range(events.len()),
+            );
+            lifecycle::duration(schedule, &endings, pace)
+        };
         planning_memory::check(events, options, repositories, schedule, duration)?;
         Ok(())
     }
@@ -896,7 +914,17 @@ impl Simulation {
         };
         {
             let _phase = trace.phase(Phase::CheckSchedule);
-            Self::check_schedule(events, options, repositories, &schedule)?;
+            let exit_tail = schedule.present_tail_tick(
+                history,
+                lifecycle::exit_end(&self.repository_exits),
+            );
+            Self::check_schedule(
+                events,
+                options,
+                repositories,
+                &schedule,
+                Some(exit_tail),
+            )?;
         }
         let preferences = std::mem::take(&mut self.travel).preferences();
         {
@@ -1055,6 +1083,7 @@ impl Simulation {
         let prior_active = prior_activity(&events[..start], repositories.len());
         let (departures, repository_ends) =
             lifecycle::plan(events, &schedule, options, start..end);
+        let repository_exits = lifecycle::repository_exits(&repository_ends);
         let first_arrivals = lifecycle::arrivals(events, start..end);
         let finals =
             lifecycle::finals(&events[start..end], &schedule.starts, &departures);
@@ -1064,6 +1093,7 @@ impl Simulation {
             finals,
             departures,
             repository_ends,
+            repository_exits,
             caption_style: caption::Style::default(),
             caption_plan: Vec::new(),
             packing: crate::layout::packing::Packing::default(),
@@ -1171,7 +1201,7 @@ impl Simulation {
             active[event.repository] = true;
         }
         let mut sampled_events = 0;
-        let ticks = frames_for(self.duration(), 60)
+        let ticks = frames_for_ticks(self.end_tick(), 60)
             .expect("multi-repository playback fits the supported frame range");
         self.trace.count_replay(ticks.into());
         let mut samples = crate::layout::packing::Inputs::new(
@@ -1212,26 +1242,17 @@ impl Simulation {
             }
         }
         self.trace.add_ticks(&mut self.tick_times);
-        samples.fade_from(
-            &self.repository_ends,
-            lifecycle::REPOSITORY_EXIT,
-            lifecycle::REFLOW,
-        );
         self.packing = crate::layout::packing::Packing::from_inputs(
             samples,
+            self.repository_exits.clone(),
             self.state.gutter,
             uncapped.then_some(activation.as_slice()),
             threads,
-        )?
-        .with_endings(
-            &self.repository_ends,
-            lifecycle::REPOSITORY_EXIT,
-            lifecycle::REFLOW,
-        );
+        )?;
         self.state = SharedState(self.initial.clone());
-        self.state.region_depth = framing::depth_bound();
-        self.state.detail = self.packing.detail();
-        self.state.lettering = self.packing.lettering();
+        self.state.field_growth = self.packing.overview_growth();
+        self.state.field = self.packing.field();
+        self.state.region_depth = framing::depth_bound() * self.state.field_growth;
         if let Some((regions, offsets, scales)) = self.packing.sample(0) {
             self.state.layout.place_regions(
                 regions,
@@ -1251,11 +1272,17 @@ impl Simulation {
         if let Some(window) = &self.window {
             return self.clock.present(window.end);
         }
-        lifecycle::duration(
-            &self.schedule,
-            &self.repository_ends,
-            self.state.fragment_pace,
-        )
+        self.activity_duration()
+            .max(tick_time(self.exit_tail_tick()))
+    }
+
+    fn activity_duration(&self) -> Time {
+        lifecycle::activity_duration(&self.schedule, self.state.fragment_pace)
+    }
+
+    fn exit_tail_tick(&self) -> u64 {
+        self.clock
+            .present_tail_tick(lifecycle::exit_end(&self.repository_exits))
     }
 
     /// The tick playback ends on, from the same padded schedule eager and streamed
@@ -1263,12 +1290,10 @@ impl Simulation {
     pub(crate) fn end_tick(&self) -> u64 {
         match self.ready_end {
             Some(ready) if !ready.complete => ready.end,
-            _ => lifecycle::duration(
-                &self.schedule,
-                &self.repository_ends,
-                self.state.fragment_pace,
-            )
-            .ticks(true),
+            _ => self
+                .activity_duration()
+                .ticks(true)
+                .max(self.exit_tail_tick()),
         }
     }
 
@@ -1593,7 +1618,7 @@ impl Simulation {
                 .labels_for_detail(|_| true)
                 .iter()
                 .filter(|l| l.kind != LabelKind::Avatar)
-                .map(|l| titles::label_bounds(self, l))
+                .filter_map(|label| self.state.overlay_label_bounds(label))
                 .chain(caption::frame_text_rects())
                 .collect();
             self.tick_times.laps.end(Phase::TickLabels);
@@ -1638,23 +1663,14 @@ impl Simulation {
 
     /// Default field camera focus and distance along [`view_direction`].
     pub(super) fn view(&self) -> (Vec3, f32) {
-        (self.state.focus, self.state.distance)
+        self.state.overview()
     }
 
     pub(super) fn view_for_projection(&self, fov: f32, viewport: Vec2) -> (Vec3, f32) {
-        let (focus, distance) = self.view();
+        let (focus, distance) = self.overview_for_projection(fov, viewport);
         if fov == framing::FOV && viewport == framing::VIEWPORT {
             return (focus, distance);
         }
-        let ratio = ((framing::FOV * 0.5).tan() / (fov * 0.5).tan())
-            .max(
-                (framing::FOV * 0.5).tan()
-                    * (framing::VIEWPORT.x / framing::VIEWPORT.y)
-                    / ((fov * 0.5).tan() * viewport.x / viewport.y),
-            )
-            .max(1.0);
-        let depth = self.state.region_depth;
-        let distance = distance * ratio + depth * (ratio - 1.0);
         (
             focus,
             distance.max(framing::distance(
@@ -1663,6 +1679,25 @@ impl Simulation {
                 fov,
                 viewport,
             )),
+        )
+    }
+
+    pub(super) fn overview_for_projection(
+        &self,
+        fov: f32,
+        viewport: Vec2,
+    ) -> (Vec3, f32) {
+        let (focus, distance) = self.view();
+        let ratio = ((framing::FOV * 0.5).tan() / (fov * 0.5).tan())
+            .max(
+                (framing::FOV * 0.5).tan()
+                    * (framing::VIEWPORT.x / framing::VIEWPORT.y)
+                    / ((fov * 0.5).tan() * viewport.x / viewport.y),
+            )
+            .max(1.0);
+        (
+            focus,
+            distance * ratio + self.state.region_depth * (ratio - 1.0),
         )
     }
 
@@ -1680,7 +1715,7 @@ impl Simulation {
     }
 
     pub(super) fn avatar_disc_scale(&self) -> f32 {
-        self.state.avatar_scale * self.state.avatar_size * self.state.detail
+        self.state.avatar_scale * self.state.avatar_size
     }
 
     pub(super) fn commit(&self) -> usize {
@@ -1734,8 +1769,7 @@ impl Simulation {
                 continue;
             }
             for &(target, weight, ..) in &pulse.targets {
-                if let Some(to) = self.state.point(target) {
-                    let from = self.state.beam_start(pulse.author, to);
+                if let Some((from, to)) = self.visible_ray(pulse, target) {
                     beams.push(Beam {
                         author: pulse.author,
                         from,
@@ -1763,6 +1797,30 @@ impl Simulation {
             && !self.travel.travelling(pulse.author, self.state.tick)
     }
 
+    fn visible_ray(&self, pulse: &Pulse, target: Target) -> Option<(Vec3, Vec3)> {
+        let to = self.state.point(target)?;
+        let from = self.state.beam_start(pulse.author, to);
+        let low = Vec2::new(from.x, from.z);
+        let high = Vec2::new(to.x, to.z);
+        let crosses =
+            self.layout()
+                .repositories
+                .iter()
+                .enumerate()
+                .any(|(index, region)| {
+                    index != pulse.repository
+                        && region.tile.is_some_and(|tile| {
+                            let corners = tile.ground();
+                            slots::segment(
+                                low,
+                                high,
+                                bevy::math::Rect::from_corners(corners[0], corners[2]),
+                            )
+                        })
+                });
+        (!crosses).then_some((from, to))
+    }
+
     #[cfg(test)]
     pub(super) fn fragments(&self) -> Vec<Fragment> {
         self.fragments_for_detail(|_| 1.0)
@@ -1788,10 +1846,9 @@ impl Simulation {
             for &(target, _, insertions, removals) in
                 pulse.targets.iter().take(FRAGMENT_TARGETS)
             {
-                let Some(to) = self.state.point(target) else {
+                let Some((from, to)) = self.visible_ray(pulse, target) else {
                     continue;
                 };
-                let from = self.state.beam_start(pulse.author, to);
                 let sample_detail = match target {
                     Target::File(id) => {
                         self.layout().file(id).map_or(0.0, |file| detail(file.dir))
@@ -1893,18 +1950,14 @@ impl Simulation {
                     })
             })
     }
-    /// A directory or file label scaled with its tile's files, never above the repository
-    /// titles, elided to the tile width.
+    /// Elides a detail label to its tile's overview width at the reference resolution.
     fn tile_label(&self, dir: usize, text: String) -> (String, f32) {
-        let dir = self.state.layout.dir(dir);
-        let scale = dir
-            .scale
-            .min(self.state.lettering)
-            .clamp(titles::MIN_SCALE, 1.0);
-        let Some(tile) = self.state.layout.repositories[dir.repository].tile else {
+        let repository = self.state.layout.dir(dir).repository;
+        let scale = LabelKind::Landmark.font_scale();
+        let Some(tile) = self.state.layout.repositories[repository].tile else {
             return (text, scale);
         };
-        let width = (tile.high.x - tile.low.x) * titles::HALF.x;
+        let width = tile.pixels().x / self.state.field_growth;
         #[expect(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
@@ -2035,9 +2088,9 @@ fn file_identities(state: &State) -> HashMap<String, FileIdentity> {
 impl State {
     fn new(layout: Layout, geometry: Geometry, options: &Options) -> Self {
         Self {
+            field_growth: 1.0,
+            field: crate::layout::packing::Tile::inset(0.0),
             region_depth: 0.0,
-            detail: 1.0,
-            lettering: 1.0,
             tick: 0,
             layout,
             avatars: Vec::new(),
@@ -2068,7 +2121,7 @@ impl State {
     }
 
     fn avatar_radius(&self) -> f32 {
-        6.5 * self.avatar_scale * self.avatar_size * self.detail * ARRIVAL_SCALE + 1.0
+        6.5 * self.avatar_scale * self.avatar_size * ARRIVAL_SCALE + 1.0
     }
 
     fn author(&mut self, contributor: &Contributor, now: Time) -> usize {
@@ -2426,6 +2479,15 @@ impl State {
             Target::File(id) => self.layout.file(id).map(|file| ground(file.position)),
             Target::Dir(index) => Some(ground(self.layout.dir(index).position)),
         }
+    }
+
+    fn overview(&self) -> (Vec3, f32) {
+        let tile = crate::layout::packing::Tile::viewport();
+        let centre = framing::field_to_world(tile.low.midpoint(tile.high));
+        let focus = self.focus + ground(centre * (1.0 - self.field_growth));
+        let distance = (self.distance - framing::FIELD_HEIGHT) * self.field_growth
+            + framing::FIELD_HEIGHT;
+        (focus, distance)
     }
 
     fn scale(&self) -> f32 {
@@ -3316,7 +3378,7 @@ mod tests {
     }
 
     #[test]
-    fn repositories_beyond_full_detail_play_with_scaled_avatars() {
+    fn crowded_fields_keep_avatar_size() {
         let (events, labels) = short_repository_history(56);
         let options = Options {
             seconds_per_day: 0.05,
@@ -3334,13 +3396,11 @@ mod tests {
             &mut None,
         )
         .unwrap();
-        let detail = simulation.packing.detail();
-        assert!(detail < 1.0);
         for frame in 0..=frames_for(simulation.duration(), 60).unwrap() {
             simulation.advance_to(frame, 60);
             assert_eq!(
                 simulation.avatar_disc_scale(),
-                simulation.state.avatar_scale * options.avatar_size * detail
+                simulation.state.avatar_scale * options.avatar_size
             );
         }
         simulation.assert_stitched_travel_rules();
@@ -3383,7 +3443,8 @@ mod tests {
                 &events,
                 &options,
                 &vec![String::new(); 5],
-                &schedule
+                &schedule,
+                None,
             )
             .is_err()
         );

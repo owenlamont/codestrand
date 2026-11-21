@@ -101,7 +101,7 @@ mod tests {
         sim.advance_to(180, 60);
         sim.state.avatars.truncate(2);
         sim.state.pulses.clear();
-        let scale = sim.state.name_scale();
+        let scale = crate::model::LabelKind::Avatar.font_scale();
         let size =
             rect(Vec2::ZERO, "Contributor 0", scale, sim.theme().label_height).size();
         let distance = sim.state.avatar_radius() + 4.0 / 3.0;
@@ -291,7 +291,7 @@ mod tests {
             rect(
                 Vec2::ZERO,
                 &avatar.name,
-                sim.state.name_scale(),
+                crate::model::LabelKind::Avatar.font_scale(),
                 sim.state.geometry.label_height,
             )
             .size(),

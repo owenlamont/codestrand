@@ -7,31 +7,37 @@ use super::{Simulation, framing};
 use crate::layout::{Layout, packing::Tile};
 mod gaps;
 
-pub(crate) fn largest_empty(tiles: &[Tile]) -> f32 {
+const EMPTY_RECTANGLE_WORK: usize = 1_000_000;
+const DEFINITIONS: &str = "Tile and content areas use fixed world coordinates expressed in reference-field units. Coverage and empty fractions normalize the grown field back to the reference viewport. Glass tiles are disjoint world rectangles represented in this field, inside a 24 reference-pixel margin plus the caption reservation below, separated by shared gutters. Largest empty rectangle is the exact maximum axis-aligned rectangle outside their union, including the margin, or null when the work budget is reached. Content is the world-XZ AABB of current directory discs and file positions padded by their model footprint size, converted with the fixed affine field scale; not projected ground-plane area, glyph ink or opaque pixel occupancy. Content fill divides content-envelope area by tile area; overall fill is area weighted. The first repository owns the empty lead-in tile. Weights are live file and directory counts, held until their shares drift and then eased over two seconds; empty active repositories weigh one until archived. Files and directories count live files not leaving and live directories. Samples include every canonical 1/60 second. Content AABBs are clipped to their own tiles; actual footprints use convex outlines. Content largest-empty rectangles use fully covered cells on a 160x90 grid inside the usable tile viewport, excluding the caption reservation, with one grid cell of boundary uncertainty.";
+
+fn largest_empty(tiles: &[Tile]) -> Option<f32> {
+    let count = tiles.len().max(1);
+    let setup = count.saturating_mul(4 + 4 * count.ilog2() as usize);
+    let mut budget = EMPTY_RECTANGLE_WORK.checked_sub(setup)?;
     let mut edges = vec![-1.0, 1.0];
     for tile in tiles {
         edges.extend([tile.low.x, tile.high.x]);
     }
     edges.sort_by(f32::total_cmp);
     edges.dedup();
+    let mut tiles = tiles.to_vec();
+    tiles.sort_by(|a, b| a.low.y.total_cmp(&b.low.y));
     let mut largest = 0.0_f32;
     for (i, &left) in edges.iter().enumerate() {
         for &right in &edges[i + 1..] {
-            let mut blocked: Vec<_> = tiles
+            budget = budget.checked_sub(count)?;
+            let blocked = tiles
                 .iter()
-                .filter(|tile| tile.low.x < right && tile.high.x > left)
-                .map(|tile| (tile.low.y, tile.high.y))
-                .collect();
-            blocked.sort_by(|a, b| a.0.total_cmp(&b.0));
+                .filter(|tile| tile.low.x < right && tile.high.x > left);
             let mut bottom = -1.0_f32;
-            for (low, high) in blocked {
-                largest = largest.max((right - left) * (low - bottom) * 0.25);
-                bottom = bottom.max(high);
+            for tile in blocked {
+                largest = largest.max((right - left) * (tile.low.y - bottom) * 0.25);
+                bottom = bottom.max(tile.high.y);
             }
             largest = largest.max((right - left) * (1.0 - bottom) * 0.25);
         }
     }
-    largest
+    Some(largest)
 }
 
 #[derive(Serialize)]
@@ -62,7 +68,7 @@ struct Repository {
 pub(crate) struct Metrics {
     pub coverage: f32,
     pub blank_fraction: f32,
-    pub largest_empty_rectangle: f32,
+    pub largest_empty_rectangle: Option<f32>,
     content_fill: f32,
     repositories: Vec<Repository>,
     pub content_largest_empty_inset: f32,
@@ -97,7 +103,10 @@ fn framing_metrics(
     (usable_fill, cropped)
 }
 
-pub(crate) fn measure(layout: &Layout) -> Metrics {
+fn measure(layout: &Layout, growth: f32) -> Metrics {
+    let viewport = Tile::viewport();
+    let center = viewport.low.midpoint(viewport.high);
+    let normalize = |point: Vec2| center + (point - center) / growth;
     let mut repositories = Vec::new();
     let mut tiles = Vec::new();
     let mut content = 0.0;
@@ -150,7 +159,7 @@ pub(crate) fn measure(layout: &Layout) -> Metrics {
                     crate::layout::outline::clip(&polygon, -axis, -axis.dot(tile.low));
             }
             let area = crate::layout::outline::area(&polygon) * 0.25;
-            polygons.push(polygon);
+            polygons.push(polygon.into_iter().map(normalize).collect());
             area
         } else {
             0.0
@@ -158,8 +167,11 @@ pub(crate) fn measure(layout: &Layout) -> Metrics {
         let tile_area = tile.area();
         let (usable_fill, cropped) = framing_metrics(region, tile);
         content += content_area;
-        coverage += tile_area;
-        tiles.push(tile);
+        coverage += tile_area / growth.powi(2);
+        tiles.push(Tile {
+            low: normalize(tile.low),
+            high: normalize(tile.high),
+        });
         repositories.push(Repository {
             label: region.label.clone(),
             tile_low: tile.low.to_array(),
@@ -186,7 +198,7 @@ pub(crate) fn measure(layout: &Layout) -> Metrics {
         coverage,
         blank_fraction: 1.0 - coverage,
         largest_empty_rectangle: largest_empty(&tiles),
-        content_fill: content / coverage.max(1e-12),
+        content_fill: content / (coverage * growth.powi(2)).max(1e-12),
         repositories,
         content_largest_empty_inset: gaps::largest(&polygons),
     }
@@ -199,7 +211,7 @@ pub(crate) fn run(
     serde_json::to_writer(
         &mut *writer,
         &serde_json::json!({"definitions":
-        "All areas and coverage fractions use the fixed reference field, normalised to its full 1280x720 reference-unit rectangle; they are not rendered-frame fractions. Glass tiles are disjoint world rectangles represented in this field, inside a 24 reference-pixel margin plus the caption reservation below, separated by shared gutters. Largest empty rectangle is the exact maximum axis-aligned rectangle outside their union, including the margin. Content is the world-XZ AABB of current directory discs and file positions padded by their model footprint size, converted with the fixed affine field scale; not projected ground-plane area, glyph ink or opaque pixel occupancy. Content fill divides content-envelope area by tile area; overall fill is area weighted. The first repository owns the empty lead-in tile. Weights are live file and directory counts, held until their shares drift and then eased over two seconds; empty active repositories weigh one until archived. Files and directories count live files not leaving and live directories. Samples include every canonical 1/60 second. Content AABBs are clipped to their own tiles; actual footprints use convex outlines. Content largest-empty rectangles use fully covered cells on a 160x90 grid inside the usable tile viewport, excluding the caption reservation, with 8 reference-pixel boundary uncertainty."}),
+        DEFINITIONS}),
     )?;
     writeln!(writer)?;
     let mut frames = simulation.frames(60)?;
@@ -224,7 +236,7 @@ pub(crate) fn run(
             &mut *writer,
             &serde_json::json!({
                 "frame": frame, "seconds": super::tick_time(u64::from(frame)).lossy_secs_f32(),
-                "commit": simulation.commit(), "metrics": measure(simulation.layout())
+                "commit": simulation.commit(), "metrics": measure(simulation.layout(), simulation.packing.overview_growth())
             }),
         )?;
         writeln!(writer)?;
@@ -248,6 +260,21 @@ mod tests {
     use bevy::math::Vec3;
 
     #[test]
+    fn dense_treemap_omits_the_empty_rectangle_within_the_work_budget() {
+        let tiles: Vec<_> = (0..200_u16)
+            .map(|i| Tile {
+                low: Vec2::new(f32::from(i) / 100.0 - 1.0, -0.5),
+                high: Vec2::new(f32::from(i + 1) / 100.0 - 1.0, 0.5),
+            })
+            .collect();
+        assert!(DEFINITIONS.contains("null when the work budget is reached"));
+        assert_eq!(
+            serde_json::to_value(largest_empty(&tiles)).unwrap(),
+            serde_json::Value::Null
+        );
+    }
+
+    #[test]
     fn empty_rectangle_control_detects_a_missing_tile() {
         let full = Tile::viewport();
         let left = Tile {
@@ -259,11 +286,12 @@ mod tests {
             ..full
         };
         assert!(
-            (largest_empty(&[left, right]) - f32::midpoint(1.0, full.low.y)).abs()
+            (largest_empty(&[left, right]).unwrap() - f32::midpoint(1.0, full.low.y))
+                .abs()
                 < 1e-6
         );
-        assert!(largest_empty(&[left]) > 0.45);
-        assert_eq!(largest_empty(&[]), 1.0);
+        assert!(largest_empty(&[left]).unwrap() > 0.45);
+        assert_eq!(largest_empty(&[]), Some(1.0));
     }
 
     fn histories() -> Vec<Vec<crate::timeline::Event>> {
@@ -341,12 +369,20 @@ mod tests {
             }
         }
         assert_eq!(simulation.state.slot_records.len(), simulation.events.len());
-        let snapshot = serde_json::to_vec(&measure(simulation.layout())).unwrap();
+        let snapshot = serde_json::to_vec(&measure(
+            simulation.layout(),
+            simulation.packing.overview_growth(),
+        ))
+        .unwrap();
         simulation.advance_to(0, 60);
         simulation.advance_to(frames, 60);
         assert_eq!(
             snapshot,
-            serde_json::to_vec(&measure(simulation.layout())).unwrap()
+            serde_json::to_vec(&measure(
+                simulation.layout(),
+                simulation.packing.overview_growth()
+            ))
+            .unwrap()
         );
     }
 }

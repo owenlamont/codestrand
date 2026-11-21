@@ -16,6 +16,9 @@ pub(crate) const DISTANCE: f32 = 60.0;
 pub(crate) const FIELD_HEIGHT: f32 = super::MIN_AVATAR_HEIGHT;
 pub(crate) const GROUND_FACTOR: f32 = (DISTANCE - FIELD_HEIGHT) / DISTANCE;
 
+pub(crate) const WORLD_UNITS_PER_REFERENCE_PIXEL: f32 =
+    (DISTANCE - FIELD_HEIGHT) * (std::f32::consts::SQRT_2 - 1.0) / (VIEWPORT.y * 0.5);
+
 // One affine field scale reserves the elevated portraits' frame clearance without warping tiles.
 pub(crate) fn field_to_world(point: Vec2) -> Vec2 {
     let tangent = (FOV * 0.5).tan();

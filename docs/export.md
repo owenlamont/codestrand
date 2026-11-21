@@ -136,11 +136,15 @@ Match `-framerate` to the `--fps` used for export. Choose a new output filename;
 FFmpeg asks before replacing an existing file. Keep PNGs for re-encoding or remove
 them manually after checking the video.
 
+## Export framing
+
+Export uses a static overview that fits the whole field by default.
+
 ## Scripted camera
 
-`--camera-path` replaces the fitted export camera with TOML keys. Save the
-[example path](examples/camera-path.toml) as `camera-path.toml` in a Git working
-tree, then run there:
+`--camera-path` replaces the export overview with TOML keys. Save the
+[example path](examples/camera-path.toml) as `camera-path.toml` in a Git working tree,
+then run there:
 
 ```sh
 codestrand export camera-frames --camera-path camera-path.toml \

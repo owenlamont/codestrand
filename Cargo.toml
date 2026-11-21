@@ -60,6 +60,7 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 cap-std = "4.0.3"
 cap-fs-ext = "4.0.3"
 sysinfo = { version = "=0.40.3", default-features = false, features = ["system"] }
+swash = { version = "=0.2.10", default-features = false, features = ["scale"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

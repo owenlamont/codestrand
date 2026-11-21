@@ -245,7 +245,9 @@ fn place_export_camera(
     previous: &mut Option<bevy::prelude::Transform>,
     (index, fps): (u32, u16),
 ) -> anyhow::Result<()> {
-    let Some(path) = path else { return Ok(()) };
+    let Some(path) = path else {
+        return Ok(());
+    };
     let mut playback = app.world_mut().resource_mut::<scene::Playback>();
     playback.0.advance_to(index, fps);
     let pose = path.pose(&playback.0, index, fps)?;
@@ -417,6 +419,10 @@ impl Captures {
 
 fn update(app: &mut App) -> anyhow::Result<()> {
     app.update();
+    anyhow::ensure!(
+        !scene::font_atlas_limit_exceeded(app.world()),
+        "export stopped at the font atlas page limit"
+    );
     app.world()
         .resource::<RenderDevice>()
         .wgpu_device()
@@ -685,6 +691,7 @@ mod tests {
             encoding,
             frames,
             camera_path,
+            ..
         }) = crate::Cli::try_parse_from(args).unwrap().command
         else {
             panic!("explicit export command required");
@@ -730,7 +737,10 @@ mod tests {
         )
         .unwrap();
         result.unwrap();
-        audit.1.assert_clear(source.avatar_max_speed);
+        audit.1.assert_clear(
+            source.avatar_max_speed
+                / crate::model::framing::WORLD_UNITS_PER_REFERENCE_PIXEL,
+        );
     }
 
     #[test]
@@ -939,6 +949,12 @@ mod pacing_tests {
     use super::{prepare, render};
     use crate::scene;
 
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Framing {
+        Overview,
+        Scripted,
+    }
+
     #[test]
     #[ignore = "requires a graphics adapter; repeats sibling-directory junction exports"]
     fn sibling_directory_exports_are_identical() {
@@ -1044,11 +1060,21 @@ mod pacing_tests {
     #[test]
     #[ignore = "requires a graphics adapter; renders two short PNG sequences"]
     fn export_is_complete_and_independent_of_render_pacing() {
+        assert_paced_export(Framing::Scripted);
+    }
+
+    #[test]
+    #[ignore = "requires a graphics adapter; renders two short PNG sequences"]
+    fn overview_export_is_independent_of_render_pacing() {
+        assert_paced_export(Framing::Overview);
+    }
+
+    fn assert_paced_export(framing: Framing) {
         let scratch = tempfile::tempdir().expect("temporary directory is available");
         let fast = scratch.path().join("fast");
         let slow = scratch.path().join("slow");
-        export(&fast, Duration::ZERO);
-        export(&slow, Duration::from_millis(50));
+        export(&fast, Duration::ZERO, framing);
+        export(&slow, Duration::from_millis(50), framing);
         let expected: Vec<_> = (0..8)
             .map(|index| format!("frame-{index:05}.png"))
             .collect();
@@ -1087,28 +1113,50 @@ mod pacing_tests {
     }
 
     /// Exports eight synthetic frames, sleeping `delay` in every app update.
-    fn export(directory: &Path, delay: Duration) {
+    fn export(directory: &Path, delay: Duration, framing: Framing) {
         let camera = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/camera-targets.toml");
+        let args = [
+            "codestrand",
+            "export",
+            "unused",
+            "--test-input",
+            "synthetic",
+        ];
         let Some(crate::Command::Export { source, theme, .. }) =
-            crate::Cli::try_parse_from([
-                "codestrand",
-                "export",
-                "unused",
-                "--test-input",
-                "synthetic",
-            ])
-            .unwrap()
-            .command
+            crate::Cli::try_parse_from(args).unwrap().command
         else {
             panic!("export command");
         };
-        let (mut simulation, title) =
-            source.load(&crate::progress::Progress::default()).unwrap();
+        let (mut simulation, title) = if framing == Framing::Scripted {
+            source.load(&crate::progress::Progress::default()).unwrap()
+        } else {
+            let histories = (0..2)
+                .map(|index| {
+                    let mut events = crate::timeline::synthetic();
+                    crate::repositories::namespace(&mut events, index);
+                    events
+                })
+                .collect();
+            let simulation = crate::model::Simulation::with_repositories(
+                crate::repositories::merge(histories),
+                &crate::model::Options {
+                    seconds_per_day: 0.02,
+                    max_idle_seconds: 0.05,
+                    ..Default::default()
+                },
+                &theme.build(),
+                &crate::contributors::Mappings::default(),
+                &["First".into(), "Second".into()],
+            );
+            (simulation, "Repository overview".into())
+        };
         simulation.set_theme(theme.build());
-        let camera_path = crate::camera_path::CameraPath::read(&camera)
-            .and_then(|path| path.bind(&simulation))
-            .unwrap();
+        let camera_path = (framing == Framing::Scripted).then(|| {
+            crate::camera_path::CameraPath::read(&camera)
+                .and_then(|path| path.bind(&simulation))
+                .unwrap()
+        });
         let resolution = crate::resolution::Resolution::default();
         let (mut app, target) = scene::headless(simulation, title, 2, resolution);
         app.add_systems(bevy::prelude::Update, move || thread::sleep(delay));
@@ -1119,7 +1167,7 @@ mod pacing_tests {
             Some(8),
             2,
             None,
-            Some(&camera_path),
+            camera_path.as_ref(),
         )
         .unwrap();
     }

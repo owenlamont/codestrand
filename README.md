@@ -41,5 +41,6 @@ codestrand preview --repository /path/to/repository
 
 Run the first command inside a Git working tree, including a subdirectory, to play
 that repository. The second command selects another local repository. Escape closes
-the window.
+the window. Export defaults to a static overview.
+
 See [Contributing](https://github.com/owenlamont/codestrand/blob/main/CONTRIBUTING.md) for development setup and checks.

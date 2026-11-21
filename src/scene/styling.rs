@@ -1,10 +1,19 @@
+use std::hash::BuildHasher as _;
+
 use crate::{model::Simulation, theme::Theme};
 use bevy::{
     asset::RenderAssetUsages,
     image::ImageSampler,
+    platform::hash::FixedHasher,
     prelude::*,
     render::render_resource::{Extent3d, TextureDimension, TextureFormat},
+    text::{
+        ComputedTextBlock, FontAtlasKey, FontAtlasSet, GlyphCacheKey, ScaleCx,
+        add_glyph_to_atlas, get_outlined_glyph_texture,
+    },
+    ui::{ComputedNode, widget::TextNodeFlags},
 };
+use swash::FontRef;
 
 use super::{
     Label, Palette, SceneCamera, grow, hide_rest, place_beam, set_material, set_visible,
@@ -15,41 +24,227 @@ pub(super) fn label_font(primary: Handle<Font>, fallback: Handle<Font>) -> FontS
     FontSource::list([primary.into(), fallback.into(), FontSource::sans_serif()])
 }
 
+const MAX_FONT_ATLAS_PAGES: usize = 64;
+
+#[derive(Default, Resource)]
+pub(super) struct FontAtlasBudget {
+    pub(super) exceeded: bool,
+}
+
+type AtlasLayout = (
+    Ref<'static, ComputedNode>,
+    &'static TextLayout,
+    Ref<'static, ComputedTextBlock>,
+    Ref<'static, FontHinting>,
+    &'static mut TextNodeFlags,
+);
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Bevy injects the text and asset resources"
+)]
+pub(super) fn reserve_font_atlases(
+    mut atlases: ResMut<FontAtlasSet>,
+    mut textures: ResMut<Assets<Image>>,
+    mut scale: ResMut<ScaleCx>,
+    mut layouts: Query<AtlasLayout>,
+    fonts: Res<Assets<Font>>,
+    positioned: Query<&bevy::text::TextLayoutInfo>,
+    mut budget: ResMut<FontAtlasBudget>,
+    mut exits: MessageWriter<AppExit>,
+) {
+    if !budget.exceeded {
+        let mut pending = layouts
+            .iter_mut()
+            .filter(|(node, _, computed, hinting, flags)| {
+                node.is_changed()
+                    || computed.is_changed()
+                    || hinting.is_changed()
+                    || flags.is_changed()
+            })
+            .peekable();
+        if pending.peek().is_some() {
+            drop_stale_font_atlases(
+                &mut atlases,
+                &mut textures,
+                fonts.into_inner(),
+                positioned.iter(),
+            );
+        }
+        let mut reservation = AtlasReservation {
+            pages: atlases.values().map(Vec::len).sum(),
+            atlases: &mut atlases,
+            textures: &mut textures,
+            scale: &mut scale,
+        };
+        let fits = pending.all(|(node, text, computed, hinting, _)| {
+            reservation.layout(&node, *text, &computed, *hinting)
+        });
+        if !fits {
+            budget.exceeded = true;
+            bevy::log::error!("font atlas exceeded {MAX_FONT_ATLAS_PAGES} pages");
+            exits.write(AppExit::error());
+        }
+    }
+    if budget.exceeded {
+        // Bevy skips text layout while the flags indicate that measurement is pending.
+        for (_, _, _, _, mut flags) in &mut layouts {
+            *flags = TextNodeFlags::default();
+        }
+    }
+}
+
+struct AtlasReservation<'a> {
+    pages: usize,
+    atlases: &'a mut FontAtlasSet,
+    textures: &'a mut Assets<Image>,
+    scale: &'a mut ScaleCx,
+}
+
+impl AtlasReservation<'_> {
+    fn layout(
+        &mut self,
+        node: &ComputedNode,
+        text: TextLayout,
+        computed: &ComputedTextBlock,
+        hinting: FontHinting,
+    ) -> bool {
+        let mut buffer;
+        let layout = if text.linebreak == bevy::text::LineBreak::NoWrap {
+            computed.buffer()
+        } else {
+            buffer = computed.buffer().clone();
+            buffer.break_all_lines(Some(node.content_box().width()));
+            &buffer
+        };
+        for run in layout.lines().flat_map(|line| line.runs()) {
+            let font = run.font();
+            let coords = run.normalized_coords();
+            let variations_hash = FixedHasher.hash_one(coords);
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "Bevy truncates the font data ID in its atlas key"
+            )]
+            let id = font.data.id() as u32;
+            for glyph in run.visual_clusters().flat_map(|cluster| cluster.glyphs()) {
+                let Ok(glyph_id) = u16::try_from(glyph.id) else {
+                    continue;
+                };
+                let font_smoothing =
+                    layout.styles()[glyph.style_index()].brush.font_smoothing;
+                let key = FontAtlasKey {
+                    id,
+                    index: font.index,
+                    font_size_bits: run.font_size().to_bits(),
+                    variations_hash,
+                    hinting,
+                    font_smoothing,
+                };
+                if !self.glyph(
+                    key,
+                    glyph_id,
+                    font.data.as_ref(),
+                    font.data.id(),
+                    coords,
+                ) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    fn glyph(
+        &mut self,
+        font: FontAtlasKey,
+        glyph_id: u16,
+        data: &[u8],
+        data_id: u64,
+        coords: &[i16],
+    ) -> bool {
+        let glyph = GlyphCacheKey { glyph_id };
+        if self.atlases.has_glyph(glyph, &font) {
+            return true;
+        }
+        let Some(font_ref) = FontRef::from_index(data, font.index as usize) else {
+            return true;
+        };
+        let smoothing = font.font_smoothing;
+        let mut scaler = self
+            .scale
+            .0
+            .builder_with_id(font_ref, [data_id, font.index.into()])
+            .size(f32::from_bits(font.font_size_bits))
+            .hint(font.hinting.is_enabled() && smoothing == FontSmoothing::AntiAliased)
+            .normalized_coords(coords)
+            .build();
+        if self.pages < MAX_FONT_ATLAS_PAGES {
+            let atlases = self.atlases.entry(font).or_default();
+            let before = atlases.len();
+            let result = add_glyph_to_atlas(
+                atlases,
+                self.textures,
+                &mut scaler,
+                smoothing,
+                glyph_id,
+            );
+            self.pages += atlases.len() - before;
+            return result.is_ok()
+                || matches!(
+                    result,
+                    Err(bevy::text::TextError::FailedToGetGlyphImage(_))
+                );
+        }
+        let Ok((texture, offset, alpha)) =
+            get_outlined_glyph_texture(&mut scaler, glyph_id, smoothing)
+        else {
+            return true;
+        };
+        self.atlases.get_mut(&font).is_some_and(|atlases| {
+            atlases.iter_mut().any(|atlas| {
+                atlas
+                    .add_glyph(self.textures, glyph, &texture, offset, alpha)
+                    .is_ok()
+            })
+        })
+    }
+}
+
 /// Drops font atlases that no laid-out text uses, unless their font is a loaded asset.
 ///
 /// Bevy evicts a system fallback font after two unused frames and reloads it under a
 /// new id, so the atlases of earlier ids would otherwise accumulate for the whole run.
-/// Only a frame that added atlas keys since the last pass scans the laid-out glyphs.
-pub(super) fn drop_stale_font_atlases(
-    mut atlases: ResMut<bevy::text::FontAtlasSet>,
-    mut kept: Local<usize>,
-    fonts: Res<Assets<Font>>,
-    layouts: Query<&bevy::text::TextLayoutInfo>,
+fn drop_stale_font_atlases<'a>(
+    atlases: &mut FontAtlasSet,
+    textures: &mut Assets<Image>,
+    fonts: &Assets<Font>,
+    layouts: impl Iterator<Item = &'a bevy::text::TextLayoutInfo>,
 ) {
-    if atlases.len() <= *kept {
-        return;
-    }
     #[expect(
         clippy::cast_possible_truncation,
         reason = "bevy_text keys atlases by the truncated font data id"
     )]
     let loaded: std::collections::HashSet<u32> = fonts
-        .into_inner()
         .iter()
         .map(|(_, font)| font.data.id() as u32)
         .collect();
+    if atlases.keys().all(|key| loaded.contains(&key.id)) {
+        return;
+    }
     let used: std::collections::HashSet<AssetId<Image>> = layouts
-        .iter()
         .flat_map(|layout| &layout.glyphs)
         .map(|glyph| glyph.atlas_info.texture)
         .collect();
     atlases.retain(|key, font_atlases| {
-        loaded.contains(&key.id)
-            || font_atlases
-                .iter()
-                .any(|atlas| used.contains(&atlas.texture.id()))
+        if !loaded.contains(&key.id) {
+            for atlas in
+                font_atlases.extract_if(.., |atlas| !used.contains(&atlas.texture.id()))
+            {
+                textures.remove(atlas.texture.id());
+            }
+        }
+        !font_atlases.is_empty()
     });
-    *kept = atlases.len();
 }
 
 #[derive(Default)]
@@ -638,6 +833,8 @@ mod tests {
         let mut world = World::new();
         world.init_resource::<Assets<Image>>();
         world.init_resource::<FontAtlasSet>();
+        world.init_resource::<FontAtlasBudget>();
+        world.init_resource::<Messages<AppExit>>();
         let font = Font::from_bytes(Vec::new());
         let loaded = u32::try_from(font.data.id()).unwrap();
         let mut fonts = Assets::<Font>::default();
@@ -680,7 +877,15 @@ mod tests {
             }],
             ..default()
         });
-        world.run_system_once(drop_stale_font_atlases).unwrap();
+        world.init_resource::<ScaleCx>();
+        world.spawn((
+            ComputedNode::default(),
+            TextLayout::default(),
+            ComputedTextBlock::default(),
+            FontHinting::default(),
+            TextNodeFlags::default(),
+        ));
+        world.run_system_once(reserve_font_atlases).unwrap();
         let mut kept: Vec<_> = world
             .resource::<FontAtlasSet>()
             .keys()
@@ -688,6 +893,146 @@ mod tests {
             .collect();
         kept.sort_unstable();
         assert_eq!(kept, [loaded, laid_out]);
+    }
+
+    #[test]
+    fn reservation_reclaims_stale_fallback_pages_at_the_limit() {
+        use bevy::text::{
+            FontCx, LayoutCx, LetterSpacing, LineHeight, RemSize, TextBounds,
+            TextElement, TextPipeline,
+        };
+
+        let mut world = World::new();
+        world.init_resource::<Assets<Image>>();
+        world.init_resource::<Assets<Font>>();
+        world.init_resource::<FontAtlasBudget>();
+        world.init_resource::<ScaleCx>();
+        world.init_resource::<Messages<AppExit>>();
+        let font = Font::from_bytes(
+            include_bytes!("../../assets/fonts/IBMPlexMono-Regular.ttf").to_vec(),
+        );
+        let font = TextFont::from_font_size(14.0)
+            .with_font(world.resource_mut::<Assets<Font>>().add(font));
+        let stale = FontAtlasKey {
+            id: u32::MAX,
+            index: 0,
+            font_size_bits: 14.0_f32.to_bits(),
+            variations_hash: 0,
+            hinting: default(),
+            font_smoothing: FontSmoothing::default(),
+        };
+        let pages = (0..MAX_FONT_ATLAS_PAGES)
+            .map(|_| {
+                FontAtlas::new(
+                    &mut world.resource_mut::<Assets<Image>>(),
+                    UVec2::splat(4),
+                    stale.font_smoothing,
+                )
+            })
+            .collect();
+        let mut atlases = FontAtlasSet::default();
+        atlases.insert(stale, pages);
+        world.insert_resource(atlases);
+        let mut computed = ComputedTextBlock::default();
+        TextPipeline::default()
+            .update_buffer(
+                world.resource::<Assets<Font>>(),
+                [(
+                    Entity::PLACEHOLDER,
+                    0,
+                    TextElement::Text {
+                        text: "A",
+                        font: &font,
+                        color: Color::WHITE,
+                        line_height: LineHeight::default(),
+                        letter_spacing: LetterSpacing::default(),
+                    },
+                )]
+                .into_iter(),
+                LineBreak::NoWrap,
+                Justify::Left,
+                TextBounds::UNBOUNDED,
+                1.0,
+                &mut computed,
+                &mut FontCx::default(),
+                &mut LayoutCx::default(),
+                Vec2::new(1280.0, 720.0),
+                RemSize::default(),
+            )
+            .unwrap();
+        let font_id = u32::try_from(
+            computed
+                .buffer()
+                .lines()
+                .next()
+                .unwrap()
+                .runs()
+                .next()
+                .unwrap()
+                .font()
+                .data
+                .id(),
+        )
+        .unwrap();
+        world.spawn((
+            ComputedNode::default(),
+            TextLayout::new(Justify::Left, LineBreak::NoWrap),
+            computed,
+            FontHinting::default(),
+            TextNodeFlags::default(),
+        ));
+        world.run_system_once(reserve_font_atlases).unwrap();
+        assert!(!world.resource::<FontAtlasBudget>().exceeded);
+        let atlases = world.resource::<FontAtlasSet>();
+        assert_eq!(atlases.len(), 1);
+        let (key, pages) = atlases.iter().next().unwrap();
+        assert_eq!(key.id, font_id);
+        assert_eq!(pages.len(), 1);
+        assert_eq!(world.resource::<Assets<Image>>().len(), 1);
+    }
+
+    #[test]
+    fn font_page_budget_stops_before_allocating_the_next_image() {
+        let mut textures = Assets::<Image>::default();
+        let mut atlases = FontAtlasSet::default();
+        let mut scale = ScaleCx::default();
+        let data = include_bytes!("../../assets/fonts/IBMPlexMono-Regular.ttf");
+        let font = Font::from_bytes(data.to_vec());
+        let data_id = font.data.id();
+        let charmap = FontRef::from_index(data, 0).unwrap().charmap();
+        let key = FontAtlasKey {
+            id: u32::try_from(data_id).unwrap(),
+            index: 0,
+            font_size_bits: 14.0_f32.to_bits(),
+            variations_hash: FixedHasher.hash_one(&[] as &[i16]),
+            hinting: default(),
+            font_smoothing: FontSmoothing::default(),
+        };
+        let pages = (1..MAX_FONT_ATLAS_PAGES)
+            .map(|_| FontAtlas::new(&mut textures, UVec2::splat(4), key.font_smoothing))
+            .collect();
+        atlases.insert(
+            FontAtlasKey {
+                id: key.id + 1,
+                ..key
+            },
+            pages,
+        );
+        let mut reservation = AtlasReservation {
+            pages: MAX_FONT_ATLAS_PAGES - 1,
+            textures: &mut textures,
+            atlases: &mut atlases,
+            scale: &mut scale,
+        };
+        assert!(reservation.glyph(key, charmap.map('A'), data, data_id, &[]));
+        assert!(reservation.glyph(key, charmap.map('B'), data, data_id, &[]));
+        let other_size = FontAtlasKey {
+            font_size_bits: 24.0_f32.to_bits(),
+            ..key
+        };
+        assert!(!reservation.glyph(other_size, charmap.map('A'), data, data_id, &[]));
+        assert_eq!(reservation.textures.len(), MAX_FONT_ATLAS_PAGES);
+        assert!(reservation.atlases.get(&other_size).is_none());
     }
 
     fn active_code_world() -> World {

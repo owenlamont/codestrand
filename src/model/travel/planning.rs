@@ -21,12 +21,9 @@ impl Capture {
 }
 
 fn hard_clearance(capture: &Capture, tick: u64, point: Vec2) -> bool {
-    point
-        .abs()
-        .cmple(HALF - Vec2::splat(capture.radius(tick)))
-        .all()
-        && point.y - capture.radius(tick) >= super::super::caption::BOTTOM
-        && point.y + capture.radius(tick) <= super::super::caption::TOP
+    let radius = Vec2::splat(capture.radius(tick));
+    point.cmpge(capture.field.min + radius).all()
+        && point.cmple(capture.field.max - radius).all()
         && !super::at_tick(&capture.tiles, tick.saturating_sub(capture.begin))
             .iter()
             .flatten()
@@ -196,7 +193,8 @@ fn moving_route(
 
 fn route_proof(points: &[Vec2], epoch: u64) -> serde_json::Value {
     let length: f32 = points.windows(2).map(|p| p[0].distance(p[1])).sum();
-    serde_json::json!({"network_epoch":epoch,"shortest_network_length":length,"route_network_length":length,"network_points":points.iter().map(Vec2::to_array).collect::<Vec<_>>()})
+    let length = length * super::super::framing::WORLD_UNITS_PER_REFERENCE_PIXEL;
+    serde_json::json!({"network_epoch":epoch,"shortest_network_length":length,"route_network_length":length,"network_points":points.iter().copied().map(super::ground_position).collect::<Vec<_>>()})
 }
 fn search(
     capture: &Capture,
@@ -407,6 +405,7 @@ mod tests {
         Capture {
             begin: 0,
             frozen: 0,
+            field: super::super::field_rect(Tile::inset(0.0)),
             services: [
                 (0, 0, 10, 70, Vec2::new(-100.0, 0.0)),
                 (1, 1, 90, 150, Vec2::new(100.0, 0.0)),

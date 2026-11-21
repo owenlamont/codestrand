@@ -1,25 +1,89 @@
-use super::{FragmentPace, Schedule, Time, tick_seconds};
+use std::sync::Arc;
+
+use super::{FragmentPace, Schedule, TICK_RATE, Time, tick_seconds};
 use crate::timeline::Event;
 
 pub(super) const EXIT: f32 = 1.2;
 pub(super) const REPOSITORY_EXIT: f32 = 2.5;
-pub(super) const REFLOW: f32 = 4.0;
+const REFLOW: f32 = 4.0;
+const FADE_TICKS: u64 = 5 * TICK_RATE as u64 / 2;
+const REFLOW_TICKS: u64 = 4 * TICK_RATE as u64;
+const STAGGERED_REFLOW_TICKS: u64 = 5 * TICK_RATE as u64;
+
+/// The first and last sample of a tile's exit on the unpadded history clock.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RepositoryExit {
+    pub(crate) start: u64,
+    pub(crate) end: u64,
+}
+
+pub(super) fn repository_exits(endings: &[Time]) -> Arc<[Option<RepositoryExit>]> {
+    let starts: Vec<_> = endings
+        .iter()
+        .map(|&end| {
+            (end.is_finite() && end >= Time::ZERO)
+                .then(|| super::schedule::first_tick(end).saturating_add(FADE_TICKS))
+        })
+        .collect();
+    let mut exits = exits_from_starts(&starts);
+    for (exit, &ending) in exits.iter_mut().zip(endings) {
+        if ending < Time::ZERO {
+            *exit = Some(RepositoryExit { start: 0, end: 0 });
+        }
+    }
+    exits.into()
+}
+
+pub(crate) fn exits_from_starts(starts: &[Option<u64>]) -> Vec<Option<RepositoryExit>> {
+    let mut distinct: Vec<_> = starts.iter().flatten().copied().collect();
+    distinct.sort_unstable();
+    distinct.dedup();
+    starts
+        .iter()
+        .map(|start| {
+            let start = (*start)?;
+            let i = distinct.binary_search(&start).expect("recorded exit start");
+            let overlaps = (i > 0 && start - distinct[i - 1] < REFLOW_TICKS)
+                || distinct
+                    .get(i + 1)
+                    .is_some_and(|&next| next - start < REFLOW_TICKS);
+            let duration = if overlaps {
+                STAGGERED_REFLOW_TICKS
+            } else {
+                REFLOW_TICKS
+            };
+            Some(RepositoryExit {
+                start,
+                end: start.saturating_add(duration),
+            })
+        })
+        .collect()
+}
+
+pub(super) fn exit_end(exits: &[Option<RepositoryExit>]) -> u64 {
+    exits
+        .iter()
+        .flatten()
+        .map(|exit| exit.end)
+        .max()
+        .unwrap_or(0)
+}
 
 pub(super) fn duration(
     schedule: &Schedule,
     endings: &[Time],
     pace: FragmentPace,
 ) -> Time {
+    activity_duration(schedule, pace)
+        .max(Time::from_tick(exit_end(&repository_exits(endings))))
+}
+
+pub(super) fn activity_duration(schedule: &Schedule, pace: FragmentPace) -> Time {
     let last_pulse = schedule
         .starts
         .last()
         .map_or(Time::ZERO, |&start| pace.pulse_end(start));
-    endings
-        .iter()
-        .filter(|end| end.is_finite())
-        .fold(schedule.duration().max(last_pulse), |duration, &end| {
-            duration.max(end + REPOSITORY_EXIT + REFLOW)
-        })
+    schedule.duration().max(last_pulse)
 }
 
 /// For each played event, bit `rank` is set when its participant at that rank (the author
@@ -307,6 +371,58 @@ mod tests {
             ending_time(selected, &schedule, 100 * 86_400, &boundary, true),
             schedule.starts[0]
         );
+    }
+
+    #[test]
+    fn boundary_repository_exits_finish_on_the_playback_end_tick() {
+        use super::super::{
+            Options, Simulation, schedule::Clock, tests::short_repository_history,
+        };
+
+        let (mut events, labels) = short_repository_history(2);
+        events.truncate(2);
+        let options = Options::default();
+        let mut sim = Simulation::build(
+            events.clone(),
+            &options,
+            &crate::theme::Theme::neon(),
+            &crate::contributors::Mappings::default(),
+            &[],
+            &labels,
+            &mut None,
+        )
+        .unwrap();
+        sim.repository_ends = [1.500_050_1, 5.500_05].map(Time::seconds).to_vec();
+        sim.repository_exits = repository_exits(&sim.repository_ends);
+        sim.plan_repositories(vec![true; 2], &options).unwrap();
+        let history = sim.schedule.clone();
+        assert_eq!(sim.end_tick(), 721);
+        for padding in [0, 37] {
+            sim.schedule = Schedule::with_padding(
+                &events,
+                options.seconds_per_day,
+                options.max_idle_seconds,
+                |index| if index == 1 { padding } else { 0 },
+            );
+            sim.clock = Clock::new(history.clone(), sim.schedule.clone());
+            let end = sim.end_tick();
+            assert_eq!(end, 721 + u64::from(padding));
+            let before = sim.packing_sample(end - 1, None).unwrap().0;
+            let after = sim.packing_sample(end, None).unwrap().0;
+            assert!(before[1].tile.is_some());
+            assert!(after.iter().all(|region| region.tile.is_none()));
+        }
+    }
+
+    #[test]
+    fn only_overlapping_four_second_intervals_stretch() {
+        let exits = exits_from_starts(&[Some(0), Some(210), Some(480), Some(480)]);
+        let durations: Vec<_> = exits
+            .iter()
+            .flatten()
+            .map(|exit| exit.end - exit.start)
+            .collect();
+        assert_eq!(durations, [300, 300, 240, 240]);
     }
 
     #[test]
