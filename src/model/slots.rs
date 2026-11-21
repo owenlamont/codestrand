@@ -1828,6 +1828,9 @@ impl State {
 }
 
 fn swept_crosses(point: Vec2, corners: &[Vec2; 4], rect: Rect) -> bool {
+    if rect.min.cmpge(rect.max).any() {
+        return false;
+    }
     if corners.iter().any(|&p| segment(point, p, rect)) {
         return true;
     }
@@ -2531,7 +2534,8 @@ mod tests {
             &Mappings::default(),
             &["a".into(), "b".into()],
         );
-        sim.advance_to(120, 60);
+        let second_write = sim.schedule.commit_ticks().nth(1).unwrap();
+        sim.advance_to(u32::try_from(second_write).unwrap(), 60);
         let mut state = sim.state.clone();
         state.avatars[0].last_active = crate::model::Time::ZERO;
         state.avatars[0].presence = 0.0;
@@ -2589,9 +2593,15 @@ mod tests {
                     let corners = sim.envelopes[avatar.commit].corners(tile);
                     let origin = slot.point - slot.offset;
                     assert!(fan(origin, &corners) < std::f32::consts::PI);
-                    assert!(!obstacles.iter().any(|(r, rect)| *r != usize::MAX
-                        && *r != avatar.repository
-                        && swept_crosses(origin, &corners, rect.inflate(-0.02))));
+                    assert!(
+                        !obstacles.iter().any(|(r, rect)| *r != usize::MAX
+                            && *r != avatar.repository
+                            && swept_crosses(origin, &corners, rect.inflate(-0.02))),
+                        "frame {frame}, avatar {}, commit {}, slot {:?}",
+                        avatar.name,
+                        avatar.commit,
+                        slot
+                    );
                 }
             }
         }

@@ -3679,10 +3679,17 @@ mod tests {
         let clock = world.register_system(preview_clock);
         let camera = world.register_system(preview_camera);
         world.run_system(clock).unwrap();
-        for seconds in [3, 60, 60] {
+        let waiting_frame = initial_duration.ticks(true) + 3;
+        let delay = std::time::Duration::from_millis(waiting_frame * 1_000 / 60 + 1);
+        let waiting_frame = model::preview_frame(delay, 60);
+        for delta in [
+            delay,
+            std::time::Duration::from_secs(60),
+            std::time::Duration::from_secs(60),
+        ] {
             world
                 .resource_mut::<Time<Real>>()
-                .update_with_duration(std::time::Duration::from_secs(seconds));
+                .update_with_duration(delta);
             world.run_system(clock).unwrap();
             assert_eq!(world.resource::<Frame>().index, 0);
             assert!(world.resource::<PlanningWait>().0);
@@ -3708,13 +3715,13 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         assert!(!world.resource::<PlanningWait>().0);
-        assert_eq!(world.resource::<Frame>().index, 180);
+        assert_eq!(world.resource::<Frame>().index, waiting_frame);
         assert!(world.resource::<Playback>().0.duration() > initial_duration);
         world
             .resource_mut::<Time<Real>>()
             .update_with_duration(std::time::Duration::from_millis(17));
         world.run_system(clock).unwrap();
-        assert_eq!(world.resource::<Frame>().index, 181);
+        assert_eq!(world.resource::<Frame>().index, waiting_frame + 1);
     }
 
     #[test]

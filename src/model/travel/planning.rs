@@ -107,8 +107,8 @@ fn route_anchors(
     for (leg, pair) in points.windows(2).enumerate() {
         let axis = usize::from(pair[0].y.to_bits() == pair[1].y.to_bits());
         let midpoint = pair[0].midpoint(pair[1]);
-        let coordinate = reference.iter().enumerate().find_map(|(repository, t)| {
-            let tile = t.as_ref()?;
+        let on_edge = |repository: usize| {
+            let tile = reference[repository].as_ref()?;
             let rect = Rect::from_corners(tile.low * HALF, tile.high * HALF);
             if !rect.inflate(0.001).contains(midpoint) {
                 return None;
@@ -124,7 +124,15 @@ fn route_anchors(
                 repository,
                 fraction,
             })
-        });
+        };
+        let preferred = if leg == 0 {
+            on_edge(trip.source_repository)
+        } else if leg + 2 == points.len() {
+            on_edge(trip.destination_repository)
+        } else {
+            None
+        };
+        let coordinate = preferred.or_else(|| (0..reference.len()).find_map(on_edge));
         let coordinate = coordinate?;
         anchors[leg][axis] = coordinate;
         anchors[leg + 1][axis] = coordinate;
@@ -143,11 +151,24 @@ fn moving_route(
     let anchors = route_anchors(capture.row(epoch), trip, points)?;
     let shape = Route::new(points, speed * 0.8);
     let duration = shape.duration + ticks_duration(animation_delay);
+    let target = capture.row(epoch)[trip.destination_repository]?;
+    let target_fraction =
+        (*points.last()? / HALF - target.low) / (target.high - target.low);
     let mut track = Vec::new();
     for offset in 0..=trip.arrival - trip.departure {
         let tick = trip.departure + offset;
         let row = capture.row(tick);
         let elapsed = ticks_duration(offset.saturating_sub(animation_delay));
+        if elapsed >= shape.duration && tick < trip.arrival {
+            let target = row[trip.destination_repository]?;
+            let point =
+                (target.low + (target.high - target.low) * target_fraction) * HALF;
+            if !hard_clearance(capture, tick, point) {
+                return None;
+            }
+            track.push(point);
+            continue;
+        }
         let leg = shape
             .legs
             .iter()
@@ -161,7 +182,9 @@ fn moving_route(
             anchors[leg + 1][0].at(row, 0)?,
             anchors[leg + 1][1].at(row, 1)?,
         );
-        let point = if u >= 1.0 {
+        let point = if tick == trip.arrival {
+            trip.destination
+        } else if u >= 1.0 {
             b
         } else {
             Vec2::new(anchors[leg][0].at(row, 0)?, anchors[leg][1].at(row, 1)?)
@@ -177,11 +200,10 @@ fn moving_route(
         .windows(2)
         .map(|p| p[0].distance(p[1]) * 60.0)
         .fold(0.0, f32::max);
-    let previous = capture.pose(trip.author, epoch.saturating_sub(1))?.point;
-    if peak > speed + 0.05
-        || track.first()?.distance(previous) * 60.0 > speed + 0.05
-        || track.last()?.distance(trip.destination) * 60.0 > speed + 0.05
-    {
+    let previous = capture
+        .pose(trip.author, trip.departure.saturating_sub(1))?
+        .point;
+    if peak > speed + 0.05 || track.first()?.distance(previous) * 60.0 > speed + 0.05 {
         return None;
     }
     Some(Route {
@@ -205,11 +227,6 @@ fn search(
 ) -> Trip {
     let mut best = template.clone();
     let first = release.min(template.arrival - 1).max(template.free);
-    let birth_begin = template
-        .arrival
-        .saturating_sub(crate::model::BIRTH_TICKS + 1);
-    let birth = capture.row(birth_begin)[template.destination_repository].is_none()
-        && capture.row(template.free)[template.destination_repository].is_none();
     let Some(target_tile) =
         capture.row(template.arrival)[template.destination_repository]
     else {
@@ -226,6 +243,11 @@ fn search(
             .pose(template.author, begin)
             .expect("existing author")
             .point;
+        if source.distance(template.destination)
+            > speed * ticks_duration(template.arrival - begin)
+        {
+            continue;
+        }
         let target = (target_tile.low
             + (target_tile.high - target_tile.low) * target_fraction)
             * HALF;
@@ -264,17 +286,11 @@ fn search(
         candidate.fade =
             candidate.route.duration > ticks_duration(candidate.arrival - begin);
         candidate.failure = Some("moving_network");
-        if (!birth || !candidate.fade)
-            && let Some(route) = moving_route(
-                capture,
-                &candidate,
-                &points,
-                begin,
-                speed,
-                animation_delay,
-            )
+        if let Some(route) =
+            moving_route(capture, &candidate, &points, begin, speed, animation_delay)
         {
             candidate.route = route;
+            candidate.fade = false;
             candidate.failure = None;
             return candidate;
         }
@@ -284,16 +300,37 @@ fn search(
             best.cutoff = Some(begin);
         }
     }
-    if best.fade && birth {
-        if let Some(approach) = birth_approach(capture, template, first, speed, router)
-        {
-            return approach;
-        }
-        best.failure = Some(super::BIRTH_WINDOW);
-        best.route = Route::default();
-        best.cutoff = None;
+    if best.fade
+        && template.birth
+        && let Some(approach) = birth_approach(capture, template, first, speed, router)
+    {
+        return approach;
+    }
+    if template.birth
+        && template.arrival - first >= crate::model::BIRTH_TICKS * 2
+        && dock_outpaces_walker(capture, template, speed, target_fraction)
+    {
+        best.failure = Some(super::MOVING_DOCK);
     }
     best
+}
+
+fn dock_outpaces_walker(
+    capture: &Capture,
+    trip: &Trip,
+    speed: f32,
+    fraction: Vec2,
+) -> bool {
+    let first = trip.arrival.saturating_sub(crate::model::BIRTH_TICKS + 1);
+    let point = |tick| {
+        capture.row(tick)[trip.destination_repository]
+            .map(|tile| (tile.low + (tile.high - tile.low) * fraction) * HALF)
+    };
+    (first..trip.arrival).any(|tick| {
+        point(tick)
+            .zip(point(tick + 1))
+            .is_some_and(|(from, to)| from.distance(to) * 60.0 > speed + 0.05)
+    })
 }
 
 fn birth_approach(
@@ -411,6 +448,7 @@ pub(super) fn trips(
             source,
             fade_ticks: 0,
             route: Route::default(),
+            birth: capture.births.binary_search(&commit).is_ok(),
             fade: true,
             bot: service.bot,
             source_repository: prior.repository,
@@ -546,6 +584,7 @@ mod tests {
             tiles: vec![vec![]; 461],
             gutters: vec![vec![Some(a), Some(b)]; 461],
             radii: vec![7.5; 461],
+            births: vec![],
         }
     }
     #[test]

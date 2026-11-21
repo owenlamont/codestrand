@@ -3,7 +3,7 @@ use std::time::Duration;
 use super::{LEAD_IN, TAIL, TICK_RATE, Time, tick_seconds, tick_time};
 use crate::timeline::Event;
 
-pub(crate) const BIRTH_TICKS: u64 = 45;
+pub(crate) const BIRTH_TICKS: u64 = 90;
 
 pub(super) fn padding_at(padding: &[(usize, u32)], index: usize) -> u32 {
     padding
@@ -17,6 +17,7 @@ pub(crate) struct Schedule {
     pub(crate) starts: Vec<Time>,
     services: Vec<Service>,
     pub(super) birth_protections: Vec<(usize, usize)>,
+    pub(super) walk_protections: Vec<(usize, usize)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -96,6 +97,33 @@ impl Schedule {
         )
     }
 
+    pub(super) fn protect_walk_after(&mut self, commit: usize) -> bool {
+        let Some((birth, _)) = self.births().find(|&(index, _)| index > commit) else {
+            return false;
+        };
+        match self
+            .walk_protections
+            .binary_search_by_key(&birth, |&(birth, _)| birth)
+        {
+            Ok(index) => {
+                let earlier = &mut self.walk_protections[index].1;
+                let changed = commit > *earlier;
+                *earlier = (*earlier).max(commit);
+                changed
+            }
+            Err(index) => {
+                self.walk_protections.insert(index, (birth, commit));
+                true
+            }
+        }
+    }
+
+    pub(super) fn needs_presentation(&self, padding: &[(usize, u32)]) -> bool {
+        !self.birth_protections.is_empty()
+            || !self.walk_protections.is_empty()
+            || padding.iter().any(|&(_, ticks)| ticks > 0)
+    }
+
     pub(super) fn with_travel(
         &self,
         len: usize,
@@ -104,6 +132,7 @@ impl Schedule {
         let mut extra = 0;
         let mut services: Vec<Service> = Vec::with_capacity(len);
         let mut protections = self.birth_protections.iter().peekable();
+        let mut walks = self.walk_protections.iter().peekable();
         let starts = self.starts[..len]
             .iter()
             .enumerate()
@@ -112,16 +141,19 @@ impl Schedule {
                 extra += u64::from(wait);
                 let service = &self.services[index];
                 let mut tick = service.tick.saturating_add(extra);
-                let protection = protections
-                    .next_if(|&&(birth, _)| birth == index)
-                    .map_or(0, |&(_, earlier)| {
-                        services[earlier]
-                            .tick
-                            .saturating_add(BIRTH_TICKS + 2)
-                            .saturating_sub(tick)
-                    });
-                extra += protection;
-                tick = tick.saturating_add(protection);
+                let write = protections.next_if(|&&(birth, _)| birth == index);
+                let walk = walks.next_if(|&&(birth, _)| birth == index);
+                if let Some(earlier) = write
+                    .into_iter()
+                    .chain(walk)
+                    .map(|&(_, earlier)| earlier)
+                    .max()
+                {
+                    let ready = services[earlier].tick.saturating_add(BIRTH_TICKS + 2);
+                    let floor = ready.saturating_add(u64::from(wait));
+                    extra += floor.saturating_sub(tick);
+                    tick = tick.max(floor);
+                }
                 let start = start.after(tick_time(extra));
                 services.push(Service {
                     tick,
@@ -139,6 +171,7 @@ impl Schedule {
             starts,
             services,
             birth_protections: Vec::new(),
+            walk_protections: Vec::new(),
         }
     }
 
@@ -189,7 +222,7 @@ impl Schedule {
         let mut previous = events.first().map_or(0, |event| event.seconds);
         let mut now = Time::seconds(LEAD_IN);
         let mut extra = 0_u64;
-        let mut next_birth = BIRTH_TICKS + 1;
+        let mut earliest_birth = BIRTH_TICKS + 1;
         let mut next_service = 0;
         let mut has_birth = false;
         let mut services = Vec::with_capacity(events.len());
@@ -207,26 +240,18 @@ impl Schedule {
                 let padding = padding(index);
                 extra += u64::from(padding);
                 let birth = is_birth(index);
-                let mut birth_wait = if birth {
-                    next_birth.saturating_sub(first_tick(now.after(tick_time(extra))))
-                } else {
-                    0
-                };
-                extra += birth_wait;
                 let mut start = now.after(tick_time(extra));
                 let service = first_tick(start);
-                let mut tick = service.max(next_service);
-                if birth {
-                    tick = tick.max(next_birth);
-                    birth_wait += tick - service;
-                    extra += tick - service;
-                }
+                let earliest = if birth { earliest_birth } else { 0 };
+                let tick = service.max(earliest).max(next_service);
+                let birth_wait = (tick - service) * u64::from(birth);
+                extra += birth_wait;
                 if tick != service {
                     start = tick_time(tick);
                 }
                 has_birth |= birth;
-                if birth || index == 0 {
-                    next_birth = tick.saturating_add(BIRTH_TICKS + 1);
+                if index == 0 {
+                    earliest_birth = tick.saturating_add(BIRTH_TICKS + 1);
                 }
                 if has_birth {
                     next_service = tick.saturating_add(1);
@@ -245,6 +270,7 @@ impl Schedule {
             starts,
             services,
             birth_protections: Vec::new(),
+            walk_protections: Vec::new(),
         }
     }
 
@@ -309,8 +335,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dense_births_delay_only_the_first_write_that_needs_room() {
-        let (events, _) = super::super::tests::short_repository_history(3);
+    fn a_dense_opening_shares_one_growth_interval() {
+        let (events, _) = super::super::tests::short_repository_history(200);
         let options = super::super::Options {
             seconds_per_day: 0.1,
             max_idle_seconds: 0.1,
@@ -320,40 +346,34 @@ mod tests {
             Schedule::new(&events, options.seconds_per_day, options.max_idle_seconds);
         let replay = Schedule::for_replay(&events, &options);
         let actual: Vec<_> = replay.commit_ticks().collect();
+        assert_eq!(replay.births().count(), 199);
         assert_eq!(actual[0], nominal.commit_ticks().next().unwrap());
         assert_eq!(actual[1] - actual[0], BIRTH_TICKS + 1);
-        assert_eq!(actual[2] - actual[1], BIRTH_TICKS + 1);
         assert!(actual.windows(2).all(|pair| pair[0] < pair[1]));
-        assert!((3..events.len()).all(|index| replay.padding(index) == 0));
+        assert!(
+            actual
+                .iter()
+                .copied()
+                .zip(nominal.commit_ticks())
+                .all(|(actual, nominal)| { actual - nominal <= BIRTH_TICKS })
+        );
     }
 
     #[test]
-    fn a_birth_yields_to_the_last_write_on_an_expanding_neighbour() {
-        let (mut events, _) = super::super::tests::short_repository_history(2);
-        events.swap(1, 2);
-        for (index, event) in events.iter_mut().enumerate() {
-            event.seconds = i64::try_from(index).unwrap() * 86_400;
-        }
-        let mut history = Schedule::for_replay(
-            &events,
-            &super::super::Options {
-                seconds_per_day: 0.5,
-                ..Default::default()
-            },
-        );
-        assert_eq!(history.births().next().unwrap().0, 2);
+    fn an_expanding_neighbours_last_write_precedes_birth_motion() {
+        let (events, _) = super::super::tests::short_repository_history(3);
+        let options = super::super::Options {
+            seconds_per_day: 0.1,
+            max_idle_seconds: 0.1,
+            ..Default::default()
+        };
+        let mut history = Schedule::for_replay(&events, &options);
         history.birth_protections.push((2, 1));
-        let original: Vec<_> = history.commit_ticks().collect();
-        for travel in [0, 24] {
-            let replay = history
-                .with_travel(events.len(), |index| if index == 2 { travel } else { 0 });
-            let ticks: Vec<_> = replay.commit_ticks().collect();
-            assert_eq!(ticks[1], original[1]);
-            assert_eq!(
-                ticks[2],
-                (original[2] + u64::from(travel)).max(ticks[1] + BIRTH_TICKS + 2)
-            );
-        }
+        let presentation =
+            history.with_travel(3, |index| if index == 2 { 24 } else { 0 });
+        let ticks: Vec<_> = presentation.commit_ticks().collect();
+        assert_eq!(ticks[1] - ticks[0], BIRTH_TICKS + 1);
+        assert_eq!(ticks[2] - 24 - ticks[1], BIRTH_TICKS + 2);
     }
 
     #[test]

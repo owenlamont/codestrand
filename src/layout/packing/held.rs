@@ -147,11 +147,18 @@ pub(super) fn reflow_ease(elapsed: usize) -> f32 {
 }
 
 pub(super) fn progress(elapsed: usize, duration: usize) -> f32 {
-    const RAMP: f32 = 0.125;
+    ease(elapsed, duration, 0.125)
+}
+
+pub(super) fn birth_ease(elapsed: usize, duration: usize) -> f32 {
+    ease(elapsed, duration, 0.25)
+}
+
+fn ease(elapsed: usize, duration: usize, ramp_fraction: f32) -> f32 {
     let phase = count(elapsed.min(duration)) / count(duration);
     let integrate = |phase: f32| {
-        let ramp = phase.min(RAMP);
-        (phase - ramp + 0.5 * ramp * ramp / RAMP) / (1.0 - RAMP)
+        let ramp = phase.min(ramp_fraction);
+        (phase - ramp + 0.5 * ramp * ramp / ramp_fraction) / (1.0 - ramp_fraction)
     };
     if phase <= 0.5 {
         integrate(phase)

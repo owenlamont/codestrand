@@ -2,8 +2,8 @@
 
 Preview loops the selected history. Export renders the same launch timeline at
 explicit frame times at 1x speed. Export uses a static overview that fits the scene by
-default. Use `--camera-path` for a scripted camera. New tiles grow for 0.75 seconds
-and settle just before their first commit.
+default. Use `--camera-path` for a scripted camera. New tiles grow over 1.5 seconds
+before their first commit.
 
 Preview renders at the window's physical resolution, including on HiDPI displays.
 Resizing or maximising keeps a 720-logical-pixel-high UI: text scales with height,
@@ -274,10 +274,7 @@ starts. Empty active repositories weigh as one item.
 The split tree and aspect limits also affect each tile's area.
 Each repository keeps file identity,
 local layout and one uniform scale, with a fixed quarter-turn chosen for its history.
-Content zoom anticipates growth with a precomputed safe-fit envelope and half-second
-easing. The log-scale limit is 0.12 per second when zooming out and 0.08 when zooming in
-(about 11.3% shrink or 8.3% growth). A larger future contraction can start the
-adjustment earlier; the chosen scale never exceeds the tile's current safe fit.
+Content scales directly to its tile's current safe fit, up to its original size.
 Each repository title fills the tile as far as its proportions and padding allow.
 The visible letters are centered on the tile surface underneath files and directories.
 The title stays aligned with the tile when you tilt or move the camera. Zooming in can
@@ -293,12 +290,11 @@ the gutters stay connected throughout the move.
 Splits clamp to a ground-aspect range of 1:3.5 to 3.5:1, inclusive. The opening shows
 every repository still active from before the selected range.
 If none are active, the first repository has a lead-in tile.
-Later tiles grow for 0.75 seconds, one at a time,
-and settle just before their first commit. Shrinking neighbours can show commits
-during the move. If the new split also needs a neighbour to grow, the birth waits
-until that neighbour's write is clear. Dense arrivals can delay commits while a tile
-makes room. Commits retain their order. Moving edges ease briefly at both ends and
-travel at steady speed in between.
+Later tiles grow over 1.5 seconds. Growth can overlap when several repositories
+arrive close together. A new tile settles before its first commit. Shrinking neighbours
+can show commits during the move. A split that would enlarge a neighbour waits for
+its earlier writes to finish. Commits retain their order. Each edge eases at both ends
+and travels at steady speed in between.
 Between reflows, tiles and shared gutters partition the field.
 `--gutter` sets spacing using the world distance represented by a pixel in the
 1280×720 reference view. The default is `4` and the range is `0`–`20`, inclusive.
@@ -361,13 +357,12 @@ Walking avatars remain visible during travel until an inferred calendar departur
 With `--contributor-travel walk`, walking trips
 also remain routed across long idle gaps instead of disappearing and re-entering at a
 different repository. After the last service, the normal inactivity fade still applies.
-Uncapped walking services trips in commit order and adds another second of waiting
-when insufficient travel time blocks a route. When a new gutter opens too late for
-a safe walk to the first write, the contributor fades across. Waiting longer would
-move the birth and its gutter later with the commit. Births follow presentation time.
-Calendar departures and content follow history time, which holds during travel waits.
-Other uncapped trips that cannot find a safe route within the planning budgets
-report an error.
+Walking trips to a repository's first commit can add waiting time under either
+contributor policy. Births follow presentation time, so the gutter can open during
+the wait. A later birth waits when its moving gutter would outrun an active walk.
+Calendar departures and content follow history time, which holds during
+travel waits. A required walk that cannot fit within the planning budgets reports
+an error.
 A plan that cannot converge within 32 replans stops with an error.
 Dormant contributors follow their previous repository's lane while waiting, so later
 tile growth cannot bury the starting point of their next uncapped trip.
@@ -385,7 +380,7 @@ Padding is revalidated as scene geometry changes. The automatic policy uses at m
 padded rebuilds, including one cleanup of unused service padding.
 Uncapped padding grows until every walking trip completes, subject to the planning
 memory estimate. Each Dijkstra search is limited to 10,000 graph nodes.
-Numeric caps apply to accumulated extra waiting per commit.
+Numeric caps apply to accumulated extra waiting for trips between existing tiles.
 
 Header and caption remain in the outer frame. Other preview aspect ratios use conservative
 framing;

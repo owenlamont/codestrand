@@ -412,8 +412,14 @@ pub(super) struct Avatar {
 impl Avatar {
     /// Moves to `target`, or along a travel route; a short step to a new seat or off the
     /// end of a route is walked over [`SETTLE_SECONDS`] rather than jumped.
-    fn walk(&mut self, target: Vec3, route: Option<Vec3>, now: Time, reach: f32) {
-        let offset = self.slot.as_ref().map_or(Vec2::ZERO, |s| s.offset);
+    fn walk(
+        &mut self,
+        target: Vec3,
+        offset: Vec2,
+        route: Option<Vec3>,
+        now: Time,
+        reach: f32,
+    ) {
         if let Some(point) = route {
             self.position = point;
             self.settle = None;
@@ -807,7 +813,7 @@ impl Simulation {
             return simulation.plan_windows(events, options, repositories, seconds);
         }
         let mut padding = simulation.travel_padding(options);
-        let history = simulation.schedule.clone();
+        let mut history = simulation.schedule.clone();
         let departures = simulation.departures.clone();
         let endings = simulation.repository_ends.clone();
         let mut pass = 0;
@@ -817,10 +823,7 @@ impl Simulation {
             check_travel_pass(pass)?;
             options.progress.pass(pass);
             let _pass = trace.phase(Phase::Pass);
-            if pass > 1
-                || !history.birth_protections.is_empty()
-                || padding.iter().any(|&(_, ticks)| ticks > 0)
-            {
+            if pass > 1 || history.needs_presentation(&padding) {
                 simulation.apply_padding(
                     &events,
                     options,
@@ -838,9 +841,18 @@ impl Simulation {
                     simulation.travel.stats.padding_seconds
                 );
             }
+            if simulation.travel.protect_birth_walks(&mut history) {
+                compactions = 0;
+                continue;
+            }
             let adjusted = simulation.adjust_travel_padding(options, &padding);
             let settled = adjusted == padding
-                || (options.travel_cap != TravelCap::None && pass >= 4);
+                || (options.travel_cap != TravelCap::None
+                    && pass >= 4
+                    && simulation
+                        .travel
+                        .unresolved_birth(options.bot_travel)
+                        .is_none());
             if !settled {
                 padding = adjusted;
                 continue;
@@ -861,6 +873,7 @@ impl Simulation {
             compactions = 1;
             padding = simulation.compact_travel_padding(&padding);
         }
+        simulation.travel.require_birth_routes(options.bot_travel)?;
         {
             let _phase = trace.phase(Phase::Caption);
             simulation.caption_plan =
@@ -932,7 +945,13 @@ impl Simulation {
             .births()
             .zip(schedule.births())
             .map(|((index, history), (_, arrival))| {
-                (self.events[index].repository, arrival, history)
+                let travel =
+                    schedule.padding(index) - self.clock.history.padding(index);
+                (
+                    self.events[index].repository,
+                    arrival - u64::from(travel),
+                    history,
+                )
             })
             .collect()
     }
@@ -1109,17 +1128,16 @@ impl Simulation {
             .births()
             .filter_map(|(birth, write)| {
                 let begin = write - BIRTH_TICKS - 1;
-                let first = self.schedule.applied(begin.saturating_sub(1));
+                let first = self.schedule.applied(begin);
                 if first >= birth {
                     return None;
                 }
-                let growing = self.packing.growing_during(
-                    usize::try_from(begin).expect("bounded birth"),
-                    usize::try_from(write - 1).expect("bounded birth"),
-                );
+                let repository = self.events[birth].repository;
+                let tick = usize::try_from(write - 1).expect("bounded birth tick");
+                let growing = self.packing.expanding_neighbours(repository, tick);
                 (first..birth)
                     .rev()
-                    .find(|&index| growing[self.events[index].repository])
+                    .find(|&i| growing[self.events[i].repository])
                     .map(|earlier| (birth, earlier))
             })
             .collect()
@@ -1384,19 +1402,20 @@ impl Simulation {
         repositories: Option<&[usize]>,
     ) -> Option<(Vec<crate::layout::RepositoryRegion>, Vec<Vec2>, Vec<f32>)> {
         let (tiles, content) = self.clock.rows(tick);
-        let next = self
+        let span = BIRTH_TICKS + 1;
+        let births: Vec<_> = self
             .births
-            .partition_point(|&(_, arrival, _)| arrival <= tick);
-        let birth =
-            self.births
-                .get(next)
-                .and_then(|&(repository, arrival, history)| {
-                    let span = schedule::BIRTH_TICKS + 1;
-                    (tiles >= history.saturating_sub(span) || tick >= arrival - span)
-                        .then(|| (repository, tick.saturating_sub(arrival - span)))
-                });
+            .iter()
+            .filter_map(|&(repository, ready, history)| {
+                let elapsed = |tick: u64, end: u64| {
+                    tick.saturating_sub(end - span).min(BIRTH_TICKS)
+                };
+                let shown = elapsed(tick, ready);
+                (shown != elapsed(tiles, history)).then_some((repository, shown))
+            })
+            .collect();
         self.packing
-            .sample_split(tiles, content, birth, repositories)
+            .sample_split(tiles, content, &births, repositories)
     }
 
     pub(super) fn visible_repository_tile(
@@ -1529,22 +1548,31 @@ impl Simulation {
         state.avatar_scale += (scale - state.avatar_scale) * (1.0 - (-dt / 0.6).exp());
         state.place_slots_planned(&self.envelopes, now, &self.travel);
         self.tick_times.laps.end(Phase::TickSlots);
-        let targets: Vec<_> = state
-            .avatars
-            .iter()
-            .map(|a| a.slot.as_ref().map_or(a.position, slots::Placement::world))
-            .collect();
         let capacities: Vec<_> = (0..state.avatars.len())
             .map(|index| state.capacity(index))
             .collect();
         let reach = state.settle_reach();
-        for (index, (avatar, target)) in
-            state.avatars.iter_mut().zip(targets).enumerate()
-        {
+        for (index, avatar) in state.avatars.iter_mut().enumerate() {
+            let target = avatar
+                .slot
+                .as_ref()
+                .map_or(avatar.position, slots::Placement::world);
             let travel = self.travel.sample(index, state.tick);
+            let offset = avatar.slot.as_ref().map_or(Vec2::ZERO, |slot| slot.offset);
+            let (target, offset) = if offset != Vec2::ZERO
+                && self.travel.approaching_departure(index, state.tick)
+            {
+                (
+                    slots::world(avatar.slot.as_ref().expect("parked seat").centre()),
+                    Vec2::ZERO,
+                )
+            } else {
+                (target, offset)
+            };
             avatar.activity *= (-dt / 3.0).exp();
             avatar.walk(
                 target,
+                offset,
                 travel.map(|(point, _)| slots::world(point)),
                 now,
                 reach,
@@ -2797,7 +2825,7 @@ mod tests {
     }
 
     #[test]
-    fn padded_birth_grows_just_before_its_first_write() {
+    fn padded_birth_opens_a_walkable_gutter_before_its_first_write() {
         let (events, labels) = short_repository_history(3);
         let options = Options {
             seconds_per_day: 0.1,
@@ -2838,20 +2866,25 @@ mod tests {
                 .count(),
             1
         );
-        for &(repository, arrival, _) in &simulation.births {
-            let begin = arrival - BIRTH_TICKS - 1;
+        for (index, &(repository, ready, _)) in simulation.births.iter().enumerate() {
+            let arrival = simulation.schedule.commit_ticks().nth(index + 1).unwrap();
+            let begin = ready - BIRTH_TICKS - 1;
             let region = |tick| {
                 simulation.packing_sample(tick, None).unwrap().0[repository].clone()
             };
             assert!(region(begin).tile.is_none());
             assert!(region(begin + 1).tile.is_some());
             assert!(
-                region(arrival - 2).tile.unwrap().area()
-                    < region(arrival - 1).tile.unwrap().area()
+                region(ready - 2).tile.unwrap().area()
+                    < region(ready - 1).tile.unwrap().area()
             );
+            assert!(!region(ready).live);
             assert!(!region(arrival - 1).live);
             assert!(region(arrival).live);
-            assert_eq!(region(arrival - 1).tile, region(arrival).tile);
+            assert!(
+                region(arrival - 1).tile.unwrap().area() + 1e-6
+                    >= region(arrival).tile.unwrap().area()
+            );
         }
     }
 
@@ -3646,7 +3679,7 @@ mod tests {
     }
 
     #[test]
-    fn uncapped_short_history_only_fades_at_births() {
+    fn uncapped_short_history_walks_to_new_repositories() {
         let (events, labels) = short_repository_history(10);
         let options = Options {
             seconds_per_day: 0.2,
@@ -3665,11 +3698,8 @@ mod tests {
         )
         .unwrap();
         eprintln!("DENSE_PLAN seconds={}", started.elapsed().as_secs_f64());
-        assert!(simulation.travel.stats.birth_fades > 0);
-        assert_eq!(
-            simulation.travel.stats.faded,
-            simulation.travel.stats.birth_fades
-        );
+        assert_eq!(simulation.travel.stats.faded, 0);
+        assert_eq!(simulation.travel.stats.birth_fades, 0);
         let mut audit = slots::diagnostics::MovingBeams::default();
         let mut checkpoints = Vec::new();
         let frames = frames_for(simulation.duration(), 60).unwrap();
@@ -3734,14 +3764,9 @@ mod tests {
             )
             .unwrap();
             let stats = simulation.travel.stats;
-            assert!(stats.birth_fades <= 1);
             assert_eq!(
                 stats.bot_fades,
-                if bot_travel == BotTravel::Fade {
-                    3
-                } else {
-                    stats.birth_fades
-                }
+                if bot_travel == BotTravel::Fade { 3 } else { 0 }
             );
             assert_eq!(stats.faded, stats.bot_fades);
         }
