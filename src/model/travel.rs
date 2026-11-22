@@ -221,12 +221,24 @@ pub(super) struct DockWalk {
 impl DockWalk {
     pub(super) fn new(
         start: u64,
-        source: Vec2,
-        target: Vec2,
+        [from, source]: [Vec2; 2],
+        [target, seat]: [Vec2; 2],
         cells: &[Rect],
         speed: f32,
     ) -> Option<Self> {
-        let points = Router::default().route(source, target, cells).ok()?;
+        let mut points = Router::default().route(source, target, cells).ok()?;
+        if points
+            .first()
+            .is_some_and(|point| point.distance(from) > 0.001)
+        {
+            points.insert(0, from);
+        }
+        if points
+            .last()
+            .is_some_and(|point| point.distance(seat) > 0.001)
+        {
+            points.push(seat);
+        }
         let route = Route::new(&points, speed);
         (route.duration > 0.0).then_some(Self { start, route })
     }
@@ -454,13 +466,25 @@ impl Plan {
         self.trips.iter().any(|t| t.active(author, tick))
     }
     pub(super) fn walking(&self, author: usize, tick: u64) -> bool {
-        self.trips.iter().any(|t| {
+        self.walking_trip(author, tick).is_some()
+    }
+
+    fn walking_trip(&self, author: usize, tick: u64) -> Option<&Trip> {
+        self.trips.iter().find(|t| {
             t.author == author
                 && t.departure <= tick
                 && tick < t.arrival
                 && !t.fade
                 && !t.route.is_empty()
         })
+    }
+
+    pub(super) fn departure_connector(&self, author: usize, tick: u64) -> Option<Vec2> {
+        self.walking_trip(author, tick)
+            .filter(|trip| {
+                ticks_duration(tick - trip.departure) < super::SETTLE_SECONDS
+            })
+            .map(|trip| trip.source)
     }
 }
 
@@ -953,6 +977,47 @@ pub(super) fn on_network(point: Vec2, cells: &[Rect]) -> bool {
     })
 }
 
+pub(super) fn align_near_network(
+    from: Vec2,
+    point: Vec2,
+    cells: &[Rect],
+    step: f32,
+) -> Vec2 {
+    if on_network(point, cells) {
+        return point;
+    }
+    cells
+        .iter()
+        .flat_map(|cell| {
+            (0..2).flat_map(move |axis| {
+                let normal = 1 - axis;
+                [cell.min[normal], cell.max[normal]].into_iter().filter_map(
+                    move |edge| {
+                        let across = edge - from[normal];
+                        if (edge - point[normal]).abs() > 1.0 || across.abs() > step {
+                            return None;
+                        }
+                        let along = (step * step - across * across).max(0.0).sqrt();
+                        let low = cell.min[axis].max(from[axis] - along);
+                        let high = cell.max[axis].min(from[axis] + along);
+                        (low <= high).then(|| {
+                            let mut candidate = point;
+                            candidate[normal] = edge;
+                            candidate[axis] = point[axis].clamp(low, high);
+                            candidate
+                        })
+                    },
+                )
+            })
+        })
+        .filter(|candidate| candidate.distance_squared(point) <= 1.0)
+        .min_by(|a, b| {
+            a.distance_squared(point)
+                .total_cmp(&b.distance_squared(point))
+        })
+        .unwrap_or(point)
+}
+
 impl Router {
     fn route(
         &mut self,
@@ -1196,6 +1261,64 @@ impl Plan {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parked_avatars_stay_clear_during_seat_transitions() {
+        let mut events = crate::timeline::synthetic();
+        events.truncate(2);
+        events[1].author = events[0].author.clone();
+        events[1].seconds = events[0].seconds + 6 * 86_400;
+        events[0].co_authors.push(crate::timeline::Identity::new(
+            "Grace",
+            "grace@example.test",
+        ));
+        let mut theme = crate::theme::Theme::neon();
+        theme.avatar_radius = 0.29;
+        let mut sim = Simulation::new(
+            events,
+            &super::super::Options {
+                max_idle_seconds: 3.0,
+                ..Default::default()
+            },
+            &theme,
+            &crate::contributors::Mappings::default(),
+        );
+        let first = sim.schedule.commit_ticks().next().unwrap();
+        sim.advance_to(u32::try_from(first + 24).unwrap(), 60);
+        let slot = sim.state.avatars[1].slot.as_ref().unwrap();
+        let normal = slots::world(slot.centre()) - slots::world(slot.point);
+        assert!(normal.length() > 0.0);
+        let source = slot.centre();
+        let destination = source + slot.offset.normalize() * 80.0;
+        let departure = first + 65;
+        sim.travel.trips.push(Trip {
+            author: 1,
+            commit: 1,
+            departure,
+            arrival: departure + 40,
+            destination,
+            source,
+            fade_ticks: 0,
+            route: Route::new(&[source, destination], sim.state.avatar_max_speed),
+            kind: TripKind::Relocation,
+            fade: false,
+            bot: false,
+            source_repository: 0,
+            destination_repository: 0,
+            free: first + 25,
+            failure: None,
+            cutoff: None,
+            proof: None,
+        });
+        sim.restart();
+
+        let mut audit = super::super::occlusion::Audit::default();
+        for frame in 0..=u32::try_from(sim.end_tick()).unwrap() {
+            sim.advance_to(frame, 60);
+            audit.observe(&sim);
+            assert_eq!(audit.parked_avatar_observations, 0, "frame {frame}");
+        }
+    }
 
     #[test]
     fn holding_files_changes_no_capture_or_reservation() {

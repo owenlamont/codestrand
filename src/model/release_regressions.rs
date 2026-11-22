@@ -216,3 +216,43 @@ fn consecutive_writes_keep_the_same_dock() {
     }
     assert!(docks.iter().all(Option::is_some));
 }
+#[test]
+fn visible_avatar_steps_stay_within_travel_speed() {
+    let actions = Identity::new("Actions", "actions@example.test");
+    let mut events = vec![
+        write(0, 0, ["src/lib.rs".into()]),
+        write(0, 1, ["src/lib.rs".into()]),
+        write(0, 2, ["src/lib.rs".into()]),
+    ];
+    events[0].co_authors.push(actions.clone());
+    events[2].author = actions;
+    let mut sim = playback(events, [false; 2]);
+    let mut previous = Vec::new();
+    let max_step =
+        sim.state.avatar_max_speed * framing::WORLD_UNITS_PER_REFERENCE_PIXEL / 60.0;
+    let relocation =
+        u32::try_from(sim.schedule.commit_ticks().nth(1).unwrap()).unwrap();
+    for frame in 0..=u32::try_from(sim.end_tick()).unwrap() {
+        if frame == relocation {
+            let slot = sim.state.avatars[0].slot.as_mut().unwrap();
+            slot.dock = slots::Dock::new(2, 0.5);
+        }
+        sim.advance_to(frame, 60);
+        for ((before, presence), avatar) in previous.iter().zip(&sim.state.avatars) {
+            if *presence > 0.001 && avatar.presence > 0.001 {
+                let step = avatar.position.distance(*before);
+                assert!(
+                    step <= max_step + 0.001,
+                    "frame {frame}: {} stepped {step} (limit {max_step})",
+                    avatar.name,
+                );
+            }
+        }
+        previous = sim
+            .state
+            .avatars
+            .iter()
+            .map(|a| (a.position, a.presence))
+            .collect();
+    }
+}

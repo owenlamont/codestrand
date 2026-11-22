@@ -157,6 +157,12 @@ impl Placement {
     pub fn centre(&self) -> Vec2 {
         self.point - self.offset
     }
+
+    pub(super) fn departure_point(&self, tile: Option<Tile>) -> Vec2 {
+        let normal = inward(self.dock.edge);
+        let point = self.point - normal * self.offset.dot(normal);
+        tile.map_or(point, |tile| point.clamp(tile.low * HALF, tile.high * HALF))
+    }
     /// The centre of the ring round a group of `capacity` seats parked here.
     pub fn ring_centre(&self, capacity: u8, radius: f32) -> Vec2 {
         self.centre() + ring_offset(capacity, self.dock.edge, radius)
@@ -229,6 +235,10 @@ fn seat_offset(seat: u8, capacity: u8, edge: u8, radius: f32) -> Vec2 {
 
 pub(super) fn world(point: Vec2) -> Vec3 {
     ground(framing::field_to_world(point / HALF)) + Vec3::Y * MIN_AVATAR_HEIGHT
+}
+
+pub(super) fn field_point(position: Vec3) -> Vec2 {
+    framing::world_to_field(Vec2::new(position.x, position.z)) * HALF
 }
 
 pub(super) fn projection_scale(point: Vec3) -> f32 {
@@ -782,14 +792,14 @@ impl State {
             if let Some(previous) = avatar.slot.as_ref()
                 && previous.dock != place.dock
                 && avatar.presence > 0.0
-                && !avatar.travelling
+                && (!avatar.travelling || avatar.dock_walk.is_some())
                 && !plan.travelling(member, self.tick)
                 && let Some(tile) = self.layout.repositories[avatar.repository].gutter
             {
                 avatar.dock_walk = super::travel::DockWalk::new(
                     self.tick,
-                    previous.dock.on_network(tile),
-                    chosen.point,
+                    [field_point(avatar.position), previous.dock.on_network(tile)],
+                    [chosen.point, place.point],
                     cells,
                     self.avatar_max_speed,
                 );

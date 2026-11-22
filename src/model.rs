@@ -427,7 +427,9 @@ impl Avatar {
         route: Option<Vec3>,
         now: Time,
         reach: f32,
+        max_step: f32,
     ) {
+        let previous = self.position;
         if let Some(point) = route {
             self.position = point;
             self.settle = None;
@@ -461,6 +463,10 @@ impl Avatar {
                 }
             };
             self.travelling = false;
+        }
+        let step = self.position - previous;
+        if self.presence > 0.0 && step.length_squared() > max_step * max_step {
+            self.position = previous + step.clamp_length_max(max_step);
         }
         self.seat = offset;
     }
@@ -1551,64 +1557,7 @@ impl Simulation {
         state.avatar_scale += (scale - state.avatar_scale) * (1.0 - (-dt / 0.6).exp());
         state.place_slots_planned(&self.envelopes, now, &self.travel);
         self.tick_times.laps.end(Phase::TickSlots);
-        let capacities: Vec<_> = (0..state.avatars.len())
-            .map(|index| state.capacity(index))
-            .collect();
-        let reach = state.settle_reach();
-        for (index, avatar) in state.avatars.iter_mut().enumerate() {
-            let target = avatar
-                .slot
-                .as_ref()
-                .map_or(avatar.position, slots::Placement::world);
-            let travel = self.travel.sample(index, state.tick);
-            let route = avatar.travel_point(travel.map(|(point, _)| point), state.tick);
-            let offset = avatar.slot.as_ref().map_or(Vec2::ZERO, |slot| slot.offset);
-            let (target, offset) = if offset != Vec2::ZERO
-                && self.travel.approaching_departure(index, state.tick)
-            {
-                (
-                    slots::world(avatar.slot.as_ref().expect("parked seat").centre()),
-                    Vec2::ZERO,
-                )
-            } else {
-                (target, offset)
-            };
-            avatar.activity *= (-dt / 3.0).exp();
-            avatar.walk(target, offset, route, now, reach);
-            let leads = avatar.group.is_some_and(|g| g.lead == index);
-            let ring = if leads && !avatar.travelling {
-                avatar.ring_capacity = avatar.ring_capacity.max(capacities[index]);
-                if capacities[index] > 1 {
-                    avatar.ring_capacity = capacities[index];
-                    dt / DISBAND
-                } else {
-                    -dt / DISBAND
-                }
-            } else {
-                -dt / DISBAND
-            };
-            avatar.ring_presence = (avatar.ring_presence + ring).clamp(0.0, 1.0);
-            avatar.projection_scale = slots::projection_scale(avatar.position);
-            let service_visible = now < avatar.expires;
-            let service_fade = if service_visible { dt / 0.4 } else { -dt / 1.2 };
-            avatar.slot_presence =
-                (avatar.slot_presence + service_fade).clamp(0.0, 1.0);
-            let fade = if service_visible {
-                dt / 0.4
-            } else if avatar.dismissed {
-                -dt / DISBAND
-            } else {
-                -dt / lifecycle::EXIT
-            };
-            avatar.presence = (avatar.presence + fade).clamp(0.0, 1.0);
-            avatar.grey = lifecycle::progress(now, avatar.expires, 0.4);
-            avatar.lifecycle_scale = 1.0
-                + (ARRIVAL_SCALE - 1.0)
-                    * (1.0 - lifecycle::progress(now, avatar.arrived + 0.4, 0.8));
-            if let Some((_, opacity)) = travel {
-                avatar.presence = avatar.presence.min(opacity);
-            }
-        }
+        state.advance_avatars(now, dt, &self.travel, self.visuals == Visuals::All);
         self.tick_times.laps.end(Phase::TickAvatars);
         if self.visuals == Visuals::All {
             let texts: Vec<_> = self
@@ -2086,6 +2035,111 @@ impl State {
             for change in &event.changes {
                 apply(&mut self.layout, change, author);
             }
+        }
+    }
+
+    fn advance_avatars(
+        &mut self,
+        now: Time,
+        dt: f32,
+        plan: &travel::Plan,
+        visuals: bool,
+    ) {
+        let capacities: Vec<_> = (0..self.avatars.len())
+            .map(|index| self.capacity(index))
+            .collect();
+        let reach = self.settle_reach();
+        let max_step =
+            self.avatar_max_speed * framing::WORLD_UNITS_PER_REFERENCE_PIXEL * dt;
+        let previous = (visuals && self.avatars.len() > 1).then(|| {
+            self.avatars
+                .iter()
+                .map(|avatar| (avatar.presence > 0.001).then_some(avatar.position))
+                .collect::<Vec<_>>()
+        });
+        for (index, avatar) in self.avatars.iter_mut().enumerate() {
+            let target = avatar
+                .slot
+                .as_ref()
+                .map_or(avatar.position, slots::Placement::world);
+            let travel = plan.sample(index, self.tick);
+            let route = avatar.travel_point(
+                travel.map(|(point, opacity)| {
+                    if opacity < 1.0 {
+                        slots::field_point(avatar.position)
+                    } else {
+                        point
+                    }
+                }),
+                self.tick,
+            );
+            let offset = avatar.slot.as_ref().map_or(Vec2::ZERO, |slot| slot.offset);
+            let (target, offset) = if offset != Vec2::ZERO
+                && plan.approaching_departure(index, self.tick)
+            {
+                (
+                    slots::world(
+                        avatar.slot.as_ref().expect("parked seat").departure_point(
+                            self.layout.repositories[avatar.repository].gutter,
+                        ),
+                    ),
+                    Vec2::ZERO,
+                )
+            } else {
+                (target, offset)
+            };
+            avatar.activity *= (-dt / 3.0).exp();
+            let from = avatar.position;
+            avatar.walk(target, offset, route, now, reach, max_step);
+            if let Some((point, 1.0)) = travel
+                && slots::world(point) != avatar.position
+            {
+                let network = travel::network(
+                    self.layout.repositories.iter().filter_map(|r| r.gutter),
+                );
+                avatar.position = slots::world(travel::align_near_network(
+                    slots::field_point(from),
+                    slots::field_point(avatar.position),
+                    &network,
+                    self.avatar_max_speed * dt,
+                ));
+            }
+            let leads = avatar.group.is_some_and(|g| g.lead == index);
+            let ring = if leads && !avatar.travelling {
+                avatar.ring_capacity = avatar.ring_capacity.max(capacities[index]);
+                if capacities[index] > 1 {
+                    avatar.ring_capacity = capacities[index];
+                    dt / DISBAND
+                } else {
+                    -dt / DISBAND
+                }
+            } else {
+                -dt / DISBAND
+            };
+            avatar.ring_presence = (avatar.ring_presence + ring).clamp(0.0, 1.0);
+            avatar.projection_scale = slots::projection_scale(avatar.position);
+            let service_visible = now < avatar.expires;
+            let service_fade = if service_visible { dt / 0.4 } else { -dt / 1.2 };
+            avatar.slot_presence =
+                (avatar.slot_presence + service_fade).clamp(0.0, 1.0);
+            let fade = if service_visible {
+                dt / 0.4
+            } else if avatar.dismissed {
+                -dt / DISBAND
+            } else {
+                -dt / lifecycle::EXIT
+            };
+            avatar.presence = (avatar.presence + fade).clamp(0.0, 1.0);
+            avatar.grey = lifecycle::progress(now, avatar.expires, 0.4);
+            avatar.lifecycle_scale = 1.0
+                + (ARRIVAL_SCALE - 1.0)
+                    * (1.0 - lifecycle::progress(now, avatar.arrived + 0.4, 0.8));
+            if let Some((_, opacity)) = travel {
+                avatar.presence = avatar.presence.min(opacity);
+            }
+        }
+        if let Some(previous) = previous {
+            occlusion::clear_seat_transitions(self, plan, &previous, max_step);
         }
     }
 
