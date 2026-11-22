@@ -387,6 +387,8 @@ pub(super) struct Avatar {
     name_visibility: names::Visibility,
     commit: usize,
     slot: Option<slots::Placement>,
+    dock_since: u64,
+    dock_walk: Option<travel::DockWalk>,
     slot_origin: Option<(usize, slots::Dock, Vec2)>,
     group: Option<Group>,
     /// Left behind by a disbanding group with no later commit, so fading with its ring.
@@ -408,6 +410,14 @@ pub(super) struct Avatar {
 }
 
 impl Avatar {
+    fn travel_point(&mut self, planned: Option<Vec2>, tick: u64) -> Option<Vec3> {
+        let local = self.dock_walk.as_ref().and_then(|walk| walk.sample(tick));
+        if planned.is_some() || local.is_none() {
+            self.dock_walk = None;
+        }
+        planned.or(local).map(slots::world)
+    }
+
     /// Moves to `target`, or along a travel route; a short step to a new seat or off the
     /// end of a route is walked over [`SETTLE_SECONDS`] rather than jumped.
     fn walk(
@@ -1551,6 +1561,7 @@ impl Simulation {
                 .as_ref()
                 .map_or(avatar.position, slots::Placement::world);
             let travel = self.travel.sample(index, state.tick);
+            let route = avatar.travel_point(travel.map(|(point, _)| point), state.tick);
             let offset = avatar.slot.as_ref().map_or(Vec2::ZERO, |slot| slot.offset);
             let (target, offset) = if offset != Vec2::ZERO
                 && self.travel.approaching_departure(index, state.tick)
@@ -1563,13 +1574,7 @@ impl Simulation {
                 (target, offset)
             };
             avatar.activity *= (-dt / 3.0).exp();
-            avatar.walk(
-                target,
-                offset,
-                travel.map(|(point, _)| slots::world(point)),
-                now,
-                reach,
-            );
+            avatar.walk(target, offset, route, now, reach);
             let leads = avatar.group.is_some_and(|g| g.lead == index);
             let ring = if leads && !avatar.travelling {
                 avatar.ring_capacity = avatar.ring_capacity.max(capacities[index]);
@@ -2113,6 +2118,8 @@ impl State {
             name_visibility: names::Visibility::default(),
             commit: 0,
             slot: None,
+            dock_since: 0,
+            dock_walk: None,
             slot_origin: None,
             group: None,
             dismissed: false,
@@ -2187,6 +2194,7 @@ impl State {
         for (&member, group) in participants.iter().zip(groups) {
             let avatar = &mut self.avatars[member];
             if avatar.repository != event.repository {
+                avatar.dock_walk = None;
                 avatar.slot_origin = avatar
                     .slot
                     .take()

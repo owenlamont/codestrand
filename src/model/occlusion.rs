@@ -54,13 +54,15 @@ impl Audit {
             .avatars()
             .iter()
             .enumerate()
-            .filter(|(_, avatar)| avatar.presence > 0.001)
-            .filter_map(|(index, avatar)| {
+            .zip(sim.member_scales())
+            .filter(|((_, avatar), _)| avatar.presence > 0.001)
+            .filter_map(|((index, avatar), member_scale)| {
                 let radius = sim.state.geometry.avatar_radius
                     * sim.scale()
                     * sim.avatar_disc_scale()
                     * avatar.projection_scale
                     * avatar.lifecycle_scale
+                    * member_scale
                     * avatar.presence;
                 let centre = screen(avatar.position)?;
                 let edge = screen(avatar.position + right * radius)?;
@@ -79,14 +81,16 @@ impl Audit {
                 }
             }
         }
+        let parked = |index: usize| {
+            let avatar = &sim.state.avatars[index];
+            !avatar.travelling && avatar.settle.is_none()
+        };
         for (index, &(author, centre, radius)) in discs.iter().enumerate() {
             for &(other, point, other_radius) in &discs[index + 1..] {
                 if centre.distance(point) + 0.01 < radius + other_radius {
                     self.avatar_avatar_observations += 1;
-                    self.parked_avatar_observations += u64::from(
-                        !sim.travel.travelling(author, sim.state.tick)
-                            && !sim.travel.travelling(other, sim.state.tick),
-                    );
+                    self.parked_avatar_observations +=
+                        u64::from(parked(author) && parked(other));
                 }
             }
         }

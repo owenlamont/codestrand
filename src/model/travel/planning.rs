@@ -479,6 +479,9 @@ pub(super) fn trips(
             );
         }
         if best.route.is_empty() {
+            if relocation {
+                continue;
+            }
             best.departure = service
                 .tick
                 .saturating_sub(9)

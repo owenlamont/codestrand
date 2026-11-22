@@ -581,6 +581,39 @@ impl State {
         party.sort_by_key(|&i| (i != lead, self.avatars[i].group.map(|g| g.seat)));
         party
     }
+
+    fn incumbent_discs(
+        &self,
+        index: usize,
+        party: &[usize],
+        now: super::Time,
+        scales: &[f32],
+        radius: f32,
+    ) -> Vec<Rect> {
+        let priority = |index: usize| {
+            let avatar = &self.avatars[index];
+            (avatar.dock_since, index)
+        };
+        let newcomer = self.avatars[index].slot.is_none();
+        self.avatars
+            .iter()
+            .enumerate()
+            .filter(|&(other, peer)| {
+                !party.contains(&other)
+                    && (peer.presence > 0.0 || now < peer.expires)
+                    && (newcomer || priority(other) < priority(index))
+            })
+            .filter_map(|(other, peer)| {
+                let slot = peer.slot.as_ref()?;
+                let tile = self.layout.repositories[peer.repository].gutter?;
+                Some(disk(
+                    slot.dock.on_network(tile) + slot.offset,
+                    radius * scales[other],
+                ))
+            })
+            .collect()
+    }
+
     pub(super) fn place_slots_planned(
         &mut self,
         envelopes: &[Envelope],
@@ -595,6 +628,7 @@ impl State {
         let radius = self.avatar_radius();
         let name_scale = super::LabelKind::Avatar.font_scale() * self.field_growth;
         let capacities = self.compute_capacities();
+        let scales = self.member_scales();
         let mut occupied = self.hold_idle(now, &capacities, radius);
         let retained = self.retained_slots(now, radius);
         occupied.extend(retained.iter().flatten().copied());
@@ -634,6 +668,7 @@ impl State {
                 choosing,
             );
             let peers = self.slot_peers(index, plan, choosing);
+            let clearance = self.incumbent_discs(index, &party, now, &scales, radius);
             let choice = Choice {
                 field: super::travel::field_rect(self.field),
                 tile,
@@ -645,6 +680,7 @@ impl State {
                 peers: &peers,
                 future: &future,
                 occupied: &occupied,
+                clearance: &clearance,
                 repository: avatar.repository,
                 text,
                 scale: name_scale,
@@ -665,7 +701,7 @@ impl State {
             );
             chosen.commit = commit;
             self.record_placement(&chosen);
-            let capacity = self.seat_party(&chosen, &party);
+            let capacity = self.seat_party(&chosen, &party, &cells, plan);
             let ring_centre =
                 chosen.point + ring_offset(capacity, chosen.dock.edge, radius);
             occupied.push(disk(ring_centre, group_radius(capacity, radius)));
@@ -710,7 +746,13 @@ impl State {
     /// Seats an author's group round its chosen dock and returns its seat count; a
     /// co-author from an earlier commit leaves the group, staying put, if the author has
     /// moved to another dock.
-    fn seat_party(&mut self, chosen: &Placement, party: &[usize]) -> u8 {
+    fn seat_party(
+        &mut self,
+        chosen: &Placement,
+        party: &[usize],
+        cells: &[Rect],
+        plan: &super::travel::Plan,
+    ) -> u8 {
         let radius = self.avatar_radius();
         let author = party[0];
         let mut seated = Vec::with_capacity(party.len());
@@ -736,8 +778,31 @@ impl State {
                 offset,
                 ..chosen.clone()
             };
-            self.avatars[member].slot = Some(place);
-            self.avatars[member].slot_origin = None;
+            let avatar = &mut self.avatars[member];
+            if let Some(previous) = avatar.slot.as_ref()
+                && previous.dock != place.dock
+                && avatar.presence > 0.0
+                && !avatar.travelling
+                && !plan.travelling(member, self.tick)
+                && let Some(tile) = self.layout.repositories[avatar.repository].gutter
+            {
+                avatar.dock_walk = super::travel::DockWalk::new(
+                    self.tick,
+                    previous.dock.on_network(tile),
+                    chosen.point,
+                    cells,
+                    self.avatar_max_speed,
+                );
+            }
+            if avatar
+                .slot
+                .as_ref()
+                .is_none_or(|previous| previous.dock != place.dock)
+            {
+                avatar.dock_since = self.tick;
+            }
+            avatar.slot = Some(place);
+            avatar.slot_origin = None;
         }
         capacity
     }
@@ -1456,6 +1521,7 @@ struct Choice<'a> {
     capacity: u8,
     beams: &'a [(usize, Rect)],
     occupied: &'a [Rect],
+    clearance: &'a [Rect],
     peers: &'a [(Vec2, u8, Vec2)],
     future: &'a [Rect],
     repository: usize,
@@ -1477,6 +1543,9 @@ impl Choice<'_> {
     ) -> Placement {
         if let Some(parked) = previous {
             let selected = self.assess(parked.dock).0;
+            if self.clearance_cost(&selected) > 0.001 {
+                return self.nearest(selected.point, true);
+            }
             if parked.commit == commit || selected.overlaps == 0 {
                 return selected;
             }
@@ -1486,7 +1555,11 @@ impl Choice<'_> {
             if locked
                 || (selected.valid() && self.reserved_cost(selected.point) <= 0.001)
             {
-                return selected;
+                return if self.clearance_cost(&selected) <= 0.001 {
+                    selected
+                } else {
+                    self.nearest(origin.unwrap_or(selected.point), true)
+                };
             }
         }
         if let Some(parked) = previous {
@@ -1521,26 +1594,27 @@ impl Choice<'_> {
                 let seconds = super::travel::slot_seconds(
                     point, slot.point, self.cells, self.speed,
                 );
-                let ray = self.ray_cost(slot.point);
                 let cost = if same_tile {
                     seconds
                 } else {
-                    ray + TRAVEL_WEIGHT * seconds
+                    self.ray_cost(slot.point)
+                        + TRAVEL_WEIGHT * seconds
                         + self.spread_cost(slot.point, slot.dock.edge)
                         + self.spacing_cost(slot.point) * 1_000.0
                 };
                 (slot, cost)
             })
             .min_by(|a, b| {
-                let obstruction = |slot: &Placement| {
-                    if same_tile {
-                        self.occupied_cost(slot.ring_centre(self.capacity, self.radius))
-                    } else {
-                        self.avatar_cost(slot.point)
-                    }
-                };
-                obstruction(&a.0)
-                    .total_cmp(&obstruction(&b.0))
+                self.clearance_cost(&a.0)
+                    .total_cmp(&self.clearance_cost(&b.0))
+                    .then_with(|| {
+                        if same_tile {
+                            std::cmp::Ordering::Equal
+                        } else {
+                            self.avatar_cost(a.0.point)
+                                .total_cmp(&self.avatar_cost(b.0.point))
+                        }
+                    })
                     .then(a.1.total_cmp(&b.1))
                     .then(
                         a.0.point
@@ -1552,6 +1626,25 @@ impl Choice<'_> {
     }
     fn avatar_cost(&self, point: Vec2) -> f32 {
         self.occupied_cost(point) + self.reserved_cost(point)
+    }
+    fn clearance_cost(&self, slot: &Placement) -> f32 {
+        if self.clearance.is_empty() {
+            return 0.0;
+        }
+        let member_radius =
+            self.radius * if self.capacity > 1 { MEMBER_SCALE } else { 1.0 };
+        (0..self.capacity)
+            .flat_map(|seat| {
+                let point = slot.point
+                    + seat_offset(seat, self.capacity, slot.dock.edge, self.radius);
+                self.clearance.iter().map(move |disc| {
+                    (member_radius + disc.half_size().x
+                        - point.distance(disc.center())
+                        - 0.001)
+                        .max(0.0)
+                })
+            })
+            .sum()
     }
     fn occupied_cost(&self, point: Vec2) -> f32 {
         self.occupied
@@ -1708,6 +1801,10 @@ impl Choice<'_> {
             .min_by(|a, b| {
                 (a.1.0, a.1.1, a.1.2)
                     .cmp(&(b.1.0, b.1.1, b.1.2))
+                    .then(
+                        self.clearance_cost(&a.0)
+                            .total_cmp(&self.clearance_cost(&b.0)),
+                    )
                     .then(
                         self.avatar_cost(a.0.point)
                             .total_cmp(&self.avatar_cost(b.0.point)),
@@ -2045,6 +2142,7 @@ mod tests {
             radius: 7.5,
             capacity: 1,
             occupied,
+            clearance: &[],
             peers: &[],
             future: &[],
             beams: obstacles,

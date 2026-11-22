@@ -212,6 +212,37 @@ impl Route {
     }
 }
 
+#[derive(Clone, Debug)]
+pub(super) struct DockWalk {
+    start: u64,
+    route: Route,
+}
+
+impl DockWalk {
+    pub(super) fn new(
+        start: u64,
+        source: Vec2,
+        target: Vec2,
+        cells: &[Rect],
+        speed: f32,
+    ) -> Option<Self> {
+        let points = Router::default().route(source, target, cells).ok()?;
+        let route = Route::new(&points, speed);
+        (route.duration > 0.0).then_some(Self { start, route })
+    }
+
+    pub(super) fn sample(&self, tick: u64) -> Option<Vec2> {
+        let elapsed = ticks_duration(tick - self.start);
+        (elapsed < self.route.duration)
+            .then(|| self.route.sample(elapsed))
+            .flatten()
+    }
+
+    pub(super) fn retained_bytes(&self) -> usize {
+        self.route.retained_bytes()
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TripKind {
     Transfer,
@@ -438,6 +469,7 @@ impl Trip {
         self.author == author
             && self.departure <= tick
             && tick < self.arrival
+            && !(self.fade && self.kind == TripKind::Relocation)
             && (self.fade || !self.route.is_empty())
     }
     fn sample(&self, tick: u64) -> (Vec2, f32) {

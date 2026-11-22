@@ -143,6 +143,43 @@ fn alternating_leads_keep_both_same_repository_docks() {
 }
 
 #[test]
+fn alternating_contributors_keep_clear_docks() {
+    let grace = Identity::new("Grace", "grace@example.test");
+    let events = (0..8)
+        .map(|day| {
+            let mut event = write(0, day, ["src/lib.rs".into()]);
+            if day % 2 == 1 {
+                event.author = grace.clone();
+            }
+            event
+        })
+        .collect();
+    let mut sim = playback(events, [false; 2]);
+    let first = u32::try_from(sim.schedule.commit_ticks().next().unwrap()).unwrap();
+    sim.advance_to(first + 1, 60);
+    let incumbent = sim.state.avatars[0].slot.as_ref().unwrap().dock;
+    sim.travel.docks.insert((1, 1), incumbent);
+    sim.restart();
+
+    let mut newcomer = None;
+    let mut audit = occlusion::Audit::default();
+    for tick in 0..=u32::try_from(sim.end_tick()).unwrap() {
+        sim.advance_to(tick, 60);
+        if sim.state.avatars.len() < 2 {
+            continue;
+        }
+        let [ada, grace] = [&sim.state.avatars[0], &sim.state.avatars[1]];
+        audit.observe(&sim);
+        assert_eq!(audit.parked_avatar_observations, 0, "tick {tick}");
+        assert_eq!(ada.slot.as_ref().unwrap().dock, incumbent, "tick {tick}");
+        let dock = grace.slot.as_ref().unwrap().dock;
+        assert_eq!(*newcomer.get_or_insert(dock), dock, "tick {tick}");
+        assert!((0..2).all(|index| sim.travel.sample(index, tick.into()).is_none()));
+    }
+    assert!(newcomer.is_some());
+}
+
+#[test]
 fn consecutive_writes_keep_the_same_dock() {
     let mut sim = playback(busy_history(), [false; 2]);
     let services: Vec<_> = sim.schedule.commit_ticks().collect();
