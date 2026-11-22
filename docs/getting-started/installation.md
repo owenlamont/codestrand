@@ -1,15 +1,14 @@
 # Installation
 
 Codestrand ships as a native binary. Choose a channel matching your tools.
-The guides describe 0.2.0. Until publication, install from `main` for these features.
-If an option in the guides is missing from `--help`, build from `main`:
+The guides describe 0.3.0. Check `codestrand --version` and the command's `--help`
+after installing. To try the latest changes from source:
 
 ```sh
 cargo install --locked --git https://github.com/owenlamont/codestrand --branch main
 ```
 
 This requires Rust and the native build prerequisites described below.
-Check `codestrand --version` and the command's `--help` after installing.
 
 ## PyPI
 

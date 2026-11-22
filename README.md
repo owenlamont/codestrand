@@ -13,8 +13,9 @@ Watch the [feature tour on YouTube](https://youtu.be/gmueXAHnvAE).
 Video export uses your installed FFmpeg.
 Licensed MIT OR Apache-2.0.
 
-The 0.2.0 release plays full histories across local repositories, with planning
-progress in preview and export and inclusive UTC date bounds.
+In 0.3.0, repositories share a field that grows with their contents and titles sit on
+the tiles beneath the files. Preview reuses plans when looping or rewinding, and
+export frames the whole field from a fixed overhead view by default.
 
 Diff samples use Bevy's bundled Fira Mono font (OFL-1.1); see
 [third-party notices](THIRDPARTY.txt).

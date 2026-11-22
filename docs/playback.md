@@ -241,10 +241,10 @@ The first commit enlarges the contributor avatar, settling over 1.2 playback sec
 Whole-file additions descend from the contributor along the beam to the file layout;
 deletions grey, rise and fade over 1.2 seconds. Line fragments remain separate.
 
-`--contributor-inactivity-days 60` assumes a contributor has left after 60 calendar
-days without a commit across the combined history. The avatar greys and fades over
-1.2 playback seconds; another commit revives the same contributor. The two-month default
-flags Owen's observed 88-day pause in the combined first-parent histories.
+`--contributor-inactivity-days` accepts 1–36,500 calendar days, inclusive. At the
+default of 60 days without a commit across the combined history, Codestrand assumes
+the contributor has left. The avatar greys and fades over 1.2 playback seconds.
+Another commit revives the same contributor.
 Departure is an assumption, not platform knowledge. Deadlines follow the compressed,
 padded timeline, using the latest author date reached so reversed dates cannot trigger
 an immediate departure. Playback does not extrapolate contributor departures beyond
@@ -343,7 +343,8 @@ Parking still spreads avatars when clear slots are available.
 A contributor can depart once its previous commit's last fragment has arrived and the
 moving gutter route can meet the speed limit. Travel overlaps other contributors'
 animations; commits remain strictly chronological. Routes stop at corners and accelerate
-toward `--avatar-max-speed` world units per second (default `31.4`, inclusive minimum `0.1`).
+toward `--avatar-max-speed` world units per second (default `31.4`, range `0.1` through
+`86400`, inclusive).
 Moving junctions follow the gutter network, with every canonical sample checked against
 the speed limit, frame bounds and tile guards. A shared parking point creates no trip.
 Contributors follow their parked gutter slot until their inferred calendar departure,
@@ -385,7 +386,6 @@ Padding is revalidated as scene geometry changes. The automatic policy uses at m
 padded rebuilds, including one cleanup of unused service padding.
 Uncapped padding grows until every walking trip completes, subject to the planning
 memory estimate. Each Dijkstra search is limited to 10,000 graph nodes.
-Numeric caps apply to accumulated extra waiting for trips between existing tiles.
 
 Header and caption remain in the outer frame. Other preview aspect ratios use conservative
 framing;
@@ -411,10 +411,9 @@ fit in memory. It can be conservative on some inputs and too low on others.
 Route searches stop at 10,000 nodes; capped playback can fade across when a search
 exceeds that bound, while uncapped walking reports an error.
 
-Large multi-repository histories can take time to begin playback. Consumed travel plans
-are discarded to bound retained travel windows and checkpoints; the shared layout
-remains available throughout playback. This does not bound total process memory.
-To inspect a smaller interval, use inclusive `--start-date` and `--end-date`.
+Export releases consumed travel plans. Preview can retain them for replay within the
+same run. The shared layout remains available throughout playback. To play a smaller
+interval, use inclusive `--start-date` and `--end-date`.
 
 Playback memory and duration checks use the range selected by `--start-date` and `--end-date`;
 the layout estimate also includes the files present when the range starts.
@@ -463,8 +462,8 @@ codestrand preview --repository /path/to/repository --start-date 2026-05-01 --en
 
 Pacing preserves within-day timestamp spacing. Coincident, reversed or very close
 timestamps get a 0.05-second minimum gap, limited by the idle cap, preserving commit
-order. Seconds per day accepts `0.01` through `86400`, inclusive; the idle cap must
-also be at least one simulation tick (1/60 second).
+order. Seconds per day accepts `0.01` through `86400`, inclusive. The idle cap
+accepts one simulation tick (1/60 second) through `86400` seconds, inclusive.
 
 Live speed keys move through the canonical timeline faster or slower without
 changing commit times, layout, pulses, beams, avatar motion, settling or fades in

@@ -138,7 +138,9 @@ them manually after checking the video.
 
 ## Export framing
 
-Export uses a static overview that fits the whole field by default.
+Export uses a fixed overhead view sized for the whole field, including room for
+contributors above the tiles. New tiles can grow into the view without moving the
+camera. Use a scripted path for closer views or camera movement.
 
 ## Scripted camera
 
