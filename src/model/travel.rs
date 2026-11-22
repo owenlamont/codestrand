@@ -70,7 +70,6 @@ pub(super) struct Service {
     radius: f32,
     bot: bool,
     dock: slots::Dock,
-    leads_commit: bool,
 }
 
 #[derive(Debug, Default)]
@@ -556,9 +555,7 @@ fn replay(simulation: &mut Simulation, frames: u32) -> Capture {
             }
         }
         for event in seen..state.next_event {
-            for (rank, contributor) in
-                simulation.events[event].participants().enumerate()
-            {
+            for contributor in simulation.events[event].participants() {
                 let author = state.authors[&contributor.key];
                 let avatar = &state.avatars[author];
                 let slot = avatar.slot.as_ref().expect("tile exists before service");
@@ -583,7 +580,6 @@ fn replay(simulation: &mut Simulation, frames: u32) -> Capture {
                     radius: state.avatar_radius(),
                     bot: contributor.is_bot(),
                     dock: slot.dock,
-                    leads_commit: rank == 0,
                 });
             }
         }

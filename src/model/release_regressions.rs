@@ -91,13 +91,55 @@ fn archive_closes_its_gap_during_continuous_writes() {
         let area = regions[0].gutter.unwrap().area();
         let (tile_tick, _) = sim.clock.rows(tick);
         let fade_end = sim.repository_ends[1] + lifecycle::REPOSITORY_EXIT;
-        if tile_tick > fade_end.ticks(true) && regions[1].gutter.is_some() {
-            assert!(area > previous, "archive gap stalled at tick {tick}");
-            closing += 1;
+        if tile_tick >= fade_end.ticks(true) && regions[1].gutter.is_some() {
+            assert_eq!(
+                sim.schedule.applied(tick),
+                sim.schedule.applied(tick.saturating_sub(1)),
+                "write during archive close at tick {tick}",
+            );
+            if tile_tick > fade_end.ticks(true) {
+                assert!(area > previous, "archive gap stalled at tick {tick}");
+                closing += 1;
+            }
         }
         previous = area;
     }
     assert!(closing > 0 && closing <= 4 * TICK_RATE);
+}
+
+#[test]
+fn alternating_leads_keep_both_same_repository_docks() {
+    let ada = Identity::new("Ada", "ada@example.test");
+    let grace = Identity::new("Grace", "grace@example.test");
+    let mut events = Vec::new();
+    for day in 0..8 {
+        let mut event = write(0, day, ["src/lib.rs".into()]);
+        let (lead, coauthor) = if day % 2 == 0 {
+            (&ada, &grace)
+        } else {
+            (&grace, &ada)
+        };
+        event.author = lead.clone();
+        event.co_authors.push(coauthor.clone());
+        events.push(event);
+    }
+    let mut sim = playback(events, [false; 2]);
+    let mut initial = None;
+    for tick in 0..=u32::try_from(sim.end_tick()).unwrap() {
+        sim.advance_to(tick, 60);
+        if sim.state.next_event == 0 {
+            continue;
+        }
+        let docks = [0, 1].map(|index| {
+            let slot = sim.state.avatars[index].slot.as_ref().unwrap();
+            assert!(
+                sim.travel.sample(index, tick.into()).is_none(),
+                "tick {tick}"
+            );
+            (slot.dock, slot.offset)
+        });
+        assert_eq!(*initial.get_or_insert(docks), docks, "tick {tick}");
+    }
 }
 
 #[test]

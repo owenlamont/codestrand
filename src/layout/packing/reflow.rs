@@ -7,8 +7,7 @@ const MAX_REBUILD_TILES: usize = 8;
 pub(super) struct Change {
     pub tick: usize,
     pub nodes: Vec<Node>,
-    from: Layout,
-    to: Layout,
+    transition: Option<(Layout, Layout)>,
 }
 
 #[derive(Clone, Debug)]
@@ -27,13 +26,25 @@ impl Layout {
 }
 
 impl Change {
+    pub fn weights(tick: usize, nodes: &[Node]) -> Self {
+        Self {
+            tick,
+            nodes: nodes.to_vec(),
+            transition: None,
+        }
+    }
+
     pub fn matches_presence(&self, presence: &[f32]) -> bool {
-        self.from.tiles.iter().zip(presence).all(|(tile, &p)| {
+        let Some((from, _)) = &self.transition else {
+            return false;
+        };
+        from.tiles.iter().zip(presence).all(|(tile, &p)| {
             if tile.is_some() { p >= 1.0 } else { p <= 0.0 }
         })
     }
 
     pub fn sample(&self, tick: usize) -> Option<Layout> {
+        let (from, to) = self.transition.as_ref()?;
         let elapsed = tick - self.tick;
         if elapsed >= held::reflow_ticks() {
             return None;
@@ -51,8 +62,8 @@ impl Change {
                 .collect()
         };
         Some(Layout {
-            tiles: blend(&self.from.tiles, &self.to.tiles),
-            gutters: blend(&self.from.gutters, &self.to.gutters),
+            tiles: blend(&from.tiles, &to.tiles),
+            gutters: blend(&from.gutters, &to.gutters),
         })
     }
 }
@@ -77,8 +88,7 @@ pub(super) fn plan(
         return Some(Change {
             tick,
             nodes: nodes.to_vec(),
-            from,
-            to: unchanged,
+            transition: Some((from, unchanged)),
         });
     }
     let mut chosen = Some((nodes.to_vec(), unchanged));
@@ -199,8 +209,7 @@ pub(super) fn plan(
     Some(Change {
         tick,
         nodes,
-        from,
-        to,
+        transition: Some((from, to)),
     })
 }
 
@@ -303,7 +312,8 @@ mod tests {
         let change = plan(12, &nodes, &weights, &target, &presence, space).unwrap();
         assert!(matches!(change.nodes[0], Node::Split { axis: 1, .. }));
         let unchanged = tiles(&nodes, &target, &presence, space).unwrap();
-        assert!(mismatch(&change.to.tiles, &target) < mismatch(&unchanged, &target));
+        let (from, to) = change.transition.as_ref().unwrap();
+        assert!(mismatch(&to.tiles, &target) < mismatch(&unchanged, &target));
         let end = 12 + held::reflow_ticks();
         let mid = 12 + held::reflow_ticks() / 2;
         let content = Input {
@@ -327,7 +337,7 @@ mod tests {
             inputs: vec![vec![content; 4]; end + 1].into(),
             samples: samples.into(),
             rotated: vec![false; 4],
-            content_zoom: vec![1.0; 4 * (end + 1)].into(),
+            content_scales: vec![1.0; 4 * (end + 1)].into(),
             ..Packing::default()
         };
         let sample = |tick| {
@@ -339,7 +349,7 @@ mod tests {
         };
         let middle = sample(mid);
         let mut previous = sample(11).tiles;
-        assert_eq!(previous, change.from.tiles);
+        assert_eq!(previous, from.tiles);
         for tick in 12..=end {
             let current = sample(tick);
             for (a, b) in previous
@@ -357,7 +367,7 @@ mod tests {
             }
             previous = current.tiles;
         }
-        assert_eq!(previous, change.to.tiles);
+        assert_eq!(previous, to.tiles);
         let replay = sample(mid);
         assert_eq!(middle.tiles, replay.tiles);
         assert_eq!(middle.gutters, replay.gutters);
@@ -388,8 +398,7 @@ mod tests {
         let change = Change {
             tick: 12,
             nodes: Vec::new(),
-            from,
-            to,
+            transition: Some((from, to)),
         };
         let midpoint = change.sample(12 + held::reflow_ticks() / 2).unwrap();
         assert_eq!(midpoint.gutters[0].unwrap().high.x, 0.5);

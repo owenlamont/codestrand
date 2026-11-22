@@ -27,6 +27,7 @@ pub(super) struct Weights {
     present: Vec<bool>,
     start: usize,
     next: usize,
+    due: Option<usize>,
 }
 
 impl Weights {
@@ -42,6 +43,7 @@ impl Weights {
             present: vec![false; repositories],
             start: 0,
             next: 0,
+            due: None,
         }
     }
 
@@ -57,6 +59,7 @@ impl Weights {
         self.step_towards(tick, items, items, presence, true)
     }
 
+    #[cfg(test)]
     pub(super) fn step_towards(
         &mut self,
         tick: usize,
@@ -64,6 +67,18 @@ impl Weights {
         future: &[f32],
         presence: &[f32],
         can_reflow: bool,
+    ) -> Vec<f32> {
+        self.step_with_births(tick, items, future, presence, can_reflow, can_reflow)
+    }
+
+    pub(super) fn step_with_births(
+        &mut self,
+        tick: usize,
+        items: &[f32],
+        future: &[f32],
+        presence: &[f32],
+        settled: bool,
+        clear_of_archives: bool,
     ) -> Vec<f32> {
         let targets: Vec<_> = items.iter().map(|&count| count.max(1.0)).collect();
         let (mut from, mut to, mut live) = (0.0, 0.0, 0.0);
@@ -85,11 +100,21 @@ impl Weights {
             }
             self.present[i] = p > 0.0;
         }
-        if can_reflow && tick >= self.next && self.drifted(&targets, presence) {
+        let overdue = if self.drifted(&targets, presence) {
+            tick >= *self.due.get_or_insert(tick) + reflow_ticks()
+        } else {
+            self.due = None;
+            false
+        };
+        if self.due.is_some()
+            && tick >= self.next
+            && (settled || (overdue && clear_of_archives))
+        {
             self.from = self.at(tick);
             self.to = future.iter().map(|&count| count.max(1.0)).collect();
             self.start = tick;
             self.next = tick + span(self.policy.reflow);
+            self.due = None;
         }
         self.at(tick)
     }

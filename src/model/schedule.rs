@@ -216,9 +216,11 @@ impl Schedule {
                 if let Some(&(_, end)) =
                     motions.next_if(|&&(commit, _)| commit == index)
                 {
-                    let wait = end.saturating_sub(tile_floor.max(service.tick));
-                    extra += wait;
-                    tick = tick.saturating_add(wait);
+                    let motion = end.saturating_sub(tile_floor.max(service.tick));
+                    let shared = if service.birth { 0 } else { u64::from(wait) };
+                    let remaining = motion.saturating_sub(shared);
+                    extra += remaining;
+                    tick = tick.saturating_add(remaining);
                     tile_floor = tile_floor.max(end);
                 }
                 let start = start.after(tick_time(extra));
@@ -455,6 +457,23 @@ mod tests {
         let ticks: Vec<_> = presentation.commit_ticks().collect();
         assert_eq!(ticks[1] - ticks[0], BIRTH_TICKS + 1);
         assert_eq!(ticks[2] - 24 - ticks[1], BIRTH_TICKS + 2);
+    }
+
+    #[test]
+    fn travel_and_reflow_share_the_same_write_pause() {
+        let mut events = crate::timeline::synthetic();
+        events.truncate(2);
+        let mut history = Schedule::new(&events, 1.0, 1.0);
+        let write = history.commit_ticks().nth(1).unwrap();
+        history.protect_tile_motion(std::iter::once((write, write + 120)));
+        let presentation =
+            history.with_travel(2, |index| if index == 1 { 24 } else { 0 });
+        let service = presentation.commit_ticks().nth(1).unwrap();
+        let clock = super::Clock::new(history, presentation);
+        assert_eq!(service, write + 120);
+        for tick in service - 120..=service {
+            assert_eq!(clock.rows(tick).0, write + tick - (service - 120));
+        }
     }
 
     #[test]

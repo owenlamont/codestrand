@@ -602,7 +602,9 @@ impl State {
             let avatar = &self.avatars[index];
             let commit = avatar.commit;
             if let Some(group) = avatar.group.filter(|g| g.lead != index) {
-                if !self.in_party(index, group.lead) {
+                if !self.in_party(index, group.lead)
+                    || now - self.avatars[group.lead].last_active >= super::AVATAR_IDLE
+                {
                     self.hold_place(index, &mut occupied);
                 }
                 continue;
@@ -1475,10 +1477,7 @@ impl Choice<'_> {
     ) -> Placement {
         if let Some(parked) = previous {
             let selected = self.assess(parked.dock).0;
-            let centre = selected.ring_centre(self.capacity, self.radius);
-            if parked.commit == commit
-                || (selected.overlaps == 0 && self.occupied_cost(centre) <= 0.001)
-            {
+            if parked.commit == commit || selected.overlaps == 0 {
                 return selected;
             }
         }
@@ -2964,7 +2963,18 @@ mod tests {
             }
             assert_members_ringed(&sim, frame);
         }
-        assert_eq!(gathered.into_iter().collect::<Vec<_>>(), shared);
+        assert!(
+            !gathered.contains(&shared[1]),
+            "a parked co-author should retain an independent dock"
+        );
+        assert_eq!(
+            gathered.into_iter().collect::<Vec<_>>(),
+            shared
+                .into_iter()
+                .enumerate()
+                .filter_map(|(index, commit)| (index != 1).then_some(commit))
+                .collect::<Vec<_>>()
+        );
         validate(&mut sim);
     }
 

@@ -2182,9 +2182,9 @@ impl State {
             .filter_map(|&(target, ..)| self.destination(target))
             .fold((Vec2::ZERO, 0.0), |(sum, n), point| (sum + point, n + 1.0));
         let touched: Vec<u64> = touched.into_keys().collect();
-        let seats = self.seats(&participants, event.repository);
+        let groups = self.seat_groups(&participants, event.repository);
         let flight = self.fragment_pace.flight();
-        for (&member, seat) in participants.iter().zip(seats) {
+        for (&member, group) in participants.iter().zip(groups) {
             let avatar = &mut self.avatars[member];
             if avatar.repository != event.repository {
                 avatar.slot_origin = avatar
@@ -2203,7 +2203,7 @@ impl State {
             }
             avatar.last_active = start;
             avatar.activity = (avatar.activity + 1.0).min(1000.0);
-            avatar.group = Some(Group { lead: author, seat });
+            avatar.group = Some(group);
             avatar.dismissed = false;
             let previous = self.pulses.iter().rposition(|pulse| pulse.author == member);
             let mut index = 0;
@@ -2230,14 +2230,42 @@ impl State {
         self.capacities = self.compute_capacities();
     }
 
-    /// Seats for an event's participants in its author's group, after the members who
-    /// cannot stay leave: those of a participant other than the author, those of the
-    /// author no longer in its group or outside `repository`, and, when the group would
-    /// outgrow its seats, every member not taking part. Seat 0 is the author's; a
-    /// co-author already in the group keeps its seat and a newcomer takes the lowest
-    /// free seat.
-    fn seats(&mut self, participants: &[usize], repository: usize) -> Vec<u8> {
+    /// Keep parked participants at their docks, and seat newcomers with the author
+    /// in the lowest free seats.
+    fn seat_groups(&mut self, participants: &[usize], repository: usize) -> Vec<Group> {
         let author = participants[0];
+        let parked = |index: usize| {
+            let avatar = &self.avatars[index];
+            avatar.slot.is_some() && avatar.repository == repository
+        };
+        if let Some(group) = self.avatars[author].group
+            && parked(group.lead)
+            && participants
+                .iter()
+                .all(|&member| parked(member) && self.in_party(member, group.lead))
+        {
+            return participants
+                .iter()
+                .map(|&member| self.avatars[member].group.unwrap())
+                .collect();
+        }
+        let retained: Vec<_> = participants[1..]
+            .iter()
+            .map(|&member| {
+                (parked(member) && !self.in_party(member, author)).then(|| {
+                    self.avatars[member]
+                        .group
+                        .filter(|group| {
+                            !participants.contains(&group.lead)
+                                && self.in_party(member, group.lead)
+                        })
+                        .unwrap_or(Group {
+                            lead: member,
+                            seat: 0,
+                        })
+                })
+            })
+            .collect();
         let mut stay = Vec::new();
         for index in 0..self.avatars.len() {
             let Some(group) = self.avatars[index].group else {
@@ -2258,7 +2286,8 @@ impl State {
                 self.avatars[index].group = None;
             }
         }
-        if stay.len() + participants.len() > crate::timeline::MAX_CO_AUTHORS + 1 {
+        let joining = retained.iter().filter(|group| group.is_none()).count();
+        if stay.len() + joining > crate::timeline::MAX_CO_AUTHORS {
             for index in stay.drain(..) {
                 self.avatars[index].group = None;
             }
@@ -2275,17 +2304,28 @@ impl State {
             .filter_map(|&member| kept(self, member))
             .chain(std::iter::once(0))
             .collect();
-        std::iter::once(0)
-            .chain(participants[1..].iter().map(|&member| {
-                kept(self, member).unwrap_or_else(|| {
-                    let seat = (1..=u8::MAX)
-                        .find(|seat| !taken.contains(seat))
-                        .expect("groups hold at most 9 members");
-                    taken.push(seat);
-                    seat
-                })
-            }))
-            .collect()
+        std::iter::once(Group {
+            lead: author,
+            seat: 0,
+        })
+        .chain(
+            participants[1..]
+                .iter()
+                .zip(retained)
+                .map(|(&member, retained)| {
+                    retained.unwrap_or_else(|| {
+                        let seat = kept(self, member).unwrap_or_else(|| {
+                            let seat = (1..=u8::MAX)
+                                .find(|seat| !taken.contains(seat))
+                                .expect("groups hold at most 9 members");
+                            taken.push(seat);
+                            seat
+                        });
+                        Group { lead: author, seat }
+                    })
+                }),
+        )
+        .collect()
     }
 
     fn aggregate(

@@ -558,12 +558,14 @@ comes from its live file and directory count. A reflow starts when the ratio bet
 tile's held and live shares exceeds 1.5 in either direction, or when more than 5% of the
 total weight would need to shift between tiles. The weights ease over two seconds
 towards the counts at the end of the transition. A commit due during a resize can wait
-for the edges to settle. Empty active repositories weigh as one item.
+for the edges to settle. Successive births can defer a pending weight change for up to
+two seconds, unless archive reclaim takes priority. Empty active repositories weigh
+as one item.
 The split tree and aspect limits also affect each tile's area.
 Each repository keeps file identity,
 local layout and one uniform scale, with a fixed quarter-turn chosen for its history.
 Content grows to use the space in roomy tiles and scales down as its tile shrinks.
-Zoom anticipates tree growth so the layout has room to expand without abrupt rescaling.
+Zoom anticipates tree growth and changes gradually in the direction of tile motion.
 Each repository title fills the tile as far as its proportions and padding allow.
 The visible letters are centered on the tile surface underneath files and directories.
 The title stays aligned with the tile when you tilt or move the camera. Zooming in can
@@ -623,6 +625,8 @@ sit on the same network. Routes never cross tile interiors, including unused are
 portraits may overlap tile edges beside a narrow gutter. Dijkstra minimises network
 length. Other avatars have no travel cost: walkers never wait or detour for each other.
 Parking still spreads avatars when clear slots are available.
+A contributor who stays at a repository keeps a valid parking spot when switching
+between author and co-author. Co-authors who are already parked can use separate docks.
 
 A contributor can depart once its previous commit's last fragment has arrived and the
 moving gutter route can meet the speed limit. Travel overlaps other contributors'

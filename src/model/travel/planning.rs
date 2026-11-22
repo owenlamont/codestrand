@@ -427,9 +427,8 @@ pub(super) fn trips(
         if commit < capture.frozen {
             continue;
         }
-        let same_tile = prior.repository == service.repository;
-        let relocation = same_tile && prior.leads_commit && service.leads_commit;
-        if (same_tile && prior.dock == service.dock)
+        let relocation = prior.repository == service.repository;
+        if (relocation && prior.dock == service.dock)
             || (!relocation
                 && (!walk || (service.bot && bots == crate::model::BotTravel::Fade))
                 && ticks_duration(service.tick - prior.tick)
@@ -574,7 +573,6 @@ mod tests {
                     point,
                     radius: 7.5,
                     bot: false,
-                    leads_commit: true,
                     dock: dock(if author == 0 && tick < 400 { 3 } else { 1 }, 0.5),
                 },
             )

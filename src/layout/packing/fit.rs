@@ -5,7 +5,9 @@ use crate::{layout::outline, model::framing};
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Fit {
+    #[cfg(test)]
     pub origin: Vec2,
+    #[cfg(test)]
     pub scale: f32,
     pub fill: f32,
 }
@@ -56,7 +58,9 @@ fn finish(tile: Tile, points: &[Vec2], origin: Vec2, scale: f32) -> Fit {
         .map(|p| framing::world_to_field(*p * scale + origin))
         .collect();
     Fit {
+        #[cfg(test)]
         origin,
+        #[cfg(test)]
         scale,
         fill: outline::area(&projected) * 0.25 / tile.area().max(1e-12),
     }

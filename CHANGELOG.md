@@ -87,12 +87,13 @@ All notable changes to Codestrand are documented here, following
 
 ### Fixed
 
-- Keep valid contributor parking spots between commits to the same repository.
+- Keep valid parking spots between commits to the same repository, including when
+  contributors switch between author and co-author.
 - Resize busy repository tiles as live file counts change, and reclaim archived
   tiles' space as soon as their fade finishes. Commits wait for tile motion in
-  history order.
-- Enlarge repository trees to use their tile space and keep arrival rays visible
-  from contributor to destination for new files and directories.
+  history order, and the pause can also cover travel.
+- Scale repository trees with their tiles and keep arrival rays visible from
+  contributor to destination for new files and directories.
 - Walking routes converge more reliably with overlapping co-author rings and moving
   tiles. Export reports the same end tick for eager and streamed playback.
   ([#197](https://github.com/owenlamont/codestrand/pull/197),
