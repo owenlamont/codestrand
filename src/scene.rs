@@ -422,22 +422,20 @@ pub(super) fn reset_scene_pools(world: &mut World) {
             avatars,
             groups,
         } = pools;
-        for entity in [
-            aggregates,
-            beams,
-            fragments,
-            edges,
-            directories,
-            avatars,
-            groups,
-        ]
-        .into_iter()
-        .flatten()
-        .chain(files.into_values())
+        for entity in [aggregates, beams, fragments, edges, directories, avatars]
+            .into_iter()
+            .flatten()
+            .chain(files.into_values())
         {
             world.despawn(entity);
         }
-        world.insert_resource(Pools { grid, ..default() });
+        // Bevy queues these opaque meshes by entity identity on visibility changes.
+        hide_rest(world, &groups, 0);
+        world.insert_resource(Pools {
+            groups,
+            grid,
+            ..default()
+        });
     }
     world.remove_resource::<GreyTextures>();
     styling::reset_pools(world);
@@ -2194,7 +2192,7 @@ fn sync_activity(
             fade(world, entity, avatar.grey, presence);
         }
     }
-    sync_groups(world, palette, pools, simulation);
+    sync_groups(world, palette, pools, &simulation.groups());
     styling::beams(world, palette, pools, simulation);
     sync_fragments(world, palette, pools, simulation);
 }
@@ -2204,14 +2202,8 @@ fn sync_groups(
     world: &mut World,
     palette: &Palette,
     pools: &mut Pools,
-    simulation: &Simulation,
+    groups: &[(usize, Vec3, f32)],
 ) {
-    let groups = simulation.groups();
-    // Separate overlapping billboard rings by palette colour to break depth ties.
-    let depth_step = world
-        .query_filtered::<&Transform, With<SceneCamera>>()
-        .single(world)
-        .map_or(Vec3::ZERO, |camera| *camera.forward() * 0.002);
     while pools.groups.len() < groups.len() {
         let entity = world
             .spawn((
@@ -2225,15 +2217,11 @@ fn sync_groups(
             .id();
         pools.groups.push(entity);
     }
-    for (&entity, &(author, centre, rim)) in pools.groups.iter().zip(&groups) {
-        let colour = author % palette.avatars.len();
-        let material = palette.avatars[colour].clone();
+    for (&entity, &(author, centre, rim)) in pools.groups.iter().zip(groups) {
+        let material = palette.avatars[author % palette.avatars.len()].clone();
         world.entity_mut(entity).insert(MeshMaterial3d(material));
         if let Some(mut transform) = world.get_mut::<Transform>(entity) {
-            let rank = model::count_u32(
-                u32::try_from(colour).expect("avatar colour fits u32"),
-            );
-            transform.translation = centre + depth_step * rank;
+            transform.translation = centre;
             transform.scale = Vec3::splat(rim);
         }
         set_visible(world, entity, true);
@@ -3886,7 +3874,7 @@ mod tests {
         let grid = world.resource::<Pools>().grid.clone();
         let grid_transform = *world.get::<Transform>(grid[0]).unwrap();
         *world.get_mut::<Transform>(grid[0]).unwrap() = Transform::IDENTITY;
-        let stale = [(); 8].map(|()| world.spawn_empty().id());
+        let stale = [(); 7].map(|()| world.spawn_empty().id());
         let stale_styles = styling::seed_replay_pools(&mut world);
         {
             let mut pools = world.resource_mut::<Pools>();
@@ -3897,7 +3885,6 @@ mod tests {
             pools.edges.push(stale[4]);
             pools.directories.push(stale[5]);
             pools.avatars.push(stale[6]);
-            pools.groups.push(stale[7]);
             pools.lod.detail.push(0.5);
             pools.names.targets.insert(model::Target::File(0));
             pools.hues.slots.push(1);
@@ -3933,6 +3920,47 @@ mod tests {
         );
         animate(&mut world);
         assert_eq!(*world.get::<Transform>(grid[0]).unwrap(), grid_transform);
+    }
+
+    #[test]
+    fn preview_loop_preserves_coplanar_ring_draw_order() {
+        let mut world = World::new();
+        world.init_resource::<Assets<Mesh>>();
+        world.init_resource::<Assets<Image>>();
+        world.init_resource::<Assets<StandardMaterial>>();
+        let palette = Palette::new(&mut world, &Theme::neon());
+        let rings = [(0, Vec3::ZERO, 1.0), (1, Vec3::X, 1.0)];
+        let mut pools = Pools::default();
+        sync_groups(&mut world, &palette, &mut pools, &rings);
+
+        let queue_order = |world: &World, pools: &Pools| {
+            let mut entities = pools.groups.clone();
+            entities.sort_unstable();
+            entities
+                .iter()
+                .map(|&entity| {
+                    world
+                        .get::<MeshMaterial3d<StandardMaterial>>(entity)
+                        .unwrap()
+                        .0
+                        .id()
+                })
+                .collect::<Vec<_>>()
+        };
+        let first_pass = queue_order(&world, &pools);
+        world.insert_resource(pools);
+        reset_scene_pools(&mut world);
+        let mut pools = world.remove_resource::<Pools>().unwrap();
+        // Cycle enough entities for Bevy to make the freed IDs available again.
+        for _ in 0..129 {
+            let transient = world.spawn_empty().id();
+            world.despawn(transient);
+        }
+        for &entity in &pools.groups {
+            assert_eq!(world.get::<Visibility>(entity), Some(&Visibility::Hidden));
+        }
+        sync_groups(&mut world, &palette, &mut pools, &rings);
+        assert_eq!(queue_order(&world, &pools), first_pass);
     }
 
     #[test]
