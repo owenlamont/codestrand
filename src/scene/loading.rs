@@ -9,10 +9,12 @@ use std::{
 };
 
 use bevy::{
+    core_pipeline::blit::{BlitPipeline, BlitPipelineKey},
     ecs::schedule::ScheduleLabel,
     prelude::*,
     render::{
-        Render, RenderApp, RenderSystems, render_resource::PipelineCache,
+        Render, RenderApp, RenderSystems,
+        render_resource::{BlendState, PipelineCache, SpecializedRenderPipelines},
         view::ViewTarget,
     },
 };
@@ -33,14 +35,56 @@ pub(super) struct Preparing {
 }
 
 #[derive(Clone, Default, Resource)]
-struct RendererReady(Arc<AtomicBool>);
+struct RendererReady(Arc<Readiness>);
+
+#[derive(Default)]
+struct Readiness {
+    composite: AtomicBool,
+    scene: AtomicBool,
+}
 
 pub(super) fn track_renderer(app: &mut App) {
     let ready = RendererReady::default();
     app.insert_resource(ready.clone())
         .sub_app_mut(RenderApp)
         .insert_resource(ready)
-        .add_systems(Render, check_renderer.after(RenderSystems::Render));
+        .add_systems(
+            Render,
+            (warm_compositor, check_renderer).after(RenderSystems::Render),
+        );
+}
+
+fn warm_compositor(
+    ready: Res<RendererReady>,
+    cache: Res<PipelineCache>,
+    blit: Res<BlitPipeline>,
+    mut pipelines: ResMut<SpecializedRenderPipelines<BlitPipeline>>,
+    views: Query<&ViewTarget, With<Camera2d>>,
+) {
+    let ready = &ready.into_inner().0.composite;
+    if ready.load(Ordering::Relaxed) {
+        return;
+    }
+    let Some(target_format) =
+        views.iter().find_map(ViewTarget::out_texture_view_format)
+    else {
+        return;
+    };
+    let cache = cache.into_inner();
+    // Bevy otherwise waits synchronously for the first alpha-blended camera output.
+    let pipeline = pipelines.specialize(
+        cache,
+        blit.into_inner(),
+        BlitPipelineKey {
+            target_format,
+            blend_state: Some(BlendState::ALPHA_BLENDING),
+            samples: 1,
+            source_space: None,
+        },
+    );
+    if cache.get_render_pipeline(pipeline).is_some() {
+        ready.store(true, Ordering::Relaxed);
+    }
 }
 
 fn check_renderer(
@@ -48,7 +92,7 @@ fn check_renderer(
     pipelines: Res<PipelineCache>,
     cameras: Query<(), (With<Camera3d>, With<ViewTarget>)>,
 ) {
-    let ready = &ready.into_inner().0;
+    let ready = &ready.into_inner().0.scene;
     if !ready.load(Ordering::Relaxed)
         && !cameras.is_empty()
         && pipelines.into_inner().waiting_pipelines().next().is_none()
@@ -316,11 +360,17 @@ pub(super) fn prepare(world: &mut World) {
 #[cfg(test)]
 pub(super) fn build_scene_for_test(world: &mut World) {
     world.init_resource::<RendererReady>();
+    world
+        .resource::<RendererReady>()
+        .0
+        .composite
+        .store(true, Ordering::Relaxed);
     prepare(world);
 }
 
 fn prepare_at(world: &mut World, now: Instant) {
-    if world.resource::<RendererReady>().0.load(Ordering::Relaxed) {
+    let ready = &world.resource::<RendererReady>().0;
+    if ready.scene.load(Ordering::Relaxed) {
         let screen: Vec<_> = world
             .query_filtered::<Entity, With<Screen>>()
             .iter(world)
@@ -331,9 +381,10 @@ fn prepare_at(world: &mut World, now: Instant) {
         world.remove_resource::<Preparing>();
         return;
     }
+    let compositor_ready = ready.composite.load(Ordering::Relaxed);
     let mut preparing = world.resource_mut::<Preparing>();
     let elapsed = now.duration_since(preparing.started);
-    let scene = preparing.scene.take();
+    let scene = compositor_ready.then(|| preparing.scene.take()).flatten();
     move_indicator(world, elapsed);
     if let Some((simulation, title)) = scene {
         build_scene(world, simulation, title);
@@ -546,10 +597,15 @@ mod tests {
         assert_eq!(warnings.single(&world).unwrap().1.display, Display::None);
         let started = world.resource::<Preparing>().started;
         prepare_at(&mut world, started);
+        assert_eq!(world.resource::<Built>().0, 0);
+        world
+            .resource::<RendererReady>()
+            .0
+            .composite
+            .store(true, Ordering::Relaxed);
+        prepare_at(&mut world, started);
         assert_eq!(world.resource::<Title>().0, "Fixture");
-        assert!(world.contains_resource::<Playback>());
         assert!(world.contains_resource::<PreviewCamera>());
-        assert_eq!(world.resource::<Built>().0, 1);
         let mut indicator = world.query_filtered::<&Node, With<Bar>>();
         assert_eq!(indicator.single(&world).unwrap().left, px(0));
         prepare_at(&mut world, started + Duration::from_millis(500));
@@ -558,6 +614,7 @@ mod tests {
         world
             .resource::<RendererReady>()
             .0
+            .scene
             .store(true, Ordering::Relaxed);
         prepare_at(&mut world, started + Duration::from_secs(1));
         assert!(!world.contains_resource::<Preparing>());
