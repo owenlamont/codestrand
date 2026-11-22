@@ -238,8 +238,8 @@ An ending before the selected playback interval is already complete when playbac
 
 The ending tile greys and fades in place over 2.5 playback seconds. Files and
 directories grey, rise and fade over the same interval.
-Neighbours reclaim the space over four seconds in a gap clear of commits and new tile
-births. Reclaim can wait after the fade for a gap or for an earlier reflow to finish.
+Neighbours start reclaiming the space as soon as the fade completes. The edges close
+over four seconds. Commits due during reclaim wait in order until the edges settle.
 If two exits start less than four seconds apart before adding any travel waits, both
 take five seconds to keep tile edges moving steadily. Exits that start together count
 as one for this rule. The extra second does not extend the overlap test to later exits.
@@ -248,8 +248,8 @@ Text fades in place.
 ## Contributor and file lifecycles
 
 The first commit enlarges the contributor avatar, settling over 1.2 playback seconds.
-Whole-file additions descend from the contributor along the beam to the file layout;
-deletions grey, rise and fade over 1.2 seconds. Line fragments remain separate.
+New files and directories descend from the contributor along a visible ray to their
+place in the tree. Deleted files grey, rise and fade over 1.2 seconds.
 
 `--contributor-inactivity-days` accepts 1–36,500 calendar days, inclusive. At the
 default of 60 days without a commit across the combined history, Codestrand assumes
@@ -283,13 +283,16 @@ wordmark and bottom caption reserve their own strips in the overview.
 Shared gutters separate neighbouring tiles, with no contributor band. Each tile's weight
 comes from its live file and directory count. A reflow starts when the ratio between a
 tile's held and live shares exceeds 1.5 in either direction, or when more than 5% of the
-total weight would need to shift between tiles. The weights ease over two seconds towards
-the counts in the middle of the next hold, with at least six seconds between reflow
-starts. Empty active repositories weigh as one item.
+total weight would need to shift between tiles. The weights ease over two seconds
+towards the counts at the end of the transition. A commit due during a resize can wait
+for the edges to settle. Successive births can defer a pending weight change for up to
+two seconds, unless archive reclaim takes priority. Empty active repositories weigh
+as one item.
 The split tree and aspect limits also affect each tile's area.
 Each repository keeps file identity,
 local layout and one uniform scale, with a fixed quarter-turn chosen for its history.
-Content scales directly to its tile's current safe fit, up to its original size.
+Content grows to use the space in roomy tiles and scales down as its tile shrinks.
+Zoom anticipates tree growth and changes gradually in the direction of tile motion.
 Each repository title fills the tile as far as its proportions and padding allow.
 The visible letters are centered on the tile surface underneath files and directories.
 The title stays aligned with the tile when you tilt or move the camera. Zooming in can
@@ -349,6 +352,8 @@ sit on the same network. Routes never cross tile interiors, including unused are
 portraits may overlap tile edges beside a narrow gutter. Dijkstra minimises network
 length. Other avatars have no travel cost: walkers never wait or detour for each other.
 Parking still spreads avatars when clear slots are available.
+A contributor who stays at a repository keeps a valid parking spot when switching
+between author and co-author. Co-authors who are already parked can use separate docks.
 
 A contributor can depart once its previous commit's last fragment has arrived and the
 moving gutter route can meet the speed limit. Travel overlaps other contributors'
@@ -479,7 +484,8 @@ Live speed keys move through the canonical timeline faster or slower without
 changing commit times, layout, pulses, beams, avatar motion, settling or fades in
 timeline seconds. Changing live speed preserves the current position.
 
-Commits affecting more than 24 files aim beams at directories to reduce clutter.
+Commits affecting more than 24 files aim diff beams at directories to reduce clutter.
+Visible file and directory arrivals still follow their own rays.
 
 ## Overview detail
 
@@ -521,8 +527,11 @@ Theme switching restyles active snippets without restarting their motion or fade
 `2`, inclusive). `0.5` doubles the crossing time, giving snippets longer to read.
 A walking contributor stays until its last fragment lands before leaving for its
 next repository, and a slower setting also delays a calendar departure until then.
-Commits keep their timeline spacing unless a new tile or walking trip needs extra
-time. `--contributor-travel auto` may still fade a contributor across mid-flight.
+Tile transitions and walking trips can delay commits, which stay in history order.
+Contributors who lead successive commits in the same repository keep their parking
+spot while it fits. If the spot no longer fits, they take the shortest gutter path
+to another spot. `--contributor-travel auto` may fade a contributor crossing between
+repositories.
 
 ```sh
 codestrand export frames --fragment-speed 0.5 --frames 90 --fps 30

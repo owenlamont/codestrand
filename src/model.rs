@@ -32,6 +32,8 @@ pub(crate) mod occlusion;
 #[cfg(test)]
 mod pacing_tests;
 mod planning_memory;
+#[cfg(test)]
+mod release_regressions;
 
 pub(crate) mod quality;
 pub(crate) mod schedule;
@@ -70,7 +72,6 @@ pub(crate) const FRAGMENT_SPEEDS: std::ops::RangeInclusive<f32> = 0.25..=2.0;
 /// Live preview speed multipliers, both bounds inclusive.
 pub(crate) const PLAYBACK_MULTIPLIERS: std::ops::RangeInclusive<f32> = 0.125..=8.0;
 const ADD_DELAY: f32 = 0.2;
-const AGGREGATED_ARRIVAL_FLIGHT: f32 = 0.8;
 const DELETE_DELAY: f32 = 0.0;
 const MIN_AVATAR_HEIGHT: f32 = 3.2;
 
@@ -292,16 +293,6 @@ struct Pulse {
 }
 
 impl Pulse {
-    fn directory_target(&self, mut dir: usize, layout: &Layout) -> Option<Target> {
-        loop {
-            let target = Target::Dir(dir);
-            if self.targets.iter().any(|&(drawn, ..)| drawn == target) {
-                return Some(target);
-            }
-            dir = layout.dir(dir).parent?;
-        }
-    }
-
     fn fragments(
         &self,
         age: f32,
@@ -396,6 +387,9 @@ pub(super) struct Avatar {
     name_visibility: names::Visibility,
     commit: usize,
     slot: Option<slots::Placement>,
+    dock_since: u64,
+    dock_walk: Option<travel::DockWalk>,
+    gutter_entry: Option<Vec2>,
     slot_origin: Option<(usize, slots::Dock, Vec2)>,
     group: Option<Group>,
     /// Left behind by a disbanding group with no later commit, so fading with its ring.
@@ -417,6 +411,30 @@ pub(super) struct Avatar {
 }
 
 impl Avatar {
+    fn seat_target(&self, approaching: impl FnOnce() -> bool) -> (Vec3, Vec2) {
+        self.slot
+            .as_ref()
+            .map_or((self.position, Vec2::ZERO), |slot| {
+                if slot.offset != Vec2::ZERO && approaching() {
+                    (slots::world(slot.centre()), Vec2::ZERO)
+                } else {
+                    (slot.world(), slot.offset)
+                }
+            })
+    }
+
+    fn travel_point(&mut self, planned: Option<Vec3>, tick: u64) -> Option<Vec3> {
+        let local = self
+            .dock_walk
+            .as_ref()
+            .and_then(|walk| walk.sample(tick))
+            .map(slots::world);
+        if planned.is_some() || local.is_none() {
+            self.dock_walk = None;
+        }
+        planned.or(local)
+    }
+
     /// Moves to `target`, or along a travel route; a short step to a new seat or off the
     /// end of a route is walked over [`SETTLE_SECONDS`] rather than jumped.
     fn walk(
@@ -426,6 +444,7 @@ impl Avatar {
         route: Option<Vec3>,
         now: Time,
         reach: f32,
+        seat_step: f32,
     ) {
         if let Some(point) = route {
             self.position = point;
@@ -446,7 +465,7 @@ impl Avatar {
                 self.settle = Some((self.position, now));
                 self.leaving_name = before.map(|name| name.point);
             }
-            self.position = match self.settle {
+            let seat = match self.settle {
                 Some((from, begun)) if now - begun < SETTLE_SECONDS => {
                     let t = (now - begun) / SETTLE_SECONDS;
                     self.settled = t;
@@ -459,9 +478,51 @@ impl Avatar {
                     target
                 }
             };
+            self.position = if self.presence > 0.0 {
+                self.position.move_towards(seat, seat_step)
+            } else {
+                seat
+            };
             self.travelling = false;
         }
         self.seat = offset;
+    }
+
+    fn update_presence(
+        &mut self,
+        now: Time,
+        dt: f32,
+        ring_capacity: Option<u8>,
+        opacity: f32,
+    ) {
+        let ring = if let Some(capacity) = ring_capacity.filter(|_| !self.travelling) {
+            self.ring_capacity = self.ring_capacity.max(capacity);
+            if capacity > 1 {
+                self.ring_capacity = capacity;
+                dt / DISBAND
+            } else {
+                -dt / DISBAND
+            }
+        } else {
+            -dt / DISBAND
+        };
+        self.ring_presence = (self.ring_presence + ring).clamp(0.0, 1.0);
+        self.projection_scale = slots::projection_scale(self.position);
+        let service_visible = now < self.expires;
+        let service_fade = if service_visible { dt / 0.4 } else { -dt / 1.2 };
+        self.slot_presence = (self.slot_presence + service_fade).clamp(0.0, 1.0);
+        let fade = if service_visible {
+            dt / 0.4
+        } else if self.dismissed {
+            -dt / DISBAND
+        } else {
+            -dt / lifecycle::EXIT
+        };
+        self.presence = (self.presence + fade).clamp(0.0, opacity);
+        self.grey = lifecycle::progress(now, self.expires, 0.4);
+        self.lifecycle_scale = 1.0
+            + (ARRIVAL_SCALE - 1.0)
+                * (1.0 - lifecycle::progress(now, self.arrived + 0.4, 0.8));
     }
 }
 
@@ -489,8 +550,10 @@ impl Avatar {
     }
 }
 
+#[derive(Clone, Copy)]
 #[cfg_attr(test, derive(Debug))]
 pub(super) struct Beam {
+    pub target: Target,
     pub author: usize,
     pub from: Vec3,
     pub to: Vec3,
@@ -822,7 +885,6 @@ impl Simulation {
         let mut padding = simulation.travel_padding(options);
         let mut history = simulation.schedule.clone();
         let departures = simulation.departures.clone();
-        let endings = simulation.repository_ends.clone();
         let mut pass = 0;
         let mut compactions = 0;
         let walk = options.travel_cap == TravelCap::None;
@@ -837,7 +899,7 @@ impl Simulation {
                     options,
                     repositories,
                     &padding,
-                    (&history, &departures, &endings),
+                    (&history, &departures),
                 )?;
             }
             simulation.plan_travel(options, &padding);
@@ -854,7 +916,8 @@ impl Simulation {
                 continue;
             }
             let adjusted = simulation.adjust_travel_padding(options, &padding);
-            let settled = adjusted == padding || (!walk && pass >= 4);
+            let settled = adjusted == padding
+                || (!walk && !simulation.travel.unsettled_relocation() && pass >= 4);
             if !settled {
                 padding = adjusted;
                 continue;
@@ -878,6 +941,7 @@ impl Simulation {
         if walk {
             simulation.travel.require_birth_routes(options.bot_travel)?;
         }
+        simulation.align_travel_arrivals(options);
         {
             let _phase = trace.phase(Phase::Caption);
             simulation.caption_plan =
@@ -901,7 +965,7 @@ impl Simulation {
         options: &Options,
         repositories: &[String],
         padding: &[(usize, u32)],
-        (history, departures, endings): (&Schedule, &[Time], &[Time]),
+        (history, departures): (&Schedule, &[Time]),
     ) -> anyhow::Result<()> {
         let trace = &options.trace;
         let schedule = {
@@ -932,8 +996,6 @@ impl Simulation {
             self.births = self.births_for(&schedule);
             self.departures =
                 departures.iter().map(|&time| clock.present(time)).collect();
-            self.repository_ends =
-                endings.iter().map(|&time| clock.present(time)).collect();
             self.clock = clock;
         }
         self.schedule = schedule;
@@ -953,7 +1015,9 @@ impl Simulation {
                     schedule.padding(index) - self.clock.history.padding(index);
                 (
                     self.events[index].repository,
-                    arrival - u64::from(travel),
+                    arrival
+                        - u64::from(travel)
+                        - schedule.motion_wait(&self.clock.history, index),
                     history,
                 )
             })
@@ -1075,7 +1139,7 @@ impl Simulation {
         let prior_active = prior_activity(&events[..start], repositories.len());
         let (departures, repository_ends) =
             lifecycle::plan(events, &schedule, options, start..end);
-        let repository_exits = lifecycle::repository_exits(&repository_ends, &schedule);
+        let repository_exits = lifecycle::repository_exits(&repository_ends);
         let first_arrivals = lifecycle::arrivals(events, start..end);
         let finals =
             lifecycle::finals(&events[start..end], &schedule.starts, &departures);
@@ -1121,6 +1185,9 @@ impl Simulation {
         simulation.births = simulation.births_for(&simulation.schedule);
         let snapshots = simulation.plan_repositories(prior_active, options)?;
         simulation.schedule.birth_protections = simulation.birth_protections();
+        simulation
+            .schedule
+            .protect_tile_motion(simulation.packing.motion_intervals());
         if options.travel_window_seconds.is_none() {
             simulation.plan_avatar_envelopes(snapshots);
         }
@@ -1216,12 +1283,6 @@ impl Simulation {
             }
         }
         self.push_regions(&mut samples, &mut pending, &labels, threads);
-        samples.set_commits(
-            self.schedule
-                .commit_ticks()
-                .map(|tick| usize::try_from(tick).expect("bounded service tick"))
-                .collect(),
-        );
         self.trace.add_ticks(&mut self.tick_times);
         self.packing = crate::layout::packing::Packing::from_inputs(
             samples,
@@ -1288,7 +1349,8 @@ impl Simulation {
             .get(repository)
             .copied()
             .unwrap_or(Time::INFINITY);
-        let u = lifecycle::progress(self.seconds(), end, lifecycle::REPOSITORY_EXIT);
+        let tiles = tick_time(self.clock.rows(self.state.tick).0);
+        let u = lifecycle::progress(tiles, end, lifecycle::REPOSITORY_EXIT);
         (u.min(0.2) * 5.0, 1.0 - u, u * self.scale() * 1.5)
     }
 
@@ -1302,7 +1364,15 @@ impl Simulation {
         let position = ground(file.position) + Vec3::Y * rise;
         let (position, grey, alpha) = match file.state {
             crate::layout::Presence::Arriving => {
-                (self.arrival_position(id, file, position), grey, alpha)
+                let beam =
+                    self.arrival_beam(Target::File(id), file.arrival_author, position);
+                (
+                    self.theme
+                        .beam_style
+                        .point(beam.from, beam.to, file.presence),
+                    grey,
+                    alpha,
+                )
             }
             crate::layout::Presence::Leaving => (
                 position + Vec3::Y * (1.0 - file.presence) * self.scale(),
@@ -1311,53 +1381,43 @@ impl Simulation {
             ),
             crate::layout::Presence::Present => (position, grey, alpha),
         };
-        let mut point = Vec2::new(position.x, position.z);
-        if file.state == crate::layout::Presence::Arriving
-            && matches!(
-                self.repository_boundary,
-                crate::repositories::Boundary::Glass
-            )
-            && let Some(tile) = self.visible_repository_tile(dir.repository)
-        {
-            let [a, _, b, _] = tile.ground();
-            let scale = file.draw_scale(dir);
-            let min = self.state.geometry.file_min * scale;
-            let max = self.state.geometry.file_max * scale;
-            let low = a.min(b) - Vec2::new(min.x, min.z);
-            let high = a.max(b) - Vec2::new(max.x, max.z);
-            let center = low.midpoint(high);
-            point = point.clamp(low.min(center), high.max(center));
-        }
-        (ground(point).with_y(position.y), grey, alpha)
+        (position, grey, alpha)
     }
 
-    fn arrival_position(&self, id: u64, file: &crate::layout::File, to: Vec3) -> Vec3 {
-        let Some(avatar) = self.state.avatars.get(file.author) else {
-            return to;
-        };
-        let pulse = self.state.pulses.iter().rev().find(|pulse| {
-            pulse.author == file.author && pulse.touched.binary_search(&id).is_ok()
-        });
-        let endpoint = pulse
-            .filter(|pulse| pulse.aggregated)
-            .and_then(|pulse| pulse.directory_target(file.dir, self.layout()))
-            .and_then(|target| self.state.point(target));
-        let from = if pulse.is_some() {
-            self.state.beam_start(file.author, endpoint.unwrap_or(to))
-        } else {
-            avatar.position
-        };
-        let Some(endpoint) = endpoint else {
-            return self.theme.beam_style.point(from, to, file.presence);
-        };
-        let flight = (file.presence / AGGREGATED_ARRIVAL_FLIGHT).min(1.0);
-        let settle = ((file.presence - AGGREGATED_ARRIVAL_FLIGHT)
-            / (1.0 - AGGREGATED_ARRIVAL_FLIGHT))
-            .max(0.0);
-        self.theme
-            .beam_style
-            .point(from, endpoint, flight)
-            .lerp(to, settle)
+    fn arrival_beam(&self, target: Target, author: usize, to: Vec3) -> Beam {
+        Beam {
+            target,
+            author,
+            from: self.state.beam_start(author, to),
+            to,
+            width: 1.0,
+        }
+    }
+
+    pub(super) fn directory_arrival(
+        &self,
+        index: usize,
+        to: Vec3,
+    ) -> Option<(Beam, f32)> {
+        let arrival = self.layout().dir(index).arrival?;
+        Some((
+            self.arrival_beam(Target::Dir(index), arrival.author, to),
+            arrival.progress,
+        ))
+    }
+
+    pub(super) fn file_arrival_beams(
+        &self,
+    ) -> impl Iterator<Item = (usize, Beam)> + '_ {
+        self.layout().arriving_files().map(|(id, file)| {
+            let dir = self.layout().dir(file.dir);
+            let rise = self.repository_effect(dir.repository).2;
+            let to = ground(file.position) + Vec3::Y * rise;
+            (
+                file.dir,
+                self.arrival_beam(Target::File(id), file.arrival_author, to),
+            )
+        })
     }
 
     pub(super) fn restart(&mut self) {
@@ -1552,69 +1612,7 @@ impl Simulation {
         state.avatar_scale += (scale - state.avatar_scale) * (1.0 - (-dt / 0.6).exp());
         state.place_slots_planned(&self.envelopes, now, &self.travel);
         self.tick_times.laps.end(Phase::TickSlots);
-        let capacities: Vec<_> = (0..state.avatars.len())
-            .map(|index| state.capacity(index))
-            .collect();
-        let reach = state.settle_reach();
-        for (index, avatar) in state.avatars.iter_mut().enumerate() {
-            let target = avatar
-                .slot
-                .as_ref()
-                .map_or(avatar.position, slots::Placement::world);
-            let travel = self.travel.sample(index, state.tick);
-            let offset = avatar.slot.as_ref().map_or(Vec2::ZERO, |slot| slot.offset);
-            let (target, offset) = if offset != Vec2::ZERO
-                && self.travel.approaching_departure(index, state.tick)
-            {
-                (
-                    slots::world(avatar.slot.as_ref().expect("parked seat").centre()),
-                    Vec2::ZERO,
-                )
-            } else {
-                (target, offset)
-            };
-            avatar.activity *= (-dt / 3.0).exp();
-            avatar.walk(
-                target,
-                offset,
-                travel.map(|(point, _)| slots::world(point)),
-                now,
-                reach,
-            );
-            let leads = avatar.group.is_some_and(|g| g.lead == index);
-            let ring = if leads && !avatar.travelling {
-                avatar.ring_capacity = avatar.ring_capacity.max(capacities[index]);
-                if capacities[index] > 1 {
-                    avatar.ring_capacity = capacities[index];
-                    dt / DISBAND
-                } else {
-                    -dt / DISBAND
-                }
-            } else {
-                -dt / DISBAND
-            };
-            avatar.ring_presence = (avatar.ring_presence + ring).clamp(0.0, 1.0);
-            avatar.projection_scale = slots::projection_scale(avatar.position);
-            let service_visible = now < avatar.expires;
-            let service_fade = if service_visible { dt / 0.4 } else { -dt / 1.2 };
-            avatar.slot_presence =
-                (avatar.slot_presence + service_fade).clamp(0.0, 1.0);
-            let fade = if service_visible {
-                dt / 0.4
-            } else if avatar.dismissed {
-                -dt / DISBAND
-            } else {
-                -dt / lifecycle::EXIT
-            };
-            avatar.presence = (avatar.presence + fade).clamp(0.0, 1.0);
-            avatar.grey = lifecycle::progress(now, avatar.expires, 0.4);
-            avatar.lifecycle_scale = 1.0
-                + (ARRIVAL_SCALE - 1.0)
-                    * (1.0 - lifecycle::progress(now, avatar.arrived + 0.4, 0.8));
-            if let Some((_, opacity)) = travel {
-                avatar.presence = avatar.presence.min(opacity);
-            }
-        }
+        state.advance_avatars(now, dt, &self.travel, self.visuals == Visuals::All);
         self.tick_times.laps.end(Phase::TickAvatars);
         if self.visuals == Visuals::All {
             let texts: Vec<_> = self
@@ -1774,6 +1772,7 @@ impl Simulation {
             for &(target, weight, ..) in &pulse.targets {
                 if let Some((from, to)) = self.visible_ray(pulse, target) {
                     beams.push(Beam {
+                        target,
                         author: pulse.author,
                         from,
                         to,
@@ -2094,6 +2093,112 @@ impl State {
         }
     }
 
+    fn advance_avatars(
+        &mut self,
+        now: Time,
+        dt: f32,
+        plan: &travel::Plan,
+        visuals: bool,
+    ) {
+        let capacities: Vec<_> = (0..self.avatars.len())
+            .map(|index| self.capacity(index))
+            .collect();
+        let reach = self.settle_reach();
+        let radius = self.avatar_radius();
+        let max_step =
+            self.avatar_max_speed * framing::WORLD_UNITS_PER_REFERENCE_PIXEL * dt;
+        let previous = (visuals && self.avatars.len() > 1).then(|| {
+            self.avatars
+                .iter()
+                .map(|avatar| (avatar.presence > 0.001).then_some(avatar.position))
+                .collect::<Vec<_>>()
+        });
+        let mut network = None;
+        for (index, avatar) in self.avatars.iter_mut().enumerate() {
+            let mut gutter_entry = None;
+            let repository = avatar
+                .slot_origin
+                .take()
+                .map_or(avatar.repository, |(repository, ..)| repository);
+            let mut join = |from, to| {
+                let cells = network.get_or_insert_with(|| {
+                    travel::network(
+                        self.layout.repositories.iter().filter_map(|r| r.gutter),
+                    )
+                });
+                let (point, entry) = travel::join_gutter(
+                    slots::field_point(from),
+                    to,
+                    self.layout.repositories[repository].gutter,
+                    cells,
+                    self.avatar_max_speed * dt,
+                );
+                gutter_entry = entry;
+                slots::world(point)
+            };
+            let target = avatar
+                .slot
+                .as_ref()
+                .map_or(avatar.position, slots::Placement::world);
+            let travel = plan.sample(index, self.tick);
+            let planned = travel.map(|(point, _)| {
+                if !plan.walking(index, self.tick) {
+                    return avatar.position;
+                }
+                let target = slots::world(point);
+                if avatar.presence <= 0.0
+                    || avatar.position.distance(target) <= max_step
+                {
+                    return target;
+                }
+                join(avatar.position, point)
+            });
+            let route = avatar.travel_point(planned, self.tick).or_else(|| {
+                let slot = avatar.slot.as_ref()?;
+                (repository != avatar.repository
+                    && avatar.presence > 0.0
+                    && avatar.position.distance(target) > reach)
+                    .then(|| join(avatar.position, slot.centre()))
+            });
+            avatar.gutter_entry = gutter_entry;
+            let (target, offset) =
+                avatar.seat_target(|| plan.approaching_departure(index, self.tick));
+            avatar.activity *= (-dt / 3.0).exp();
+            let from = avatar.position;
+            avatar.walk(target, offset, route, now, reach, max_step);
+            if (route.is_none() || gutter_entry.is_some()) && avatar.presence > 0.0 {
+                let nominal = slots::field_point(avatar.position);
+                let clear = travel::seat_clearance(
+                    slots::field_point(from),
+                    nominal,
+                    radius,
+                    self.layout
+                        .repositories
+                        .iter()
+                        .enumerate()
+                        .filter(|(index, _)| *index != avatar.repository)
+                        .filter_map(|(_, repository)| repository.tile),
+                );
+                if clear != nominal {
+                    avatar.position = slots::world(clear);
+                }
+            }
+            let capacity = avatar
+                .group
+                .filter(|g| g.lead == index)
+                .map(|_| capacities[index]);
+            avatar.update_presence(
+                now,
+                dt,
+                capacity,
+                travel.map_or(1.0, |(_, alpha)| alpha),
+            );
+        }
+        if let Some(previous) = previous {
+            occlusion::clear_seat_transitions(self, plan, &previous, max_step);
+        }
+    }
+
     fn avatar_radius(&self) -> f32 {
         6.5 * self.avatar_scale * self.avatar_size * ARRIVAL_SCALE + 1.0
     }
@@ -2123,6 +2228,9 @@ impl State {
             name_visibility: names::Visibility::default(),
             commit: 0,
             slot: None,
+            dock_since: 0,
+            dock_walk: None,
+            gutter_entry: None,
             slot_origin: None,
             group: None,
             dismissed: false,
@@ -2192,11 +2300,13 @@ impl State {
             .filter_map(|&(target, ..)| self.destination(target))
             .fold((Vec2::ZERO, 0.0), |(sum, n), point| (sum + point, n + 1.0));
         let touched: Vec<u64> = touched.into_keys().collect();
-        let seats = self.seats(&participants, event.repository);
+        let groups = self.seat_groups(&participants, event.repository);
         let flight = self.fragment_pace.flight();
-        for (&member, seat) in participants.iter().zip(seats) {
+        for (&member, group) in participants.iter().zip(groups) {
             let avatar = &mut self.avatars[member];
             if avatar.repository != event.repository {
+                avatar.dock_walk = None;
+                avatar.settle = None;
                 avatar.slot_origin = avatar
                     .slot
                     .take()
@@ -2213,7 +2323,7 @@ impl State {
             }
             avatar.last_active = start;
             avatar.activity = (avatar.activity + 1.0).min(1000.0);
-            avatar.group = Some(Group { lead: author, seat });
+            avatar.group = Some(group);
             avatar.dismissed = false;
             let previous = self.pulses.iter().rposition(|pulse| pulse.author == member);
             let mut index = 0;
@@ -2240,14 +2350,42 @@ impl State {
         self.capacities = self.compute_capacities();
     }
 
-    /// Seats for an event's participants in its author's group, after the members who
-    /// cannot stay leave: those of a participant other than the author, those of the
-    /// author no longer in its group or outside `repository`, and, when the group would
-    /// outgrow its seats, every member not taking part. Seat 0 is the author's; a
-    /// co-author already in the group keeps its seat and a newcomer takes the lowest
-    /// free seat.
-    fn seats(&mut self, participants: &[usize], repository: usize) -> Vec<u8> {
+    /// Keep parked participants at their docks, and seat newcomers with the author
+    /// in the lowest free seats.
+    fn seat_groups(&mut self, participants: &[usize], repository: usize) -> Vec<Group> {
         let author = participants[0];
+        let parked = |index: usize| {
+            let avatar = &self.avatars[index];
+            avatar.slot.is_some() && avatar.repository == repository
+        };
+        if let Some(group) = self.avatars[author].group
+            && parked(group.lead)
+            && participants
+                .iter()
+                .all(|&member| parked(member) && self.in_party(member, group.lead))
+        {
+            return participants
+                .iter()
+                .map(|&member| self.avatars[member].group.unwrap())
+                .collect();
+        }
+        let retained: Vec<_> = participants[1..]
+            .iter()
+            .map(|&member| {
+                (parked(member) && !self.in_party(member, author)).then(|| {
+                    self.avatars[member]
+                        .group
+                        .filter(|group| {
+                            !participants.contains(&group.lead)
+                                && self.in_party(member, group.lead)
+                        })
+                        .unwrap_or(Group {
+                            lead: member,
+                            seat: 0,
+                        })
+                })
+            })
+            .collect();
         let mut stay = Vec::new();
         for index in 0..self.avatars.len() {
             let Some(group) = self.avatars[index].group else {
@@ -2268,7 +2406,8 @@ impl State {
                 self.avatars[index].group = None;
             }
         }
-        if stay.len() + participants.len() > crate::timeline::MAX_CO_AUTHORS + 1 {
+        let joining = retained.iter().filter(|group| group.is_none()).count();
+        if stay.len() + joining > crate::timeline::MAX_CO_AUTHORS {
             for index in stay.drain(..) {
                 self.avatars[index].group = None;
             }
@@ -2285,17 +2424,28 @@ impl State {
             .filter_map(|&member| kept(self, member))
             .chain(std::iter::once(0))
             .collect();
-        std::iter::once(0)
-            .chain(participants[1..].iter().map(|&member| {
-                kept(self, member).unwrap_or_else(|| {
-                    let seat = (1..=u8::MAX)
-                        .find(|seat| !taken.contains(seat))
-                        .expect("groups hold at most 9 members");
-                    taken.push(seat);
-                    seat
-                })
-            }))
-            .collect()
+        std::iter::once(Group {
+            lead: author,
+            seat: 0,
+        })
+        .chain(
+            participants[1..]
+                .iter()
+                .zip(retained)
+                .map(|(&member, retained)| {
+                    retained.unwrap_or_else(|| {
+                        let seat = kept(self, member).unwrap_or_else(|| {
+                            let seat = (1..=u8::MAX)
+                                .find(|seat| !taken.contains(seat))
+                                .expect("groups hold at most 9 members");
+                            taken.push(seat);
+                            seat
+                        });
+                        Group { lead: author, seat }
+                    })
+                }),
+        )
+        .collect()
     }
 
     fn aggregate(
@@ -2808,7 +2958,7 @@ mod tests {
         for (id, file) in simulation.layout().files() {
             let repository = simulation.layout().dir(file.dir).repository;
             let (position, _, alpha) = simulation.file_effect(id, file);
-            if alpha > 0.001 {
+            if alpha > 0.001 && file.state != crate::layout::Presence::Arriving {
                 inside(repository, Vec2::new(position.x, position.z));
             }
             let anchor = simulation.surface_target(Target::File(id)).unwrap();
@@ -2824,6 +2974,60 @@ mod tests {
         for label in simulation.labels() {
             if let Some(repository) = label.repository {
                 inside(repository, Vec2::new(label.position.x, label.position.z));
+            }
+        }
+    }
+
+    #[test]
+    fn single_tile_fills_with_separate_directory_subtrees() {
+        let mut event = timeline::synthetic().remove(0);
+        event.changes = ["src/a.rs", "src/b.rs", "tests/a.rs", "tests/b.rs"]
+            .map(|path| crate::timeline::FileChange {
+                path: path.to_owned(),
+                kind: Kind::Added,
+                ..Default::default()
+            })
+            .into();
+        let mut simulation = Simulation::new(
+            vec![event],
+            &Options::default(),
+            &Theme::neon(),
+            &Mappings::default(),
+        );
+        for frame in 0..simulation.frames(60).unwrap() {
+            simulation.advance_to(frame, 60);
+            let layout = simulation.layout();
+            if layout.files().next().is_none() {
+                continue;
+            }
+            let region = &layout.repositories[0];
+            let tile = simulation.visible_repository_tile(0).unwrap();
+            let dirs: Vec<_> = layout.dirs().map(|(_, dir)| dir).collect();
+            let low = dirs.iter().fold(Vec2::splat(f32::INFINITY), |low, dir| {
+                low.min(dir.position - Vec2::splat(dir.radius()))
+            });
+            let high = dirs
+                .iter()
+                .fold(Vec2::splat(f32::NEG_INFINITY), |high, dir| {
+                    high.max(dir.position + Vec2::splat(dir.radius()))
+                });
+            let size =
+                (framing::world_to_field(high) - framing::world_to_field(low)).abs();
+            let fill = size.element_product() * 0.25 / tile.area();
+            assert!(fill >= 0.25, "frame {frame}: fill {fill:.3}");
+            for &point in &region.outline {
+                let projected = framing::world_to_field(point);
+                assert!(
+                    projected.cmpge(tile.low).all() && projected.cmple(tile.high).all()
+                );
+            }
+            for (index, dir) in dirs.iter().enumerate() {
+                for other in &dirs[..index] {
+                    assert!(
+                        dir.position.distance(other.position) + 1e-5
+                            >= dir.radius() + other.radius()
+                    );
+                }
             }
         }
     }
@@ -2848,14 +3052,13 @@ mod tests {
         .unwrap();
         let history = simulation.schedule.clone();
         let departures = simulation.departures.clone();
-        let endings = simulation.repository_ends.clone();
         simulation
             .apply_padding(
                 &events,
                 &options,
                 &labels,
                 &[(1, 120), (2, 10)],
-                (&history, &departures, &endings),
+                (&history, &departures),
             )
             .unwrap();
         assert_eq!(simulation.births.len(), 2);
@@ -3139,7 +3342,7 @@ mod tests {
     }
 
     #[test]
-    fn arriving_files_follow_aggregated_beams_before_settling() {
+    fn crowded_pulses_aggregate_fragments_and_keep_individual_file_arrivals() {
         for (count, nested, frame) in
             [(24, false), (25, false), (25, true)].into_iter().flat_map(
                 |(count, nested)| [60, 70].map(move |frame| (count, nested, frame)),
@@ -3172,40 +3375,16 @@ mod tests {
             assert_eq!(beams.len(), if aggregated { 1 } else { count });
             for (id, file) in sim.layout().files() {
                 assert_eq!(file.state, crate::layout::Presence::Arriving);
-                let endpoint = if aggregated {
-                    beams[0].to
-                } else {
-                    super::ground(file.position)
-                };
-                let flight = if aggregated { 0.8 } else { 1.0 };
+                let to = super::ground(file.position);
                 let expected = theme.beam_style.point(
-                    sim.avatars()[file.author].position,
-                    endpoint,
-                    file.presence / flight,
+                    sim.state.beam_start(file.author, to),
+                    to,
+                    file.presence,
                 );
                 assert!(
                     sim.file_effect(id, file).0.distance(expected) < 0.0001,
                     "{count} files, nested={nested}, frame={frame}, file={id}"
                 );
-                let mut settled = file.clone();
-                settled.presence = 1.0;
-                assert_eq!(
-                    sim.file_effect(id, &settled).0,
-                    super::ground(file.position)
-                );
-                if aggregated {
-                    settled.presence = 0.8;
-                    assert!(
-                        sim.file_effect(id, &settled).0.distance(endpoint) < 0.0001
-                    );
-                    settled.presence = 0.9;
-                    assert!(
-                        sim.file_effect(id, &settled)
-                            .0
-                            .distance(endpoint.lerp(super::ground(file.position), 0.5))
-                            < 0.0001
-                    );
-                }
             }
             let pulse = &sim.state.pulses[0];
             for fragment in sim.fragments() {

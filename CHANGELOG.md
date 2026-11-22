@@ -5,7 +5,7 @@ All notable changes to Codestrand are documented here, following
 
 ## Unreleased
 
-## v0.3.0 - 2026-11-22
+## v0.3.0 - 2026-11-23
 
 ### Added
 
@@ -15,12 +15,14 @@ All notable changes to Codestrand are documented here, following
   ([#158](https://github.com/owenlamont/codestrand/issues/158))
 - Load preview and export options from a TOML file with `--config`. Command-line
   flags override the file. ([#182](https://github.com/owenlamont/codestrand/pull/182))
+- New files and directories descend from the contributor along visible arrival rays.
 - Adjust diff fragment travel speed with `--fragment-speed`.
   ([#190](https://github.com/owenlamont/codestrand/pull/190))
 - Export reports history progress, projected video length, ETA and waits for planning.
   ([#192](https://github.com/owenlamont/codestrand/pull/192))
 - Co-authors share a ring with the commit author and keep their own contributor
-  identities, names and portraits.
+  identities, names and portraits. Contributors who stay at a repository keep a
+  valid parking spot when switching between author and co-author.
   ([#191](https://github.com/owenlamont/codestrand/pull/191))
 - Change the theme, speed, caption style and directory collapsing in F10 settings.
   ([#198](https://github.com/owenlamont/codestrand/pull/198))
@@ -41,11 +43,12 @@ All notable changes to Codestrand are documented here, following
   [#209](https://github.com/owenlamont/codestrand/pull/209))
 - Repository tiles share a world-space field that grows with their contents. The
   overhead view fits the field, and export uses that fixed overview by default.
-  Ended repositories release their space for neighbouring tiles. Avatar travel
-  speed is set in world units per second.
+  Neighbouring tiles start reclaiming space as soon as an ended tile fades out.
+  Avatar travel speed is set in world units per second.
   ([#214](https://github.com/owenlamont/codestrand/pull/214))
 - Tiles reflow as live file and directory counts shift. New tiles can grow together
-  just before their first commits, and content keeps its quarter-turn as tiles resize.
+  just before their first commits. Trees scale to use the available tile space while
+  keeping their quarter-turn. Commits can wait in history order for tile motion.
   ([#197](https://github.com/owenlamont/codestrand/pull/197),
   [#208](https://github.com/owenlamont/codestrand/pull/208),
   [#216](https://github.com/owenlamont/codestrand/pull/216))

@@ -61,7 +61,7 @@ impl Plan {
         for (index, event) in events.iter().enumerate() {
             progress.report(Stage::Directories, index as u64, events.len() as u64);
             for change in &event.changes {
-                layout.ensure_dir(parent_path(&change.path[skip..]));
+                layout.ensure_dir(parent_path(&change.path[skip..]), None);
             }
         }
         let (required, step) = occupancy(layout, events, starts, skip, progress);

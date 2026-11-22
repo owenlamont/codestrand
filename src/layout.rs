@@ -74,13 +74,14 @@ pub(super) struct File {
     pub heat: f32,
     pub activity: f32,
     pub author: usize,
+    pub arrival_author: usize,
 }
 
 impl File {
     fn replay_bytes(&self) -> u128 {
         let (path,) = retained_fields!(self, Self {
             path; local_position, dir, slot, slot_offset, position, velocity, presence,
-            state, delay, heat, activity, author,
+            state, delay, heat, activity, author, arrival_author,
         });
         path.capacity() as u128
     }
@@ -112,6 +113,32 @@ impl File {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(super) struct DirectoryArrival {
+    pub author: usize,
+    delay: f32,
+    pub progress: f32,
+}
+
+impl DirectoryArrival {
+    fn new(author: usize, delay: f32) -> Self {
+        Self {
+            author,
+            delay,
+            progress: 0.0,
+        }
+    }
+
+    fn step(mut self, dt: f32) -> Option<Self> {
+        if self.delay > 0.0 {
+            self.delay -= dt;
+        } else {
+            self.progress += dt / FADE_SECONDS;
+        }
+        (self.progress < 1.0).then_some(self)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct Dir {
     local_position: Vec2,
@@ -126,6 +153,7 @@ pub(super) struct Dir {
     children: usize,
     pub live: bool,
     pub touch_age: f32,
+    pub arrival: Option<DirectoryArrival>,
     reserve: f32,
 }
 
@@ -133,7 +161,7 @@ impl Dir {
     fn replay_bytes(&self) -> u128 {
         let (path, slots) = retained_fields!(self, Self {
             path, slots; local_position, scale, repository, parent, depth, position, files,
-            children, live, touch_age, reserve,
+            children, live, touch_age, reserve, arrival,
         });
         path.capacity() as u128 + buffer_bytes::<Option<u64>>(slots.capacity())
     }
@@ -152,6 +180,7 @@ impl Dir {
             children: 0,
             live: true,
             touch_age: f32::INFINITY,
+            arrival: None,
             reserve: 0.4,
         }
     }
@@ -359,6 +388,13 @@ impl Layout {
         self.files.iter().map(|(&id, file)| (id, file))
     }
 
+    pub(super) fn arriving_files(&self) -> impl Iterator<Item = (u64, &File)> {
+        self.fading.iter().filter_map(|&id| {
+            let file = self.file(id)?;
+            (file.state == Presence::Arriving).then_some((id, file))
+        })
+    }
+
     pub(super) fn file(&self, id: u64) -> Option<&File> {
         self.files.get(&id)
     }
@@ -407,12 +443,16 @@ impl Layout {
             file.state = Presence::Arriving;
             file.delay = delay;
             file.author = author;
+            file.arrival_author = author;
             file.activity = 1.0;
             self.dirs[file.dir].touch_age = 0.0;
             self.fading.insert(id);
             return id;
         }
-        let dir = self.ensure_dir(parent_path(path));
+        let dir = self.ensure_dir(
+            parent_path(path),
+            Some(DirectoryArrival::new(author, delay)),
+        );
         self.dirs[dir].touch_age = 0.0;
         let slot = self.claim_slot(dir);
         let id = self.next_id;
@@ -435,6 +475,7 @@ impl Layout {
                 heat: 0.0,
                 activity: 1.0,
                 author,
+                arrival_author: author,
             },
         );
         self.index_file(path, id);
@@ -484,7 +525,8 @@ impl Layout {
             self.fading.remove(&previous);
         }
         self.dirs[self.files[&id].dir].touch_age = 0.0;
-        let dir = self.ensure_dir(parent_path(to));
+        let dir =
+            self.ensure_dir(parent_path(to), Some(DirectoryArrival::new(author, 0.0)));
         let slot = if self.files[&id].dir == dir {
             self.files[&id].slot
         } else {
@@ -503,6 +545,7 @@ impl Layout {
         self.dirs[file.dir].touch_age = 0.0;
         if file.state == Presence::Leaving {
             file.state = Presence::Arriving;
+            file.arrival_author = author;
         }
         self.index_file(to, id);
         id
@@ -535,6 +578,9 @@ impl Layout {
     ) {
         self.revision += 1;
         self.fade_files(dt);
+        for dir in &mut self.dirs {
+            dir.arrival = dir.arrival.and_then(|arrival| arrival.step(dt));
+        }
         done(StepPart::Fade);
         self.compact_slots();
         done(StepPart::Compact);
@@ -609,6 +655,7 @@ impl Layout {
         self.revision += 1;
         for dir in &mut self.dirs {
             dir.touch_age = f32::INFINITY;
+            dir.arrival = None;
         }
         for file in self.files.values_mut() {
             file.delay = 0.0;
@@ -743,11 +790,11 @@ impl Layout {
         }
     }
 
-    fn ensure_dir(&mut self, path: &str) -> usize {
+    fn ensure_dir(&mut self, path: &str, arrival: Option<DirectoryArrival>) -> usize {
         if let Some(&index) = self.dir_index.get(path) {
             if !self.dirs[index].live {
                 if self.dirs[index].parent.is_some() {
-                    let parent = self.ensure_dir(parent_path(path));
+                    let parent = self.ensure_dir(parent_path(path), arrival);
                     self.dirs[parent].children += 1;
                 }
                 let position = self
@@ -757,13 +804,14 @@ impl Layout {
                 let dir = &mut self.dirs[index];
                 dir.live = true;
                 dir.position = position;
+                dir.arrival = dir.parent.and(arrival);
                 if let Some(rested) = self.reserve_fixed_points.get_mut(index) {
                     *rested = None;
                 }
             }
             return index;
         }
-        let parent = self.ensure_dir(parent_path(path));
+        let parent = self.ensure_dir(parent_path(path), arrival);
         self.dirs[parent].children += 1;
         let index = self.dirs.len();
         self.dirs.push(Dir::new(
@@ -772,6 +820,7 @@ impl Layout {
             self.dirs[parent].depth + 1,
             self.dirs[parent].repository,
         ));
+        self.dirs[index].arrival = arrival;
         self.dir_index.insert(path.to_owned(), index);
         index
     }
