@@ -256,3 +256,64 @@ fn visible_avatar_steps_stay_within_travel_speed() {
             .collect();
     }
 }
+
+#[test]
+fn visible_cross_repository_handoffs_stay_out_of_foreign_tiles() {
+    let mut events = vec![
+        write(0, 0, ["src/lib.rs".into()]),
+        write(1, 1, ["main.rs".into()]),
+        write(1, 10, ["main.rs".into()]),
+    ];
+    events[2].author = events[0].author.clone();
+    let mut sim = Simulation::with_repositories(
+        events,
+        &Options {
+            seconds_per_day: 1.0,
+            max_idle_seconds: 15.0,
+            contributor_inactivity_days: 30,
+            ..Default::default()
+        },
+        &Theme::neon(),
+        &Mappings::default(),
+        &["Source".into(), "Destination".into()],
+    );
+    let mut previous: Vec<(usize, bool)> = Vec::new();
+    let mut handoffs = 0;
+    for frame in 0..=u32::try_from(sim.end_tick()).unwrap() {
+        sim.advance_to(frame, 60);
+        let state = &sim.state;
+        for (index, avatar) in state.avatars.iter().enumerate() {
+            if avatar.presence <= 0.001 {
+                continue;
+            }
+            if let Some(&(repository, visible)) = previous.get(index)
+                && repository != avatar.repository
+            {
+                handoffs += 1;
+                assert!(
+                    !visible || sim.travel.walking(index, u64::from(frame - 1)),
+                    "frame {frame}: {} changed repository without walking or fading",
+                    avatar.name,
+                );
+            }
+            let point = slots::field_point(avatar.position);
+            for (repository, layout) in state.layout.repositories.iter().enumerate() {
+                if repository != avatar.repository
+                    && let Some(tile) = layout.tile
+                {
+                    assert!(
+                        !travel::in_guard(tile, state.avatar_radius(), point),
+                        "frame {frame}: {} entered foreign tile {repository}",
+                        avatar.name,
+                    );
+                }
+            }
+        }
+        previous = state
+            .avatars
+            .iter()
+            .map(|avatar| (avatar.repository, avatar.presence > 0.001))
+            .collect();
+    }
+    assert_eq!(handoffs, 1);
+}

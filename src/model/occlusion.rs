@@ -108,26 +108,46 @@ fn clear_position(
         .map_or(target, |(_, point)| point)
 }
 
-pub(super) fn clear_seat_transitions(
-    state: &mut State,
-    plan: &travel::Plan,
-    previous: &[Option<Vec3>],
-    max_step: f32,
-) {
-    let base = state.geometry.avatar_radius
-        * state.scale()
-        * state.avatar_scale
-        * state.avatar_size;
-    let scales = state.member_scales();
-    let birth_step = max_step
-        + 2.0 * state.avatar_radius() * framing::WORLD_UNITS_PER_REFERENCE_PIXEL;
+fn seat_bounds(state: &State) -> Rect {
     let (focus, distance) = state.overview();
     let zoom = (distance - framing::FIELD_HEIGHT)
         / (framing::DISTANCE - framing::FIELD_HEIGHT);
     let field =
         travel::field_rect(crate::layout::packing::Tile::inset(state.avatar_radius()));
     let corner = |point| focus.xz() + slots::world(point).xz() * zoom;
-    let bounds = Rect::from_corners(corner(field.min), corner(field.max));
+    Rect::from_corners(corner(field.min), corner(field.max))
+}
+
+fn previous_group_seats(
+    state: &State,
+    previous: &[Option<Vec3>],
+    scales: &[f32],
+    base: f32,
+) -> Vec<Option<(usize, Disc)>> {
+    state
+        .avatars
+        .iter()
+        .zip(previous)
+        .zip(scales)
+        .map(|((avatar, position), scale)| {
+            let group = avatar.group?;
+            Some((
+                group.lead,
+                Disc {
+                    centre: position.as_ref()?.xz(),
+                    radius: disc_radius(avatar, base, *scale),
+                    blocks_walkers: true,
+                },
+            ))
+        })
+        .collect()
+}
+
+fn seat_order(
+    state: &State,
+    plan: &travel::Plan,
+    previous: &[Option<Vec3>],
+) -> Vec<(usize, bool, bool)> {
     let mut order: Vec<_> = state
         .avatars
         .iter()
@@ -146,9 +166,29 @@ pub(super) fn clear_seat_transitions(
             index,
         )
     });
+    order
+}
+
+pub(super) fn clear_seat_transitions(
+    state: &mut State,
+    plan: &travel::Plan,
+    previous: &[Option<Vec3>],
+    max_step: f32,
+) {
+    let base = state.geometry.avatar_radius
+        * state.scale()
+        * state.avatar_scale
+        * state.avatar_size;
+    let scales = state.member_scales();
+    let birth_step = max_step
+        + 2.0 * state.avatar_radius() * framing::WORLD_UNITS_PER_REFERENCE_PIXEL;
+    let bounds = seat_bounds(state);
+    let order = seat_order(state, plan, previous);
     let mut placed: Vec<Disc> = Vec::with_capacity(order.len());
+    let mut approaching: Vec<Disc> = Vec::new();
     let mut obstacles = Vec::with_capacity(order.len());
-    for (index, blocks_walkers, _) in order {
+    let old_seats = previous_group_seats(state, previous, &scales, base);
+    for (rank, &(index, blocks_walkers, parked_here)) in order.iter().enumerate() {
         let avatar = &mut state.avatars[index];
         let target = avatar.position.xz();
         let y = avatar.position.y;
@@ -157,11 +197,28 @@ pub(super) fn clear_seat_transitions(
         let world = |point: Vec2| Vec3::new(point.x, y, point.y);
         let radius_at = |point: Vec2| nominal * slots::projection_scale(world(point));
         let radius = radius_at(target);
+        let nearby = |disc: &Disc| {
+            target.distance(disc.centre) < radius + disc.radius + 2.0 * max_step
+        };
         obstacles.clear();
-        obstacles.extend(placed.iter().copied().filter(|disc| {
-            (blocks_walkers || disc.blocks_walkers)
-                && target.distance(disc.centre) < radius + disc.radius + 2.0 * max_step
-        }));
+        obstacles.extend(
+            placed
+                .iter()
+                .copied()
+                .filter(|disc| (blocks_walkers || disc.blocks_walkers) && nearby(disc)),
+        );
+        if blocks_walkers {
+            obstacles.extend(approaching.iter().copied().filter(nearby));
+            if parked_here && let Some(group) = avatar.group {
+                obstacles.extend(order[rank + 1..].iter().filter_map(
+                    |&(other, _, parked_other)| {
+                        let (lead, disc) = old_seats[other]?;
+                        (parked_other && lead == group.lead && nearby(&disc))
+                            .then_some(disc)
+                    },
+                ));
+            }
+        }
         let mut point = target;
         if blocks_walkers
             && obstacles.iter().any(|disc| {
@@ -186,6 +243,21 @@ pub(super) fn clear_seat_transitions(
             radius: radius_at(point),
             blocks_walkers,
         });
+        if !blocks_walkers {
+            approaching.extend(
+                plan.walking_forecast(index, state.tick, [4, 8, 12])
+                    .filter_map(|(ticks, future)| {
+                        let centre = slots::world(future).xz();
+                        (centre.distance(point)
+                            <= super::ticks_duration(ticks) * 60.0 * max_step)
+                            .then(|| Disc {
+                                centre,
+                                radius: radius_at(centre),
+                                blocks_walkers: false,
+                            })
+                    }),
+            );
+        }
     }
 }
 

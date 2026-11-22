@@ -52,11 +52,41 @@ pub(super) fn in_guard(
     guard.size().cmpgt(Vec2::ZERO).all() && guard.contains(point)
 }
 
+pub(super) fn seat_clearance(
+    from: Vec2,
+    mut target: Vec2,
+    radius: f32,
+    foreign_tiles: impl Iterator<Item = crate::layout::packing::Tile>,
+) -> Vec2 {
+    for tile in foreign_tiles {
+        let guard = interior(tile, radius);
+        if !guard.size().cmpgt(Vec2::ZERO).all()
+            || !guard.contains(target)
+            || guard.contains(from)
+        {
+            continue;
+        }
+        let mut inside = target;
+        let mut outside = from;
+        for _ in 0..12 {
+            let middle = inside.midpoint(outside);
+            if guard.contains(middle) {
+                inside = middle;
+            } else {
+                outside = middle;
+            }
+        }
+        target = outside;
+    }
+    target
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Pose {
     tick: u64,
     point: Vec2,
     dock: slots::Dock,
+    visible: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -469,6 +499,22 @@ impl Plan {
         self.walking_trip(author, tick).is_some()
     }
 
+    pub(super) fn walking_forecast(
+        &self,
+        author: usize,
+        tick: u64,
+        ahead: [u64; 3],
+    ) -> impl Iterator<Item = (u64, Vec2)> {
+        self.walking_trip(author, tick)
+            .into_iter()
+            .flat_map(move |trip| {
+                ahead.map(|offset| {
+                    let sample = (tick + offset).min(trip.arrival - 1);
+                    (sample - tick, trip.sample(sample).0)
+                })
+            })
+    }
+
     fn walking_trip(&self, author: usize, tick: u64) -> Option<&Trip> {
         self.trips.iter().find(|t| {
             t.author == author
@@ -598,15 +644,19 @@ fn replay(simulation: &mut Simulation, frames: u32) -> Capture {
             .push(state.layout.repositories.iter().map(|r| r.tile).collect());
         capture.poses.resize_with(state.avatars.len(), Vec::new);
         for (index, avatar) in state.avatars.iter().enumerate() {
+            let visible = avatar.slot_presence > 0.0;
             if let Some(slot) = &avatar.slot
                 && capture.poses[index].last().is_none_or(|last| {
-                    last.point != slot.centre() || last.dock != slot.dock
+                    last.point != slot.centre()
+                        || last.dock != slot.dock
+                        || last.visible != visible
                 })
             {
                 capture.poses[index].push(Pose {
                     tick: state.tick,
                     point: slot.centre(),
                     dock: slot.dock,
+                    visible,
                 });
             }
         }
@@ -977,45 +1027,44 @@ pub(super) fn on_network(point: Vec2, cells: &[Rect]) -> bool {
     })
 }
 
-pub(super) fn align_near_network(
+pub(super) fn join_gutter(
     from: Vec2,
-    point: Vec2,
+    target: Vec2,
+    source: Option<crate::layout::packing::Tile>,
     cells: &[Rect],
     step: f32,
-) -> Vec2 {
-    if on_network(point, cells) {
-        return point;
-    }
-    cells
-        .iter()
-        .flat_map(|cell| {
-            (0..2).flat_map(move |axis| {
-                let normal = 1 - axis;
-                [cell.min[normal], cell.max[normal]].into_iter().filter_map(
-                    move |edge| {
-                        let across = edge - from[normal];
-                        if (edge - point[normal]).abs() > 1.0 || across.abs() > step {
-                            return None;
-                        }
-                        let along = (step * step - across * across).max(0.0).sqrt();
-                        let low = cell.min[axis].max(from[axis] - along);
-                        let high = cell.max[axis].min(from[axis] + along);
-                        (low <= high).then(|| {
-                            let mut candidate = point;
-                            candidate[normal] = edge;
-                            candidate[axis] = point[axis].clamp(low, high);
-                            candidate
-                        })
-                    },
-                )
-            })
-        })
-        .filter(|candidate| candidate.distance_squared(point) <= 1.0)
+) -> (Vec2, Option<Vec2>) {
+    let entrance = if on_network(from, cells) {
+        from
+    } else if let Some(tile) = source {
+        let rect = field_rect(tile);
+        let closest = from.clamp(rect.min, rect.max);
+        [
+            Vec2::new(rect.min.x, closest.y),
+            Vec2::new(rect.max.x, closest.y),
+            Vec2::new(closest.x, rect.min.y),
+            Vec2::new(closest.x, rect.max.y),
+        ]
+        .into_iter()
         .min_by(|a, b| {
-            a.distance_squared(point)
-                .total_cmp(&b.distance_squared(point))
+            from.distance_squared(*a)
+                .total_cmp(&from.distance_squared(*b))
         })
-        .unwrap_or(point)
+        .expect("four gutter edges")
+    } else {
+        return (from, None);
+    };
+    let Ok(path) = Router::default().route(entrance, target, cells) else {
+        return (from, None);
+    };
+    let next = std::iter::once(entrance)
+        .chain(path)
+        .find(|point| point.distance_squared(from) > 0.00001)
+        .unwrap_or(target);
+    (
+        from.move_towards(next, step),
+        (next == entrance).then_some(entrance),
+    )
 }
 
 impl Router {

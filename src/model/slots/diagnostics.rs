@@ -312,12 +312,14 @@ impl MovingBeams {
                 );
                 let on_network =
                     |point| super::super::travel::on_network(point, &cells);
+                let near_source = |source| point.distance(source) < 4.0 * radius;
                 if !on_network(point) {
                     // A seat can be offset from its dock while leaving room for another avatar.
-                    let joining = simulation
-                        .travel
-                        .departure_connector(author, state.tick)
-                        .is_some_and(|source| point.distance(source) < 4.0 * radius)
+                    let joining = (avatar.gutter_entry.is_some_and(on_network)
+                        || simulation
+                            .travel
+                            .departure_connector(author, state.tick)
+                            .is_some_and(near_source))
                         && simulation
                             .travel
                             .sample(author, state.tick)

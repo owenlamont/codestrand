@@ -158,11 +158,6 @@ impl Placement {
         self.point - self.offset
     }
 
-    pub(super) fn departure_point(&self, tile: Option<Tile>) -> Vec2 {
-        let normal = inward(self.dock.edge);
-        let point = self.point - normal * self.offset.dot(normal);
-        tile.map_or(point, |tile| point.clamp(tile.low * HALF, tile.high * HALF))
-    }
     /// The centre of the ring round a group of `capacity` seats parked here.
     pub fn ring_centre(&self, capacity: u8, radius: f32) -> Vec2 {
         self.centre() + ring_offset(capacity, self.dock.edge, radius)
@@ -790,15 +785,23 @@ impl State {
             };
             let avatar = &mut self.avatars[member];
             if let Some(previous) = avatar.slot.as_ref()
-                && previous.dock != place.dock
+                && (previous.dock != place.dock
+                    || previous.centre().distance(chosen.point) > 4.0 * radius)
                 && avatar.presence > 0.0
                 && (!avatar.travelling || avatar.dock_walk.is_some())
                 && !plan.travelling(member, self.tick)
                 && let Some(tile) = self.layout.repositories[avatar.repository].gutter
             {
+                let from = field_point(avatar.position);
+                let old_centre = previous.centre();
+                let dock = if super::travel::on_network(old_centre, cells) {
+                    old_centre
+                } else {
+                    previous.dock.on_network(tile)
+                };
                 avatar.dock_walk = super::travel::DockWalk::new(
                     self.tick,
-                    [field_point(avatar.position), previous.dock.on_network(tile)],
+                    [from, dock],
                     [chosen.point, place.point],
                     cells,
                     self.avatar_max_speed,
@@ -812,7 +815,6 @@ impl State {
                 avatar.dock_since = self.tick;
             }
             avatar.slot = Some(place);
-            avatar.slot_origin = None;
         }
         capacity
     }

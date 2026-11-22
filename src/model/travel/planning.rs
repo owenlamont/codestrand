@@ -431,8 +431,9 @@ pub(super) fn trips(
         if (relocation && prior.dock == service.dock)
             || (!relocation
                 && (!walk || (service.bot && bots == crate::model::BotTravel::Fade))
-                && ticks_duration(service.tick - prior.tick)
-                    >= crate::model::AVATAR_IDLE + 1.2)
+                && capture
+                    .pose(service.author, service.tick - 1)
+                    .is_some_and(|pose| !pose.visible))
         {
             continue;
         }
@@ -597,6 +598,7 @@ mod tests {
                                 if author == 0 && tick < 400 { 3 } else { 1 },
                                 0.5,
                             ),
+                            visible: true,
                         })
                         .collect()
                 })
