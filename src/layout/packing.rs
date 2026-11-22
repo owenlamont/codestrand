@@ -236,8 +236,6 @@ fn intervals(points: &[Vec2], axis: usize, crosses: &[f32]) -> Vec<Option<(f32, 
         .collect()
 }
 
-// Feasible size polygons keep the children's aspect intervals while accounting for
-// fixed pixel gutters.
 fn combine(a: &[Vec2], b: &[Vec2], axis: usize, gap: f32) -> Vec<Vec2> {
     let mut coordinates: Vec<_> = a.iter().chain(b).map(|p| p[1 - axis]).collect();
     coordinates.sort_by(f32::total_cmp);
@@ -1608,17 +1606,12 @@ impl Packing {
             .or_else(|| nearest_tiles(nodes, weights, presence, space))
             .or_else(|| self.firmer_tiles(nodes, weights, presence))
             .unwrap_or_else(|| {
-                let mut allocated =
-                    tiles(nodes, weights, &vec![1.0; presence.len()], space)
-                        .or_else(|| {
-                            tiles(
-                                &self.nodes,
-                                weights,
-                                &vec![1.0; presence.len()],
-                                space,
-                            )
-                        })
-                        .unwrap_or_else(|| vec![None; presence.len()]);
+                let mut allocated = {
+                    let full_presence = vec![1.0; presence.len()];
+                    tiles(nodes, weights, &full_presence, space)
+                        .or_else(|| tiles(&self.nodes, weights, &full_presence, space))
+                }
+                .unwrap_or_else(|| vec![None; presence.len()]);
                 shrink_tiles(&mut allocated, presence);
                 allocated
             })

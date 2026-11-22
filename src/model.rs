@@ -216,7 +216,7 @@ impl Options {
         self.replay = Some(Arc::new(std::sync::Mutex::new(streaming::Replay::new())));
     }
 
-    pub(super) fn choose_window(&mut self, events: &[Event]) -> Time {
+    pub(super) fn choose_window(&mut self, events: &[Event]) {
         let history = Schedule::for_replay(events, self);
         let (_, endings) =
             lifecycle::plan(events, &history, self, self.selected_range(events.len()));
@@ -224,7 +224,6 @@ impl Options {
         self.travel_window_seconds = (duration
             > Time::seconds(WINDOW_SECONDS + windows::MARGIN))
         .then_some(WINDOW_SECONDS);
-        duration
     }
 
     fn fragment_pace(&self) -> FragmentPace {

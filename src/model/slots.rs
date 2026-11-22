@@ -789,17 +789,11 @@ impl State {
     }
 
     pub(super) fn overlay_label_bounds(&self, label: &super::Label) -> Option<Rect> {
-        let point = self.screen(label.position)?;
-        let size = super::names::rect(
-            Vec2::ZERO,
+        Some(super::names::top_left_rect(
+            self.screen(label.position)?,
             &label.text,
             label.kind.font_scale(),
             self.geometry.label_height,
-        )
-        .size();
-        Some(Rect::from_corners(
-            point - Vec2::Y * size.y,
-            point + Vec2::X * size.x,
         ))
     }
 

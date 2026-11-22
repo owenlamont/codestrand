@@ -521,22 +521,13 @@ impl Source {
         if self.retain_preview_windows {
             options.retain_preview_windows();
         }
-        let history_duration = options.choose_window(&events);
+        options.choose_window(&events);
         #[cfg(test)]
         if let Some(window) = self.window_override {
             options.travel_window_seconds = match window {
                 WindowOverride::Whole => None,
                 WindowOverride::Seconds(seconds) => Some(seconds),
             };
-        }
-        if cfg!(test) {
-            eprintln!(
-                "planning_history_seconds={} travel_window_seconds={}",
-                history_duration.lossy_secs_f32(),
-                options
-                    .travel_window_seconds
-                    .map_or_else(|| "single".to_owned(), |seconds| seconds.to_string())
-            );
         }
         let mut simulation = Self::playback(events, &options, &mappings, &names)?;
         simulation.repository_boundary = self.repository_boundary;
