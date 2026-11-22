@@ -265,6 +265,7 @@ pub(super) fn load_range(
         &scanned
     };
     let history = history::import(repo, tip, links, skip, end_date)?;
+    let started = history::import_clock();
     let snapshot = Snapshot {
         version: timeline::CACHE_VERSION,
         tip: tip_text,
@@ -272,6 +273,12 @@ pub(super) fn load_range(
         end,
         events: timeline::from_history(&history),
     };
+    if let Some(started) = started {
+        eprintln!(
+            "import_events seconds={:.6}",
+            started.elapsed().as_secs_f64()
+        );
+    }
     if let Some(path) = entry {
         let _ = store(&path, &snapshot);
     }

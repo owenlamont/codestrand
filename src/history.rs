@@ -2,6 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     ops::ControlFlow,
     path::{Path, PathBuf},
+    time::{Duration, Instant},
 };
 
 use gix::object::tree::diff::Change as TreeChange;
@@ -348,8 +349,27 @@ pub(super) fn links(
     repo: &gix::Repository,
     tip: gix::ObjectId,
 ) -> Result<Vec<Link>, Error> {
-    scan(repo, tip, &mut Budget::new(Limits::default()))
-        .map_err(|source| Error::History { tip, source })
+    let started = import_clock();
+    let links = scan(repo, tip, &mut Budget::new(Limits::default()))
+        .map_err(|source| Error::History { tip, source })?;
+    if let Some(started) = started {
+        eprintln!(
+            "import_scan seconds={:.6} links={}",
+            started.elapsed().as_secs_f64(),
+            links.len()
+        );
+    }
+    Ok(links)
+}
+
+pub(super) fn import_clock() -> Option<Instant> {
+    std::env::var_os("CODESTRAND_TRACE_PLANNING").map(|_| Instant::now())
+}
+
+#[derive(Default)]
+struct ImportTiming {
+    tree: Duration,
+    blob: Duration,
 }
 
 /// Imports the links from `skip` onwards; with `skip > 0`, the tree of the last skipped
@@ -529,11 +549,27 @@ fn load_with_limits(
     let mut resources = bounded_resources(repo)?;
     let mut commits = Vec::new();
     let mut spent = Vec::new();
+    let started = import_clock();
+    let mut timing = started.map(|_| ImportTiming::default());
     for (index, link) in links.iter().enumerate().skip(skip).rev() {
-        match diffed(repo, link, &mut budget, &mut resources) {
+        match diffed(repo, link, &mut budget, &mut resources, timing.as_mut()) {
             Ok(commit) => {
                 commits.push(commit);
                 spent.push(budget.spent);
+                if commits.len() == 128
+                    && let Some(started) = started
+                {
+                    eprintln!(
+                        "import_sample seconds={:.6} commits={} requested={} \
+                         retained_bytes={} work_bytes={} changed_entries={}",
+                        started.elapsed().as_secs_f64(),
+                        commits.len(),
+                        links.len() - skip,
+                        budget.spent.retained_bytes,
+                        budget.spent.work,
+                        budget.spent.changes,
+                    );
+                }
             }
             Err(error) if error.is_exhausted() => {
                 return Err(refusal(
@@ -550,6 +586,7 @@ fn load_with_limits(
         }
     }
     commits.reverse();
+    let boundary_started = started.map(|_| Instant::now());
     let boundary = match skip.checked_sub(1) {
         None => None,
         Some(last) => match boundary(repo, &links[last], &mut budget) {
@@ -568,6 +605,23 @@ fn load_with_limits(
             Err(error) => return Err(error),
         },
     };
+    if let (Some(started), Some(boundary_started), Some(timing)) =
+        (started, boundary_started, timing)
+    {
+        eprintln!(
+            "import_diff tree_s={:.6} blob_s={:.6} other_s={:.6} boundary_s={:.6} \
+             retained_bytes={} work_bytes={} changed_entries={}",
+            timing.tree.as_secs_f64(),
+            timing.blob.as_secs_f64(),
+            (boundary_started - started)
+                .saturating_sub(timing.tree + timing.blob)
+                .as_secs_f64(),
+            boundary_started.elapsed().as_secs_f64(),
+            budget.spent.retained_bytes,
+            budget.spent.work,
+            budget.spent.changes,
+        );
+    }
     Ok(History {
         tip: tip.to_string(),
         merge_policy: "first-parent",
@@ -751,7 +805,9 @@ fn diffed(
     link: &Link,
     budget: &mut Budget,
     resources: &mut gix::diff::blob::Platform,
+    timing: Option<&mut ImportTiming>,
 ) -> Result<Commit> {
+    let started = timing.as_ref().map(|_| Instant::now());
     let id = link.id;
     budget.object(repo, id)?;
     let commit = repo.find_commit(id)?;
@@ -796,6 +852,7 @@ fn diffed(
     changes.sort_by(|a, b| {
         (&a.path, &a.source_path, &a.kind).cmp(&(&b.path, &b.source_path, &b.kind))
     });
+    let blob_started = started.map(|_| Instant::now());
     for change in &mut changes {
         change.diff = bounded_blob_diff(repo, change, budget).map_err(|source| {
             ReadError::Diff {
@@ -804,6 +861,12 @@ fn diffed(
                 source: Box::new(source),
             }
         })?;
+    }
+    if let (Some(timing), Some(started), Some(blob_started)) =
+        (timing, started, blob_started)
+    {
+        timing.tree += blob_started - started;
+        timing.blob += blob_started.elapsed();
     }
     record_commit(&commit, changes, budget)
 }
