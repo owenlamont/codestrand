@@ -1,5 +1,5 @@
 use super::{
-    Capture, HALF, Pose, Rect, Route, Router, Trip, Vec2, fade_clearance,
+    Capture, HALF, Pose, Rect, Route, Router, Trip, TripKind, Vec2, fade_clearance,
     ticks_duration,
 };
 use crate::layout::packing::Tile;
@@ -427,8 +427,11 @@ pub(super) fn trips(
         if commit < capture.frozen {
             continue;
         }
-        if (prior.repository == service.repository && prior.dock == service.dock)
-            || ((!walk || (service.bot && bots == crate::model::BotTravel::Fade))
+        let same_tile = prior.repository == service.repository;
+        let relocation = same_tile && prior.leads_commit && service.leads_commit;
+        if (same_tile && prior.dock == service.dock)
+            || (!relocation
+                && (!walk || (service.bot && bots == crate::model::BotTravel::Fade))
                 && ticks_duration(service.tick - prior.tick)
                     >= crate::model::AVATAR_IDLE + 1.2)
         {
@@ -440,6 +443,13 @@ pub(super) fn trips(
             .pose(service.author, free)
             .expect("existing author")
             .point;
+        let kind = if relocation {
+            TripKind::Relocation
+        } else if capture.births.binary_search(&commit).is_ok() {
+            TripKind::Birth
+        } else {
+            TripKind::Transfer
+        };
         let mut best = Trip {
             author: service.author,
             commit,
@@ -449,7 +459,7 @@ pub(super) fn trips(
             source,
             fade_ticks: 0,
             route: Route::default(),
-            birth: capture.births.binary_search(&commit).is_ok(),
+            kind,
             fade: true,
             bot: service.bot,
             source_repository: prior.repository,
@@ -459,14 +469,14 @@ pub(super) fn trips(
             cutoff: None,
             proof: None,
         };
-        if !service.bot || bots == crate::model::BotTravel::Walk {
+        if relocation || !service.bot || bots == crate::model::BotTravel::Walk {
             best = search(
                 capture,
                 &best,
                 prior.release,
                 speed,
                 &mut router,
-                walk && best.birth,
+                relocation || (walk && kind == TripKind::Birth),
             );
         }
         if best.route.is_empty() {
@@ -564,6 +574,7 @@ mod tests {
                     point,
                     radius: 7.5,
                     bot: false,
+                    leads_commit: true,
                     dock: dock(if author == 0 && tick < 400 { 3 } else { 1 }, 0.5),
                 },
             )

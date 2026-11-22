@@ -18,6 +18,7 @@ pub(crate) struct Schedule {
     services: Vec<Service>,
     pub(super) birth_protections: Vec<(usize, usize)>,
     pub(super) walk_protections: Vec<(usize, usize)>,
+    motion_protections: Vec<(usize, u64)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -25,6 +26,7 @@ struct Service {
     tick: u64,
     padding: u32,
     birth: bool,
+    tile_floor: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -47,19 +49,28 @@ impl Clock {
 
     pub(super) fn rows(&self, tick: u64) -> (u64, u64) {
         let next = self.presentation.applied(tick);
-        let (floor, running) = next.checked_sub(1).map_or((0, tick), |last| {
-            let floor = self.history.services[last].tick;
-            (floor, floor + tick - self.presentation.services[last].tick)
-        });
-        self.history
-            .services
-            .get(next)
-            .map_or((running, running), |service| {
+        let (floor, running, tile_floor) =
+            next.checked_sub(1).map_or((0, tick, 0), |last| {
+                let floor = self.history.services[last].tick;
+                let shown = &self.presentation.services[last];
+                (floor, floor + tick - shown.tick, shown.tile_floor)
+            });
+        self.history.services.get(next).map_or(
+            (running.max(tile_floor), running),
+            |service| {
+                let limit = self.presentation.services.get(next).map_or(
+                    service.tick,
+                    |shown| {
+                        let wait = self.presentation.motion_wait(&self.history, next);
+                        service.tick + wait.saturating_sub(shown.tick - tick)
+                    },
+                );
                 (
-                    running.min(service.tick),
+                    running.min(limit).max(tile_floor),
                     running.min(service.tick.saturating_sub(1).max(floor)),
                 )
-            })
+            },
+        )
     }
 
     pub(super) fn present(&self, history: Time) -> Time {
@@ -87,13 +98,14 @@ impl Schedule {
     pub(super) fn replay_bytes(&self) -> u128 {
         use super::checkpoint_memory::{buffer_bytes, retained_fields};
 
-        let (starts, services, birth_protections, walk_protections) = retained_fields!(self, Schedule {
-            starts, services, birth_protections, walk_protections;
+        let (starts, services, birth_protections, walk_protections, motion_protections) = retained_fields!(self, Schedule {
+            starts, services, birth_protections, walk_protections, motion_protections;
         });
         buffer_bytes::<Time>(starts.capacity())
             + buffer_bytes::<Service>(services.capacity())
             + buffer_bytes::<(usize, usize)>(birth_protections.capacity())
             + buffer_bytes::<(usize, usize)>(walk_protections.capacity())
+            + buffer_bytes::<(usize, u64)>(motion_protections.capacity())
     }
 
     pub(super) fn for_replay(events: &[Event], options: &super::Options) -> Self {
@@ -137,7 +149,36 @@ impl Schedule {
     pub(super) fn needs_presentation(&self, padding: &[(usize, u32)]) -> bool {
         !self.birth_protections.is_empty()
             || !self.walk_protections.is_empty()
+            || !self.motion_protections.is_empty()
             || padding.iter().any(|&(_, ticks)| ticks > 0)
+    }
+
+    pub(super) fn protect_tile_motion(
+        &mut self,
+        intervals: impl Iterator<Item = (u64, u64)>,
+    ) {
+        let mut intervals: Vec<_> =
+            intervals.filter(|&(start, end)| start < end).collect();
+        intervals.sort_unstable();
+        let mut closing: Vec<(u64, u64)> = Vec::new();
+        for (start, end) in intervals {
+            if let Some(last) = closing.last_mut()
+                && start < last.1
+            {
+                last.1 = last.1.max(end);
+            } else {
+                closing.push((start, end));
+            }
+        }
+        self.motion_protections = closing
+            .into_iter()
+            .filter_map(|(start, end)| {
+                let commit = self
+                    .services
+                    .partition_point(|service| service.tick < start);
+                (self.services.get(commit)?.tick < end).then_some((commit, end))
+            })
+            .collect();
     }
 
     pub(super) fn with_travel(
@@ -149,6 +190,8 @@ impl Schedule {
         let mut services: Vec<Service> = Vec::with_capacity(len);
         let mut protections = self.birth_protections.iter().peekable();
         let mut walks = self.walk_protections.iter().peekable();
+        let mut motions = self.motion_protections.iter().peekable();
+        let mut tile_floor = 0;
         let starts = self.starts[..len]
             .iter()
             .enumerate()
@@ -170,11 +213,20 @@ impl Schedule {
                     extra += floor.saturating_sub(tick);
                     tick = tick.max(floor);
                 }
+                if let Some(&(_, end)) =
+                    motions.next_if(|&&(commit, _)| commit == index)
+                {
+                    let wait = end.saturating_sub(tile_floor.max(service.tick));
+                    extra += wait;
+                    tick = tick.saturating_add(wait);
+                    tile_floor = tile_floor.max(end);
+                }
                 let start = start.after(tick_time(extra));
                 services.push(Service {
                     tick,
                     padding: service.padding.saturating_add(wait),
                     birth: service.birth,
+                    tile_floor,
                 });
                 if first_tick(start) == tick || tick == u64::MAX {
                     start
@@ -188,6 +240,7 @@ impl Schedule {
             services,
             birth_protections: Vec::new(),
             walk_protections: Vec::new(),
+            motion_protections: Vec::new(),
         }
     }
 
@@ -200,6 +253,15 @@ impl Schedule {
             })
     }
 
+    pub(super) fn motion_wait(&self, history: &Self, index: usize) -> u64 {
+        let earlier_floor = index
+            .checked_sub(1)
+            .map_or(0, |i| self.services[i].tile_floor);
+        self.services[index]
+            .tile_floor
+            .saturating_sub(earlier_floor.max(history.services[index].tick))
+    }
+
     pub(super) fn present_tail_tick(&self, history: &Self, history_tick: u64) -> u64 {
         self.services.last().map_or(history_tick, |last| {
             let history_last = history.services[self.services.len() - 1].tick;
@@ -207,6 +269,7 @@ impl Schedule {
         })
     }
 
+    #[cfg(test)]
     pub(super) fn commit_ticks(&self) -> impl Iterator<Item = u64> + '_ {
         self.services.iter().map(|service| service.tick)
     }
@@ -278,6 +341,7 @@ impl Schedule {
                         u32::try_from(birth_wait).expect("bounded birth wait"),
                     ),
                     birth,
+                    tile_floor: 0,
                 });
                 start
             })
@@ -287,6 +351,7 @@ impl Schedule {
             services,
             birth_protections: Vec::new(),
             walk_protections: Vec::new(),
+            motion_protections: Vec::new(),
         }
     }
 

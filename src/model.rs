@@ -32,6 +32,8 @@ pub(crate) mod occlusion;
 #[cfg(test)]
 mod pacing_tests;
 mod planning_memory;
+#[cfg(test)]
+mod release_regressions;
 
 pub(crate) mod quality;
 pub(crate) mod schedule;
@@ -822,7 +824,6 @@ impl Simulation {
         let mut padding = simulation.travel_padding(options);
         let mut history = simulation.schedule.clone();
         let departures = simulation.departures.clone();
-        let endings = simulation.repository_ends.clone();
         let mut pass = 0;
         let mut compactions = 0;
         let walk = options.travel_cap == TravelCap::None;
@@ -837,7 +838,7 @@ impl Simulation {
                     options,
                     repositories,
                     &padding,
-                    (&history, &departures, &endings),
+                    (&history, &departures),
                 )?;
             }
             simulation.plan_travel(options, &padding);
@@ -854,7 +855,8 @@ impl Simulation {
                 continue;
             }
             let adjusted = simulation.adjust_travel_padding(options, &padding);
-            let settled = adjusted == padding || (!walk && pass >= 4);
+            let settled = adjusted == padding
+                || (!walk && !simulation.travel.unsettled_relocation() && pass >= 4);
             if !settled {
                 padding = adjusted;
                 continue;
@@ -901,7 +903,7 @@ impl Simulation {
         options: &Options,
         repositories: &[String],
         padding: &[(usize, u32)],
-        (history, departures, endings): (&Schedule, &[Time], &[Time]),
+        (history, departures): (&Schedule, &[Time]),
     ) -> anyhow::Result<()> {
         let trace = &options.trace;
         let schedule = {
@@ -932,8 +934,6 @@ impl Simulation {
             self.births = self.births_for(&schedule);
             self.departures =
                 departures.iter().map(|&time| clock.present(time)).collect();
-            self.repository_ends =
-                endings.iter().map(|&time| clock.present(time)).collect();
             self.clock = clock;
         }
         self.schedule = schedule;
@@ -953,7 +953,9 @@ impl Simulation {
                     schedule.padding(index) - self.clock.history.padding(index);
                 (
                     self.events[index].repository,
-                    arrival - u64::from(travel),
+                    arrival
+                        - u64::from(travel)
+                        - schedule.motion_wait(&self.clock.history, index),
                     history,
                 )
             })
@@ -1075,7 +1077,7 @@ impl Simulation {
         let prior_active = prior_activity(&events[..start], repositories.len());
         let (departures, repository_ends) =
             lifecycle::plan(events, &schedule, options, start..end);
-        let repository_exits = lifecycle::repository_exits(&repository_ends, &schedule);
+        let repository_exits = lifecycle::repository_exits(&repository_ends);
         let first_arrivals = lifecycle::arrivals(events, start..end);
         let finals =
             lifecycle::finals(&events[start..end], &schedule.starts, &departures);
@@ -1121,6 +1123,9 @@ impl Simulation {
         simulation.births = simulation.births_for(&simulation.schedule);
         let snapshots = simulation.plan_repositories(prior_active, options)?;
         simulation.schedule.birth_protections = simulation.birth_protections();
+        simulation
+            .schedule
+            .protect_tile_motion(simulation.packing.motion_intervals());
         if options.travel_window_seconds.is_none() {
             simulation.plan_avatar_envelopes(snapshots);
         }
@@ -1216,12 +1221,6 @@ impl Simulation {
             }
         }
         self.push_regions(&mut samples, &mut pending, &labels, threads);
-        samples.set_commits(
-            self.schedule
-                .commit_ticks()
-                .map(|tick| usize::try_from(tick).expect("bounded service tick"))
-                .collect(),
-        );
         self.trace.add_ticks(&mut self.tick_times);
         self.packing = crate::layout::packing::Packing::from_inputs(
             samples,
@@ -1288,7 +1287,8 @@ impl Simulation {
             .get(repository)
             .copied()
             .unwrap_or(Time::INFINITY);
-        let u = lifecycle::progress(self.seconds(), end, lifecycle::REPOSITORY_EXIT);
+        let tiles = tick_time(self.clock.rows(self.state.tick).0);
+        let u = lifecycle::progress(tiles, end, lifecycle::REPOSITORY_EXIT);
         (u.min(0.2) * 5.0, 1.0 - u, u * self.scale() * 1.5)
     }
 
@@ -2848,14 +2848,13 @@ mod tests {
         .unwrap();
         let history = simulation.schedule.clone();
         let departures = simulation.departures.clone();
-        let endings = simulation.repository_ends.clone();
         simulation
             .apply_padding(
                 &events,
                 &options,
                 &labels,
                 &[(1, 120), (2, 10)],
-                (&history, &departures, &endings),
+                (&history, &departures),
             )
             .unwrap();
         assert_eq!(simulation.births.len(), 2);

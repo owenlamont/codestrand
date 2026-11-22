@@ -1056,7 +1056,6 @@ pub(crate) struct Inputs {
     labels: Vec<String>,
     rows: Vec<Vec<Input>>,
     items: Vec<Vec<f32>>,
-    commits: Vec<usize>,
 }
 
 impl Inputs {
@@ -1065,7 +1064,6 @@ impl Inputs {
             labels: Vec::new(),
             rows: Vec::with_capacity(ticks),
             items: Vec::with_capacity(ticks),
-            commits: Vec::new(),
         }
     }
 
@@ -1082,10 +1080,6 @@ impl Inputs {
             .unzip();
         self.rows.push(rows);
         self.items.push(items);
-    }
-
-    pub(crate) fn set_commits(&mut self, commits: Vec<usize>) {
-        self.commits = commits;
     }
 }
 impl Input {
@@ -1218,7 +1212,6 @@ impl Packing {
             labels,
             rows: regions,
             items,
-            commits,
         } = inputs;
         let Some(first) = regions.first().filter(|r| !r.is_empty()) else {
             return Ok(Self::default());
@@ -1298,16 +1291,15 @@ impl Packing {
                     .collect();
                 let finish = tick + held::reflow_ticks();
                 let end = u64::try_from(finish).expect("bounded reflow");
-                let stable = commits
-                    .get(commits.partition_point(|&commit| commit < tick))
-                    .is_none_or(|&commit| commit >= finish)
-                    && shown.iter().enumerate().all(|(i, &p)| {
-                        let exit = exits.get(i).and_then(|exit| *exit);
-                        (p >= 1.0 && exit.is_none_or(|exit| end < exit.start))
-                            || (p == 0.0
-                                && (finish <= windows[i].0
-                                    || exit.is_some_and(|exit| now >= exit.end)))
-                    });
+                let stable = shown.iter().enumerate().all(|(i, &p)| {
+                    let exit = exits.get(i).and_then(|exit| *exit);
+                    (p >= 1.0
+                        && tick >= births[i]
+                        && exit.is_none_or(|exit| end < exit.start))
+                        || (p == 0.0
+                            && (finish <= windows[i].0
+                                || exit.is_some_and(|exit| now >= exit.end)))
+                });
                 let future = held::target_tick(tick).min(items.len() - 1);
                 let targets: Vec<_> = births
                     .iter()
@@ -1409,6 +1401,19 @@ impl Packing {
         self.sample_rows(tiles, content, births, None, |index| {
             repositories.is_none_or(|selected| selected.contains(&index))
         })
+    }
+
+    pub(crate) fn motion_intervals(&self) -> impl Iterator<Item = (u64, u64)> + '_ {
+        self.exits
+            .iter()
+            .flatten()
+            .map(|exit| (exit.start, exit.end))
+            .chain(self.reflows.iter().map(|change| {
+                let start = u64::try_from(change.tick).expect("bounded reflow");
+                let duration =
+                    u64::try_from(held::reflow_ticks()).expect("bounded reflow");
+                (start, start + duration)
+            }))
     }
 
     pub(crate) fn expanding_neighbours(

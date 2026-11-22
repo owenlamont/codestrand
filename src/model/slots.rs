@@ -1473,12 +1473,11 @@ impl Choice<'_> {
         planned: Option<Dock>,
         locked: bool,
     ) -> Placement {
-        if !locked && let Some(parked) = previous {
+        if let Some(parked) = previous {
             let selected = self.assess(parked.dock).0;
+            let centre = selected.ring_centre(self.capacity, self.radius);
             if parked.commit == commit
-                || (planned.is_some()
-                    && selected.valid()
-                    && self.reserved_cost(selected.point) <= 0.001)
+                || (selected.overlaps == 0 && self.occupied_cost(centre) <= 0.001)
             {
                 return selected;
             }
@@ -1491,19 +1490,10 @@ impl Choice<'_> {
                 return selected;
             }
         }
-        let occupied_origin = previous
-            .filter(|s| {
-                s.commit != commit && self.avatar_cost(self.point(s.dock)) > 0.001
-            })
-            .map(|s| self.point(s.dock));
-        let previous = previous
-            .filter(|s| {
-                s.commit == commit || self.avatar_cost(self.point(s.dock)) <= 0.001
-            })
-            .map(|s| s.dock);
-        origin
-            .or(occupied_origin)
-            .map_or_else(|| self.select(previous), |p| self.nearest(p))
+        if let Some(parked) = previous {
+            return self.nearest(self.point(parked.dock), true);
+        }
+        origin.map_or_else(|| self.select(None), |p| self.nearest(p, false))
     }
     fn point(&self, dock: Dock) -> Vec2 {
         self.gutter.map_or_else(
@@ -1511,7 +1501,7 @@ impl Choice<'_> {
             |tile| dock.on_network(tile),
         )
     }
-    fn nearest(&self, point: Vec2) -> Placement {
+    fn nearest(&self, point: Vec2, same_tile: bool) -> Placement {
         self.free_docks()
             .into_iter()
             .chain((0..4).flat_map(|edge| {
@@ -1521,21 +1511,37 @@ impl Choice<'_> {
                 })
             }))
             .map(|dock| self.assess(dock).0)
-            .filter(Placement::valid)
+            .filter(|slot| {
+                if same_tile {
+                    slot.overlaps == 0
+                } else {
+                    slot.valid()
+                }
+            })
             .map(|slot| {
                 let seconds = super::travel::slot_seconds(
                     point, slot.point, self.cells, self.speed,
                 );
                 let ray = self.ray_cost(slot.point);
-                let cost = ray
-                    + TRAVEL_WEIGHT * seconds
-                    + self.spread_cost(slot.point, slot.dock.edge)
-                    + self.spacing_cost(slot.point) * 1_000.0;
+                let cost = if same_tile {
+                    seconds
+                } else {
+                    ray + TRAVEL_WEIGHT * seconds
+                        + self.spread_cost(slot.point, slot.dock.edge)
+                        + self.spacing_cost(slot.point) * 1_000.0
+                };
                 (slot, cost)
             })
             .min_by(|a, b| {
-                self.avatar_cost(a.0.point)
-                    .total_cmp(&self.avatar_cost(b.0.point))
+                let obstruction = |slot: &Placement| {
+                    if same_tile {
+                        self.occupied_cost(slot.ring_centre(self.capacity, self.radius))
+                    } else {
+                        self.avatar_cost(slot.point)
+                    }
+                };
+                obstruction(&a.0)
+                    .total_cmp(&obstruction(&b.0))
                     .then(a.1.total_cmp(&b.1))
                     .then(
                         a.0.point
@@ -1546,6 +1552,9 @@ impl Choice<'_> {
             .map_or_else(|| self.select(None), |(slot, _)| slot)
     }
     fn avatar_cost(&self, point: Vec2) -> f32 {
+        self.occupied_cost(point) + self.reserved_cost(point)
+    }
+    fn occupied_cost(&self, point: Vec2) -> f32 {
         self.occupied
             .iter()
             .map(|r| {
@@ -1553,8 +1562,7 @@ impl Choice<'_> {
                     - point.distance(r.center()))
                 .max(0.0)
             })
-            .sum::<f32>()
-            + self.reserved_cost(point)
+            .sum()
     }
     fn reserved_cost(&self, point: Vec2) -> f32 {
         self.future
@@ -1913,7 +1921,7 @@ mod tests {
         let first = choice(&[], &[]).select(None);
         let occupied = [disk(first.point, 7.5)];
         let chooser = choice(&[], &occupied);
-        let selected = chooser.nearest(first.point);
+        let selected = chooser.nearest(first.point, false);
         assert!(selected.valid());
         assert_eq!(chooser.avatar_cost(selected.point), 0.0);
     }
@@ -2071,7 +2079,7 @@ mod tests {
         chooser.envelope.rays = Arc::new(vec![Vec2::ONE; 100]);
         let source = Vec2::new(-200.0, -124.0);
         let far = chooser.select(None);
-        let near = chooser.nearest(source);
+        let near = chooser.nearest(source, false);
         assert!(near.point.distance(source) < 50.0);
         assert!(chooser.ray_cost(near.point) > chooser.ray_cost(far.point));
         let near_time =
@@ -2123,7 +2131,7 @@ mod tests {
     fn repository_switch_uses_a_near_valid_edge_instead_of_the_top() {
         let free = choice(&[], &[]);
         let source = Vec2::new(0.0, -250.0);
-        let near = free.nearest(source);
+        let near = free.nearest(source, false);
         assert!(near.valid());
         assert_eq!(near.dock.edge, 2);
         assert!(near.point.distance(source) < free.select(None).point.distance(source));

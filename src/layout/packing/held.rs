@@ -11,15 +11,12 @@ struct Policy {
     ratio: f32,
     /// Ticks one reflow eases over.
     reflow: u32,
-    /// Ticks after a reflow ends before the next may start.
-    hold: u32,
 }
 
 const POLICY: Policy = Policy {
     drift: 0.05,
     ratio: 1.5,
     reflow: 2 * TICK_RATE,
-    hold: 4 * TICK_RATE,
 };
 
 /// Weights held at the counts of the last reflow, easing towards the next one's.
@@ -92,7 +89,7 @@ impl Weights {
             self.from = self.at(tick);
             self.to = future.iter().map(|&count| count.max(1.0)).collect();
             self.start = tick;
-            self.next = tick + span(self.policy.reflow + self.policy.hold);
+            self.next = tick + span(self.policy.reflow);
         }
         self.at(tick)
     }
@@ -133,13 +130,13 @@ pub(super) fn reflow_ticks() -> usize {
     span(POLICY.reflow)
 }
 
-/// Aim at the midpoint of the next hold, after the ease has ended.
+/// Aim at the counts when the ease ends.
 pub(super) fn target_tick(tick: usize) -> usize {
-    tick + span(POLICY.reflow + POLICY.hold / 2)
+    tick + reflow_ticks()
 }
 
 pub(super) fn reflow_spacing() -> usize {
-    span(POLICY.reflow + POLICY.hold)
+    reflow_ticks()
 }
 
 pub(super) fn reflow_ease(elapsed: usize) -> f32 {
@@ -202,7 +199,7 @@ mod tests {
     }
 
     #[test]
-    fn a_drift_eases_once_to_the_new_counts_then_holds() {
+    fn a_drift_eases_to_the_new_counts_before_the_next_reflow() {
         let mut weights = Weights::new(2);
         weights.step(0, &[100.0, 100.0], &BOTH);
         let reflow = span(POLICY.reflow);
@@ -212,9 +209,8 @@ mod tests {
         assert!(path.windows(2).all(|pair| pair[0] <= pair[1]));
         assert!(path[0] < 101.0);
         assert_eq!(path[reflow], 300.0);
-        let late = span(POLICY.reflow + POLICY.hold);
+        let late = reflow + 2;
         assert_eq!(weights.step(late, &[100.0, 900.0], &BOTH)[1], 300.0);
-        assert_eq!(weights.step(late + 1, &[100.0, 900.0], &BOTH)[1], 300.0);
         assert!(weights.step(late + 2, &[100.0, 900.0], &BOTH)[1] > 300.0);
     }
 
@@ -235,7 +231,7 @@ mod tests {
     }
 
     #[test]
-    fn a_reflow_eases_towards_the_counts_in_the_middle_of_the_hold() {
+    fn a_reflow_eases_towards_the_counts_at_its_end() {
         let mut weights = Weights::new(2);
         weights.step(0, &[100.0, 100.0], &BOTH);
         assert_eq!(

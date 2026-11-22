@@ -70,6 +70,7 @@ pub(super) struct Service {
     radius: f32,
     bot: bool,
     dock: slots::Dock,
+    leads_commit: bool,
 }
 
 #[derive(Debug, Default)]
@@ -212,6 +213,13 @@ impl Route {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TripKind {
+    Transfer,
+    Birth,
+    Relocation,
+}
+
 #[derive(Clone, Debug)]
 struct Trip {
     author: usize,
@@ -222,7 +230,7 @@ struct Trip {
     source: Vec2,
     fade_ticks: u64,
     route: Route,
-    birth: bool,
+    kind: TripKind,
     fade: bool,
     bot: bool,
     source_repository: usize,
@@ -296,6 +304,11 @@ impl Plan {
     pub(super) fn trip_count(&self) -> usize {
         self.trips.len()
     }
+    pub(super) fn unsettled_relocation(&self) -> bool {
+        self.trips.iter().any(|trip| {
+            trip.commit >= self.frozen && trip.fade && trip.kind == TripKind::Relocation
+        })
+    }
     /// The first commit whose trip fades although its policy walks; a bot under
     /// `--bot-travel fade` fades by design.
     pub(super) fn first_unresolved(&self, bots: super::BotTravel) -> Option<usize> {
@@ -320,7 +333,9 @@ impl Plan {
         bots: super::BotTravel,
     ) -> anyhow::Result<()> {
         if let Some(trip) = self.trips.iter().find(|trip| {
-            trip.birth && trip.fade && (!trip.bot || bots == super::BotTravel::Walk)
+            trip.kind == TripKind::Birth
+                && trip.fade
+                && (!trip.bot || bots == super::BotTravel::Walk)
         }) {
             anyhow::bail!(
                 "no safe gutter walk to a repository's first commit (event {})",
@@ -541,9 +556,12 @@ fn replay(simulation: &mut Simulation, frames: u32) -> Capture {
             }
         }
         for event in seen..state.next_event {
-            for contributor in simulation.events[event].participants() {
+            for (rank, contributor) in
+                simulation.events[event].participants().enumerate()
+            {
                 let author = state.authors[&contributor.key];
                 let avatar = &state.avatars[author];
+                let slot = avatar.slot.as_ref().expect("tile exists before service");
                 capture.services.push(Service {
                     commit: event,
                     author,
@@ -561,14 +579,11 @@ fn replay(simulation: &mut Simulation, frames: u32) -> Capture {
                     )
                     .expect("bounded pulse")
                     .into(),
-                    point: avatar
-                        .slot
-                        .as_ref()
-                        .expect("tile exists before service")
-                        .centre(),
+                    point: slot.centre(),
                     radius: state.avatar_radius(),
                     bot: contributor.is_bot(),
-                    dock: avatar.slot.as_ref().expect("service slot").dock,
+                    dock: slot.dock,
+                    leads_commit: rank == 0,
                 });
             }
         }
@@ -625,10 +640,16 @@ impl Simulation {
         let mut deficits = std::collections::BTreeMap::<usize, (u32, u32)>::new();
         for trip in self.travel.trips.iter().filter(|t| {
             t.commit >= self.travel.frozen
-                && (!t.bot || options.bot_travel == super::BotTravel::Walk)
+                && (t.kind == TripKind::Relocation
+                    || !t.bot
+                    || options.bot_travel == super::BotTravel::Walk)
                 && t.fade
         }) {
-            let policy = options.travel_cap;
+            let policy = if trip.kind == TripKind::Relocation {
+                super::TravelCap::None
+            } else {
+                options.travel_cap
+            };
             let needed = if trip.route.is_empty() {
                 policy.blocked_ticks()
             } else {
@@ -796,7 +817,10 @@ impl Simulation {
             graph_epochs,
             routed: trips.iter().filter(|t| !t.fade).count(),
             faded: trips.iter().filter(|t| t.fade).count(),
-            birth_fades: trips.iter().filter(|t| t.birth && t.fade).count(),
+            birth_fades: trips
+                .iter()
+                .filter(|t| t.kind == TripKind::Birth && t.fade)
+                .count(),
             blocked: trips
                 .iter()
                 .filter(|t| !t.bot && t.route.is_empty())
@@ -1391,7 +1415,7 @@ mod tests {
             source: Vec2::ZERO,
             fade_ticks: 0,
             route: Route::default(),
-            birth: false,
+            kind: TripKind::Transfer,
             fade: true,
             bot: false,
             source_repository: 0,
@@ -1582,7 +1606,7 @@ mod tests {
             source: Vec2::ZERO,
             fade_ticks: 9,
             route: Route::new(&[Vec2::ZERO, Vec2::new(500.0, 100.0)], 480.0),
-            birth: false,
+            kind: TripKind::Transfer,
             fade: true,
             bot: false,
             source_repository: 0,
@@ -1609,7 +1633,7 @@ mod tests {
             source: Vec2::new(-100.0, 0.0),
             destination: Vec2::ZERO,
             route: Route::new(&[Vec2::new(-100.0, 0.0), Vec2::ZERO], 480.0),
-            birth: false,
+            kind: TripKind::Transfer,
             fade: false,
             bot: false,
             fade_ticks: 9,
