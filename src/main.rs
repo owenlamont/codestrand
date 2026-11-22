@@ -308,8 +308,9 @@ impl Source {
         };
         let mut boundaries = Vec::new();
         let mut histories = Vec::new();
+        let count = repositories.len();
         for (index, repository) in repositories.iter().enumerate() {
-            progress.report(Stage::History, index as u64, repositories.len() as u64);
+            progress.report(Stage::History, index as u64, count as u64);
             let started = std::time::Instant::now();
             let revision = tips.get(index).unwrap_or(&self.revision);
             let (repo, tip) = history::resolve(&repository.path, revision)?;
@@ -329,6 +330,9 @@ impl Source {
                             links.iter().map(|link| link.seconds),
                         );
                     }
+                },
+                |done, total| {
+                    progress.report_part(Stage::History, index, count, done, total);
                 },
             )?;
             if self.trace.on() {
@@ -583,32 +587,53 @@ impl Source {
     fn report_preview_selection(
         &self,
         name: String,
-        seconds: impl ExactSizeIterator<Item = i64>,
+        seconds: impl ExactSizeIterator<Item = i64> + Clone,
     ) {
         if let Some(sender) = &self.preview_selection {
             let start_date = self.suggest_preview_start(seconds);
-            let _ = sender.send(scene::Selection { name, start_date });
+            let _ = sender.send(scene::Selection {
+                name,
+                start_date,
+                replace_start_date: self.start_date.is_some(),
+            });
         }
     }
 
     fn suggest_preview_start(
         &self,
-        mut seconds: impl ExactSizeIterator<Item = i64>,
+        seconds: impl ExactSizeIterator<Item = i64> + Clone,
     ) -> Option<String> {
         const TARGET_COMMITS: usize = 1_000;
-        let older_commits = seconds.len().saturating_sub(TARGET_COMMITS);
-        if older_commits == 0 {
+        const DAY: i64 = 86_400;
+        const FIRST_DAY: i64 = -719_162; // 0001-01-01
+        const LAST_DAY: i64 = 2_932_896; // 9999-12-31
+        let total = seconds.len();
+        if total <= TARGET_COMMITS {
             return None;
         }
-        let first = seconds.next()?;
-        let cutoff = seconds
-            .take(older_commits)
-            .filter(|&time| self.end_date.is_none_or(|end| time < end + 86_400))
-            .max()?;
-        let date = model::date(cutoff);
-        let midnight = start_date(&date).ok()?;
-        (first < midnight && self.start_date.is_none_or(|start| midnight > start))
-            .then_some(date)
+        let last_matching_day = seconds
+            .clone()
+            .filter(|&time| self.end_date.is_none_or(|end| time < end + DAY))
+            .max()?
+            .div_euclid(DAY)
+            .min(LAST_DAY);
+        let earliest = self
+            .start_date
+            .map_or(FIRST_DAY, |start| start.div_euclid(DAY) + 1);
+        let mut days = seconds.map(|time| time.div_euclid(DAY));
+        let mut latest = days.next()?;
+        let mut best = None;
+        for (index, day) in days.enumerate() {
+            let candidate = (latest + 1).max(earliest);
+            // Each record day can be the first inclusive match for a later start.
+            if candidate <= day && candidate <= last_matching_day {
+                let remaining = total - index - 1;
+                let score = (remaining.abs_diff(TARGET_COMMITS), candidate);
+                best = Some(best.map_or(score, |previous| score.min(previous)));
+            }
+            latest = latest.max(day);
+        }
+        best.map(|(_, day)| model::date(day * DAY))
     }
 
     fn resolve_range(&self, seconds: &[i64]) -> anyhow::Result<std::ops::Range<usize>> {
@@ -1123,6 +1148,25 @@ mod tests {
         assert_eq!(date, "2023-02-08");
         source.start_date = Some(start_date(&date).unwrap());
         assert_eq!(source.resolve_range(&history).unwrap(), 1..1_002);
+    }
+
+    #[test]
+    fn preview_chooses_the_closest_suffix_after_an_early_date_spike() {
+        let cli = Cli::try_parse_from(["codestrand", "preview"]).unwrap();
+        let Some(Command::Preview { mut source, .. }) = cli.command else {
+            panic!("preview")
+        };
+        let midnight = start_date("2023-02-08").unwrap();
+        let mut history = vec![midnight - 1, midnight];
+        history.extend(std::iter::repeat_n(midnight - 1, 2_001));
+        history.extend(std::iter::repeat_n(midnight + 86_400, 999));
+
+        let date = source
+            .suggest_preview_start(history.iter().copied())
+            .unwrap();
+        assert_eq!(date, "2023-02-09");
+        source.start_date = Some(start_date(&date).unwrap());
+        assert_eq!(source.resolve_range(&history).unwrap().len(), 999);
     }
 
     #[test]

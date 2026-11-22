@@ -150,7 +150,9 @@ impl Layout {
                 names.len() as u64,
             );
             let end = first.saturating_add(workers).min(names.len());
-            let layouts = Self::scheduled_batch(events, starts, first..end);
+            let quiet = crate::progress::Progress::default();
+            let detailed = if names.len() == 1 { progress } else { &quiet };
+            let layouts = Self::scheduled_batch(events, starts, first..end, detailed);
             for (repository, layout) in (first..end).zip(layouts) {
                 combined.append_repository(repository, &names[repository], layout);
             }
@@ -162,12 +164,13 @@ impl Layout {
         events: &[Event],
         starts: &[crate::model::Time],
         repositories: std::ops::Range<usize>,
+        progress: &crate::progress::Progress,
     ) -> Vec<Self> {
         std::thread::scope(|scope| {
             let handles: Vec<_> = repositories
                 .map(|repository| {
                     scope.spawn(move || {
-                        Self::scheduled_repository(events, starts, repository)
+                        Self::scheduled_repository(events, starts, repository, progress)
                     })
                 })
                 .collect();
@@ -216,6 +219,7 @@ impl Layout {
         events: &[Event],
         starts: &[crate::model::Time],
         repository: usize,
+        progress: &crate::progress::Progress,
     ) -> Self {
         let mut local = Vec::new();
         let mut times = Vec::new();
@@ -229,6 +233,7 @@ impl Layout {
             &local,
             &times,
             crate::repositories::prefix(repository).len(),
+            progress,
         )
     }
 

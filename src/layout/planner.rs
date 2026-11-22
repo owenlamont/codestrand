@@ -5,6 +5,7 @@ use bevy::math::Vec2;
 use super::{Layout, MAX_ACCELERATION, MAX_SPEED, Presence, parent_path};
 use crate::{
     model::{self, Time},
+    progress::{Progress, Stage},
     timeline::{Event, Kind},
 };
 
@@ -55,13 +56,15 @@ impl Plan {
         events: &[&Event],
         starts: &[Time],
         skip: usize,
+        progress: &Progress,
     ) -> Self {
-        for event in events {
+        for (index, event) in events.iter().enumerate() {
+            progress.report(Stage::Directories, index as u64, events.len() as u64);
             for change in &event.changes {
                 layout.ensure_dir(parent_path(&change.path[skip..]));
             }
         }
-        let (required, step) = occupancy(layout, events, starts, skip);
+        let (required, step) = occupancy(layout, events, starts, skip, progress);
         let peak: Vec<_> = required
             .iter()
             .map(|row| row.iter().copied().fold(0.0, f32::max))
@@ -76,20 +79,34 @@ impl Plan {
         }
         let root = subtree(&children, 0, &peak, &mut regions, &mut sizes);
         let mut windows = vec![8_usize; required[0].len()];
+        let report = |phase, done, total| {
+            progress.report_part(Stage::DirectoryPacking, phase, 5, done, total);
+        };
         let mut samples = loop {
             let mut samples = {
                 // Reverse the two filter supports, including the spline, into reservations.
                 let reserved: Vec<_> = required
                     .iter()
-                    .map(|row| spread(&spread(&maximum(row, 2), &windows), &windows))
+                    .enumerate()
+                    .map(|(index, row)| {
+                        report(0, index, required.len());
+                        spread(&spread(&maximum(row, 2), &windows), &windows)
+                    })
                     .collect();
-                pack(&regions, root, &reserved)
+                pack(&regions, root, &reserved, |done, total| {
+                    report(1, done, total);
+                })
             };
-            anchor_motion(&mut samples, &required);
-            for row in &mut samples {
+            anchor_motion(&mut samples, &required, |done, total| {
+                report(2, done, total);
+            });
+            for (index, row) in samples.iter_mut().enumerate() {
+                report(3, index, required.len());
                 *row = smooth(&smooth(row, &windows), &windows);
             }
-            let failed = motion_failures(&samples, &required, step);
+            let failed = motion_failures(&samples, &required, step, |done, total| {
+                report(4, done, total);
+            });
             if !failed.iter().any(|&value| value) {
                 break samples;
             }
@@ -172,6 +189,7 @@ fn occupancy(
     events: &[&Event],
     starts: &[Time],
     skip: usize,
+    progress: &Progress,
 ) -> (Vec<Vec<f32>>, f32) {
     let mut shadow = layout.clone();
     let duration = starts.last().copied().unwrap_or(Time::seconds(0.5)) + 2.5;
@@ -190,6 +208,7 @@ fn occupancy(
     let mut deadlines = std::collections::HashMap::new();
     let mut tick = 0;
     while tick <= ticks {
+        progress.report(Stage::DirectoryOccupancy, tick, ticks);
         let time = model::tick_time(tick);
         while starts.get(event_index).is_some_and(|&start| start <= time) {
             for change in &events[event_index].changes {
@@ -307,9 +326,11 @@ fn motion_failures(
     samples: &[Vec<Vec2>],
     required: &[Vec<f32>],
     step: f32,
+    report: impl Fn(usize, usize),
 ) -> Vec<bool> {
     let mut failed = vec![false; required[0].len()];
-    for (row, radii) in samples.iter().zip(required) {
+    for (index, (row, radii)) in samples.iter().zip(required).enumerate() {
+        report(index, required.len());
         for (index, (points, radii)) in row.windows(3).zip(radii.windows(3)).enumerate()
         {
             if radii.iter().all(|&radius| radius > 0.0)
@@ -391,10 +412,15 @@ fn smooth(values: &[Vec2], windows: &[usize]) -> Vec<Vec2> {
         })
         .collect()
 }
-fn anchor_motion(samples: &mut [Vec<Vec2>], required: &[Vec<f32>]) {
+fn anchor_motion(
+    samples: &mut [Vec<Vec2>],
+    required: &[Vec<f32>],
+    report: impl Fn(usize, usize),
+) {
     let mut previous: Vec<_> = samples.iter().map(|row| row[0]).collect();
     let mut shift = Vec2::ZERO;
     for sample in 1..samples[0].len() {
+        report(sample, samples[0].len());
         let deltas: Vec<_> = samples
             .iter()
             .zip(&previous)
@@ -493,8 +519,13 @@ fn combine(
     index
 }
 
-fn pack(regions: &[Region], root: usize, reserved: &[Vec<f32>]) -> Vec<Vec<Vec2>> {
-    let (samples, residual) = pack_with_residual(regions, root, reserved);
+fn pack(
+    regions: &[Region],
+    root: usize,
+    reserved: &[Vec<f32>],
+    report: impl Fn(usize, usize),
+) -> Vec<Vec<Vec2>> {
+    let (samples, residual) = pack_with_residual(regions, root, reserved, report);
     assert!(residual < 0.001, "region separation residual: {residual}");
     samples
 }
@@ -503,6 +534,7 @@ fn pack_with_residual(
     regions: &[Region],
     root: usize,
     reserved: &[Vec<f32>],
+    report: impl Fn(usize, usize),
 ) -> (Vec<Vec<Vec2>>, f32) {
     let samples = reserved[0].len();
     let mut result = vec![vec![Vec2::ZERO; samples]; reserved.len()];
@@ -510,6 +542,7 @@ fn pack_with_residual(
     let mut offsets = vec![Vec2::ZERO; regions.len()];
     let mut residual = 0.0_f32;
     for sample in 0..samples {
+        report(sample, samples);
         for (index, region) in regions.iter().enumerate() {
             sizes[index] = match *region {
                 Region::Directory(dir) => Vec2::splat(reserved[dir][sample] * 2.0),
@@ -559,15 +592,25 @@ impl Layout {
     #[cfg(test)]
     pub(crate) fn planned(events: &[Event]) -> Self {
         let starts = model::schedule::Schedule::new(events, 0.5, 1.0).starts;
-        Self::scheduled(&events.iter().collect::<Vec<_>>(), &starts, 0)
+        Self::scheduled(
+            &events.iter().collect::<Vec<_>>(),
+            &starts,
+            0,
+            &Progress::default(),
+        )
     }
 
     /// Plans directories for `events`, whose paths all start with `skip` bytes of
     /// repository prefix that the layout omits.
-    pub(crate) fn scheduled(events: &[&Event], starts: &[Time], skip: usize) -> Self {
+    pub(crate) fn scheduled(
+        events: &[&Event],
+        starts: &[Time],
+        skip: usize,
+        progress: &Progress,
+    ) -> Self {
         let mut layout = Self::empty();
         let started = std::time::Instant::now();
-        layout.plan = Plan::new(&mut layout, events, starts, skip);
+        layout.plan = Plan::new(&mut layout, events, starts, skip, progress);
         layout.plan.seconds = started.elapsed().as_secs_f64();
         for (index, dir) in layout.dirs.iter_mut().enumerate() {
             dir.live = index == 0;
@@ -724,6 +767,37 @@ mod tests {
         }
     }
 
+    #[test]
+    fn single_repository_reports_work_within_directory_planning() {
+        let mut events = crate::timeline::synthetic();
+        crate::repositories::namespace(&mut events, 0);
+        let starts = model::schedule::Schedule::new(&events, 0.5, 1.0).starts;
+        let (progress, updates) = Progress::channel(std::time::Duration::ZERO);
+
+        Layout::scheduled_repositories(
+            &events,
+            &starts,
+            &["Fixture".into()],
+            &progress,
+        );
+
+        let updates: Vec<_> = updates.try_iter().collect();
+        for stage in [
+            Stage::Directories,
+            Stage::DirectoryOccupancy,
+            Stage::DirectoryPacking,
+        ] {
+            assert!(
+                updates.iter().any(|update| {
+                    update.stage == stage
+                        && update.fraction > 0.0
+                        && update.fraction < 1.0
+                }),
+                "{stage:?}"
+            );
+        }
+    }
+
     pub(super) fn change(path: String, kind: Kind) -> FileChange {
         FileChange {
             path,
@@ -831,8 +905,12 @@ mod tests {
                 axis: 0,
             },
         ];
-        let (_, residual) =
-            pack_with_residual(&regions, 2, &[vec![100.0, 0.0], vec![0.0, 100.0]]);
+        let (_, residual) = pack_with_residual(
+            &regions,
+            2,
+            &[vec![100.0, 0.0], vec![0.0, 100.0]],
+            |_, _| {},
+        );
         assert!(residual < 0.001);
     }
     #[test]
@@ -977,7 +1055,7 @@ mod tests {
                 axis: 0,
             },
         ];
-        let samples = pack(&regions, 2, &[vec![4.0, 1.0], vec![1.0, 1.0]]);
+        let samples = pack(&regions, 2, &[vec![4.0, 1.0], vec![1.0, 1.0]], |_, _| {});
         assert!((samples[1][0].length() - 5.0 - GAP).abs() < 0.0001);
         assert!((samples[1][1].length() - 2.0 - GAP).abs() < 0.0001);
     }
@@ -1000,7 +1078,7 @@ mod tests {
                 axis: 1,
             },
         ];
-        let positions = pack(&regions, 4, &radii);
+        let positions = pack(&regions, 4, &radii, |_, _| {});
         for fraction in [0.0, 0.25, 0.5, 0.75, 1.0] {
             let position =
                 |index: usize| positions[index][0].lerp(positions[index][1], fraction);
@@ -1022,7 +1100,12 @@ mod tests {
             .collect();
         let starts = model::schedule::Schedule::new(&events, 86_400.0, 86_400.0).starts;
         assert!(starts[999].ticks(true) > u64::from(u32::MAX));
-        let layout = Layout::scheduled(&events.iter().collect::<Vec<_>>(), &starts, 0);
+        let layout = Layout::scheduled(
+            &events.iter().collect::<Vec<_>>(),
+            &starts,
+            0,
+            &Progress::default(),
+        );
         assert!(layout.plan.samples[0].len() <= 8_194);
     }
 

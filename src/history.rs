@@ -361,8 +361,9 @@ pub(super) fn import(
     links: &[Link],
     skip: usize,
     end_date: Option<i64>,
+    report: impl FnMut(usize, usize),
 ) -> Result<History, Error> {
-    load_with_limits(repo, tip, links, skip, end_date, Limits::default())
+    load_with_limits(repo, tip, links, skip, end_date, Limits::default(), report)
         .map_err(|source| Error::History { tip, source })
 }
 
@@ -370,7 +371,7 @@ pub(super) fn import_all(
     repo: &gix::Repository,
     tip: gix::ObjectId,
 ) -> Result<History, Error> {
-    import(repo, tip, &links(repo, tip)?, 0, None)
+    import(repo, tip, &links(repo, tip)?, 0, None, |_, _| {})
 }
 
 const MAX_REFERENCE_HOPS: usize = 64;
@@ -524,12 +525,14 @@ fn load_with_limits(
     skip: usize,
     end_date: Option<i64>,
     limits: Limits,
+    mut report: impl FnMut(usize, usize),
 ) -> Result<History> {
     let mut budget = Budget::new(limits);
     let mut resources = bounded_resources(repo)?;
     let mut commits = Vec::new();
     let mut spent = Vec::new();
     for (index, link) in links.iter().enumerate().skip(skip).rev() {
+        report(commits.len(), links.len() - skip);
         match diffed(repo, link, &mut budget, &mut resources) {
             Ok(commit) => {
                 commits.push(commit);
@@ -1090,7 +1093,7 @@ mod security_tests {
         limits: Limits,
     ) -> Result<History> {
         let links = scan(repo, tip, &mut Budget::new(Limits::default()))?;
-        load_with_limits(repo, tip, &links, 0, None, limits)
+        load_with_limits(repo, tip, &links, 0, None, limits, |_, _| {})
     }
 
     /// The error and its causes, as the CLI prints them.
@@ -1499,14 +1502,15 @@ mod security_tests {
             ..Limits::default()
         };
         let links = scan(&repo, tip, &mut Budget::new(Limits::default())).unwrap();
-        let error = load_with_limits(&repo, tip, &links, 0, None, limits)
+        let error = load_with_limits(&repo, tip, &links, 0, None, limits, |_, _| {})
             .err()
             .unwrap();
         let expected = format!(
             "commit {first} dated 2023-11-14 UTC exceeds the import budget; --start-date 2023-11-15 fits"
         );
         assert!(format!("{error:#}").contains(&expected), "{error:#}");
-        let fitted = load_with_limits(&repo, tip, &links, 1, None, limits).unwrap();
+        let fitted =
+            load_with_limits(&repo, tip, &links, 1, None, limits, |_, _| {}).unwrap();
         assert_eq!(fitted.boundary.unwrap().id, first.to_string());
     }
 
@@ -1553,10 +1557,19 @@ mod security_tests {
             ..Limits::default()
         };
         assert!(
-            load_with_limits(repo, tip, links, links.len() - 1, None, limits).is_ok()
+            load_with_limits(
+                repo,
+                tip,
+                links,
+                links.len() - 1,
+                None,
+                limits,
+                |_, _| {}
+            )
+            .is_ok()
         );
         message(
-            load_with_limits(repo, tip, links, skip, None, limits)
+            load_with_limits(repo, tip, links, skip, None, limits, |_, _| {})
                 .err()
                 .unwrap(),
         )
@@ -1593,7 +1606,7 @@ mod security_tests {
         };
         let end = crate::start_date("2023-11-16").ok();
         let tip = links.last().unwrap().id;
-        let error = load_with_limits(&repo, tip, &links, 0, end, limits)
+        let error = load_with_limits(&repo, tip, &links, 0, end, limits, |_, _| {})
             .err()
             .unwrap();
         assert!(

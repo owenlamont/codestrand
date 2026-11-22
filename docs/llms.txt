@@ -10,7 +10,7 @@
 ## Guides
 
 - [Git history import](https://codestrand.pages.dev/history/)
-- [Playback](https://codestrand.pages.dev/playback/): Preview loops the selected history. If playback is still preparing after 30 seconds, the planning status shows a warning and suggests `--start-date YYYY-MM-DD` (inclusive, UTC) when a later start would keep about the last 1,000 tree-changing commits across the selected repositories. Preview keeps planning and clears the warning when playback starts. Export uses a static overview that fits the scene by default.
+- [Playback](https://codestrand.pages.dev/playback/): Preview loops the selected history. If playback is still preparing after a minute, the planning status shows a warning and suggests `--start-date YYYY-MM-DD` (inclusive, UTC) when a later start would keep about the last 1,000 tree-changing commits across the selected repositories. If you already set `--start-date`, replace it with the suggested date. Preview keeps planning and clears the warning when playback starts. Export uses a static overview that fits the scene by default.
 - [Export](https://codestrand.pages.dev/export/)
 - [Config file](https://codestrand.pages.dev/configuration/): `--config FILE` reads `preview` and `export` options from a TOML file, so a run can be kept and repeated as one file. Each key is a flag name without the leading dashes:
 - [Contributors and avatars](https://codestrand.pages.dev/contributors/): Preview and export read `contributors.toml` from the user configuration directory:

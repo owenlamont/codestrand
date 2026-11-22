@@ -11,30 +11,28 @@ use crate::{camera::PreviewCamera, model::Simulation, progress::Update};
 
 type Planned = anyhow::Result<(Simulation, String)>;
 
-const SLOW_START: Duration = Duration::from_secs(30);
+const SLOW_START: Duration = Duration::from_secs(60);
 
 #[derive(PartialEq, Eq)]
 pub(crate) struct Selection {
     pub(crate) name: String,
     pub(crate) start_date: Option<String>,
+    pub(crate) replace_start_date: bool,
 }
 
 impl Selection {
     fn warning(&self) -> String {
-        let mut warning = format!(
-            "{} preview is still preparing after {} seconds.",
-            self.name,
-            SLOW_START.as_secs()
-        );
-        if let Some(date) = &self.start_date {
-            use std::fmt::Write as _;
-            write!(
-                warning,
-                " Keep waiting, or close preview and retry with `--start-date {date}` to view a shorter range."
-            )
-            .expect("writing to a String succeeds");
+        let name = &self.name;
+        let status = format!("{name} preview is still preparing after a minute.");
+        match &self.start_date {
+            Some(date) if self.replace_start_date => format!(
+                "{status} Keep waiting, or close preview and replace your start date with `--start-date {date}` to view a shorter range."
+            ),
+            Some(date) => format!(
+                "{status} Keep waiting, or close preview and retry with `--start-date {date}` to view a shorter range."
+            ),
+            None => status,
         }
-        warning
     }
 }
 
@@ -64,6 +62,7 @@ impl Loading {
             selection: Selection {
                 name: "This history".to_owned(),
                 start_date: None,
+                replace_start_date: false,
             },
             warned: false,
         }
@@ -203,7 +202,7 @@ fn poll_at(world: &mut World, now: Instant) {
             .query_filtered::<&mut Text, With<Label>>()
             .iter_mut(world)
         {
-            label.0 = update.to_string();
+            label.0 = format!("{update:.1}");
         }
     }
     if let Some(warning) = warning {
@@ -297,7 +296,7 @@ pub(super) fn waiting(
             node.display = Display::Flex;
             let planning = progress.latest.map_or_else(
                 || "Planning next window".to_owned(),
-                |update| update.to_string(),
+                |update| format!("{update:.1}"),
             );
             text.0 = if replanning {
                 format!("Replay memory limit reached · {planning}")
@@ -395,32 +394,33 @@ mod tests {
             .query_filtered::<&Text, With<Label>>()
             .single(&world)
             .unwrap();
-        assert_eq!(label.0, "Planning: planning travel 75%");
+        assert_eq!(label.0, "Planning: planning travel 75.0%");
         assert!(!world.contains_resource::<Playback>());
 
         let mut warnings = world.query_filtered::<(&Text, &Node), With<Warning>>();
-        poll_at(&mut world, launched + Duration::from_millis(29_999));
+        poll_at(&mut world, launched + Duration::from_millis(59_999));
         assert_eq!(warnings.single(&world).unwrap().1.display, Display::None);
 
-        poll_at(&mut world, launched + Duration::from_secs(30));
+        poll_at(&mut world, launched + Duration::from_secs(60));
         let (text, node) = warnings.single(&world).unwrap();
         assert_eq!(node.display, Display::Flex);
         assert_eq!(
             text.0,
-            "This history preview is still preparing after 30 seconds."
+            "This history preview is still preparing after a minute."
         );
 
         selection
             .send(Selection {
                 name: "Fixture".to_owned(),
                 start_date: Some("2023-02-08".to_owned()),
+                replace_start_date: false,
             })
             .unwrap();
-        poll_at(&mut world, launched + Duration::from_secs(31));
+        poll_at(&mut world, launched + Duration::from_secs(61));
         let (text, _) = warnings.single(&world).unwrap();
         assert_eq!(
             text.0,
-            "Fixture preview is still preparing after 30 seconds. Keep waiting, or close preview and retry with `--start-date 2023-02-08` to view a shorter range."
+            "Fixture preview is still preparing after a minute. Keep waiting, or close preview and retry with `--start-date 2023-02-08` to view a shorter range."
         );
 
         release.send(()).unwrap();
@@ -441,7 +441,7 @@ mod tests {
             .query_filtered::<(&Text, &Node), With<WaitLabel>>()
             .single(&world)
             .unwrap();
-        assert_eq!(text.0, "Planning: reserving parking 25%");
+        assert_eq!(text.0, "Planning: reserving parking 25.0%");
         assert_eq!(node.display, Display::Flex);
         world.resource_mut::<super::super::PlanningWait>().0 = false;
         world.run_system(waiting).unwrap();
@@ -452,6 +452,20 @@ mod tests {
                 .unwrap()
                 .display,
             Display::None
+        );
+    }
+
+    #[test]
+    fn the_warning_asks_to_replace_an_existing_start_date() {
+        let warning = Selection {
+            name: "Fixture".to_owned(),
+            start_date: Some("2023-02-08".to_owned()),
+            replace_start_date: true,
+        }
+        .warning();
+        assert_eq!(
+            warning,
+            "Fixture preview is still preparing after a minute. Keep waiting, or close preview and replace your start date with `--start-date 2023-02-08` to view a shorter range."
         );
     }
 

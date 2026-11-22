@@ -1,10 +1,11 @@
 # Playback
 
-Preview loops the selected history. If playback is still preparing after 30 seconds,
+Preview loops the selected history. If playback is still preparing after a minute,
 the planning status shows a warning and suggests `--start-date YYYY-MM-DD` (inclusive,
 UTC) when a later start would keep about the last 1,000 tree-changing commits across
-the selected repositories. Preview keeps planning and clears the warning when playback
-starts. Export uses a static overview that fits the scene by default.
+the selected repositories. If you already set `--start-date`, replace it with the
+suggested date. Preview keeps planning and clears the warning when playback starts.
+Export uses a static overview that fits the scene by default.
 
 Export renders the same launch timeline at explicit frame times at 1x speed. Use
 `--camera-path` for a scripted camera.

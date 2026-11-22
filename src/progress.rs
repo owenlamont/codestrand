@@ -11,6 +11,8 @@ use std::{
 pub(crate) enum Stage {
     History,
     Directories,
+    DirectoryOccupancy,
+    DirectoryPacking,
     Layout,
     Travel,
     Reservations,
@@ -22,6 +24,8 @@ impl Stage {
         match self {
             Self::History => "reading history",
             Self::Directories => "planning directories",
+            Self::DirectoryOccupancy => "measuring directory occupancy",
+            Self::DirectoryPacking => "arranging directories",
             Self::Layout => "replaying layout",
             Self::Travel => "planning travel",
             Self::Reservations => "reserving parking",
@@ -40,9 +44,10 @@ pub(crate) struct Update {
 
 impl std::fmt::Display for Update {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let precision = formatter.precision().unwrap_or(0);
         write!(
             formatter,
-            "Planning: {} {:.0}%",
+            "Planning: {} {:.precision$}%",
             self.stage.label(),
             self.fraction * 100.0
         )?;
@@ -88,6 +93,21 @@ impl Progress {
     pub(crate) fn report(&self, stage: Stage, done: u64, total: u64) {
         if let Some(channel) = &self.0 {
             self.report_at(channel.created.elapsed(), stage, done, total);
+        }
+    }
+
+    pub(crate) fn report_part(
+        &self,
+        stage: Stage,
+        part: usize,
+        parts: usize,
+        done: usize,
+        total: usize,
+    ) {
+        if self.0.is_some() {
+            const SCALE: u64 = 10_000;
+            let local = done as u64 * SCALE / (total as u64).max(1);
+            self.report(stage, part as u64 * SCALE + local, parts as u64 * SCALE);
         }
     }
 
