@@ -435,7 +435,7 @@ mod tests {
             source: point,
             fade_ticks: 0,
             route: super::super::Route::new(&[point, point + Vec2::X], 480.0),
-            birth: false,
+            kind: super::super::TripKind::Transfer,
             fade: false,
             bot: false,
             source_repository: 0,

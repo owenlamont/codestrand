@@ -5,7 +5,9 @@ use crate::{layout::outline, model::framing};
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Fit {
+    #[cfg(test)]
     pub origin: Vec2,
+    #[cfg(test)]
     pub scale: f32,
     pub fill: f32,
 }
@@ -56,13 +58,25 @@ fn finish(tile: Tile, points: &[Vec2], origin: Vec2, scale: f32) -> Fit {
         .map(|p| framing::world_to_field(*p * scale + origin))
         .collect();
     Fit {
+        #[cfg(test)]
         origin,
+        #[cfg(test)]
         scale,
         fill: outline::area(&projected) * 0.25 / tile.area().max(1e-12),
     }
 }
 
 pub(super) fn anchored(tile: Tile, points: &[Vec2], height: f32, anchor: Vec2) -> Fit {
+    let (origin, scale) = anchored_scale(tile, points, height, anchor);
+    finish(tile, points, origin, scale)
+}
+
+pub(super) fn anchored_scale(
+    tile: Tile,
+    points: &[Vec2],
+    height: f32,
+    anchor: Vec2,
+) -> (Vec2, f32) {
     let (low, high) = outline::bounds(points);
     let centre = (low + high) * 0.5;
     let local: Vec<_> = points.iter().map(|p| *p - centre).collect();
@@ -73,7 +87,7 @@ pub(super) fn anchored(tile: Tile, points: &[Vec2], height: f32, anchor: Vec2) -
         .map(|(p, bound)| ((bound - p.truncate().dot(origin)) / p.z).max(0.0))
         .fold(f32::INFINITY, f32::min)
         * 0.999;
-    finish(tile, points, origin - centre * scale, scale)
+    (origin - centre * scale, scale)
 }
 
 pub(super) fn best(tile: Tile, points: &[Vec2], height: f32) -> Fit {

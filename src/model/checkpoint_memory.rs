@@ -60,12 +60,12 @@ impl State {
 
 impl Avatar {
     fn replay_bytes(&self) -> u128 {
-        let (key, name, touched, name_visibility, slot) = retained_fields!(self, Avatar {
-            key, name, touched, name_visibility, slot;
+        let (key, name, touched, name_visibility, slot, dock_walk) = retained_fields!(self, Avatar {
+            key, name, touched, name_visibility, slot, dock_walk;
             expires, arrived, lifecycle_scale, grey, portrait, position, target, repository,
             last_active, presence, slot_presence, projection_scale, activity, commit,
-            slot_origin, group, dismissed, ring_presence, ring_capacity, settle, settled,
-            leaving_name, seat, travelling,
+            dock_since, gutter_entry, slot_origin, group, dismissed, ring_presence,
+            ring_capacity, settle, settled, leaving_name, seat, travelling,
         });
         let (placement,) = retained_fields!(name_visibility, Visibility {
             placement; joint_exhausted, joint_clear, opacity, visible, full_clear_since,
@@ -75,6 +75,9 @@ impl Avatar {
             + buffer_bytes::<u64>(touched.capacity())
             + placement.as_ref().map_or(0, names::Placement::replay_bytes)
             + slot.as_ref().map_or(0, slots::Placement::replay_bytes)
+            + dock_walk
+                .as_ref()
+                .map_or(0, |walk| walk.retained_bytes() as u128)
     }
 }
 

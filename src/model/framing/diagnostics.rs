@@ -53,8 +53,10 @@ fn realistic_history_has_stable_framing_and_uniform_icons_at_sixty_hz() {
                         !(delta[axis] * deltas[i][axis] < 0.0
                             && delta[axis].abs() > 2.0
                             && deltas[i][axis].abs() > 2.0),
-                        "framing reverses at {frame}/{i}: {:?} -> {delta:?}",
-                        deltas[i]
+                        "framing reverses at {frame}/{i}: {:?} -> {delta:?}; rows {:?}; births {:?}",
+                        deltas[i],
+                        sim.clock.rows(u64::from(frame)),
+                        sim.births
                     );
                 }
                 deltas[i] = delta;
