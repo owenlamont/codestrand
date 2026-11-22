@@ -287,6 +287,15 @@ Resizing or maximising keeps a 720-logical-pixel-high UI: text scales with heigh
 and wider windows show more scene. See [Export](https://codestrand.pages.dev/export/) for native output sizes.
 
 Preview opens its window at once and shows planning progress until playback is ready.
+Directory packing numbers additional passes when planning retries. After planning,
+preview shows `Preparing renderer` until the scene is ready.
+
+If playback is still preparing after a minute, the status shows a warning and
+suggests `--start-date YYYY-MM-DD` (inclusive, UTC) when a later start would keep about
+the last 1,000 tree-changing commits across the selected repositories. If you already
+set `--start-date`, replace it with the suggested date. Preview keeps preparing and
+clears the warning when playback starts.
+
 For long histories, the first frame appears while later history is still being
 planned. Playback pauses if planning falls behind, then resumes without skipping
 history. Camera controls remain active during the pause, and a small label shows

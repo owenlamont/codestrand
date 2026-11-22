@@ -22,6 +22,11 @@ All notable changes to Codestrand are documented here, following
   ([#191](https://github.com/owenlamont/codestrand/pull/191))
 - Change the theme, speed, caption style and directory collapsing in F10 settings.
   ([#198](https://github.com/owenlamont/codestrand/pull/198))
+- Preview warns after a minute of startup and suggests a later `--start-date` when
+  it would shorten the selected history to about 1,000 tree-changing commits.
+  Preview shows `Preparing renderer` while the renderer starts, and planning
+  progress numbers directory packing retries.
+  ([#223](https://github.com/owenlamont/codestrand/pull/223))
 - Toggle a frame-rate counter in preview with F12.
   ([#216](https://github.com/owenlamont/codestrand/pull/216))
 

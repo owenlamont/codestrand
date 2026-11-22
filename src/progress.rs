@@ -11,6 +11,8 @@ use std::{
 pub(crate) enum Stage {
     History,
     Directories,
+    DirectoryOccupancy,
+    DirectoryPacking,
     Layout,
     Travel,
     Reservations,
@@ -22,6 +24,8 @@ impl Stage {
         match self {
             Self::History => "reading history",
             Self::Directories => "planning directories",
+            Self::DirectoryOccupancy => "measuring directory occupancy",
+            Self::DirectoryPacking => "arranging directories",
             Self::Layout => "replaying layout",
             Self::Travel => "planning travel",
             Self::Reservations => "reserving parking",
@@ -30,7 +34,7 @@ impl Stage {
     }
 }
 
-/// How far one planning stage has come; travel planning repeats stages in passes.
+/// How far one planning stage has come within its current pass.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Update {
     pub(crate) stage: Stage,
@@ -40,9 +44,10 @@ pub(crate) struct Update {
 
 impl std::fmt::Display for Update {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let precision = formatter.precision().unwrap_or(0);
         write!(
             formatter,
-            "Planning: {} {:.0}%",
+            "Planning: {} {:.precision$}%",
             self.stage.label(),
             self.fraction * 100.0
         )?;
@@ -87,7 +92,35 @@ impl Progress {
 
     pub(crate) fn report(&self, stage: Stage, done: u64, total: u64) {
         if let Some(channel) = &self.0 {
-            self.report_at(channel.created.elapsed(), stage, done, total);
+            self.report_at(
+                channel.created.elapsed(),
+                stage,
+                channel.pass.load(Ordering::Relaxed),
+                done,
+                total,
+            );
+        }
+    }
+
+    pub(crate) fn report_part(
+        &self,
+        stage: Stage,
+        pass: u32,
+        part: usize,
+        parts: usize,
+        done: usize,
+        total: usize,
+    ) {
+        if let Some(channel) = &self.0 {
+            const SCALE: u64 = 10_000;
+            let local = done as u64 * SCALE / (total as u64).max(1);
+            self.report_at(
+                channel.created.elapsed(),
+                stage,
+                pass,
+                part as u64 * SCALE + local,
+                parts as u64 * SCALE,
+            );
         }
     }
 
@@ -101,7 +134,14 @@ impl Progress {
         }
     }
 
-    fn report_at(&self, elapsed: Duration, stage: Stage, done: u64, total: u64) {
+    fn report_at(
+        &self,
+        elapsed: Duration,
+        stage: Stage,
+        pass: u32,
+        done: u64,
+        total: u64,
+    ) {
         let Some(channel) = &self.0 else { return };
         let now = u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX);
         let interval = u64::try_from(channel.interval.as_nanos()).unwrap_or(u64::MAX);
@@ -120,7 +160,7 @@ impl Progress {
         let fraction = (done as f32 / total.max(1) as f32).min(1.0);
         let update = Update {
             stage,
-            pass: channel.pass.load(Ordering::Relaxed),
+            pass,
             fraction,
         };
         // A closed receiver means nobody is watching; planning carries on.
@@ -136,10 +176,15 @@ mod tests {
     fn reports_arrive_at_most_once_per_interval() {
         let (progress, updates) = Progress::channel(Duration::from_secs(1));
         for (millis, done) in [(0, 0), (500, 1), (1000, 2), (1200, 3), (2100, 4)] {
-            progress.report_at(Duration::from_millis(millis), Stage::Layout, done, 4);
+            progress.report_at(
+                Duration::from_millis(millis),
+                Stage::Layout,
+                1,
+                done,
+                4,
+            );
         }
-        progress.pass(2);
-        progress.report_at(Duration::from_millis(3100), Stage::Travel, 9, 4);
+        progress.report_at(Duration::from_millis(3100), Stage::Travel, 2, 9, 4);
         drop(progress);
         let lines: Vec<_> = updates.iter().map(|update| update.to_string()).collect();
         assert_eq!(
