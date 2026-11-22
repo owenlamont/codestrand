@@ -11,34 +11,47 @@ All notable changes to Codestrand are documented here, following
   `gh skill install owenlamont/codestrand codestrand`, and `llms.txt` and
   `llms-full.txt` on the docs site, so coding agents can run Codestrand.
   ([#158](https://github.com/owenlamont/codestrand/issues/158))
+- Load preview and export options from a TOML file with `--config`. Command-line
+  flags override the file. ([#182](https://github.com/owenlamont/codestrand/pull/182))
+- Adjust diff fragment travel speed with `--fragment-speed`.
+  ([#190](https://github.com/owenlamont/codestrand/pull/190))
+- Export reports history progress, projected video length, ETA and waits for planning.
+  ([#192](https://github.com/owenlamont/codestrand/pull/192))
+- Co-authors share a ring with the commit author and keep their own contributor
+  identities, names and portraits.
+  ([#191](https://github.com/owenlamont/codestrand/pull/191))
+- Change the theme, speed, caption style and directory collapsing in F10 settings.
+  ([#198](https://github.com/owenlamont/codestrand/pull/198))
+- Toggle a frame-rate counter in preview with F12.
+  ([#216](https://github.com/owenlamont/codestrand/pull/216))
 
 ### Changed
 
-- Planning is faster: on thirty repositories, about 35% less time per window and 40%
-  less before the first frame.
-  ([#176](https://github.com/owenlamont/codestrand/pull/176))
-- Repository titles choose their corner from contributor discs, beams and tiles, no
-  longer from contributor names, so some titles sit in a different corner and switch
-  less often. ([#176](https://github.com/owenlamont/codestrand/pull/176))
-- Tile planning for many repositories is faster with identical tiles: about 6.5 times
-  on 128 and 200 synthetic repositories with 16 threads.
-  ([#180](https://github.com/owenlamont/codestrand/pull/180))
-- Repository sets too large for full-size tiles play with tiles, gutters, avatars and
-  titles shrunk together, instead of packing refusing with "use fewer repositories".
-  ([#180](https://github.com/owenlamont/codestrand/pull/180))
-- Avatars no longer shrink as repository count rises, so many-repository playback
-  shows them up to four times larger.
-  ([#180](https://github.com/owenlamont/codestrand/pull/180))
-- Repository titles share one size across tiles, about half size by 72 repositories and
-  never below 6 pixels, end in an ellipsis when too wide, and appear on small tiles
-  that previously showed none.
-  ([#180](https://github.com/owenlamont/codestrand/pull/180))
-- Directory and touched-file labels shrink with their tile's files, never larger than
-  repository titles and to no less than 6 pixels, and end in an ellipsis when wider than
-  their tile. ([#180](https://github.com/owenlamont/codestrand/pull/180),
-  [#181](https://github.com/owenlamont/codestrand/pull/181))
-- The `bevelled-desktop` theme is now `retro-desktop`, titled "Retro Desktop"; the old
-  name is no longer accepted. ([#185](https://github.com/owenlamont/codestrand/pull/185))
+- Planning does less work before the first frame and between playback windows, and
+  retains fewer copies of imported events.
+  ([#176](https://github.com/owenlamont/codestrand/pull/176),
+  [#206](https://github.com/owenlamont/codestrand/pull/206),
+  [#209](https://github.com/owenlamont/codestrand/pull/209))
+- Repository tiles share a world-space field that grows with their contents. The
+  overhead view fits the field, and export uses that fixed overview by default.
+  Ended repositories release their space for neighbouring tiles. Avatar travel
+  speed is set in world units per second.
+  ([#214](https://github.com/owenlamont/codestrand/pull/214))
+- Tiles reflow as live file and directory counts shift. New tiles can grow together
+  just before their first commits, and content keeps its quarter-turn as tiles resize.
+  ([#197](https://github.com/owenlamont/codestrand/pull/197),
+  [#208](https://github.com/owenlamont/codestrand/pull/208),
+  [#216](https://github.com/owenlamont/codestrand/pull/216))
+- Repository titles sit on their tiles beneath the files. Contributor names use a
+  12-pixel font, and directory and touched-file labels use a 10-pixel font.
+  ([#214](https://github.com/owenlamont/codestrand/pull/214),
+  [#216](https://github.com/owenlamont/codestrand/pull/216))
+- Preview reuses planned windows when looping or rewinding while they fit in memory.
+  When estimated use exceeds the limit, preview releases the windows and replans as
+  needed.
+  ([#221](https://github.com/owenlamont/codestrand/pull/221))
+- The desktop theme is now named Retro Desktop (`retro-desktop`).
+  ([#185](https://github.com/owenlamont/codestrand/pull/185))
 - Export checks its output directory, camera path syntax and video encoder before
   planning, so a typo fails at once rather than after planning; the default `--video`
   encoder is tried on one frame at the chosen resolution first.
@@ -48,23 +61,34 @@ All notable changes to Codestrand are documented here, following
   Neon, Phosphor and Atlas icons are smaller, so they sit inside their round rings.
   ([#195](https://github.com/owenlamont/codestrand/pull/195),
   [#204](https://github.com/owenlamont/codestrand/pull/204))
+- Avatar fetching uses GitHub accounts and configured HTTPS images. Commit lookups
+  can group multiple emails for one GitHub account, and portrait data uses a new
+  cache. ([#202](https://github.com/owenlamont/codestrand/pull/202))
 - A late `--start-date` imports only the requested range: on a full Cargo clone, the
   last seven weeks imported in 0.5 s instead of about 17 s. Playback opens on the tree
   of the commit before the range, so first frames differ.
   ([#194](https://github.com/owenlamont/codestrand/pull/194))
 - Import and `inspect` read first-parent commits that change the tree; side-branch
   commits are no longer read. ([#194](https://github.com/owenlamont/codestrand/pull/194))
-- History over an import budget is refused with a later `--start-date` that fits;
-  `--allow-truncated-history` is removed.
-  ([#194](https://github.com/owenlamont/codestrand/pull/194))
+- History over an import budget is refused with a later `--start-date` when one fits.
+  Budget accounting includes retained history and tree summaries.
+  ([#194](https://github.com/owenlamont/codestrand/pull/194),
+  [#213](https://github.com/owenlamont/codestrand/pull/213))
 - `--end-date` stops the import at the range's last commit: on a full Cargo clone, a
   two-frame export ending in 2016 took about 4.5 s instead of 75 s on a release build
-  without LTO. Its tiles are laid out for
-  the files up to the end date, so files are larger.
+  without LTO. Overview framing uses peak content across the selected interval.
+  Moving the end date earlier can leave the framing unchanged if the same peak remains.
   ([#199](https://github.com/owenlamont/codestrand/pull/199))
 
 ### Fixed
 
+- Walking routes converge more reliably with overlapping co-author rings and moving
+  tiles. Export reports the same end tick for eager and streamed playback.
+  ([#197](https://github.com/owenlamont/codestrand/pull/197),
+  [#200](https://github.com/owenlamont/codestrand/pull/200),
+  [#210](https://github.com/owenlamont/codestrand/pull/210))
+- Planning handles unavailable physical-memory readings on macOS and explains
+  when it uses total RAM. ([#200](https://github.com/owenlamont/codestrand/pull/200))
 - A date range numbers commits against the whole history again instead of from 1.
   ([#199](https://github.com/owenlamont/codestrand/pull/199))
 - Diff setup no longer resolves `HEAD` or reads the index or `.gitattributes`, so a
@@ -82,6 +106,16 @@ All notable changes to Codestrand are documented here, following
 - A contributor name no longer vanishes for a moment under the top caption bar when its
   avatar jumps to another repository without travelling.
   ([#180](https://github.com/owenlamont/codestrand/pull/180))
+
+### Removed
+
+- `--repository-label-plane`; titles now sit on the tile surface.
+  ([#216](https://github.com/owenlamont/codestrand/pull/216))
+- GitLab and Gravatar portrait discovery, including `--gitlab-email-avatars`.
+  Existing contributor files with `gitlab` or `gravatar` keys now fail at startup.
+  ([#202](https://github.com/owenlamont/codestrand/pull/202))
+- `--allow-truncated-history`; choose a shorter date range when an import exceeds
+  a budget. ([#194](https://github.com/owenlamont/codestrand/pull/194))
 
 ## v0.2.0 - 2026-11-16
 

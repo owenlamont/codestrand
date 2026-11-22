@@ -11,8 +11,8 @@ argument or manifest, export discovers the repository from the current directory
 searching upward. Export writes `frame-00000.png` onwards and a
 `frames.csv` logical-state manifest. Frames default to 1280×720.
 The final `glyphs` and `missing_glyphs` columns count visible text-layout glyphs
-used for each captured frame. A nonzero missing count indicates unavailable glyphs;
-install fonts covering the contributor names' scripts before exporting again.
+used for each captured frame. A nonzero missing count indicates unavailable glyphs.
+Install fonts covering the affected scripts before exporting again.
 
 Select a native render size with `--resolution WIDTHxHEIGHT`:
 
@@ -138,7 +138,9 @@ them manually after checking the video.
 
 ## Export framing
 
-Export uses a static overview that fits the whole field by default.
+Export uses a fixed overhead view sized for the whole field, including room for
+contributors above the tiles. New tiles can grow into the view without moving the
+camera. Use a scripted path for closer views or camera movement.
 
 ## Scripted camera
 

@@ -4,7 +4,7 @@
 
 Open a new terminal after installing and confirm the installation directory is on
 `PATH`. Use `codestrand --version` and `codestrand --help` to check which binary
-runs. The guides describe 0.2.0; upgrade an older release if an option is
+runs. The guides describe 0.3.0. Upgrade an older release if an option is
 missing. See [installation](getting-started/installation.md) for supported targets.
 
 ## Repository or revision cannot be read
@@ -27,7 +27,7 @@ the first load of a large repository can take time.
 Both preview and export need a working graphics adapter. Preview also needs a
 windowing environment. Update graphics drivers and try a local desktop session
 for preview. `inspect` works without a GPU.
-For slow source-checkout playback, use `cargo run --locked --release -- preview`.
+For smoother playback from a source checkout, use a release build.
 
 ## Source build fails
 

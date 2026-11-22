@@ -25,10 +25,8 @@ codestrand preview --config codestrand.toml
 codestrand export frames --config codestrand.toml --start-date 2025-06-01
 ```
 
-- Flags on the command line override the file. A repeated flag such as `--repository`
-  replaces the file's list rather than adding to it, and any `--repository` or
-  `--repositories-file` flag replaces the whole repository list, and the file's list
-  is then not read.
+- Flags on the command line override the file. Passing `--repository` or
+  `--repositories-file` replaces the whole repository list from the config file.
 - One file serves both commands: an export option such as `fps` is checked but ignored
   by `preview`.
 - Relative paths resolve beside the file, as repository paths do. `ffmpeg` is the

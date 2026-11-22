@@ -65,7 +65,9 @@ codestrand preview --repository /path/to/repository --start-date 2026-05-01 --en
 codestrand preview --repository /path/to/first --repository /path/to/second --theme outrun
 ```
 
-Preview loops until the window closes (Escape). Both date bounds are UTC and inclusive:
+Preview loops until the window closes (Escape) and reuses planned windows on loops or
+rewinds while they fit in memory. F12 toggles the frame-rate counter. Both date bounds
+are UTC and inclusive:
 `--end-date` includes the whole named day. A start date opens on the tree of the commit
 before it; neither bound reads diffs outside the range. `--seconds-per-day` and `--max-idle-seconds`
 set pacing. `codestrand preview --help` lists the themes and every default.
@@ -86,7 +88,7 @@ codestrand export clip --repository /path/to/repository --video history.mp4 --fr
   `CODESTRAND_FFMPEG` or `--ffmpeg`; the default encoder is libx264, so an odd
   `--resolution` needs PNGs or `--ffmpeg-arg` options. Codestrand never downloads an
   encoder.
-- Export defaults to a static overview.
+- Export defaults to a fixed overhead view sized for the whole field.
 - `--camera-path camera.toml` scripts the export camera; see
   [export](https://codestrand.pages.dev/export/#scripted-camera).
 
@@ -98,8 +100,8 @@ Every export directory gets `frames.csv`, one row per frame:
 frame,seconds,commit,files,avatars,beams,glyphs,missing_glyphs
 ```
 
-A nonzero `missing_glyphs` means a contributor name used a script no installed font
-covers; install fonts for it and export again.
+`missing_glyphs` counts unavailable glyphs across all visible text blocks in the
+frame. Install fonts covering the affected scripts and export again.
 
 ## Several repositories and config files
 
@@ -107,6 +109,8 @@ Repository titles fill their tiles with padding around the visible letters when 
 room. Titles use bundled IBM Plex Mono and replace unsupported characters with `?`.
 They lie underneath files and directories and stay on the tile when the camera tilts.
 `--repository-boundary none` hides the glass without hiding the title.
+The field grows with content. New tiles can grow together just before their first
+commits, and neighbouring tiles reclaim the space when a repository ends.
 
 Repeat `--repository`, or list repositories in a TOML file:
 
@@ -126,8 +130,8 @@ codestrand preview --repositories-file repositories.toml
 ```
 
 `--config codestrand.toml` reads any preview or export option, keyed by flag name
-without dashes, plus a `[[repositories]]` list. Flags on the command line override it,
-and any `--repository` flag replaces the file's list.
+without dashes, plus a `[[repositories]]` list. Flags on the command line override
+the file. Passing `--repository` or `--repositories-file` replaces its repository list.
 
 ```toml
 # codestrand.toml; relative paths resolve beside this file
