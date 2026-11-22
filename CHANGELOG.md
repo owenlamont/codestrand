@@ -5,6 +5,8 @@ All notable changes to Codestrand are documented here, following
 
 ## Unreleased
 
+## v0.3.0 - 2026-11-22
+
 ### Added
 
 - An agent skill, installed with
