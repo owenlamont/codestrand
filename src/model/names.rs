@@ -19,6 +19,11 @@ pub(crate) fn rect(point: Vec2, text: &str, scale: f32, height: f32) -> Rect {
     Rect::from_corners(point, point + Vec2::new(width, height * scale + 4.0))
 }
 
+pub(super) fn top_left_rect(point: Vec2, text: &str, scale: f32, height: f32) -> Rect {
+    let size = rect(Vec2::ZERO, text, scale, height).size();
+    Rect::from_corners(point - Vec2::Y * size.y, point + Vec2::X * size.x)
+}
+
 #[derive(Clone, Debug, Default)]
 pub(super) struct Visibility {
     pub joint_exhausted: bool,
@@ -43,8 +48,7 @@ pub(super) struct Placement {
 
 impl Placement {
     pub(super) fn bounds(&self, label_height: f32) -> Rect {
-        let size = rect(Vec2::ZERO, &self.text, self.scale, label_height).size();
-        Rect::from_corners(self.point - Vec2::Y * size.y, self.point + Vec2::X * size.x)
+        top_left_rect(self.point, &self.text, self.scale, label_height)
     }
 }
 
