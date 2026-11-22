@@ -47,7 +47,7 @@ mod static_tests;
 mod styling;
 mod titles;
 
-pub(super) use loading::Loading;
+pub(super) use loading::{Loading, Selection};
 
 #[derive(Resource)]
 pub(super) struct Frame {
@@ -3585,7 +3585,13 @@ mod tests {
             crate::progress::Progress::channel(std::time::Duration::ZERO);
         let worker = std::thread::spawn(move || Ok((simulation, "Fixture".to_owned())));
         let mut world = World::new();
-        world.insert_resource(Loading::new(updates, worker));
+        let (_, selections) = std::sync::mpsc::channel();
+        world.insert_resource(Loading::new(
+            updates,
+            selections,
+            worker,
+            std::time::Instant::now(),
+        ));
         world.insert_resource(Frame { index: 0, fps: 30 });
         world.init_resource::<ButtonInput<KeyCode>>();
         world.init_resource::<Time<Real>>();

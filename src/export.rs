@@ -1003,7 +1003,11 @@ mod pacing_tests {
                 "30",
                 "--no-cache",
             ];
-            crate::dispatch(crate::Cli::try_parse_from(args).unwrap()).unwrap();
+            crate::dispatch(
+                crate::Cli::try_parse_from(args).unwrap(),
+                std::time::Instant::now(),
+            )
+            .unwrap();
         }
         for frame in 0..24 {
             let filename = format!("frame-{frame:05}.png");

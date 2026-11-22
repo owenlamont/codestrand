@@ -231,7 +231,7 @@ pub(super) fn load_whole(
     cache_root: Option<&Path>,
 ) -> Result<Vec<timeline::Event>, history::Error> {
     let (repo, tip) = history::resolve(path, revision)?;
-    load_range(&repo, tip, None, None, cache_root)
+    load_range(&repo, tip, None, None, cache_root, |_| {})
 }
 
 /// Loads the events of the links in `range`, led by a boundary event when it skips any;
@@ -243,6 +243,7 @@ pub(super) fn load_range(
     range: Option<(&[history::Link], &std::ops::Range<usize>)>,
     end_date: Option<i64>,
     cache_root: Option<&Path>,
+    scanned_links: impl FnOnce(&[history::Link]),
 ) -> Result<Vec<timeline::Event>, history::Error> {
     let skip = range.map_or(0, |(_, range)| range.start);
     let end =
@@ -262,6 +263,7 @@ pub(super) fn load_range(
         &links[..range.end]
     } else {
         scanned = history::links(repo, tip)?;
+        scanned_links(&scanned);
         &scanned
     };
     let history = history::import(repo, tip, links, skip, end_date)?;

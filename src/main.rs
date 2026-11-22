@@ -36,6 +36,8 @@ mod small_file;
 mod theme;
 mod timeline;
 
+use std::{sync::mpsc, time::Instant};
+
 fn terminal_escape(value: &str) -> String {
     escape_except(value, &[])
 }
@@ -186,7 +188,7 @@ impl ContributorTravel {
 struct Source {
     #[arg(skip)]
     #[serde(skip)]
-    retain_preview_windows: bool,
+    preview_selection: Option<mpsc::Sender<scene::Selection>>,
     /// Assume departure after this many calendar days; default 60 marks two quiet months.
     #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u32).range(1..=36500))]
     contributor_inactivity_days: u32,
@@ -318,6 +320,16 @@ impl Source {
                 chains.get(index).map(Vec::as_slice).zip(range),
                 self.end_date,
                 cache_root.filter(|_| !self.no_cache),
+                |links| {
+                    if let [repository] = repositories
+                        && self.preview_selection.is_some()
+                    {
+                        self.report_preview_selection(
+                            repository.name(),
+                            links.iter().map(|link| link.seconds),
+                        );
+                    }
+                },
             )?;
             if self.trace.on() {
                 eprintln!(
@@ -465,8 +477,7 @@ impl Source {
             repositories::inputs(&paths, file)?
         };
         let mut mappings = contributors::load(self.contributors.as_deref())?;
-        let (mut events, range, unread) =
-            self.events(cache::root().as_deref(), &repositories, progress)?;
+        let (mut events, range, unread) = self.load_events(&repositories, progress)?;
         mappings.apply(&mut events);
         self.resolve_avatars(&mut events, &mut mappings, &repositories, range.clone());
         let names: Vec<_> = repositories
@@ -518,7 +529,7 @@ impl Source {
             progress: progress.clone(),
             trace: self.trace.clone(),
         };
-        if self.retain_preview_windows {
+        if self.preview_selection.is_some() {
             options.retain_preview_windows();
         }
         let history_duration = options.choose_window(&events);
@@ -543,6 +554,61 @@ impl Source {
         simulation.collapse_directories = self.collapse_directories;
         simulation.caption_style = self.caption_style;
         Ok((simulation, title))
+    }
+
+    fn load_events(
+        &self,
+        repositories: &[repositories::Repository],
+        progress: &Progress,
+    ) -> anyhow::Result<(Vec<timeline::Event>, std::ops::Range<usize>, model::Unread)>
+    {
+        let root = cache::root();
+        if self.preview_selection.is_none() {
+            return self.events(root.as_deref(), repositories, progress);
+        }
+        let name = match repositories {
+            [repository] => repository.name(),
+            _ => "This history".to_owned(),
+        };
+        self.report_preview_selection(name.clone(), std::iter::empty());
+        let (events, range, unread) =
+            self.events(root.as_deref(), repositories, progress)?;
+        self.report_preview_selection(
+            name,
+            events[range.clone()].iter().map(|event| event.seconds),
+        );
+        Ok((events, range, unread))
+    }
+
+    fn report_preview_selection(
+        &self,
+        name: String,
+        seconds: impl ExactSizeIterator<Item = i64>,
+    ) {
+        if let Some(sender) = &self.preview_selection {
+            let start_date = self.suggest_preview_start(seconds);
+            let _ = sender.send(scene::Selection { name, start_date });
+        }
+    }
+
+    fn suggest_preview_start(
+        &self,
+        mut seconds: impl ExactSizeIterator<Item = i64>,
+    ) -> Option<String> {
+        const TARGET_COMMITS: usize = 1_000;
+        let older_commits = seconds.len().saturating_sub(TARGET_COMMITS);
+        if older_commits == 0 {
+            return None;
+        }
+        let first = seconds.next()?;
+        let cutoff = seconds
+            .take(older_commits)
+            .filter(|&time| self.end_date.is_none_or(|end| time < end + 86_400))
+            .max()?;
+        let date = model::date(cutoff);
+        let midnight = start_date(&date).ok()?;
+        (first < midnight && self.start_date.is_none_or(|start| midnight > start))
+            .then_some(date)
     }
 
     fn resolve_range(&self, seconds: &[i64]) -> anyhow::Result<std::ops::Range<usize>> {
@@ -823,21 +889,27 @@ fn termination(result: anyhow::Result<()>) -> std::process::ExitCode {
 }
 
 /// Opens the preview window while a worker thread loads and plans `source`.
-fn preview(mut source: Source, theme: theme::ThemeName) -> anyhow::Result<()> {
-    source.retain_preview_windows = true;
+fn preview(
+    mut source: Source,
+    theme: theme::ThemeName,
+    launched: Instant,
+) -> anyhow::Result<()> {
     // Outside a repository, fail before a window opens.
     source.repository = source.repositories()?;
     let (progress, updates) = Progress::channel(std::time::Duration::from_millis(50));
+    let (selection, selections) = mpsc::channel();
+    source.preview_selection = Some(selection);
     let theme = theme.build();
     let worker = std::thread::spawn(move || {
         let (mut simulation, title) = source.load(&progress)?;
         simulation.set_theme(theme);
         Ok((simulation, title))
     });
-    scene::preview(scene::Loading::new(updates, worker))
+    scene::preview(scene::Loading::new(updates, selections, worker, launched))
 }
 
 fn run() -> anyhow::Result<()> {
+    let launched = Instant::now();
     let cli =
         match Cli::try_parse_from(config::arguments(std::env::args_os().collect())?) {
             Ok(cli) => cli,
@@ -847,10 +919,10 @@ fn run() -> anyhow::Result<()> {
                 return Ok(());
             }
         };
-    dispatch(cli)
+    dispatch(cli, launched)
 }
 
-fn dispatch(cli: Cli) -> anyhow::Result<()> {
+fn dispatch(cli: Cli, launched: Instant) -> anyhow::Result<()> {
     match cli.command {
         Some(Command::LayoutQuality {
             source,
@@ -894,7 +966,7 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
             let history = history::import_all(&repo, tip)?;
             serde_json::to_writer_pretty(std::io::stdout().lock(), &history)?;
         }
-        Some(Command::Preview { source, theme }) => preview(source, theme)?,
+        Some(Command::Preview { source, theme }) => preview(source, theme, launched)?,
         Some(Command::Export {
             theme,
             directory,
@@ -989,6 +1061,68 @@ mod tests {
                 .is_ok()
             );
         }
+    }
+
+    #[test]
+    fn preview_suggests_an_inclusive_start_for_single_and_merged_histories() {
+        let cli = Cli::try_parse_from(["codestrand", "preview"]).unwrap();
+        let Some(Command::Preview { mut source, .. }) = cli.command else {
+            panic!("preview")
+        };
+        let midnight = start_date("2023-02-08").unwrap();
+        let times: Vec<_> = (midnight..midnight + 999).collect();
+        let single = [&[midnight - 1, midnight][..], &times].concat();
+        let merged = repositories::merge_by(
+            vec![vec![midnight - 1, midnight], times],
+            |&seconds| seconds,
+        );
+        for history in [single, merged] {
+            let date = source
+                .suggest_preview_start(history.iter().copied())
+                .unwrap();
+            assert_eq!(date, "2023-02-08");
+            source.start_date = Some(start_date(&date).unwrap());
+            let selected = source.resolve_range(&history).unwrap();
+            assert_eq!(selected, 1..1_001);
+            assert_eq!(history[selected.start], midnight);
+            source.start_date = None;
+        }
+    }
+
+    #[test]
+    fn preview_omits_a_start_that_would_not_shorten_the_selection() {
+        let cli = Cli::try_parse_from(["codestrand", "preview"]).unwrap();
+        let Some(Command::Preview { mut source, .. }) = cli.command else {
+            panic!("preview")
+        };
+        let midnight = start_date("2023-02-08").unwrap();
+        let short = vec![midnight; 1_000];
+        let same_day = vec![midnight; 1_001];
+        assert_eq!(source.suggest_preview_start(short.iter().copied()), None);
+        assert_eq!(source.suggest_preview_start(same_day.iter().copied()), None);
+
+        let long = [&[midnight - 1][..], &short].concat();
+        for start in [midnight, midnight + 86_400] {
+            source.start_date = Some(start);
+            assert_eq!(source.suggest_preview_start(long.iter().copied()), None);
+        }
+    }
+
+    #[test]
+    fn preview_keeps_the_recent_suffix_when_commit_dates_run_backwards() {
+        let cli = Cli::try_parse_from(["codestrand", "preview"]).unwrap();
+        let Some(Command::Preview { mut source, .. }) = cli.command else {
+            panic!("preview")
+        };
+        let midnight = start_date("2023-02-08").unwrap();
+        let mut history = vec![midnight - 60, midnight, midnight - 1];
+        history.extend(midnight + 1..midnight + 1_000);
+        let date = source
+            .suggest_preview_start(history.iter().copied())
+            .unwrap();
+        assert_eq!(date, "2023-02-08");
+        source.start_date = Some(start_date(&date).unwrap());
+        assert_eq!(source.resolve_range(&history).unwrap(), 1..1_002);
     }
 
     #[test]
