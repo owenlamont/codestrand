@@ -521,8 +521,8 @@ Text fades in place.
 ## Contributor and file lifecycles
 
 The first commit enlarges the contributor avatar, settling over 1.2 playback seconds.
-Whole-file additions descend from the contributor along the beam to the file layout;
-deletions grey, rise and fade over 1.2 seconds. Line fragments remain separate.
+New files and directories descend from the contributor along a visible ray to their
+place in the tree. Deleted files grey, rise and fade over 1.2 seconds.
 
 `--contributor-inactivity-days` accepts 1–36,500 calendar days, inclusive. At the
 default of 60 days without a commit across the combined history, Codestrand assumes
@@ -562,7 +562,8 @@ for the edges to settle. Empty active repositories weigh as one item.
 The split tree and aspect limits also affect each tile's area.
 Each repository keeps file identity,
 local layout and one uniform scale, with a fixed quarter-turn chosen for its history.
-Content scales directly to its tile's current safe fit, up to its original size.
+Content grows to use the space in roomy tiles and scales down as its tile shrinks.
+Zoom anticipates tree growth so the layout has room to expand without abrupt rescaling.
 Each repository title fills the tile as far as its proportions and padding allow.
 The visible letters are centered on the tile surface underneath files and directories.
 The title stays aligned with the tile when you tilt or move the camera. Zooming in can
@@ -752,7 +753,8 @@ Live speed keys move through the canonical timeline faster or slower without
 changing commit times, layout, pulses, beams, avatar motion, settling or fades in
 timeline seconds. Changing live speed preserves the current position.
 
-Commits affecting more than 24 files aim beams at directories to reduce clutter.
+Commits affecting more than 24 files aim diff beams at directories to reduce clutter.
+Visible file and directory arrivals still follow their own rays.
 
 ## Overview detail
 

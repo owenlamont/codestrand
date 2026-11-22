@@ -327,6 +327,7 @@ mod tests {
             inputs: vec![vec![content; 4]; end + 1].into(),
             samples: samples.into(),
             rotated: vec![false; 4],
+            content_zoom: vec![1.0; 4 * (end + 1)].into(),
             ..Packing::default()
         };
         let sample = |tick| {

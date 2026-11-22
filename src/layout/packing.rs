@@ -1025,6 +1025,7 @@ pub(crate) struct Packing {
     inputs: Arc<[Vec<Input>]>,
     samples: Arc<[Sample]>,
     rotated: Vec<bool>,
+    content_zoom: Arc<[f32]>,
     exits: Arc<[Option<crate::model::RepositoryExit>]>,
     tiling: TilingCache,
     /// Tiles every sample from scratch; tests compare against it.
@@ -1133,7 +1134,7 @@ impl Packing {
 
         let (nodes, rotated, birth_order, opening) = retained_fields!(self, Packing {
             nodes, rotated, birth_order, opening;
-            gutter_scale, growth, reflows, labels, inputs, samples, exits,
+            gutter_scale, growth, reflows, labels, inputs, samples, exits, content_zoom,
             tiling, fresh_tiling,
         });
         let opening = opening.as_ref().map_or(0, |opening| {
@@ -1150,7 +1151,7 @@ impl Packing {
     pub(crate) fn input_bytes() -> usize {
         std::mem::size_of::<Input>()
             + outline::NORMALS.len() * std::mem::size_of::<Vec2>()
-            + 4 * std::mem::size_of::<f32>()
+            + 5 * std::mem::size_of::<f32>()
     }
 
     pub(crate) fn row_bytes() -> usize {
@@ -1341,6 +1342,7 @@ impl Packing {
         let opening =
             Opening::new(&nodes, &samples, &births, &order, &windows, &exits, space);
         let rotated = rotations(&nodes, &regions, &samples, space);
+        let content_zoom = content_zoom(&regions, &rotated, space);
         drop(items);
         Ok(Self {
             gutter_scale,
@@ -1353,6 +1355,7 @@ impl Packing {
             inputs: regions.into(),
             samples: samples.into(),
             rotated,
+            content_zoom,
             exits,
             tiling: TilingCache::default(),
             fresh_tiling: false,
@@ -1792,6 +1795,8 @@ impl Packing {
         tiling: Option<&mut Tiling>,
     ) -> Vec<Placement> {
         let layout = self.layout_at(tile_tick, births, presence, tiling);
+        let field_area = self.space().field(framing::MARGIN).usable().area();
+        let repositories = self.rotated.len();
         self.inputs[tick]
             .iter()
             .enumerate()
@@ -1800,26 +1805,27 @@ impl Packing {
                 let shape: Vec<_> = r.outline.iter().copied().map(turn).collect();
                 let tile = layout.tiles[i];
                 // A fixed screen anchor avoids switching between equal-area fit vertices.
-                let fitted = tile.map(|tile| {
-                    fit::anchored(
-                        tile.usable(),
+                let (origin, scale) = tile.map_or((Vec2::ZERO, 0.0), |tile| {
+                    let usable = tile.usable();
+                    let fit = fit::anchored(
+                        usable,
                         &shape,
                         r.height / self.overview_growth(),
                         Vec2::splat(0.5),
-                    )
-                });
-                let scale = fitted.map_or(0.0, |fit| fit.scale.min(1.0));
-                let (low, high) = outline::bounds(&shape);
-                let center = (low + high) * 0.5;
-                let origin = match fitted {
-                    Some(fit) if fit.scale.is_finite() => {
+                    );
+                    let tile_fraction = (usable.area() / field_area).sqrt();
+                    let zoom = self.content_zoom[tick * repositories + i];
+                    let scale = fit.scale.min((tile_fraction * zoom).max(1.0));
+                    let (low, high) = outline::bounds(&shape);
+                    let center = (low + high) * 0.5;
+                    let origin = if fit.scale.is_finite() {
                         fit.origin + center * (fit.scale - scale)
-                    }
-                    _ => tile.map_or(Vec2::ZERO, |tile| {
+                    } else {
                         framing::field_to_world(tile.low.midpoint(tile.high))
                             - center * scale
-                    }),
-                };
+                    };
+                    (origin, scale)
+                });
                 Placement {
                     tile,
                     gutter: layout.gutters[i],
@@ -1829,6 +1835,49 @@ impl Packing {
             })
             .collect()
     }
+}
+
+/// Plan ahead of tree growth so changing content cannot make the scale snap.
+fn content_zoom(regions: &[Vec<Input>], rotated: &[bool], space: Space) -> Arc<[f32]> {
+    let field = space.field(framing::MARGIN).usable();
+    let width = rotated.len();
+    let mut zoom: Vec<_> = regions
+        .iter()
+        .flat_map(|row| row.iter().zip(rotated))
+        .map(|(input, &rotated)| {
+            if !input.live {
+                return f32::INFINITY;
+            }
+            let turned;
+            let shape = if rotated {
+                turned = input
+                    .outline
+                    .iter()
+                    .map(|point| point.perp())
+                    .collect::<Vec<_>>();
+                &turned
+            } else {
+                input.outline.as_ref()
+            };
+            fit::anchored_scale(
+                field,
+                shape,
+                input.height / space.growth,
+                Vec2::splat(0.5),
+            )
+            .1
+            .max(1.0)
+        })
+        .collect();
+    // Limit scale changes in either direction to about 12% per playback second.
+    let step = (0.12_f32 / 60.0).exp();
+    for index in (0..zoom.len() - width).rev() {
+        zoom[index] = zoom[index].min(zoom[index + width] * step);
+    }
+    for index in width..zoom.len() {
+        zoom[index] = zoom[index].min(zoom[index - width] * step);
+    }
+    zoom.into()
 }
 
 fn birth_weights(
@@ -1947,7 +1996,7 @@ mod tests {
                 input.height / packing.overview_growth(),
                 Vec2::splat(0.5),
             );
-            assert!((scales[1] - fit.scale.min(1.0)).abs() < 1e-6, "tick {tick}");
+            assert!((scales[1] - fit.scale).abs() < 1e-6, "tick {tick}");
         }
     }
 
@@ -2433,6 +2482,7 @@ mod tests {
             gutter_scale: 4.0,
             nodes: nodes.to_vec(),
             rotated: vec![false; weights.len()],
+            content_zoom: vec![1.0; samples.len() * weights.len()].into(),
             inputs: vec![vec![content; weights.len()]; samples.len()].into(),
             samples: samples.into(),
             exits: exits.into(),
