@@ -15,7 +15,6 @@ All notable changes to Codestrand are documented here, following
   ([#158](https://github.com/owenlamont/codestrand/issues/158))
 - Load preview and export options from a TOML file with `--config`. Command-line
   flags override the file. ([#182](https://github.com/owenlamont/codestrand/pull/182))
-- New files and directories descend from the contributor along visible arrival rays.
 - Adjust diff fragment travel speed with `--fragment-speed`.
   ([#190](https://github.com/owenlamont/codestrand/pull/190))
 - Export reports history progress, projected video length, ETA and waits for planning.
@@ -49,6 +48,7 @@ All notable changes to Codestrand are documented here, following
 - Tiles reflow as live file and directory counts shift. New tiles can grow together
   just before their first commits. Trees scale to use the available tile space while
   keeping their quarter-turn. Commits can wait in history order for tile motion.
+  New files and directories descend from the contributor along visible rays.
   ([#197](https://github.com/owenlamont/codestrand/pull/197),
   [#208](https://github.com/owenlamont/codestrand/pull/208),
   [#216](https://github.com/owenlamont/codestrand/pull/216))
