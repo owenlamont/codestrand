@@ -135,7 +135,7 @@ hooks = [
 
 [[repos]]
 repo = "https://github.com/rvben/rumdl-pre-commit"
-rev = "v0.3.2"
+rev = "v0.3.4"
 hooks = [{ id = "rumdl" }]
 
 [[repos]]
@@ -150,7 +150,7 @@ hooks = [
 
 [[repos]]
 repo = "https://github.com/adhtruong/mirrors-typos"
-rev = "v1.52.0"
+rev = "v1.52.2"
 hooks = [{ id = "typos", args = ["--force-exclude"] }]
 
 [[repos]]

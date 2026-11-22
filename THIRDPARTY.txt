@@ -3081,12 +3081,12 @@ DEALINGS IN THE SOFTWARE.
 ================================================================================
 MIT License (MIT)
 Used by:
-  cc 1.11.2
-  Source: https://crates.io/api/v1/crates/cc/1.11.2/download
+  cc 1.11.3
+  Source: https://crates.io/api/v1/crates/cc/1.11.3/download
   cfg-if 1.0.5
   Source: https://crates.io/api/v1/crates/cfg-if/1.0.5/download
-  filetime 0.2.29
-  Source: https://crates.io/api/v1/crates/filetime/0.2.29/download
+  filetime 0.2.30
+  Source: https://crates.io/api/v1/crates/filetime/0.2.30/download
   find-msvc-tools 0.1.15
   Source: https://crates.io/api/v1/crates/find-msvc-tools/0.1.15/download
   jobserver 0.1.35
@@ -3219,10 +3219,10 @@ Used by:
   Source: https://crates.io/api/v1/crates/log/0.4.35/download
   num-traits 0.2.19
   Source: https://crates.io/api/v1/crates/num-traits/0.2.19/download
-  regex-automata 0.4.18
-  Source: https://crates.io/api/v1/crates/regex-automata/0.4.18/download
-  regex-syntax 0.8.11
-  Source: https://crates.io/api/v1/crates/regex-syntax/0.8.11/download
+  regex-automata 0.4.19
+  Source: https://crates.io/api/v1/crates/regex-automata/0.4.19/download
+  regex-syntax 0.8.12
+  Source: https://crates.io/api/v1/crates/regex-syntax/0.8.12/download
 
 Copyright (c) 2014 The Rust Project Developers
 
@@ -3254,8 +3254,8 @@ DEALINGS IN THE SOFTWARE.
 ================================================================================
 MIT License (MIT)
 Used by:
-  uuid 1.29.2
-  Source: https://crates.io/api/v1/crates/uuid/1.29.2/download
+  uuid 1.29.3
+  Source: https://crates.io/api/v1/crates/uuid/1.29.3/download
 
 Copyright (c) 2014 The Rust Project Developers
 Copyright (c) 2018 Ashley Mannix, Christopher Armstrong, Dylan DPC, Hunar Roop Kahlon
@@ -3838,8 +3838,8 @@ Used by:
   Source: https://crates.io/api/v1/crates/hashbrown/0.14.5/download
   hashbrown 0.16.1
   Source: https://crates.io/api/v1/crates/hashbrown/0.16.1/download
-  hashbrown 0.17.1
-  Source: https://crates.io/api/v1/crates/hashbrown/0.17.1/download
+  hashbrown 0.17.2
+  Source: https://crates.io/api/v1/crates/hashbrown/0.17.2/download
 
 Copyright (c) 2016 Amanieu d'Antras
 
@@ -4210,8 +4210,8 @@ MIT License (MIT)
 Used by:
   heapless 0.8.0
   Source: https://crates.io/api/v1/crates/heapless/0.8.0/download
-  heapless 0.9.3
-  Source: https://crates.io/api/v1/crates/heapless/0.9.3/download
+  heapless 0.9.4
+  Source: https://crates.io/api/v1/crates/heapless/0.9.4/download
 
 Copyright (c) 2017 Jorge Aparicio
 
@@ -4609,8 +4609,8 @@ DEALINGS IN THE SOFTWARE.
 ================================================================================
 MIT License (MIT)
 Used by:
-  bytes 1.12.1
-  Source: https://crates.io/api/v1/crates/bytes/1.12.1/download
+  bytes 1.12.2
+  Source: https://crates.io/api/v1/crates/bytes/1.12.2/download
 
 Copyright (c) 2018 Carl Lerche
 
@@ -4809,8 +4809,8 @@ DEALINGS IN THE SOFTWARE.
 ================================================================================
 MIT License (MIT)
 Used by:
-  smallvec 1.16.5
-  Source: https://crates.io/api/v1/crates/smallvec/1.16.5/download
+  smallvec 1.16.6
+  Source: https://crates.io/api/v1/crates/smallvec/1.16.6/download
 
 Copyright (c) 2018 The Servo Project Developers
 
@@ -5121,8 +5121,8 @@ DEALINGS IN THE SOFTWARE.
 ================================================================================
 MIT License (MIT)
 Used by:
-  zeroize 1.9.1
-  Source: https://crates.io/api/v1/crates/zeroize/1.9.1/download
+  zeroize 1.9.2
+  Source: https://crates.io/api/v1/crates/zeroize/1.9.2/download
 
 Copyright (c) 2018-2026 The RustCrypto Project Developers
 
@@ -6214,14 +6214,14 @@ Used by:
   Source: https://crates.io/api/v1/crates/anstyle-wincon/3.0.11/download
   anstyle 1.0.14
   Source: https://crates.io/api/v1/crates/anstyle/1.0.14/download
-  clap 4.6.7
-  Source: https://crates.io/api/v1/crates/clap/4.6.7/download
+  clap 4.6.9
+  Source: https://crates.io/api/v1/crates/clap/4.6.9/download
   clap_builder 4.6.7
   Source: https://crates.io/api/v1/crates/clap_builder/4.6.7/download
-  clap_derive 4.6.7
-  Source: https://crates.io/api/v1/crates/clap_derive/4.6.7/download
-  clap_lex 1.1.1
-  Source: https://crates.io/api/v1/crates/clap_lex/1.1.1/download
+  clap_derive 4.6.9
+  Source: https://crates.io/api/v1/crates/clap_derive/4.6.9/download
+  clap_lex 1.1.2
+  Source: https://crates.io/api/v1/crates/clap_lex/1.1.2/download
   colorchoice 1.0.5
   Source: https://crates.io/api/v1/crates/colorchoice/1.0.5/download
   is_terminal_polyfill 1.70.2
@@ -6230,14 +6230,14 @@ Used by:
   Source: https://crates.io/api/v1/crates/once_cell_polyfill/1.70.2/download
   serde_spanned 1.1.3
   Source: https://crates.io/api/v1/crates/serde_spanned/1.1.3/download
-  toml 1.2.1+spec-1.1.0
-  Source: https://crates.io/api/v1/crates/toml/1.2.1+spec-1.1.0/download
+  toml 1.2.2+spec-1.1.0
+  Source: https://crates.io/api/v1/crates/toml/1.2.2+spec-1.1.0/download
   toml_datetime 1.1.3+spec-1.1.0
   Source: https://crates.io/api/v1/crates/toml_datetime/1.1.3+spec-1.1.0/download
-  toml_edit 0.25.19+spec-1.1.0
-  Source: https://crates.io/api/v1/crates/toml_edit/0.25.19+spec-1.1.0/download
-  toml_parser 1.1.5+spec-1.1.0
-  Source: https://crates.io/api/v1/crates/toml_parser/1.1.5+spec-1.1.0/download
+  toml_edit 0.25.20+spec-1.1.0
+  Source: https://crates.io/api/v1/crates/toml_edit/0.25.20+spec-1.1.0/download
+  toml_parser 1.1.6+spec-1.1.0
+  Source: https://crates.io/api/v1/crates/toml_parser/1.1.6+spec-1.1.0/download
   toml_writer 1.2.0+spec-1.1.0
   Source: https://crates.io/api/v1/crates/toml_writer/1.2.0+spec-1.1.0/download
 
@@ -6616,10 +6616,10 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 ================================================================================
 MIT License (MIT)
 Used by:
-  zerocopy-derive 0.8.63
-  Source: https://crates.io/api/v1/crates/zerocopy-derive/0.8.63/download
-  zerocopy 0.8.63
-  Source: https://crates.io/api/v1/crates/zerocopy/0.8.63/download
+  zerocopy-derive 0.8.64
+  Source: https://crates.io/api/v1/crates/zerocopy-derive/0.8.64/download
+  zerocopy 0.8.64
+  Source: https://crates.io/api/v1/crates/zerocopy/0.8.64/download
 
 Copyright 2023 The Fuchsia Authors
 
@@ -8179,8 +8179,8 @@ Used by:
   Source: https://crates.io/api/v1/crates/cap-std/4.0.3/download
   concurrent-queue 2.5.0
   Source: https://crates.io/api/v1/crates/concurrent-queue/2.5.0/download
-  ctrlc 3.5.2
-  Source: https://crates.io/api/v1/crates/ctrlc/3.5.2/download
+  ctrlc 3.5.3
+  Source: https://crates.io/api/v1/crates/ctrlc/3.5.3/download
   displaydoc 0.2.7
   Source: https://crates.io/api/v1/crates/displaydoc/0.2.7/download
   erased-serde 0.4.11
@@ -8239,12 +8239,12 @@ Used by:
   Source: https://crates.io/api/v1/crates/once_cell/1.21.4/download
   parking 2.2.1
   Source: https://crates.io/api/v1/crates/parking/2.2.1/download
-  pin-project-internal 1.1.13
-  Source: https://crates.io/api/v1/crates/pin-project-internal/1.1.13/download
-  pin-project-lite 0.2.17
-  Source: https://crates.io/api/v1/crates/pin-project-lite/0.2.17/download
-  pin-project 1.1.13
-  Source: https://crates.io/api/v1/crates/pin-project/1.1.13/download
+  pin-project-internal 1.2.0
+  Source: https://crates.io/api/v1/crates/pin-project-internal/1.2.0/download
+  pin-project-lite 0.2.18
+  Source: https://crates.io/api/v1/crates/pin-project-lite/0.2.18/download
+  pin-project 1.2.0
+  Source: https://crates.io/api/v1/crates/pin-project/1.2.0/download
   piper 0.2.5
   Source: https://crates.io/api/v1/crates/piper/0.2.5/download
   polling 3.11.0
@@ -8720,8 +8720,8 @@ Used by:
   Source: https://crates.io/api/v1/crates/jiff/0.2.46/download
   memchr 2.8.3
   Source: https://crates.io/api/v1/crates/memchr/2.8.3/download
-  walkdir 2.5.0
-  Source: https://crates.io/api/v1/crates/walkdir/2.5.0/download
+  walkdir 2.5.1
+  Source: https://crates.io/api/v1/crates/walkdir/2.5.1/download
 
 The MIT License (MIT)
 
@@ -8749,8 +8749,8 @@ THE SOFTWARE.
 ================================================================================
 MIT License (MIT)
 Used by:
-  nix 0.31.3
-  Source: https://crates.io/api/v1/crates/nix/0.31.3/download
+  nix 0.32.0
+  Source: https://crates.io/api/v1/crates/nix/0.32.0/download
 
 The MIT License (MIT)
 
@@ -9165,8 +9165,8 @@ SOFTWARE.
 ================================================================================
 MIT License (MIT)
 Used by:
-  bstr 1.13.1
-  Source: https://crates.io/api/v1/crates/bstr/1.13.1/download
+  bstr 1.14.0
+  Source: https://crates.io/api/v1/crates/bstr/1.14.0/download
 
 The MIT License (MIT)
 
