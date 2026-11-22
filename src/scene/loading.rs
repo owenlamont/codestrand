@@ -1,10 +1,21 @@
 use std::{
-    sync::{Arc, Mutex, PoisonError, mpsc},
+    sync::{
+        Arc, Mutex, PoisonError,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     thread::JoinHandle,
     time::{Duration, Instant},
 };
 
-use bevy::{ecs::schedule::ScheduleLabel, prelude::*};
+use bevy::{
+    ecs::schedule::ScheduleLabel,
+    prelude::*,
+    render::{
+        Render, RenderApp, RenderSystems, render_resource::PipelineCache,
+        view::ViewTarget,
+    },
+};
 
 use super::{Playback, Title};
 use crate::{camera::PreviewCamera, model::Simulation, progress::Update};
@@ -12,6 +23,39 @@ use crate::{camera::PreviewCamera, model::Simulation, progress::Update};
 type Planned = anyhow::Result<(Simulation, String)>;
 
 const SLOW_START: Duration = Duration::from_secs(60);
+const TRACK_WIDTH: f32 = 480.0;
+const INDICATOR_WIDTH: f32 = 96.0;
+
+#[derive(Resource)]
+pub(super) struct Preparing {
+    started: Instant,
+    scene: Option<(Simulation, String)>,
+}
+
+#[derive(Clone, Default, Resource)]
+struct RendererReady(Arc<AtomicBool>);
+
+pub(super) fn track_renderer(app: &mut App) {
+    let ready = RendererReady::default();
+    app.insert_resource(ready.clone())
+        .sub_app_mut(RenderApp)
+        .insert_resource(ready)
+        .add_systems(Render, check_renderer.after(RenderSystems::Render));
+}
+
+fn check_renderer(
+    ready: Res<RendererReady>,
+    pipelines: Res<PipelineCache>,
+    cameras: Query<(), (With<Camera3d>, With<ViewTarget>)>,
+) {
+    let ready = &ready.into_inner().0;
+    if !ready.load(Ordering::Relaxed)
+        && !cameras.is_empty()
+        && pipelines.into_inner().waiting_pipelines().next().is_none()
+    {
+        ready.store(true, Ordering::Relaxed);
+    }
+}
 
 #[derive(PartialEq, Eq)]
 pub(crate) struct Selection {
@@ -118,10 +162,21 @@ pub(super) struct WindowProgress {
 }
 
 pub(super) fn show(mut commands: Commands) {
-    commands.spawn((Screen, Camera2d));
+    let camera = commands
+        .spawn((
+            Screen,
+            Camera2d,
+            Camera {
+                order: 2,
+                ..default()
+            },
+        ))
+        .id();
     commands
         .spawn((
             Screen,
+            UiTargetCamera(camera),
+            BackgroundColor(Color::srgb_u8(43, 44, 47)),
             Node {
                 width: percent(100),
                 height: percent(100),
@@ -142,7 +197,7 @@ pub(super) fn show(mut commands: Commands) {
             screen
                 .spawn((
                     Node {
-                        width: px(480),
+                        width: px(TRACK_WIDTH),
                         height: px(10),
                         ..default()
                     },
@@ -216,7 +271,7 @@ fn poll_at(world: &mut World, now: Instant) {
     }
     match planned {
         None => {}
-        Some(Ok(Ok((simulation, title)))) => finish(world, simulation, title, latest),
+        Some(Ok(Ok(scene))) => finish(world, scene, latest, now),
         Some(Ok(Err(error))) => fail(world, error),
         Some(Err(_)) => fail(world, anyhow::anyhow!("planning stopped unexpectedly")),
     }
@@ -224,17 +279,27 @@ fn poll_at(world: &mut World, now: Instant) {
 
 fn finish(
     world: &mut World,
-    simulation: Simulation,
-    title: String,
+    scene: (Simulation, String),
     latest: Option<Update>,
+    now: Instant,
 ) {
-    let screen: Vec<_> = world
-        .query_filtered::<Entity, With<Screen>>()
-        .iter(world)
-        .collect();
-    for entity in screen {
-        world.despawn(entity);
+    for mut text in world
+        .query_filtered::<&mut Text, With<Label>>()
+        .iter_mut(world)
+    {
+        "Preparing renderer".clone_into(&mut text.0);
     }
+    for mut node in world
+        .query_filtered::<&mut Node, With<Warning>>()
+        .iter_mut(world)
+    {
+        node.display = Display::None;
+    }
+    move_indicator(world, Duration::ZERO);
+    world.insert_resource(Preparing {
+        started: now,
+        scene: Some(scene),
+    });
     let loading = world
         .remove_resource::<Loading>()
         .expect("loader completed");
@@ -242,6 +307,51 @@ fn finish(
         updates: loading.updates,
         latest,
     });
+}
+
+pub(super) fn prepare(world: &mut World) {
+    prepare_at(world, Instant::now());
+}
+
+#[cfg(test)]
+pub(super) fn build_scene_for_test(world: &mut World) {
+    world.init_resource::<RendererReady>();
+    prepare(world);
+}
+
+fn prepare_at(world: &mut World, now: Instant) {
+    if world.resource::<RendererReady>().0.load(Ordering::Relaxed) {
+        let screen: Vec<_> = world
+            .query_filtered::<Entity, With<Screen>>()
+            .iter(world)
+            .collect();
+        for entity in screen {
+            world.despawn(entity);
+        }
+        world.remove_resource::<Preparing>();
+        return;
+    }
+    let mut preparing = world.resource_mut::<Preparing>();
+    let elapsed = now.duration_since(preparing.started);
+    let scene = preparing.scene.take();
+    move_indicator(world, elapsed);
+    if let Some((simulation, title)) = scene {
+        build_scene(world, simulation, title);
+    }
+}
+
+fn move_indicator(world: &mut World, elapsed: Duration) {
+    let phase = (elapsed.as_secs_f32() % 2.0 - 1.0).abs();
+    for mut bar in world
+        .query_filtered::<&mut Node, With<Bar>>()
+        .iter_mut(world)
+    {
+        bar.width = px(INDICATOR_WIDTH);
+        bar.left = px((1.0 - phase) * (TRACK_WIDTH - INDICATOR_WIDTH));
+    }
+}
+
+fn build_scene(world: &mut World, simulation: Simulation, title: String) {
     let indicator = world
         .spawn((
             WaitLabel,
@@ -342,6 +452,7 @@ mod tests {
         let mut world = World::new();
         world.init_resource::<Messages<AppExit>>();
         world.init_resource::<Built>();
+        world.init_resource::<RendererReady>();
         world.insert_resource(Loading::new(updates, selections, worker, launched));
         let mut built = Schedule::new(Loaded);
         built.add_systems(|mut built: ResMut<Built>| built.0 += 1);
@@ -372,7 +483,7 @@ mod tests {
     }
 
     #[test]
-    fn the_bar_advances_then_gives_way_to_the_scene() {
+    fn preparing_renderer_animates_until_the_scene_is_ready() {
         let simulation = Simulation::new(
             crate::timeline::synthetic(),
             &crate::model::Options::default(),
@@ -425,21 +536,46 @@ mod tests {
 
         release.send(()).unwrap();
         poll_until_planned(&mut world);
+        assert!(!world.contains_resource::<Playback>());
+        let label = world
+            .query_filtered::<&Text, With<Label>>()
+            .single(&world)
+            .unwrap();
+        assert_eq!(label.0, "Preparing renderer");
+        assert_eq!(bar(&mut world), px(INDICATOR_WIDTH));
+        assert_eq!(warnings.single(&world).unwrap().1.display, Display::None);
+        let started = world.resource::<Preparing>().started;
+        prepare_at(&mut world, started);
         assert_eq!(world.resource::<Title>().0, "Fixture");
         assert!(world.contains_resource::<Playback>());
         assert!(world.contains_resource::<PreviewCamera>());
         assert_eq!(world.resource::<Built>().0, 1);
+        let mut indicator = world.query_filtered::<&Node, With<Bar>>();
+        assert_eq!(indicator.single(&world).unwrap().left, px(0));
+        prepare_at(&mut world, started + Duration::from_millis(500));
+        assert_eq!(indicator.single(&world).unwrap().left, px(192));
+        assert_eq!(world.resource::<Built>().0, 1);
+        world
+            .resource::<RendererReady>()
+            .0
+            .store(true, Ordering::Relaxed);
+        prepare_at(&mut world, started + Duration::from_secs(1));
+        assert!(!world.contains_resource::<Preparing>());
         assert_eq!(world.query::<&Screen>().iter(&world).count(), 0);
         assert_eq!(warnings.iter(&world).count(), 0);
         assert!(world.resource::<Messages<AppExit>>().is_empty());
 
+        assert_waiting_label(&mut world, &progress);
+    }
+
+    fn assert_waiting_label(world: &mut World, progress: &Progress) {
         let waiting = world.register_system(waiting);
         world.insert_resource(super::super::PlanningWait(true));
         progress.report(Stage::Reservations, 1, 4);
         world.run_system(waiting).unwrap();
         let (text, node) = world
             .query_filtered::<(&Text, &Node), With<WaitLabel>>()
-            .single(&world)
+            .single(world)
             .unwrap();
         assert_eq!(text.0, "Planning: reserving parking 25.0%");
         assert_eq!(node.display, Display::Flex);
@@ -448,7 +584,7 @@ mod tests {
         assert_eq!(
             world
                 .query_filtered::<&Node, With<WaitLabel>>()
-                .single(&world)
+                .single(world)
                 .unwrap()
                 .display,
             Display::None

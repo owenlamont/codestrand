@@ -672,6 +672,12 @@ pub(super) fn preview(loading: Loading) -> anyhow::Result<()> {
         .add_systems(loading::Loaded, setup)
         .add_systems(
             Update,
+            loading::prepare
+                .run_if(resource_exists::<loading::Preparing>)
+                .before(loading::poll),
+        )
+        .add_systems(
+            Update,
             loading::poll
                 .run_if(resource_exists::<Loading>)
                 .before(preview_clock),
@@ -680,7 +686,8 @@ pub(super) fn preview(loading: Loading) -> anyhow::Result<()> {
             Update,
             preview_clock
                 .before(animate)
-                .run_if(resource_exists::<Playback>),
+                .run_if(resource_exists::<Playback>)
+                .run_if(not(resource_exists::<loading::Preparing>)),
         )
         .add_systems(
             Update,
@@ -694,6 +701,7 @@ pub(super) fn preview(loading: Loading) -> anyhow::Result<()> {
                 .after(animate)
                 .run_if(resource_exists::<Playback>),
         );
+    loading::track_renderer(&mut app);
     app.run();
     let error = failure
         .0
@@ -3601,7 +3609,8 @@ mod tests {
         world.add_schedule(Schedule::new(loading::Loaded));
         for _ in 0..2_000 {
             loading::poll(&mut world);
-            if world.contains_resource::<Playback>() {
+            if world.contains_resource::<loading::Preparing>() {
+                loading::build_scene_for_test(&mut world);
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(5));

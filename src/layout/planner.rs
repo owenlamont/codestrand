@@ -79,10 +79,18 @@ impl Plan {
         }
         let root = subtree(&children, 0, &peak, &mut regions, &mut sizes);
         let mut windows = vec![8_usize; required[0].len()];
-        let report = |phase, done, total| {
-            progress.report_part(Stage::DirectoryPacking, phase, 5, done, total);
-        };
+        let mut pass = 1;
         let mut samples = loop {
+            let report = |phase, done, total| {
+                progress.report_part(
+                    Stage::DirectoryPacking,
+                    pass,
+                    phase,
+                    5,
+                    done,
+                    total,
+                );
+            };
             let mut samples = {
                 // Reverse the two filter supports, including the spline, into reservations.
                 let reserved: Vec<_> = required
@@ -110,6 +118,7 @@ impl Plan {
             if !failed.iter().any(|&value| value) {
                 break samples;
             }
+            pass += 1;
             windows = widen_windows(&windows, &failed);
         };
         for position in samples.iter_mut().flatten() {
@@ -855,6 +864,40 @@ mod tests {
             .collect();
         events.push(deletion);
         events
+    }
+
+    #[test]
+    fn directory_packing_restarts_progress_with_a_new_pass() {
+        let mut events = vec![Event::at(
+            0,
+            (0..32)
+                .map(|dir| change(format!("d{dir}/seed"), Kind::Added))
+                .collect(),
+        )];
+        events.push(Event::at(
+            5 * 86_400,
+            (0..32)
+                .flat_map(|dir| {
+                    (0..80)
+                        .map(move |file| change(format!("d{dir}/{file}"), Kind::Added))
+                })
+                .collect(),
+        ));
+        let starts = [Time::ZERO, Time::seconds(12.0)];
+        let events: Vec<_> = events.iter().collect();
+        let (progress, updates) = Progress::channel(std::time::Duration::ZERO);
+        Layout::scheduled(&events, &starts, 0, &progress);
+
+        let packing: Vec<_> = updates
+            .try_iter()
+            .filter(|update| update.stage == Stage::DirectoryPacking)
+            .collect();
+        assert!(packing.windows(2).any(|pair| {
+            pair[0].pass == 1 && pair[1].pass == 2 && pair[1].fraction == 0.0
+        }));
+        assert!(packing.windows(2).all(|pair| {
+            pair[1].pass > pair[0].pass || pair[1].fraction >= pair[0].fraction
+        }));
     }
 
     #[test]

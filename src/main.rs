@@ -332,7 +332,7 @@ impl Source {
                     }
                 },
                 |done, total| {
-                    progress.report_part(Stage::History, index, count, done, total);
+                    progress.report_part(Stage::History, 1, index, count, done, total);
                 },
             )?;
             if self.trace.on() {
