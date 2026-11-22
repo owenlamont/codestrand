@@ -259,24 +259,7 @@ fn visible_avatar_steps_stay_within_travel_speed() {
 
 #[test]
 fn visible_cross_repository_handoffs_stay_out_of_foreign_tiles() {
-    let mut events = vec![
-        write(0, 0, ["src/lib.rs".into()]),
-        write(1, 1, ["main.rs".into()]),
-        write(1, 10, ["main.rs".into()]),
-    ];
-    events[2].author = events[0].author.clone();
-    let mut sim = Simulation::with_repositories(
-        events,
-        &Options {
-            seconds_per_day: 1.0,
-            max_idle_seconds: 15.0,
-            contributor_inactivity_days: 30,
-            ..Default::default()
-        },
-        &Theme::neon(),
-        &Mappings::default(),
-        &["Source".into(), "Destination".into()],
-    );
+    let mut sim = handoff_playback();
     let mut previous: Vec<(usize, bool)> = Vec::new();
     let mut handoffs = 0;
     for frame in 0..=u32::try_from(sim.end_tick()).unwrap() {
@@ -316,4 +299,63 @@ fn visible_cross_repository_handoffs_stay_out_of_foreign_tiles() {
             .collect();
     }
     assert_eq!(handoffs, 1);
+}
+
+fn handoff_playback() -> Simulation {
+    let mut events = vec![
+        write(0, 0, ["src/lib.rs".into()]),
+        write(1, 1, ["main.rs".into()]),
+        write(1, 10, ["main.rs".into()]),
+    ];
+    events[2].author = events[0].author.clone();
+    Simulation::with_repositories(
+        events,
+        &Options {
+            seconds_per_day: 1.0,
+            max_idle_seconds: 15.0,
+            contributor_inactivity_days: 30,
+            ..Default::default()
+        },
+        &Theme::neon(),
+        &Mappings::default(),
+        &["Source".into(), "Destination".into()],
+    )
+}
+
+#[test]
+fn visible_travellers_do_not_hold_away_from_their_seat() {
+    let mut sim = handoff_playback();
+    let mut origins = [Vec3::ZERO; 2];
+    let mut stopped = [(Vec3::ZERO, 0); 2];
+    let mut walked = false;
+    let stationary_radius = 0.1 * framing::WORLD_UNITS_PER_REFERENCE_PIXEL;
+    let settling_frames = 6;
+    for frame in 0..=u32::try_from(sim.end_tick()).unwrap() {
+        sim.advance_to(frame, 60);
+        for (index, avatar) in sim.state.avatars.iter().enumerate() {
+            let point = avatar.position;
+            let travelling = sim.travel.travelling(index, u64::from(frame));
+            walked |=
+                avatar.presence > 0.001 && sim.travel.walking(index, u64::from(frame));
+            if !travelling {
+                origins[index] = point;
+            }
+            let (anchor, since) = &mut stopped[index];
+            if !travelling
+                || avatar.presence <= 0.001
+                || point.distance(origins[index]) <= stationary_radius
+                || point.distance(*anchor) > stationary_radius
+            {
+                *anchor = point;
+                *since = frame;
+                continue;
+            }
+            assert!(
+                frame - *since <= settling_frames,
+                "frame {frame}: {} stopped away from the origin seat at {point:?}",
+                avatar.name,
+            );
+        }
+    }
+    assert!(walked);
 }

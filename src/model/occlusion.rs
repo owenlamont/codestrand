@@ -259,6 +259,61 @@ pub(super) fn clear_seat_transitions(
             );
         }
     }
+    // A parked avatar may have room to yield once the arriving seats are placed.
+    clear_remaining_parked_contacts(
+        state,
+        previous,
+        max_step,
+        bounds,
+        &order,
+        &mut placed,
+    );
+}
+
+fn clear_remaining_parked_contacts(
+    state: &mut State,
+    previous: &[Option<Vec3>],
+    max_step: f32,
+    bounds: Rect,
+    order: &[(usize, bool, bool)],
+    placed: &mut [Disc],
+) {
+    let mut obstacles = Vec::new();
+    for (rank, &(index, _, parked)) in order.iter().enumerate() {
+        let Some(from) = previous[index].filter(|_| parked) else {
+            continue;
+        };
+        let current = placed[rank];
+        obstacles.clear();
+        obstacles.extend(placed.iter().enumerate().filter_map(|(other, &disc)| {
+            (other != rank
+                && disc.centre.distance(current.centre)
+                    < current.radius + disc.radius + 2.0 * max_step)
+                .then_some(disc)
+        }));
+        if !obstacles.iter().any(|disc| {
+            disc.centre.distance(current.centre) < current.radius + disc.radius
+        }) {
+            continue;
+        }
+        let avatar = &mut state.avatars[index];
+        let y = avatar.position.y;
+        let nominal = current.radius / avatar.projection_scale;
+        let world = |point: Vec2| Vec3::new(point.x, y, point.y);
+        let radius_at = |point| nominal * slots::projection_scale(world(point));
+        let point = clear_position(
+            from.xz(),
+            current.centre,
+            max_step,
+            &obstacles,
+            radius_at,
+            |point| bounds.contains(point),
+        );
+        avatar.position = world(point);
+        avatar.projection_scale = slots::projection_scale(avatar.position);
+        placed[rank].centre = point;
+        placed[rank].radius = radius_at(point);
+    }
 }
 
 #[derive(Debug, Default, Serialize)]

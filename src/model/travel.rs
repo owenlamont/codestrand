@@ -313,6 +313,14 @@ struct Trip {
     proof: Option<serde_json::Value>,
 }
 
+fn retained_route_bytes(trips: &Vec<Trip>) -> usize {
+    trips.capacity() * size_of::<Trip>()
+        + trips
+            .iter()
+            .map(|trip| trip.route.retained_bytes())
+            .sum::<usize>()
+}
+
 #[derive(Clone, Default, Serialize)]
 pub(super) struct Statistics {
     pub human_complete: usize,
@@ -715,6 +723,29 @@ fn fade_clearance(capture: &Capture, begin: u64, point: Vec2, radius: f32) -> u6
 }
 
 impl Simulation {
+    pub(super) fn align_travel_arrivals(&mut self, options: &super::Options) {
+        if !self
+            .travel
+            .trips
+            .iter()
+            .any(|trip| planning::needs_alignment(trip, self.travel.frozen))
+        {
+            return;
+        }
+        // Service slots and their padding are fixed before choosing later departures.
+        let capture = capture(self);
+        let _phase = self.trace.phase(Phase::Routes);
+        let epochs = planning::align_arrivals(
+            &capture,
+            &mut self.travel.trips,
+            options.avatar_max_speed,
+        );
+        self.trace.count(Counter::RouteCandidates, epochs);
+        self.travel.stats.graph_epochs += epochs;
+        self.travel.stats.retained_route_bytes =
+            retained_route_bytes(&self.travel.trips);
+    }
+
     fn routes(
         &self,
         capture: &Capture,
@@ -911,11 +942,7 @@ impl Simulation {
             bot_fades: trips.iter().filter(|t| t.bot && t.fade).count(),
             max_speed: options.avatar_max_speed,
             temporary_capture_bytes: capture.bytes(),
-            retained_route_bytes: trips.capacity() * size_of::<Trip>()
-                + trips
-                    .iter()
-                    .map(|trip| trip.route.retained_bytes())
-                    .sum::<usize>(),
+            retained_route_bytes: retained_route_bytes(&trips),
             graph_epochs,
             routed: trips.iter().filter(|t| !t.fade).count(),
             faded: trips.iter().filter(|t| t.fade).count(),

@@ -941,6 +941,7 @@ impl Simulation {
         if walk {
             simulation.travel.require_birth_routes(options.bot_travel)?;
         }
+        simulation.align_travel_arrivals(options);
         {
             let _phase = trace.phase(Phase::Caption);
             simulation.caption_plan =

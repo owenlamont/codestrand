@@ -210,6 +210,7 @@ impl Simulation {
         if options.travel_cap == TravelCap::None {
             self.travel.require_birth_routes(options.bot_travel)?;
         }
+        self.align_travel_arrivals(options);
         Ok(pass)
     }
 
