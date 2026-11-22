@@ -100,8 +100,8 @@ Every export directory gets `frames.csv`, one row per frame:
 frame,seconds,commit,files,avatars,beams,glyphs,missing_glyphs
 ```
 
-A nonzero `missing_glyphs` means a contributor name used a script no installed font
-covers; install fonts for it and export again.
+`missing_glyphs` counts unavailable glyphs across all visible text blocks in the
+frame. Install fonts covering the affected scripts and export again.
 
 ## Several repositories and config files
 

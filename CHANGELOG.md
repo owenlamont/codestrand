@@ -47,7 +47,8 @@ All notable changes to Codestrand are documented here, following
   ([#214](https://github.com/owenlamont/codestrand/pull/214),
   [#216](https://github.com/owenlamont/codestrand/pull/216))
 - Preview reuses planned windows when looping or rewinding while they fit in memory.
-  At the limit, preview releases the windows and replans as needed.
+  When estimated use exceeds the limit, preview releases the windows and replans as
+  needed.
   ([#221](https://github.com/owenlamont/codestrand/pull/221))
 - The desktop theme is now named Retro Desktop (`retro-desktop`).
   ([#185](https://github.com/owenlamont/codestrand/pull/185))
@@ -75,8 +76,8 @@ All notable changes to Codestrand are documented here, following
   [#213](https://github.com/owenlamont/codestrand/pull/213))
 - `--end-date` stops the import at the range's last commit: on a full Cargo clone, a
   two-frame export ending in 2016 took about 4.5 s instead of 75 s on a release build
-  without LTO. Its tiles are laid out for
-  the files up to the end date, so files are larger.
+  without LTO. Overview framing uses peak content across the selected interval.
+  Moving the end date earlier can leave the framing unchanged if the same peak remains.
   ([#199](https://github.com/owenlamont/codestrand/pull/199))
 
 ### Fixed
@@ -111,6 +112,7 @@ All notable changes to Codestrand are documented here, following
 - `--repository-label-plane`; titles now sit on the tile surface.
   ([#216](https://github.com/owenlamont/codestrand/pull/216))
 - GitLab and Gravatar portrait discovery, including `--gitlab-email-avatars`.
+  Existing contributor files with `gitlab` or `gravatar` keys now fail at startup.
   ([#202](https://github.com/owenlamont/codestrand/pull/202))
 - `--allow-truncated-history`; choose a shorter date range when an import exceeds
   a budget. ([#194](https://github.com/owenlamont/codestrand/pull/194))

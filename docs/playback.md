@@ -1,9 +1,10 @@
 # Playback
 
 Preview loops the selected history and reuses planned windows within the run while
-they fit within the replay memory limit. At the limit, preview discards the cached
-windows, replans as needed, and shows `Replay memory limit reached` during replanning
-pauses. Export renders the same launch timeline at explicit frame times at 1x speed.
+they fit within the replay memory limit. If estimated use exceeds the limit, preview
+discards the cached windows, replans as needed, and shows `Replay memory limit reached`
+during replanning pauses. Export renders the same launch timeline at explicit frame
+times at 1x speed.
 Export uses a static overview that fits the scene by default. Use `--camera-path`
 for a scripted camera.
 New tiles grow over 1.5 seconds before their first commit.
@@ -16,9 +17,7 @@ Preview opens its window at once and shows planning progress until playback is r
 For long histories, the first frame appears while later history is still being
 planned. Playback pauses if planning falls behind, then resumes without skipping
 history. Camera controls remain active during the pause, and a small label shows
-the planning stage and percentage. Rewinds also reuse planned windows. If the replay
-memory limit is reached, preview releases all retained windows and displays
-`Replay memory limit reached` when it pauses to plan them again.
+the planning stage and percentage. Rewinds also reuse planned windows.
 Export prints the stage and its percentage to standard error at most once a second.
 
 Commit application times are planned ahead for the selected history and pacing.
@@ -230,10 +229,12 @@ An ending before the selected playback interval is already complete when playbac
 
 The ending tile greys and fades in place over 2.5 playback seconds. Files and
 directories grey, rise and fade over the same interval.
-Neighbours then reclaim the space over four seconds. If two exits start less than four
-seconds apart before adding any travel waits, both take five seconds to keep tile edges
-moving steadily. Exits that start together count as one for this rule. The extra second
-does not extend the overlap test to later exits. Text fades in place.
+Neighbours reclaim the space over four seconds in a gap clear of commits and new tile
+births. Reclaim can wait after the fade for a gap or for an earlier reflow to finish.
+If two exits start less than four seconds apart before adding any travel waits, both
+take five seconds to keep tile edges moving steadily. Exits that start together count
+as one for this rule. The extra second does not extend the overlap test to later exits.
+Text fades in place.
 
 ## Contributor and file lifecycles
 
