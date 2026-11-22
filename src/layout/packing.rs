@@ -454,7 +454,7 @@ fn reweigh(
     };
 }
 
-/// The feasibility states of the last presence vector tiled, and how often they were reused.
+/// Feasibility states for the last tree and presence vector, with reuse counts.
 #[derive(Default)]
 struct Tiling {
     tree_tick: usize,
@@ -464,7 +464,6 @@ struct Tiling {
     reuses: usize,
 }
 
-/// Feasibility polygons depend on presence alone, so one presence vector's are kept.
 #[derive(Default)]
 struct TilingCache(std::sync::Mutex<Tiling>);
 
