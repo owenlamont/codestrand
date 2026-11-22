@@ -16,9 +16,9 @@ gh skill install owenlamont/codestrand codestrand --agent claude-code --scope us
 ```
 
 Swap `--agent` for `codex`, `cursor`, `github-copilot` or another host listed by
-`gh skill install --help`. The skill installs from the latest release, so it is
-available from the first release after 0.2.0. A test checks that every option the skill
-names is in `--help` and that every command it shows parses.
+`gh skill install --help`. Starting with 0.3.0, the skill ships with releases.
+A test checks that every Codestrand option the skill names is in `--help` and
+that every Codestrand command it shows parses.
 
 ## Prompting in AGENTS.md
 

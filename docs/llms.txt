@@ -4,13 +4,13 @@
 
 ## Getting started
 
-- [Installation](https://codestrand.pages.dev/getting-started/installation/): Codestrand ships as a native binary. Choose a channel matching your tools. The guides describe 0.2.0. Until publication, install from `main` for these features. If an option in the guides is missing from `--help`, build from `main`:
+- [Installation](https://codestrand.pages.dev/getting-started/installation/): Codestrand ships as a native binary. Choose a channel matching your tools. The guides describe 0.3.0. Check `codestrand --version` and the command's `--help` after installing. To try the latest changes from source:
 - [First use](https://codestrand.pages.dev/getting-started/quickstart/)
 
 ## Guides
 
 - [Git history import](https://codestrand.pages.dev/history/)
-- [Playback](https://codestrand.pages.dev/playback/): Preview loops the selected history. If playback is still preparing after a minute, the planning status shows a warning and suggests `--start-date YYYY-MM-DD` (inclusive, UTC) when a later start would keep about the last 1,000 tree-changing commits across the selected repositories. If you already set `--start-date`, replace it with the suggested date. Preview keeps planning and clears the warning when playback starts. Export uses a static overview that fits the scene by default.
+- [Playback](https://codestrand.pages.dev/playback/): Preview loops the selected history and reuses planned windows within the run while they fit within the replay memory limit. If estimated use exceeds the limit, preview discards the cached windows, replans as needed, and shows `Replay memory limit reached` during replanning pauses. Export renders the same launch timeline at explicit frame times at 1x speed. Export uses a static overview that fits the scene by default. Use `--camera-path` for a scripted camera. New tiles grow over 1.5 seconds before their first commit.
 - [Export](https://codestrand.pages.dev/export/)
 - [Config file](https://codestrand.pages.dev/configuration/): `--config FILE` reads `preview` and `export` options from a TOML file, so a run can be kept and repeated as one file. Each key is a flag name without the leading dashes:
 - [Contributors and avatars](https://codestrand.pages.dev/contributors/): Preview and export read `contributors.toml` from the user configuration directory:

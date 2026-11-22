@@ -789,17 +789,11 @@ impl State {
     }
 
     pub(super) fn overlay_label_bounds(&self, label: &super::Label) -> Option<Rect> {
-        let point = self.screen(label.position)?;
-        let size = super::names::rect(
-            Vec2::ZERO,
+        Some(super::names::top_left_rect(
+            self.screen(label.position)?,
             &label.text,
             label.kind.font_scale(),
             self.geometry.label_height,
-        )
-        .size();
-        Some(Rect::from_corners(
-            point - Vec2::Y * size.y,
-            point + Vec2::X * size.x,
         ))
     }
 
@@ -830,11 +824,7 @@ impl State {
         .size()
     }
 
-    /// Where each avatar's name attaches: the avatar, or for a group's member a point
-    /// one avatar radius inside the group's ring towards that member, so its name sits
-    /// just outside the ring beside it.
-    /// Where an avatar's name is anchored: the seat it is walking to, so the name holds
-    /// still while the body steps under it.
+    /// The avatar's current position, or its destination seat while settling.
     fn standing(&self, index: usize) -> Vec3 {
         let avatar = &self.avatars[index];
         avatar
@@ -843,6 +833,8 @@ impl State {
             .filter(|_| avatar.settle.is_some())
             .map_or(avatar.position, Placement::world)
     }
+
+    /// Projected name anchors, shifted one avatar radius inward for members on a ring.
     fn name_bodies(&self) -> Vec<Option<Vec2>> {
         let radius = self.avatar_radius();
         let capacities = &self.capacities;

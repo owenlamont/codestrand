@@ -1,14 +1,12 @@
 # Playback
 
-Preview loops the selected history. If playback is still preparing after a minute,
-the planning status shows a warning and suggests `--start-date YYYY-MM-DD` (inclusive,
-UTC) when a later start would keep about the last 1,000 tree-changing commits across
-the selected repositories. If you already set `--start-date`, replace it with the
-suggested date. Preview keeps planning and clears the warning when playback starts.
-Export uses a static overview that fits the scene by default.
-
-Export renders the same launch timeline at explicit frame times at 1x speed. Use
-`--camera-path` for a scripted camera.
+Preview loops the selected history and reuses planned windows within the run while
+they fit within the replay memory limit. If estimated use exceeds the limit, preview
+discards the cached windows, replans as needed, and shows `Replay memory limit reached`
+during replanning pauses. Export renders the same launch timeline at explicit frame
+times at 1x speed.
+Export uses a static overview that fits the scene by default. Use `--camera-path`
+for a scripted camera.
 New tiles grow over 1.5 seconds before their first commit.
 
 Preview renders at the window's physical resolution, including on HiDPI displays.
@@ -16,12 +14,19 @@ Resizing or maximising keeps a 720-logical-pixel-high UI: text scales with heigh
 and wider windows show more scene. See [Export](export.md) for native output sizes.
 
 Preview opens its window at once and shows planning progress until playback is ready.
+Directory packing numbers additional passes when planning retries. After planning,
+preview shows `Preparing renderer` until the scene is ready.
+
+If playback is still preparing after a minute, the status shows a warning and
+suggests `--start-date YYYY-MM-DD` (inclusive, UTC) when a later start would keep about
+the last 1,000 tree-changing commits across the selected repositories. If you already
+set `--start-date`, replace it with the suggested date. Preview keeps preparing and
+clears the warning when playback starts.
+
 For long histories, the first frame appears while later history is still being
 planned. Playback pauses if planning falls behind, then resumes without skipping
 history. Camera controls remain active during the pause, and a small label shows
-the planning stage and percentage. Loops and rewinds reuse planned windows while they
-fit within the replay memory limit. At the limit, preview releases those windows and
-displays `Replay memory limit reached` when it pauses to plan them again.
+the planning stage and percentage. Rewinds also reuse planned windows.
 Export prints the stage and its percentage to standard error at most once a second.
 
 Commit application times are planned ahead for the selected history and pacing.
@@ -233,10 +238,12 @@ An ending before the selected playback interval is already complete when playbac
 
 The ending tile greys and fades in place over 2.5 playback seconds. Files and
 directories grey, rise and fade over the same interval.
-Neighbours then reclaim the space over four seconds. If two exits start less than four
-seconds apart before adding any travel waits, both take five seconds to keep tile edges
-moving steadily. Exits that start together count as one for this rule. The extra second
-does not extend the overlap test to later exits. Text fades in place.
+Neighbours reclaim the space over four seconds in a gap clear of commits and new tile
+births. Reclaim can wait after the fade for a gap or for an earlier reflow to finish.
+If two exits start less than four seconds apart before adding any travel waits, both
+take five seconds to keep tile edges moving steadily. Exits that start together count
+as one for this rule. The extra second does not extend the overlap test to later exits.
+Text fades in place.
 
 ## Contributor and file lifecycles
 
@@ -244,10 +251,10 @@ The first commit enlarges the contributor avatar, settling over 1.2 playback sec
 Whole-file additions descend from the contributor along the beam to the file layout;
 deletions grey, rise and fade over 1.2 seconds. Line fragments remain separate.
 
-`--contributor-inactivity-days 60` assumes a contributor has left after 60 calendar
-days without a commit across the combined history. The avatar greys and fades over
-1.2 playback seconds; another commit revives the same contributor. The two-month default
-flags Owen's observed 88-day pause in the combined first-parent histories.
+`--contributor-inactivity-days` accepts 1–36,500 calendar days, inclusive. At the
+default of 60 days without a commit across the combined history, Codestrand assumes
+the contributor has left. The avatar greys and fades over 1.2 playback seconds.
+Another commit revives the same contributor.
 Departure is an assumption, not platform knowledge. Deadlines follow the compressed,
 padded timeline, using the latest author date reached so reversed dates cannot trigger
 an immediate departure. Playback does not extrapolate contributor departures beyond
@@ -346,7 +353,8 @@ Parking still spreads avatars when clear slots are available.
 A contributor can depart once its previous commit's last fragment has arrived and the
 moving gutter route can meet the speed limit. Travel overlaps other contributors'
 animations; commits remain strictly chronological. Routes stop at corners and accelerate
-toward `--avatar-max-speed` world units per second (default `31.4`, inclusive minimum `0.1`).
+toward `--avatar-max-speed` world units per second (default `31.4`, range `0.1` through
+`86400`, inclusive).
 Moving junctions follow the gutter network, with every canonical sample checked against
 the speed limit, frame bounds and tile guards. A shared parking point creates no trip.
 Contributors follow their parked gutter slot until their inferred calendar departure,
@@ -388,7 +396,6 @@ Padding is revalidated as scene geometry changes. The automatic policy uses at m
 padded rebuilds, including one cleanup of unused service padding.
 Uncapped padding grows until every walking trip completes, subject to the planning
 memory estimate. Each Dijkstra search is limited to 10,000 graph nodes.
-Numeric caps apply to accumulated extra waiting for trips between existing tiles.
 
 Header and caption remain in the outer frame. Other preview aspect ratios use conservative
 framing;
@@ -414,10 +421,9 @@ fit in memory. It can be conservative on some inputs and too low on others.
 Route searches stop at 10,000 nodes; capped playback can fade across when a search
 exceeds that bound, while uncapped walking reports an error.
 
-Large multi-repository histories can take time to begin playback. Consumed travel plans
-are discarded to bound retained travel windows and checkpoints; the shared layout
-remains available throughout playback. This does not bound total process memory.
-To inspect a smaller interval, use inclusive `--start-date` and `--end-date`.
+Export releases consumed travel plans. Preview can retain them for replay within the
+same run. The shared layout remains available throughout playback. To play a smaller
+interval, use inclusive `--start-date` and `--end-date`.
 
 Playback memory and duration checks use the range selected by `--start-date` and `--end-date`;
 the layout estimate also includes the files present when the range starts.
@@ -466,8 +472,8 @@ codestrand preview --repository /path/to/repository --start-date 2026-05-01 --en
 
 Pacing preserves within-day timestamp spacing. Coincident, reversed or very close
 timestamps get a 0.05-second minimum gap, limited by the idle cap, preserving commit
-order. Seconds per day accepts `0.01` through `86400`, inclusive; the idle cap must
-also be at least one simulation tick (1/60 second).
+order. Seconds per day accepts `0.01` through `86400`, inclusive. The idle cap
+accepts one simulation tick (1/60 second) through `86400` seconds, inclusive.
 
 Live speed keys move through the canonical timeline faster or slower without
 changing commit times, layout, pulses, beams, avatar motion, settling or fades in

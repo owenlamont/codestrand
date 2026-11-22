@@ -348,10 +348,11 @@ impl Simulation {
             if adjusted != padding {
                 return adjusted;
             }
+            if options.replay_everything {
+                continue;
+            }
             let round = self.travel.round_state(self.window.as_ref());
-            // A round that ends where it began repeats unchanged until the cap.
-            if !options.replay_everything && repeated_round(previous.as_deref(), &round)
-            {
+            if repeated_round(previous.as_deref(), &round) {
                 self.trace.count(Counter::SettledRefinements, 1);
                 break;
             }

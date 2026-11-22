@@ -16,15 +16,12 @@ pub(super) fn screen(sim: &Simulation, point: Vec3) -> Vec2 {
         * HALF
 }
 pub(in crate::model) fn label_bounds(sim: &Simulation, label: &super::Label) -> Rect {
-    let point = screen(sim, label.position);
-    let size = super::names::rect(
-        Vec2::ZERO,
+    super::names::top_left_rect(
+        screen(sim, label.position),
         &label.text,
         label.scale,
         sim.state.geometry.label_height,
     )
-    .size();
-    Rect::from_corners(point - Vec2::Y * size.y, point + Vec2::X * size.x)
 }
 
 #[derive(Debug, Default, Serialize)]
