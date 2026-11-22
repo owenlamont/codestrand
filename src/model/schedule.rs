@@ -34,6 +34,10 @@ pub(super) struct Clock {
 }
 
 impl Clock {
+    pub(super) fn replay_bytes(&self) -> u128 {
+        self.history.replay_bytes() + self.presentation.replay_bytes()
+    }
+
     pub(super) fn new(history: Schedule, presentation: Schedule) -> Self {
         Self {
             history,
@@ -80,6 +84,18 @@ impl Clock {
 }
 
 impl Schedule {
+    pub(super) fn replay_bytes(&self) -> u128 {
+        use super::checkpoint_memory::{buffer_bytes, retained_fields};
+
+        let (starts, services, birth_protections, walk_protections) = retained_fields!(self, Schedule {
+            starts, services, birth_protections, walk_protections;
+        });
+        buffer_bytes::<Time>(starts.capacity())
+            + buffer_bytes::<Service>(services.capacity())
+            + buffer_bytes::<(usize, usize)>(birth_protections.capacity())
+            + buffer_bytes::<(usize, usize)>(walk_protections.capacity())
+    }
+
     pub(super) fn for_replay(events: &[Event], options: &super::Options) -> Self {
         let range = options.selected_range(events.len());
         let mut seen: std::collections::HashSet<_> = events[..range.start]

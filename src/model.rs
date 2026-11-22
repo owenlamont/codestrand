@@ -21,6 +21,7 @@ mod lifecycle;
 pub(crate) use lifecycle::RepositoryExit;
 #[cfg(test)]
 pub(crate) use lifecycle::exits_from_starts;
+pub(crate) mod checkpoint_memory;
 pub(crate) use schedule::BIRTH_TICKS;
 #[cfg(test)]
 mod measurement;
@@ -138,6 +139,7 @@ pub(super) struct Options {
     pub unread: Unread,
     pub travel_cap: TravelCap,
     pub travel_window_seconds: Option<f32>,
+    pub replay: Option<Arc<std::sync::Mutex<streaming::Replay>>>,
     #[cfg(test)]
     pub eager_windows: bool,
     #[cfg(test)]
@@ -210,6 +212,10 @@ pub(super) enum BotTravel {
 }
 
 impl Options {
+    pub(super) fn retain_preview_windows(&mut self) {
+        self.replay = Some(Arc::new(std::sync::Mutex::new(streaming::Replay::new())));
+    }
+
     pub(super) fn choose_window(&mut self, events: &[Event]) -> Time {
         let history = Schedule::for_replay(events, self);
         let (_, endings) =
@@ -247,6 +253,7 @@ impl Default for Options {
             unread: Unread::default(),
             travel_cap: TravelCap::Seconds(0.4),
             travel_window_seconds: None,
+            replay: None,
             #[cfg(test)]
             eager_windows: false,
             #[cfg(test)]
@@ -358,6 +365,7 @@ fn attach_samples<'a>(
         .collect()
 }
 
+#[cfg_attr(test, derive(Debug))]
 pub(super) struct DiffLine {
     pub fragment: usize,
     pub detail: f32,

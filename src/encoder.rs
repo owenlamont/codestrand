@@ -254,26 +254,49 @@ fn wait_for_output(
     output: Option<&Path>,
     quiet: Duration,
 ) -> anyhow::Result<ExitStatus> {
-    let fingerprint = || {
-        output
-            .and_then(|path| std::fs::metadata(path).ok())
-            .map(|metadata| (metadata.len(), metadata.modified().ok()))
-    };
-    let mut previous = fingerprint();
-    let mut last_progress = Instant::now();
+    let mut quiet_for = output_progress(output, Instant::now);
     loop {
         if let Some(status) = child.try_wait()? {
             return Ok(status);
         }
-        let current = fingerprint();
-        if current != previous {
-            previous = current;
-            last_progress = Instant::now();
-        }
-        if last_progress.elapsed() >= quiet {
+        if quiet_for() >= quiet {
+            if let Some(status) = child.try_wait()? {
+                return Ok(status);
+            }
             bail!("FFmpeg output made no progress for {quiet:?}");
         }
         thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn output_progress(
+    output: Option<&Path>,
+    now: impl FnMut() -> Instant,
+) -> impl FnMut() -> Duration {
+    track_progress(
+        move || {
+            output
+                .and_then(|path| std::fs::metadata(path).ok())
+                .map(|metadata| (metadata.len(), metadata.modified().ok()))
+        },
+        now,
+    )
+}
+
+fn track_progress<T: PartialEq>(
+    mut fingerprint: impl FnMut() -> T,
+    mut now: impl FnMut() -> Instant,
+) -> impl FnMut() -> Duration {
+    let mut previous = fingerprint();
+    let mut last_progress = now();
+    move || {
+        let current = fingerprint();
+        let now = now();
+        if current != previous {
+            previous = current;
+            last_progress = now;
+        }
+        now - last_progress
     }
 }
 
@@ -385,21 +408,6 @@ fn main() {
     }
     let mut bytes = Vec::new();
     std::io::stdin().read_to_end(&mut bytes).unwrap();
-    let touch = args.iter().any(|arg| arg == "touch-finish");
-    if touch || args.iter().any(|arg| arg == "slow-finish") {
-        let mut output = std::fs::File::create(args.last().unwrap()).unwrap();
-        output.write_all(b"frame").unwrap();
-        for step in 1..20 {
-            std::thread::sleep(std::time::Duration::from_millis(100));
-            if touch {
-                let seconds = std::time::Duration::from_secs(step);
-                output.set_modified(std::time::UNIX_EPOCH + seconds).unwrap();
-            } else {
-                output.write_all(b"frame").unwrap();
-            }
-        }
-        return;
-    }
     if let Some(path) = args.last().filter(|path| path.as_str() != "-") {
         std::fs::write(path, bytes).unwrap();
     }
@@ -515,36 +523,68 @@ fn main() {
         assert!(!output.exists());
     }
 
-    /// Finishes a fake encoder that changes its output every 100 ms for about two
-    /// seconds, so finishing succeeds only if each change resets the 1 s quiet period.
-    fn finish_slowly(mode: &str) -> Vec<u8> {
-        let (scratch, binary) = fake_ffmpeg();
-        let output = scratch.path().join("slow.mp4");
-        let options = Options {
-            video: Some(output.clone()),
-            ffmpeg: Some(binary),
-            ffmpeg_arg: vec![mode.into()],
-        };
-        let mut encoder = options
-            .start(30, crate::resolution::Resolution::default())
-            .unwrap()
-            .unwrap();
-        encoder.write(vec![0; 12]).unwrap();
-        let quiet = Duration::from_secs(1);
-        let start = Instant::now();
-        encoder.finish_with_quiet_period(quiet).unwrap();
-        assert!(start.elapsed() > quiet);
-        std::fs::read(output).unwrap()
-    }
-
     #[test]
     fn finishing_tracks_growing_output() {
-        assert_eq!(finish_slowly("slow-finish"), b"frame".repeat(20));
+        let output = tempfile::NamedTempFile::new().unwrap();
+        let modified = output.as_file().metadata().unwrap().modified().unwrap();
+        let start = Instant::now();
+        let interval = Duration::from_millis(900);
+        let mut clock = (0..=4).map(|step| start + interval * step);
+        let mut quiet_for =
+            output_progress(Some(output.path()), || clock.next().unwrap());
+
+        for size in 1..=3 {
+            std::fs::write(output.path(), vec![0; size]).unwrap();
+            output.as_file().set_modified(modified).unwrap();
+            assert_eq!(quiet_for(), Duration::ZERO);
+        }
+
+        assert_eq!(quiet_for(), interval);
     }
 
     #[test]
     fn finishing_tracks_output_whose_modification_time_alone_changes() {
-        assert_eq!(finish_slowly("touch-finish"), b"frame");
+        let output = tempfile::NamedTempFile::new().unwrap();
+        let start = Instant::now();
+        let interval = Duration::from_millis(900);
+        let mut clock = (0..=4).map(|step| start + interval * step);
+        let mut quiet_for =
+            output_progress(Some(output.path()), || clock.next().unwrap());
+
+        for step in 1_u64..=3 {
+            let modified = std::time::UNIX_EPOCH + Duration::from_secs(step * 2);
+            output.as_file().set_modified(modified).unwrap();
+            assert_eq!(quiet_for(), Duration::ZERO);
+        }
+
+        assert_eq!(quiet_for(), interval);
+    }
+
+    #[test]
+    fn slow_metadata_read_resets_quiet_interval_when_output_grows() {
+        use std::cell::Cell;
+
+        let start = Instant::now();
+        let quiet = Duration::from_secs(1);
+        let clock = Cell::new(start);
+        let mut size = [0, 1, 1, 1].into_iter();
+        let mut quiet_for = track_progress(
+            || {
+                let size = size.next().unwrap();
+                if clock.get() == start + quiet / 2 {
+                    clock.set(start + quiet * 2);
+                }
+                size
+            },
+            || clock.get(),
+        );
+
+        clock.set(start + quiet / 2);
+        assert_eq!(quiet_for(), Duration::ZERO);
+        clock.set(start + quiet * 2 + quiet / 2);
+        assert_eq!(quiet_for(), quiet / 2);
+        clock.set(start + quiet * 3);
+        assert_eq!(quiet_for(), quiet);
     }
 
     #[test]

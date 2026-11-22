@@ -1,10 +1,14 @@
 use std::{
+    mem::size_of_val,
     ops::Deref,
     sync::{Arc, Mutex, mpsc},
     thread,
 };
 
-use super::{Options, Simulation, Time};
+use super::{
+    Options, Simulation, Time,
+    checkpoint_memory::{buffer_bytes, hash_table_bytes, retained_fields},
+};
 use crate::timeline::Event;
 
 // Consumer, worker, and the completed handoff while the consumer catches up.
@@ -90,6 +94,61 @@ pub(super) struct Stream {
     reset: mpsc::SyncSender<u64>,
     generation: u64,
     resetting: bool,
+    latest_ready: Option<Ready>,
+    replay: Option<Arc<Mutex<Replay>>>,
+}
+
+const REPLAY_LIMIT: u128 = 1024 * 1024 * 1024;
+
+pub(crate) struct Replay {
+    windows: Vec<Simulation>,
+    used: u128,
+    limit: u128,
+    exceeded: bool,
+}
+
+impl Replay {
+    pub(super) fn new() -> Self {
+        Self {
+            windows: Vec::new(),
+            used: 0,
+            limit: REPLAY_LIMIT,
+            exceeded: false,
+        }
+    }
+
+    pub(super) fn set_budget(&mut self, limit: u128) {
+        self.limit = self.limit.min(limit);
+        self.check_limit(self.used);
+    }
+
+    fn check_limit(&mut self, used: u128) -> bool {
+        if !self.exceeded && used > self.limit {
+            self.windows = Vec::new();
+            self.used = 0;
+            self.exceeded = true;
+        }
+        !self.exceeded
+    }
+
+    fn retain(&mut self, packet: &Packet) {
+        if self.exceeded {
+            return;
+        }
+        let used = self.used.saturating_add(packet.simulation.replay_bytes());
+        if self.check_limit(used) {
+            self.windows.push(packet.simulation.clone());
+            self.used = used;
+        }
+    }
+
+    fn frame(&self, tick: u64) -> Option<Simulation> {
+        let index = self.windows.partition_point(|window| {
+            let ready = window.ready_end.expect("retained window is planned");
+            !ready.complete && ready.end <= tick
+        });
+        self.windows.get(index).cloned()
+    }
 }
 
 fn work(
@@ -152,6 +211,7 @@ impl Stream {
         // The worker plans one window ahead, then hands it directly to the consumer.
         let (sender, receiver) = mpsc::sync_channel(0);
         let (reset, resets) = mpsc::sync_channel(1);
+        let replay = options.replay.clone();
         thread::Builder::new()
             .name("travel-planner".into())
             .spawn(move || {
@@ -180,6 +240,8 @@ impl Stream {
             reset,
             generation: 0,
             resetting: false,
+            latest_ready: None,
+            replay,
         };
         let mut first = stream
             .receive(true)?
@@ -212,6 +274,13 @@ impl Stream {
             }?;
             if packet.generation == self.generation {
                 self.resetting = false;
+                self.latest_ready = packet.simulation.ready_end;
+                if let Some(replay) = &self.replay {
+                    replay
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .retain(&packet);
+                }
                 return Ok(Some(packet.simulation));
             }
         }
@@ -219,6 +288,72 @@ impl Stream {
 }
 
 impl Simulation {
+    fn replay_bytes(&self) -> u128 {
+        let (
+            file_ids,
+            first_arrivals,
+            finals,
+            departures,
+            repository_ends,
+            caption_plan,
+            packing,
+            envelopes,
+            schedule,
+            clock,
+            births,
+            initial,
+            state,
+            theme,
+            travel,
+        ) = retained_fields!(self, Simulation {
+            file_ids, first_arrivals, finals, departures, repository_ends, caption_plan,
+            packing, envelopes, schedule, clock, births, initial, state, theme, travel;
+            repository_exits, caption_style, repository_boundary, collapse_directories,
+            diff_text_distance, events, offset, unread_before,
+            total, playback_multiplier, heat_half_life, visuals, progress, trace,
+            tick_times, window, boundaries, windowed, stream, ready_end,
+            #[cfg(test)]
+            advance_all_files,
+        });
+        debug_assert!(
+            self.window.is_none()
+                && self.boundaries.is_empty()
+                && self.stream.is_none()
+        );
+        let checkpoint = initial.replay_bytes();
+        let current = if Arc::ptr_eq(initial, &state.0) {
+            0
+        } else {
+            state.replay_bytes()
+        };
+        let rays = envelopes
+            .iter()
+            .map(|row| row.ray_bytes() as u128)
+            .sum::<u128>();
+        // The replay vector can reserve four slots at its first push and double thereafter.
+        4 * size_of_val(self) as u128
+            + checkpoint
+            + current
+            + hash_table_bytes::<String, super::FileIdentity>(file_ids.capacity())
+            + file_ids
+                .keys()
+                .map(|path| path.capacity() as u128)
+                .sum::<u128>()
+            + buffer_bytes::<u16>(first_arrivals.capacity())
+            + buffer_bytes::<u16>(finals.capacity())
+            + buffer_bytes::<Time>(departures.capacity())
+            + buffer_bytes::<Time>(repository_ends.capacity())
+            + buffer_bytes::<super::caption::Transition>(caption_plan.capacity())
+            + packing.replay_bytes()
+            + buffer_bytes::<super::slots::Envelope>(envelopes.capacity())
+            + rays
+            + schedule.replay_bytes()
+            + clock.replay_bytes()
+            + buffer_bytes::<(usize, u64, u64)>(births.capacity())
+            + theme.replay_bytes()
+            + travel.replay_bytes()
+    }
+
     #[cfg(test)]
     pub(crate) fn force_unrouteable_test(&mut self) {
         self.travel.force_unrouteable();
@@ -244,23 +379,60 @@ impl Simulation {
             return Ok(true);
         };
         let mut stream = shared.lock().map_err(|_| Error::Disconnected)?;
-        if super::Schedule::frame_tick(frame, fps) < self.initial.tick {
+        if !stream.resetting && self.frame_ready(frame, fps) {
+            return Ok(true);
+        }
+        let tick = super::Schedule::frame_tick(frame, fps);
+        let retained = stream.replay.as_ref().and_then(|replay| {
+            replay
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .frame(tick)
+        });
+        if let Some(next) = retained {
+            self.install_window(next, &shared);
+            return Ok(true);
+        }
+        if tick < self.initial.tick
+            || stream
+                .latest_ready
+                .is_some_and(|ready| tick < ready.end || ready.complete)
+        {
             stream.rewind()?;
         }
         while stream.resetting || !self.frame_ready(frame, fps) {
-            let Some(mut next) = stream.receive(wait)? else {
+            let Some(next) = stream.receive(wait)? else {
                 return Ok(false);
             };
-            next.set_theme(self.theme.clone());
-            next.playback_multiplier = self.playback_multiplier;
-            next.caption_style = self.caption_style;
-            next.repository_boundary = self.repository_boundary;
-            next.collapse_directories = self.collapse_directories;
-            next.diff_text_distance = self.diff_text_distance;
-            next.stream = Some(shared.clone());
-            *self = next;
+            self.install_window(next, &shared);
         }
         Ok(true)
+    }
+
+    fn install_window(&mut self, mut next: Self, stream: &Arc<Mutex<Stream>>) {
+        next.set_theme(self.theme.clone());
+        next.playback_multiplier = self.playback_multiplier;
+        next.caption_style = self.caption_style;
+        next.repository_boundary = self.repository_boundary;
+        next.collapse_directories = self.collapse_directories;
+        next.diff_text_distance = self.diff_text_distance;
+        next.stream = Some(stream.clone());
+        *self = next;
+    }
+
+    pub(crate) fn replanning_after_replay_limit(&self) -> bool {
+        self.stream.as_ref().is_some_and(|stream| {
+            let stream = stream
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            stream.generation > 0
+                && stream.replay.as_ref().is_some_and(|replay| {
+                    replay
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .exceeded
+                })
+        })
     }
     pub(crate) fn history_progress(&self) -> (Time, Time) {
         (
@@ -529,6 +701,15 @@ pub(crate) mod tests {
         hook: Option<WindowHook>,
         cap: super::super::TravelCap,
     ) -> Simulation {
+        fixture_with_replay(eager, hook, cap, None)
+    }
+
+    fn fixture_with_replay(
+        eager: bool,
+        hook: Option<WindowHook>,
+        cap: super::super::TravelCap,
+        replay: Option<Arc<Mutex<Replay>>>,
+    ) -> Simulation {
         let events = (0..8)
             .map(|index| {
                 let mut row = vec![crate::timeline::synthetic().remove(0)];
@@ -543,6 +724,7 @@ pub(crate) mod tests {
                 seconds_per_day: 1.0,
                 max_idle_seconds: 1.0,
                 travel_window_seconds: Some(2.0),
+                replay,
                 eager_windows: eager,
                 window_hook: hook,
                 travel_cap: cap,
@@ -701,5 +883,281 @@ pub(crate) mod tests {
             stream.advance_to(frame, 60);
             assert_eq!(visible(&stream), expected, "loop frame {frame}");
         }
+    }
+
+    #[test]
+    fn retained_windows_replay_every_frame_without_planning() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let hook: WindowHook = {
+            let calls = calls.clone();
+            Arc::new(move |_, _| {
+                calls.fetch_add(1, Ordering::Relaxed);
+            })
+        };
+        let mut sim = fixture_with_replay(
+            false,
+            Some(hook),
+            super::super::TravelCap::Seconds(0.4),
+            Some(Arc::new(Mutex::new(Replay::new()))),
+        );
+        let frames = fixture(true).frames(60).unwrap();
+        let first: Vec<_> = (0..frames)
+            .map(|frame| {
+                sim.advance_to(frame, 60);
+                rendered_frame(&sim)
+            })
+            .collect();
+        assert!(sim.planning_complete());
+        let planned = calls.load(Ordering::Relaxed);
+        assert!(planned > 1);
+        for (frame, expected) in (0..frames).zip(first) {
+            assert!(sim.prepare_frame(frame, 60, false).unwrap());
+            sim.advance_to(frame, 60);
+            assert_eq!(rendered_frame(&sim), expected, "loop frame {frame}");
+        }
+        assert_eq!(calls.load(Ordering::Relaxed), planned);
+    }
+
+    fn rendered_frame(sim: &Simulation) -> String {
+        let layout = sim.layout();
+        let files: Vec<_> = layout
+            .files()
+            .map(|(id, file)| sim.file_effect(id, file))
+            .collect();
+        let repositories: Vec<_> = (0..layout.repositories.len())
+            .map(|repository| {
+                (
+                    sim.repository_effect(repository),
+                    sim.visible_repository_tile(repository),
+                )
+            })
+            .collect();
+        let settings = (
+            sim.theme().name,
+            sim.caption_style,
+            sim.repository_boundary,
+            sim.collapse_directories,
+            sim.diff_text_distance,
+            sim.playback_multiplier(),
+        );
+        let placement = (
+            sim.seconds(),
+            layout.revision(),
+            sim.state.region_depth,
+            sim.groups(),
+            sim.scale(),
+            sim.avatar_disc_scale(),
+            sim.member_scales(),
+            &sim.state.pulses,
+        );
+        let caption = (sim.caption_fields(), sim.caption_background());
+        format!(
+            "{}|{}|{files:?}|{repositories:?}|{settings:?}|{placement:?}|{caption:?}|{:?}",
+            visible(sim),
+            layout.exact_state(),
+            sim.diff_lines()
+        )
+    }
+
+    #[test]
+    fn replay_comparison_detects_file_layout_and_presentation_changes() {
+        let mut sim = fixture(true);
+        sim.advance_to(60, 60);
+        let expected = rendered_frame(&sim);
+        let mut heated = sim.clone();
+        let file = heated.layout().files().next().unwrap().0;
+        heated.state.layout.heat(file, 1.0);
+        assert_ne!(rendered_frame(&heated), expected, "file heat");
+        sim.collapse_directories = !sim.collapse_directories;
+        assert_ne!(rendered_frame(&sim), expected, "directory presentation");
+    }
+
+    #[test]
+    fn long_repository_labels_exhaust_the_replay_budget() {
+        let mut simulation = fixture(true);
+        simulation.window = None;
+        simulation.boundaries = Vec::new();
+        let limit = 1024 * 1024;
+        let mut replay = Replay::new();
+        replay.set_budget(limit);
+        for label in ['a', 'b'] {
+            let checkpoint = Arc::make_mut(&mut simulation.initial);
+            checkpoint.layout.repositories[0].label =
+                label.to_string().repeat(600 * 1024);
+            simulation.state = super::super::SharedState(simulation.initial.clone());
+            replay.retain(&Packet {
+                generation: 0,
+                simulation: simulation.clone(),
+            });
+            if label == 'a' {
+                assert_eq!(replay.windows.len(), 1);
+            }
+        }
+        assert!(replay.exceeded);
+        assert!(replay.windows.is_empty());
+    }
+
+    #[test]
+    fn checkpoint_charge_covers_reserved_payloads() {
+        let mut simulation = fixture(true);
+        simulation.advance_to(60, 60);
+        let checkpoint = &mut *simulation.state;
+        let before = checkpoint.replay_bytes();
+        let region = &mut checkpoint.layout.repositories[0];
+        let label_before = region.label.capacity();
+        let outline_before = region.outline.capacity();
+        region.label.reserve(64 * 1024);
+        region.outline.reserve(512);
+        let region_growth = (region.label.capacity() - label_before) as u128
+            + buffer_bytes::<bevy::math::Vec2>(
+                region.outline.capacity() - outline_before,
+            );
+        let avatar = &mut checkpoint.avatars[0];
+        let name_before = avatar.name.capacity();
+        let touched_before = avatar.touched.capacity();
+        avatar.name.reserve(8192);
+        avatar.touched.reserve(256);
+        let avatar_growth = (avatar.name.capacity() - name_before) as u128
+            + buffer_bytes::<u64>(avatar.touched.capacity() - touched_before);
+        assert_eq!(
+            checkpoint.replay_bytes() - before,
+            region_growth + avatar_growth
+        );
+    }
+
+    #[test]
+    fn long_contributor_identities_exhaust_the_replay_budget() {
+        let mut sim = fixture(true);
+        sim.advance_to(60, 60);
+        let avatar = sim.avatars()[0].clone();
+        let contributors = 128;
+        let string_bytes = 4096;
+        let checkpoint = Arc::make_mut(&mut sim.initial);
+        checkpoint.avatars.clear();
+        checkpoint.authors.clear();
+        for author in 0..contributors {
+            let mut avatar = avatar.clone();
+            avatar.name = format!("{author:0>string_bytes$}");
+            avatar.key =
+                crate::contributors::Key::Name(avatar.name.as_bytes().to_vec());
+            avatar.name_visibility.placement.as_mut().unwrap().text =
+                avatar.name.clone();
+            avatar.slot.as_mut().unwrap().text = avatar.name.clone();
+            checkpoint.authors.insert(avatar.key.clone(), author);
+            checkpoint.avatars.push(avatar);
+        }
+        sim.state = super::super::SharedState(sim.initial.clone());
+        sim.window = None;
+        sim.boundaries = Vec::new();
+        let packet = Packet {
+            generation: 0,
+            simulation: sim,
+        };
+        let checkpoint_bytes = packet.simulation.replay_bytes();
+        assert!(checkpoint_bytes >= (contributors * 5 * string_bytes) as u128);
+        let mut replay = Replay::new();
+        replay.set_budget(checkpoint_bytes);
+        replay.retain(&packet);
+        assert_eq!(replay.windows.len(), 1);
+        assert_eq!(replay.used, checkpoint_bytes);
+        let mut next = Packet {
+            simulation: packet.simulation.clone(),
+            ..packet
+        };
+        Arc::make_mut(&mut next.simulation.initial).tick += 1;
+        next.simulation.state =
+            super::super::SharedState(next.simulation.initial.clone());
+        replay.retain(&next);
+        assert!(replay.exceeded);
+        assert!(replay.windows.is_empty());
+    }
+
+    #[test]
+    fn seeking_to_an_evicted_window_resets_blocking_prepare() {
+        seek_after_eviction(true);
+    }
+
+    #[test]
+    fn seeking_to_an_evicted_window_resets_nonblocking_prepare() {
+        seek_after_eviction(false);
+    }
+
+    #[test]
+    fn seeking_past_retained_windows_resumes_the_worker() {
+        let replay = Arc::new(Mutex::new(Replay::new()));
+        let mut sim = fixture_with_replay(
+            false,
+            None,
+            super::super::TravelCap::Seconds(0.4),
+            Some(replay.clone()),
+        );
+        let second_start = u32::try_from(sim.ready_end.unwrap().end).unwrap();
+        assert!(sim.prepare_frame(second_start, 60, true).unwrap());
+        let third_start = u32::try_from(sim.ready_end.unwrap().end).unwrap();
+        assert!(sim.prepare_frame(0, 60, false).unwrap());
+        assert!(sim.prepare_frame(third_start, 60, true).unwrap());
+        assert_eq!(sim.initial.tick, u64::from(third_start));
+        let stream = sim.stream.as_ref().unwrap().lock().unwrap();
+        assert_eq!(stream.generation, 0);
+        assert_eq!(replay.lock().unwrap().windows.len(), 3);
+    }
+
+    fn seek_after_eviction(wait: bool) {
+        let replay = Arc::new(Mutex::new(Replay::new()));
+        let mut sim = fixture_with_replay(
+            false,
+            None,
+            super::super::TravelCap::Seconds(0.4),
+            Some(replay.clone()),
+        );
+        let second_start = u32::try_from(sim.ready_end.unwrap().end).unwrap();
+        assert!(sim.prepare_frame(second_start, 60, true).unwrap());
+        assert_eq!(sim.initial.tick, u64::from(second_start));
+        assert!(sim.prepare_frame(0, 60, false).unwrap());
+        assert_eq!(sim.initial.tick, 0);
+        replay.lock().unwrap().set_budget(0);
+
+        let (done, result) = mpsc::sync_channel(1);
+        let worker = thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            loop {
+                let ready = sim.prepare_frame(second_start, 60, wait).unwrap();
+                assert!(sim.initial.tick <= u64::from(second_start));
+                if ready {
+                    assert_eq!(sim.initial.tick, u64::from(second_start));
+                    assert!(sim.replanning_after_replay_limit());
+                    done.send(()).unwrap();
+                    break;
+                }
+                assert!(std::time::Instant::now() < deadline);
+                thread::sleep(Duration::from_millis(1));
+            }
+        });
+        result
+            .recv_timeout(Duration::from_secs(3))
+            .expect("prepare must finish after resetting the worker");
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn exceeding_the_replay_limit_releases_windows_and_replans() {
+        let replay = Arc::new(Mutex::new(Replay::new()));
+        let mut sim = fixture_with_replay(
+            false,
+            None,
+            super::super::TravelCap::Seconds(0.4),
+            Some(replay.clone()),
+        );
+        let first = visible(&sim);
+        assert_eq!(replay.lock().unwrap().windows.len(), 1);
+        replay.lock().unwrap().set_budget(0);
+        assert!(replay.lock().unwrap().windows.is_empty());
+        assert!(!sim.replanning_after_replay_limit());
+        sim.advance_to(fixture(true).frames(60).unwrap() - 1, 60);
+        assert!(sim.prepare_frame(0, 60, true).unwrap());
+        assert!(sim.replanning_after_replay_limit());
+        assert_eq!(visible(&sim), first);
     }
 }

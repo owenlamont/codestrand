@@ -1,5 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+use crate::model::checkpoint_memory::{
+    buffer_bytes, hash_table_bytes, retained_fields, tree_bytes,
+};
 use bevy::math::Vec2;
 use planner::Plan;
 
@@ -25,6 +28,13 @@ pub(super) struct RepositoryRegion {
 }
 
 impl RepositoryRegion {
+    fn replay_bytes(&self) -> u128 {
+        let (label, outline) = retained_fields!(self, Self {
+            label, outline; low, high, live, items, tile, gutter, height, rotated,
+        });
+        label.capacity() as u128 + buffer_bytes::<Vec2>(outline.capacity())
+    }
+
     pub(super) fn corners(&self) -> [Vec2; 4] {
         [
             self.low,
@@ -67,6 +77,14 @@ pub(super) struct File {
 }
 
 impl File {
+    fn replay_bytes(&self) -> u128 {
+        let (path,) = retained_fields!(self, Self {
+            path; local_position, dir, slot, slot_offset, position, velocity, presence,
+            state, delay, heat, activity, author,
+        });
+        path.capacity() as u128
+    }
+
     pub(super) fn draw_scale(&self, dir: &Dir) -> f32 {
         match self.state {
             Presence::Present => self.visible_presence(dir),
@@ -112,6 +130,14 @@ pub(super) struct Dir {
 }
 
 impl Dir {
+    fn replay_bytes(&self) -> u128 {
+        let (path, slots) = retained_fields!(self, Self {
+            path, slots; local_position, scale, repository, parent, depth, position, files,
+            children, live, touch_age, reserve,
+        });
+        path.capacity() as u128 + buffer_bytes::<Option<u64>>(slots.capacity())
+    }
+
     fn new(path: String, parent: Option<usize>, depth: u16, repository: usize) -> Self {
         Self {
             local_position: Vec2::ZERO,
@@ -152,12 +178,54 @@ pub(super) struct Layout {
     /// Files with a delay or fade pending; every other file is present and still.
     fading: BTreeSet<u64>,
     file_index: HashMap<String, u64>,
+    file_index_capacity: usize,
     next_id: u64,
     revision: u64,
     plan: Plan,
     pub repositories: Vec<RepositoryRegion>,
     placed: bool,
     reserve_fixed_points: Vec<Option<u32>>,
+}
+
+impl Layout {
+    pub(super) fn replay_bytes(&self) -> u128 {
+        let (
+            dirs,
+            dir_index,
+            files,
+            fading,
+            file_index,
+            file_index_capacity,
+            plan,
+            repositories,
+            reserve_fixed_points,
+        ) = retained_fields!(self, Self {
+            dirs, dir_index, files, fading, file_index, file_index_capacity, plan,
+            repositories, reserve_fixed_points; next_id, revision, placed,
+        });
+        buffer_bytes::<Dir>(dirs.capacity())
+            + dirs.iter().map(Dir::replay_bytes).sum::<u128>()
+            + hash_table_bytes::<String, usize>(dir_index.capacity())
+            + dir_index
+                .keys()
+                .map(|path| path.capacity() as u128)
+                .sum::<u128>()
+            + tree_bytes::<u64, File>(files.len())
+            + files.values().map(File::replay_bytes).sum::<u128>()
+            + tree_bytes::<u64, ()>(fading.len())
+            + hash_table_bytes::<String, u64>(*file_index_capacity)
+            + file_index
+                .keys()
+                .map(|path| path.capacity() as u128)
+                .sum::<u128>()
+            + plan.replay_bytes()
+            + buffer_bytes::<RepositoryRegion>(repositories.capacity())
+            + repositories
+                .iter()
+                .map(RepositoryRegion::replay_bytes)
+                .sum::<u128>()
+            + buffer_bytes::<Option<u32>>(reserve_fixed_points.capacity())
+    }
 }
 
 /// How much of a file shows, from its presence and how far inside its directory disc it sits.
@@ -247,6 +315,7 @@ impl Layout {
             files: BTreeMap::new(),
             fading: BTreeSet::new(),
             file_index: HashMap::new(),
+            file_index_capacity: 0,
             next_id: 0,
             revision: 0,
             plan: Plan::default(),
@@ -368,7 +437,7 @@ impl Layout {
                 author,
             },
         );
-        self.file_index.insert(path.to_owned(), id);
+        self.index_file(path, id);
         self.fading.insert(id);
         id
     }
@@ -435,8 +504,15 @@ impl Layout {
         if file.state == Presence::Leaving {
             file.state = Presence::Arriving;
         }
-        self.file_index.insert(to.to_owned(), id);
+        self.index_file(to, id);
         id
+    }
+
+    fn index_file(&mut self, path: &str, id: u64) {
+        self.file_index.insert(path.to_owned(), id);
+        // Tombstones can lower reported capacity without releasing the allocation.
+        self.file_index_capacity =
+            self.file_index_capacity.max(self.file_index.capacity());
     }
 
     /// Every directory, file and region with floats printed exactly, in a stable order.
@@ -719,6 +795,21 @@ mod tests {
     use super::*;
 
     const DT: f32 = 1.0 / 60.0;
+
+    #[test]
+    fn replay_file_index_charge_stays_flat_under_churn() {
+        let mut layout = Layout::empty();
+        layout.add("file", 0.0, 0);
+        let before = layout.replay_bytes();
+
+        for _ in 0..1_000 {
+            layout.remove("file", 0.0, 0).unwrap();
+            layout.fade_files(1.0);
+            layout.add("file", 0.0, 0);
+        }
+
+        assert_eq!(layout.replay_bytes(), before);
+    }
 
     #[test]
     fn slot_offsets_follow_compaction_and_cross_directory_renames() {

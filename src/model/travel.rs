@@ -1,6 +1,7 @@
 use std::{
     cmp::Reverse,
     collections::{BTreeMap, BinaryHeap},
+    mem::size_of,
 };
 
 use bevy::math::{Rect, Vec2};
@@ -162,6 +163,10 @@ struct Route {
 }
 
 impl Route {
+    fn retained_bytes(&self) -> usize {
+        self.legs.capacity() * size_of::<Leg>() + self.track.len() * size_of::<Vec2>()
+    }
+
     fn is_empty(&self) -> bool {
         self.legs.is_empty() && self.track.is_empty()
     }
@@ -260,6 +265,28 @@ pub(super) struct Plan {
 }
 
 impl Plan {
+    pub(super) fn replay_bytes(&self) -> u128 {
+        let trips = self.trips.capacity() * size_of::<Trip>();
+        let routes = self
+            .trips
+            .iter()
+            .map(|trip| {
+                let proof = trip.proof.as_ref().map_or(0, |proof| {
+                    let points = proof["network_points"].as_array().map_or(0, Vec::len);
+                    // The JSON object and each nested coordinate array have separate allocations.
+                    2048 + points * 256
+                });
+                (trip.route.retained_bytes() + proof + 32) as u128
+            })
+            .sum::<u128>();
+        let occupancy = self
+            .occupancy
+            .values()
+            .map(|spans| (128 + spans.capacity() * size_of::<(u8, Rect)>()) as u128)
+            .sum::<u128>();
+        trips as u128 + routes + occupancy + self.docks.len() as u128 * 128
+    }
+
     #[cfg(test)]
     pub(super) fn force_unrouteable(&mut self) -> usize {
         let trip = self.trips.last_mut().expect("fixture has a trip");
@@ -761,13 +788,10 @@ impl Simulation {
             bot_fades: trips.iter().filter(|t| t.bot && t.fade).count(),
             max_speed: options.avatar_max_speed,
             temporary_capture_bytes: capture.bytes(),
-            retained_route_bytes: trips.capacity() * std::mem::size_of::<Trip>()
+            retained_route_bytes: trips.capacity() * size_of::<Trip>()
                 + trips
                     .iter()
-                    .map(|t| {
-                        t.route.legs.capacity() * std::mem::size_of::<Leg>()
-                            + t.route.track.len() * std::mem::size_of::<Vec2>()
-                    })
+                    .map(|trip| trip.route.retained_bytes())
                     .sum::<usize>(),
             graph_epochs,
             routed: trips.iter().filter(|t| !t.fade).count(),

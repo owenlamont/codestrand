@@ -33,6 +33,19 @@ enum Region {
 }
 
 impl Plan {
+    pub(super) fn replay_bytes(&self) -> u128 {
+        use crate::model::checkpoint_memory::{buffer_bytes, retained_fields};
+
+        let (parts,) = retained_fields!(self, Plan {
+            parts; samples, time, origin, step, seconds,
+        });
+        buffer_bytes::<(usize, Self)>(parts.capacity())
+            + parts
+                .iter()
+                .map(|(_, plan)| plan.replay_bytes())
+                .sum::<u128>()
+    }
+
     pub(super) fn add_part(&mut self, base: usize, plan: Self) {
         self.seconds += plan.seconds;
         self.parts.push((base, plan));
