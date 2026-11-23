@@ -68,6 +68,107 @@ fn target_repository(simulation: &Simulation, beam: Beam) -> usize {
     layout.dir(dir).repository
 }
 
+fn capped_motion_history(rows: &[(usize, &str, Option<&str>)]) -> Simulation {
+    let template = synthetic().remove(0);
+    let identity = |name: &str| {
+        Identity::new(name, &format!("{}@test.invalid", name.to_ascii_lowercase()))
+    };
+    let events = rows
+        .iter()
+        .enumerate()
+        .flat_map(|(index, &(repository, author, co_author))| {
+            let mut event = template.clone();
+            event.repository = repository;
+            event.commit = format!("event-{index}");
+            event.seconds = i64::try_from(index).unwrap() * 86_400;
+            event.author = identity(author);
+            if let Some(co_author) = co_author {
+                event.co_authors.push(identity(co_author));
+            }
+            event.changes = vec![FileChange {
+                path: format!("content/f{index}.rs"),
+                ..FileChange::default()
+            }];
+            let mut row = [event];
+            crate::repositories::namespace(&mut row, repository);
+            row
+        })
+        .collect();
+    let options = Options {
+        seconds_per_day: 0.35,
+        max_idle_seconds: 0.35,
+        travel_cap: TravelCap::Seconds(0.45),
+        fragment_speed: 0.35,
+        ..Options::default()
+    };
+    Simulation::with_repositories(
+        events,
+        &options,
+        &Theme::neon(),
+        &Mappings::default(),
+        &["one".to_owned(), "two".to_owned(), "three".to_owned()],
+    )
+}
+
+#[test]
+fn a_visible_contributor_never_steps_above_travel_speed() {
+    let mut simulation = capped_motion_history(&[
+        (0, "Ada", Some("Choi")),
+        (1, "Ben", Some("Dara")),
+        (2, "Choi", Some("Ada")),
+        (0, "Ada", None),
+        (2, "Choi", Some("Dara")),
+        (0, "Ben", None),
+        (1, "Ben", None),
+        (1, "Ben", None),
+        (2, "Dara", Some("Ada")),
+    ]);
+    let maximum = simulation.state.avatar_max_speed
+        * super::framing::WORLD_UNITS_PER_REFERENCE_PIXEL
+        / 60.0;
+    let mut previous = Vec::<(super::Vec3, f32)>::new();
+    for frame in 0..=simulation.frames(60).unwrap() {
+        simulation.advance_to(frame, 60);
+        for (avatar, &(position, presence)) in
+            simulation.avatars().iter().zip(&previous)
+        {
+            if presence > 0.001 && avatar.presence > 0.001 {
+                assert!(
+                    position.distance(avatar.position) <= maximum + 0.0005,
+                    "{} exceeded the travel speed at frame {frame}",
+                    avatar.name,
+                );
+            }
+        }
+        previous = simulation
+            .avatars()
+            .iter()
+            .map(|avatar| (avatar.position, avatar.presence))
+            .collect();
+    }
+}
+
+#[test]
+fn a_capped_walk_avoids_a_parked_contributor() {
+    let mut simulation = capped_motion_history(&[
+        (0, "Ada", None),
+        (1, "Ben", None),
+        (2, "Choi", None),
+        (0, "Ben", None),
+        (2, "Dara", Some("Choi")),
+        (2, "Choi", None),
+        (1, "Ada", Some("Dara")),
+        (2, "Dara", None),
+        (0, "Ada", None),
+    ]);
+    let mut audit = super::occlusion::Audit::default();
+    for frame in 0..=simulation.frames(60).unwrap() {
+        simulation.advance_to(frame, 60);
+        audit.observe(&simulation);
+        assert_eq!(audit.parked_avatar_observations, 0, "frame {frame}");
+    }
+}
+
 #[test]
 fn arrival_rays_end_when_a_contributor_transfers() {
     let mut simulation = rapid_repositories(4);
