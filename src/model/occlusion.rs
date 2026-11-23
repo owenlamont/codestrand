@@ -87,6 +87,24 @@ fn escape_points(
     ]
 }
 
+fn disc_intersections(a: Disc, b: Disc, margin: f32) -> Option<[Vec2; 2]> {
+    let between = b.centre - a.centre;
+    let distance = between.length_squared();
+    if distance <= f32::EPSILON {
+        return None;
+    }
+    let a_radius = a.radius + margin;
+    let b_radius = b.radius + margin;
+    let along = (distance + a_radius.powi(2) - b_radius.powi(2)) / (2.0 * distance);
+    let across = a_radius.powi(2) / distance - along.powi(2);
+    if across < 0.0 {
+        return None;
+    }
+    let centre = a.centre + between * along;
+    let offset = between.perp() * across.sqrt();
+    Some([centre + offset, centre - offset])
+}
+
 fn clear_position(
     from: Vec2,
     target: Vec2,
@@ -107,7 +125,7 @@ fn clear_position(
         (penetration, point.distance_squared(target))
     };
     let radius = radius_at(target);
-    obstacles
+    let (mut best_cost, mut best) = obstacles
         .iter()
         .copied()
         .filter_map(|disc| {
@@ -120,7 +138,26 @@ fn clear_position(
         .filter(|&point| point == from || allowed(point))
         .map(|point| (cost(point), point))
         .min_by(|a, b| a.0.partial_cmp(&b.0).expect("finite disc positions"))
-        .map_or(from, |(_, point)| point)
+        .unwrap_or_else(|| (cost(from), from));
+    if best_cost.0 == 0.0 {
+        return best;
+    }
+    let intersections = obstacles.iter().enumerate().flat_map(|(index, &a)| {
+        obstacles[index + 1..]
+            .iter()
+            .filter_map(move |&b| disc_intersections(a, b, radius + SEAT_CLEARANCE))
+            .flatten()
+    });
+    for point in intersections {
+        if from.distance_squared(point) > step * step || !allowed(point) {
+            continue;
+        }
+        let candidate = cost(point);
+        if candidate < best_cost {
+            (best_cost, best) = (candidate, point);
+        }
+    }
+    best
 }
 
 fn seat_bounds(state: &State) -> Rect {
@@ -241,8 +278,13 @@ pub(super) fn clear_seat_transitions(
         let world = |point: Vec2| Vec3::new(point.x, y, point.y);
         let radius_at = |point: Vec2| nominal * slots::projection_scale(world(point));
         let radius = radius_at(target);
+        let step = if previous[index].is_some() {
+            max_step
+        } else {
+            birth_step
+        };
         let nearby = |disc: &Disc| {
-            target.distance(disc.centre) < radius + disc.radius + 2.0 * max_step
+            target.distance(disc.centre) < radius + disc.radius + 2.0 * step
         };
         obstacles.clear();
         obstacles.extend(
@@ -271,11 +313,6 @@ pub(super) fn clear_seat_transitions(
             })
         {
             let from = previous[index].map_or(target, Vec3::xz);
-            let step = if previous[index].is_some() {
-                max_step
-            } else {
-                birth_step
-            };
             let network = (!blocks_walkers).then(|| {
                 gutters
                     .get_or_insert_with(|| {
