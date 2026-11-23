@@ -621,6 +621,18 @@ mod tests {
     }
 
     #[test]
+    fn a_same_repository_co_author_keeps_their_dock() {
+        let mut capture = fixture();
+        capture.services[2].repository = 0;
+        capture.services[2].point = Vec2::ZERO;
+        capture.services[2].authoring = false;
+
+        let (planned, _) = trips(&capture, 480.0, crate::model::BotTravel::Walk, true);
+
+        assert!(planned.is_empty());
+    }
+
+    #[test]
     fn a_calendar_departure_fades_even_during_an_uncapped_trip() {
         let mut events = crate::timeline::synthetic();
         events.truncate(1);
@@ -668,6 +680,7 @@ mod tests {
                 |(commit, (author, repository, tick, release, point))| Service {
                     commit,
                     author,
+                    authoring: true,
                     repository,
                     tick,
                     release,

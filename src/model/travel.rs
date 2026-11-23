@@ -95,6 +95,8 @@ pub(super) struct Pose {
 pub(super) struct Service {
     pub(super) commit: usize,
     pub(super) author: usize,
+    #[cfg(test)]
+    authoring: bool,
     repository: usize,
     tick: u64,
     release: u64,
@@ -698,6 +700,8 @@ fn replay(simulation: &mut Simulation, frames: u32) -> Capture {
                 capture.services.push(Service {
                     commit: event,
                     author,
+                    #[cfg(test)]
+                    authoring: true,
                     repository: avatar.repository,
                     tick: state.tick,
                     arrivals_land: super::schedule::first_tick(
