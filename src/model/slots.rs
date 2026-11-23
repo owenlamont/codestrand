@@ -663,7 +663,7 @@ impl State {
                 let dock = (!travelling[other]).then(|| projected(peer)).flatten();
                 if !(peer.transmitting || newcomer || yields_to(other, peer)) {
                     let claim = dock
-                        .filter(|_| peer.dock_since == self.tick)
+                        .filter(|_| peer.presence > 0.0)
                         .map(SeatClearance::Claim);
                     return [claim, None];
                 }
