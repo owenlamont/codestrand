@@ -29,9 +29,32 @@ impl Capture {
         poses.points.get(offset).copied().flatten()
     }
 
-    fn departure_point(&self, trip: &Trip, tick: u64) -> Option<Vec2> {
-        self.waiting_position(trip, tick.saturating_sub(1))
-            .or_else(|| self.pose(trip.author, tick).map(|pose| pose.point))
+    fn departure_point(&self, trip: &Trip, tick: u64, speed: f32) -> Option<Vec2> {
+        let Some(waiting) = self.waiting_position(trip, tick.saturating_sub(1)) else {
+            return self.pose(trip.author, tick).map(|pose| pose.point);
+        };
+        let cells = super::network(self.row(tick).iter().flatten().copied());
+        if super::on_network(waiting, &cells) {
+            return Some(waiting);
+        }
+        let entrance = cells
+            .iter()
+            .map(|cell| waiting.clamp(cell.min, cell.max))
+            .min_by(|a, b| {
+                waiting
+                    .distance_squared(*a)
+                    .total_cmp(&waiting.distance_squared(*b))
+            })?;
+        let tiles = super::at_tick(&self.tiles, tick.saturating_sub(self.begin));
+        let foreign = tiles.iter().enumerate().filter_map(|(repository, tile)| {
+            (repository != trip.source_repository)
+                .then_some(*tile)
+                .flatten()
+        });
+        (waiting.distance(entrance) <= speed / 60.0
+            && super::seat_clearance(waiting, entrance, self.radius(tick), foreign)
+                == entrance)
+            .then_some(entrance)
     }
 }
 
@@ -339,9 +362,9 @@ fn search(
         let Some(target_tile) = row[template.destination_repository] else {
             continue;
         };
-        let source = capture
-            .departure_point(template, begin)
-            .expect("existing author");
+        let Some(source) = capture.departure_point(template, begin, speed) else {
+            continue;
+        };
         if source.distance(template.destination)
             > speed * ticks_duration(template.arrival - begin)
         {
@@ -472,7 +495,9 @@ fn fixed_dock_approach(
     for tick in epochs.chain([first, template.arrival]) {
         let cells = super::network(capture.row(tick).iter().flatten().copied());
         for from in late.into_iter().chain([first]) {
-            let source = capture.departure_point(template, from)?;
+            let Some(source) = capture.departure_point(template, from, speed) else {
+                continue;
+            };
             if let Some(approach) = fixed_approach(
                 capture,
                 template,
@@ -515,7 +540,9 @@ fn fixed_approach(
     let route = Route::new(&points, speed);
     let duration = u64::from(super::seconds_ticks(route.duration, true));
     let departure = template.arrival.checked_sub(duration)?;
-    if departure < first || capture.departure_point(template, departure)? != source {
+    if departure < first
+        || capture.departure_point(template, departure, speed)? != source
+    {
         return None;
     }
     let track: Vec<_> = (departure..=template.arrival)
