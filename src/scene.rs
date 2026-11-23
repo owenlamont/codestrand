@@ -2023,6 +2023,22 @@ fn directory_arrival_position(
     (position, 0.15 + 0.85 * progress)
 }
 
+#[cfg(test)]
+pub(super) fn directory_rays_for_test(simulation: &Simulation) -> Vec<model::Beam> {
+    let mut beams = Vec::new();
+    for (index, dir) in simulation.layout().dirs() {
+        let rise = simulation.repository_effect(dir.repository).2;
+        directory_arrival_position(
+            simulation,
+            &mut beams,
+            index,
+            ground(dir.position).with_y(rise - 0.05),
+            true,
+        );
+    }
+    beams
+}
+
 fn set_material(
     world: &mut World,
     entity: Entity,

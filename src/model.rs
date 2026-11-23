@@ -33,6 +33,8 @@ pub(crate) mod occlusion;
 mod pacing_tests;
 mod planning_memory;
 #[cfg(test)]
+mod ray_tests;
+#[cfg(test)]
 mod release_regressions;
 
 pub(crate) mod quality;
