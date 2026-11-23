@@ -77,6 +77,7 @@ pub(super) struct File {
     pub arrival_author: usize,
     arrival_revision: u64,
     pub flight: Option<DirectoryFlight>,
+    pub arrival_cancelled: bool,
 }
 
 impl File {
@@ -84,6 +85,7 @@ impl File {
         let (path,) = retained_fields!(self, Self {
             path; local_position, dir, slot, slot_offset, position, velocity, presence,
             state, delay, heat, activity, author, arrival_author, arrival_revision, flight,
+            arrival_cancelled,
         });
         path.capacity() as u128
     }
@@ -501,12 +503,16 @@ impl Layout {
         self.revision += 1;
         if let Some(&id) = self.file_index.get(path) {
             let file = self.files.get_mut(&id).expect("indexed files exist");
+            if file.arrival_cancelled {
+                file.presence = 0.0;
+            }
             file.state = Presence::Arriving;
             file.delay = delay;
             file.author = author;
             file.arrival_author = author;
             file.arrival_revision = self.revision;
             file.flight = None;
+            file.arrival_cancelled = false;
             file.activity = 1.0;
             self.dirs[file.dir].touch_age = 0.0;
             self.fading.insert(id);
@@ -541,6 +547,7 @@ impl Layout {
                 arrival_author: author,
                 arrival_revision: self.revision,
                 flight: None,
+                arrival_cancelled: false,
             },
         );
         self.index_file(path, id);
@@ -569,6 +576,10 @@ impl Layout {
     ) -> Option<u64> {
         let &id = self.file_index.get(path)?;
         let file = self.files.get_mut(&id).expect("indexed files exist");
+        if file.state == Presence::Arriving {
+            file.arrival_cancelled =
+                file.presence <= file.flight.map_or(0.0, |flight| flight.offset);
+        }
         file.state = Presence::Leaving;
         file.delay = delay;
         self.fading.insert(id);
@@ -615,6 +626,7 @@ impl Layout {
             file.arrival_author = author;
             file.arrival_revision = self.revision;
             file.flight = None;
+            file.arrival_cancelled = false;
         }
         self.index_file(to, id);
         id

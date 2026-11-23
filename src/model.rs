@@ -1382,13 +1382,17 @@ impl Simulation {
                         file.flight.is_some(),
                     ),
                     grey,
-                    alpha,
+                    if progress > 0.0 { alpha } else { 0.0 },
                 )
             }
             crate::layout::Presence::Leaving => (
                 position + Vec3::Y * (1.0 - file.presence) * self.scale(),
                 1.0,
-                alpha * file.presence,
+                if file.arrival_cancelled {
+                    0.0
+                } else {
+                    alpha * file.presence
+                },
             ),
             crate::layout::Presence::Present => (position, grey, alpha),
         };
@@ -3453,6 +3457,124 @@ mod tests {
                 assert_eq!(line.position, fragments[line.fragment].position);
             }
         }
+    }
+
+    #[test]
+    fn file_deleted_before_launch_never_appears() {
+        let event = timeline::synthetic().remove(0);
+        let mut simulation = Simulation::new(
+            vec![event],
+            &Options::default(),
+            &Theme::neon(),
+            &Mappings::default(),
+        );
+        simulation.advance_to(60, 60);
+        let path = format!("{}short-lived.rs", crate::repositories::prefix(0));
+        let id = simulation.state.layout.add(&path, super::ADD_DELAY, 0);
+        let file = simulation.layout().file(id).unwrap();
+        let before_deletion = simulation.file_effect(id, file).2;
+        simulation.state.layout.remove(&path, 0.0, 0).unwrap();
+        let file = simulation.layout().file(id).unwrap();
+        let after_deletion = simulation.file_effect(id, file).2;
+        simulation.state.layout.step(1.0 / 60.0);
+        assert!(simulation.layout().file(id).is_none());
+        assert!(
+            before_deletion <= 0.0 && after_deletion <= 0.0,
+            "file alpha before deletion: {before_deletion}, after: {after_deletion}"
+        );
+    }
+
+    #[test]
+    fn grouped_file_deleted_while_waiting_stays_invisible_during_fade() {
+        let event = timeline::synthetic().remove(0);
+        let mut simulation = Simulation::new(
+            vec![event],
+            &Options::default(),
+            &Theme::neon(),
+            &Mappings::default(),
+        );
+        simulation.advance_to(60, 60);
+        let path = format!("{}short-lived.rs", crate::repositories::prefix(0));
+        let layout = &mut simulation.state.layout;
+        let revision = layout.revision();
+        let id = layout.add(&path, 0.0, 0);
+        let directory = layout.file(id).unwrap().dir;
+        let offset = super::MAX_ARRIVAL_OFFSET;
+        layout.route_arrival(
+            id,
+            revision,
+            directory,
+            crate::layout::DirectoryFlight { directory, offset },
+            false,
+        );
+        layout.step(1.0 / 60.0);
+        layout.remove(&path, 0.0, 0).unwrap();
+        let file = simulation.layout().file(id).unwrap();
+        assert!(file.presence > 0.0 && file.presence < offset);
+        assert!(simulation.file_effect(id, file).2 <= 0.0);
+    }
+
+    #[test]
+    fn readded_grouped_file_waits_at_the_start_of_its_new_ray() {
+        let event = timeline::synthetic().remove(0);
+        let mut simulation = Simulation::new(
+            vec![event],
+            &Options::default(),
+            &Theme::neon(),
+            &Mappings::default(),
+        );
+        simulation.advance_to(60, 60);
+        let path = format!("{}readded.rs", crate::repositories::prefix(0));
+        let tick = 1.0 / 60.0;
+        let layout = &mut simulation.state.layout;
+        let revision = layout.revision();
+        let id = layout.add(&path, 0.0, 0);
+        let directory = layout.file(id).unwrap().dir;
+        layout.route_arrival(
+            id,
+            revision,
+            directory,
+            crate::layout::DirectoryFlight {
+                directory,
+                offset: super::MAX_ARRIVAL_OFFSET,
+            },
+            false,
+        );
+        for _ in 0..8 {
+            layout.step(tick);
+        }
+        layout.remove(&path, super::DELETE_DELAY, 0).unwrap();
+        layout.step(tick);
+        assert!(layout.file(id).unwrap().arrival_cancelled);
+
+        let revision = layout.revision();
+        assert_eq!(layout.add(&path, tick, 0), id);
+        layout.route_arrival(
+            id,
+            revision,
+            directory,
+            crate::layout::DirectoryFlight {
+                directory,
+                offset: 0.0,
+            },
+            false,
+        );
+        let file = simulation.layout().file(id).unwrap();
+        let (position, _, alpha) = simulation.file_effect(id, file);
+        let (_, beam) = simulation
+            .file_arrival_beams()
+            .find(|(_, beam)| beam.target == super::Target::Dir(directory))
+            .unwrap();
+        assert!(alpha <= 0.0, "delayed arrival had alpha {alpha}");
+        assert!(position.distance(beam.from) < 0.0001);
+
+        simulation.state.layout.step(tick);
+        let file = simulation.layout().file(id).unwrap();
+        assert!(simulation.file_effect(id, file).2 <= 0.0);
+
+        simulation.state.layout.step(tick);
+        let file = simulation.layout().file(id).unwrap();
+        assert!(simulation.file_effect(id, file).2 > 0.0);
     }
 
     #[test]
