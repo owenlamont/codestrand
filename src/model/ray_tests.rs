@@ -91,6 +91,49 @@ fn arrival_rays_end_when_a_contributor_transfers() {
 }
 
 #[test]
+fn arrivals_keep_their_ray_during_contributor_transfers() {
+    let mut simulation = rapid_repositories(4);
+    let mut file_flights = 0;
+    let mut directory_flights = 0;
+    for frame in 0..=simulation.frames(60).unwrap() {
+        simulation.advance_to(frame, 60);
+        for (id, file) in simulation.layout().arriving_files() {
+            let dir = simulation.layout().dir(file.dir);
+            let to = super::ground(file.position)
+                + super::Vec3::Y * simulation.repository_effect(dir.repository).2;
+            let (beam, progress) = simulation.arrival_beam(
+                Target::File(id),
+                file.arrival_author,
+                to,
+                file.presence,
+                file.flight,
+                file.arrival_revision,
+            );
+            if progress > 0.0 && progress < super::ARRIVAL_FLIGHT {
+                file_flights += 1;
+                assert!(beam.is_some(), "file {id} has no ray at frame {frame}");
+            }
+        }
+        for (index, dir) in simulation.layout().dirs() {
+            let to = super::ground(dir.position)
+                + super::Vec3::Y * simulation.repository_effect(dir.repository).2;
+            if let Some((beam, _, progress)) = simulation.directory_arrival(index, to)
+                && progress > 0.0
+                && progress < super::ARRIVAL_FLIGHT
+            {
+                directory_flights += 1;
+                assert!(
+                    beam.is_some(),
+                    "directory {index} has no ray at frame {frame}"
+                );
+            }
+        }
+    }
+    assert!(file_flights > 0);
+    assert!(directory_flights > 0);
+}
+
+#[test]
 fn commit_pulse_waits_for_the_displayed_contributor_to_reach_the_gutter() {
     let mut simulation = Simulation::new(
         vec![synthetic().remove(0)],
