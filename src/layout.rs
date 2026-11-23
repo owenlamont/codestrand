@@ -576,7 +576,7 @@ impl Layout {
                 self.dirs[file.dir].touch_age = 0.0;
                 id
             }
-            None => self.add(path, 0.0, author),
+            None => self.add(path, crate::model::tick_seconds(), author),
         }
     }
 
@@ -604,8 +604,9 @@ impl Layout {
     /// Keeps the file's identity and current position while it glides to its new slot.
     pub(super) fn rename(&mut self, from: &str, to: &str, author: usize) -> u64 {
         self.revision += 1;
+        let delay = crate::model::tick_seconds();
         let Some(id) = self.file_index.remove(from) else {
-            return self.add(to, 0.0, author);
+            return self.add(to, delay, author);
         };
         if let Some(previous) = self.file_index.remove(to) {
             self.release(previous);
@@ -615,7 +616,7 @@ impl Layout {
         self.dirs[self.files[&id].dir].touch_age = 0.0;
         let dir = self.ensure_dir(
             parent_path(to),
-            Some(DirectoryArrival::new(author, 0.0, self.revision)),
+            Some(DirectoryArrival::new(author, delay, self.revision)),
         );
         let slot = if self.files[&id].dir == dir {
             self.files[&id].slot
@@ -635,6 +636,9 @@ impl Layout {
         self.dirs[file.dir].touch_age = 0.0;
         if file.state == Presence::Leaving {
             file.restore(author, self.revision);
+            if file.state == Presence::Arriving {
+                file.delay = file.delay.max(delay);
+            }
         }
         self.index_file(to, id);
         id
