@@ -2657,6 +2657,37 @@ mod tests {
     }
 
     #[test]
+    fn a_new_commit_yields_to_a_later_occupant_of_its_old_dock() {
+        let mut sim = Simulation::new(
+            vec![crate::timeline::synthetic().remove(0)],
+            &Options::default(),
+            &Theme::neon(),
+            &Mappings::default(),
+        );
+        sim.advance_to(60, 60);
+        let mut state = sim.state.clone();
+        let incumbent = &mut state.avatars[0];
+        incumbent.presence = 1.0;
+        incumbent.transmitting = false;
+        incumbent.dock_since = 50;
+        let mut arriving = incumbent.clone();
+        arriving.commit += 1;
+        arriving.dock_since = 1;
+        state.avatars.push(arriving);
+
+        let clearance = state.incumbent_discs(
+            1,
+            &[1],
+            sim.seconds(),
+            &[1.0, 1.0],
+            state.avatar_radius(),
+            &[false, false],
+        );
+
+        assert_eq!(clearance.len(), 1);
+    }
+
+    #[test]
     fn a_fading_ring_member_keeps_its_seat_until_it_disappears() {
         let mut sim = Simulation::new(
             vec![crate::timeline::synthetic().remove(0)],
