@@ -1,6 +1,6 @@
 use std::{
     cmp::Reverse,
-    collections::{BTreeMap, BinaryHeap},
+    collections::{BTreeMap, BTreeSet, BinaryHeap},
     mem::size_of,
 };
 
@@ -20,8 +20,10 @@ const HALF: Vec2 = Vec2::new(640.0, 360.0);
 const NETWORK_EPSILON: f32 = 0.01;
 const JUNCTION_EPSILON: f32 = 0.001;
 const MAX_ROUTE_NODES: usize = 10_000;
+pub(super) const FADE_TICKS: u64 = 9;
 
 const MOVING_DOCK: &str = "moving_dock";
+const UNREACHED_DOCK: &str = "unreached_dock";
 
 pub(super) fn field_rect(tile: crate::layout::packing::Tile) -> Rect {
     Rect::from_corners(tile.low * HALF, tile.high * HALF)
@@ -96,7 +98,6 @@ pub(super) struct Service {
     repository: usize,
     tick: u64,
     release: u64,
-    #[cfg(test)]
     arrivals_land: u64,
     point: Vec2,
     radius: f32,
@@ -351,6 +352,7 @@ pub(super) struct Plan {
     pub(super) frozen: usize,
     /// Reserved gutter spans by commit and avatar.
     pub(super) occupancy: BTreeMap<(usize, usize), Vec<(u8, Rect)>>,
+    unreached_docks: BTreeSet<(usize, usize)>,
     pub stats: Statistics,
 }
 
@@ -374,7 +376,10 @@ impl Plan {
             .values()
             .map(|spans| (128 + spans.capacity() * size_of::<(u8, Rect)>()) as u128)
             .sum::<u128>();
-        trips as u128 + routes + occupancy + self.docks.len() as u128 * 128
+        trips as u128
+            + routes
+            + occupancy
+            + (self.docks.len() + self.unreached_docks.len()) as u128 * 128
     }
 
     #[cfg(test)]
@@ -454,6 +459,7 @@ impl Plan {
         Self {
             docks: self.docks,
             occupancy: self.occupancy,
+            unreached_docks: self.unreached_docks,
             frozen: self.frozen,
             trips: self
                 .trips
@@ -504,6 +510,20 @@ impl Plan {
     }
     pub fn travelling(&self, author: usize, tick: u64) -> bool {
         self.trips.iter().any(|t| t.active(author, tick))
+    }
+
+    pub(super) fn undocking(&self, author: usize, tick: u64) -> bool {
+        let settle = u64::from(seconds_ticks(super::SETTLE_SECONDS, true));
+        self.trips.iter().any(|trip| {
+            trip.author == author
+                && trip.departure >= tick
+                && if trip.fade {
+                    trip.departure == tick
+                } else {
+                    !trip.route.is_empty()
+                        && trip.departure.saturating_sub(settle).max(trip.free) <= tick
+                }
+        })
     }
     pub(super) fn walking(&self, author: usize, tick: u64) -> bool {
         self.walking_trip(author, tick).is_some()
@@ -560,7 +580,7 @@ impl Trip {
             }
             let duration = trip
                 .fade_ticks
-                .clamp(1, 9)
+                .clamp(1, FADE_TICKS)
                 .min((trip.arrival - trip.departure).max(1));
             return (
                 trip.source,
@@ -675,20 +695,21 @@ fn replay(simulation: &mut Simulation, frames: u32) -> Capture {
                 let author = state.authors[&contributor.key];
                 let avatar = &state.avatars[author];
                 let slot = avatar.slot.as_ref().expect("tile exists before service");
-                let pulse = state
-                    .pulses
-                    .iter()
-                    .find(|p| p.commit == event)
-                    .expect("new pulse");
-                let release = frames_for(pulse.end - 0.3, 60).expect("bounded pulse");
                 capture.services.push(Service {
                     commit: event,
                     author,
                     repository: avatar.repository,
                     tick: state.tick,
-                    release: release.into(),
-                    #[cfg(test)]
-                    arrivals_land: 0,
+                    arrivals_land: super::schedule::first_tick(
+                        avatar.arrivals_land + super::tick_seconds(),
+                    ),
+                    release: state
+                        .pulses
+                        .iter()
+                        .filter(|pulse| pulse.commit == event || pulse.author == author)
+                        .map(|pulse| super::schedule::first_tick(pulse.end - 0.3))
+                        .max()
+                        .unwrap_or(state.tick),
                     point: slot.centre(),
                     radius: state.avatar_radius(),
                     bot: contributor.is_bot(),
@@ -707,7 +728,7 @@ fn replay(simulation: &mut Simulation, frames: u32) -> Capture {
 }
 
 fn fade_clearance(capture: &Capture, begin: u64, point: Vec2, radius: f32) -> u64 {
-    for offset in 0..=9_u64 {
+    for offset in 0..=FADE_TICKS {
         let tick = begin + offset;
         let row = at_tick(&capture.tiles, tick.saturating_sub(capture.begin));
         let tile_collision = row
@@ -718,7 +739,7 @@ fn fade_clearance(capture: &Capture, begin: u64, point: Vec2, radius: f32) -> u6
             return offset;
         }
     }
-    9
+    FADE_TICKS
 }
 
 impl Simulation {
@@ -776,6 +797,7 @@ impl Simulation {
                     || !t.bot
                     || options.bot_travel == super::BotTravel::Walk)
                 && t.fade
+                && t.failure != Some(UNREACHED_DOCK)
         }) {
             let policy = if trip.kind == TripKind::Relocation {
                 super::TravelCap::None
@@ -906,6 +928,23 @@ impl Simulation {
         let _phase = self.trace.phase(Phase::PlanTravel);
         let capture = capture(self);
         let (mut trips, graph_epochs) = self.routes(&capture, options);
+        let mut unreached_docks = std::mem::take(&mut self.travel.unreached_docks);
+        unreached_docks.retain(|&(commit, _)| commit < self.events.len());
+        for trip in trips.iter_mut().filter(|trip| {
+            trip.kind != TripKind::Relocation
+                && unreached_docks.contains(&(trip.commit, trip.author))
+        }) {
+            trip.departure = trip.arrival.saturating_sub(FADE_TICKS).max(trip.free);
+            trip.source = capture
+                .pose(trip.author, trip.departure)
+                .map_or(trip.source, |pose| pose.point);
+            trip.fade_ticks = FADE_TICKS.min(trip.arrival - trip.departure);
+            trip.fade = true;
+            trip.route = Route::default();
+            trip.failure = Some(UNREACHED_DOCK);
+            trip.cutoff = None;
+            trip.proof = None;
+        }
         trips.extend(
             self.travel
                 .trips
@@ -977,6 +1016,7 @@ impl Simulation {
             replanning: false,
             frozen: self.travel.frozen,
             occupancy: std::mem::take(&mut self.travel.occupancy),
+            unreached_docks,
         };
     }
 }
@@ -1413,7 +1453,7 @@ mod tests {
             sim.advance_all_files = advance;
             sim.travel = planned.clone();
             let captured = format!("{:?}", capture(&mut sim));
-            let conflicts = sim.reserve_service_slots();
+            let conflicts = sim.reserve_service_slots(true);
             (captured, conflicts, sim.travel.round_state(None))
         });
         assert_eq!(held, advanced);
@@ -1724,12 +1764,15 @@ mod tests {
                 seconds_per_day: 0.3,
                 ..Default::default()
             };
-            let nominal = super::super::Schedule::for_replay(&events, &options);
+            let mappings = crate::contributors::Mappings::default();
+            mappings.apply(&mut events);
+            let nominal = super::super::Schedule::for_replay(&events, &options)
+                .with_travel(events.len(), |_| 0);
             let sim = Simulation::with_repositories(
                 events,
                 &options,
                 &crate::theme::Theme::neon(),
-                &crate::contributors::Mappings::default(),
+                &mappings,
                 &["A".into(), "B".into()],
             );
             if bot {

@@ -467,6 +467,19 @@ impl Simulation {
 }
 
 impl State {
+    pub(super) fn service_corners(
+        &self,
+        repository: usize,
+        envelope: &Envelope,
+    ) -> Option<[Vec3; 4]> {
+        let tile = self.layout.repositories[repository].tile?;
+        Some(
+            envelope
+                .corners(tile)
+                .map(|point| ground(framing::field_to_world(point / HALF))),
+        )
+    }
+
     #[cfg(test)]
     pub(super) fn place_slots(&mut self, envelopes: &[Envelope], now: super::Time) {
         self.place_slots_planned(envelopes, now, &super::travel::Plan::default());
@@ -508,12 +521,16 @@ impl State {
         (0..self.avatars.len())
             .map(|index| {
                 let avatar = &self.avatars[index];
-                if now >= avatar.expires {
+                if now >= avatar.expires && !avatar.transmitting {
                     return None;
                 }
                 let slot = avatar.slot.as_ref()?;
                 let tile = self.layout.repositories[avatar.repository].gutter?;
-                let point = slot.dock.on_network(tile) + slot.offset;
+                let point = if avatar.transmitting {
+                    field_point(avatar.position)
+                } else {
+                    slot.dock.on_network(tile) + slot.offset
+                };
                 self.held_space(index, point, &capacities, radius)
             })
             .collect()
@@ -606,15 +623,19 @@ impl State {
             .filter(|&(other, peer)| {
                 !party.contains(&other)
                     && (peer.presence > 0.0 || now < peer.expires)
-                    && (newcomer || priority(other) < priority(index))
+                    && (peer.transmitting
+                        || newcomer
+                        || priority(other) < priority(index))
             })
             .filter_map(|(other, peer)| {
                 let slot = peer.slot.as_ref()?;
                 let tile = self.layout.repositories[peer.repository].gutter?;
-                Some(disk(
-                    slot.dock.on_network(tile) + slot.offset,
-                    radius * scales[other],
-                ))
+                let point = if peer.transmitting {
+                    field_point(peer.position)
+                } else {
+                    slot.dock.on_network(tile) + slot.offset
+                };
+                Some(disk(point, radius * scales[other]))
             })
             .collect()
     }
@@ -693,17 +714,23 @@ impl State {
                 cells: &cells,
                 speed: self.avatar_max_speed,
             };
-            let mut chosen = choice.pick(
-                avatar.slot.as_ref(),
-                avatar.slot_origin.map(|(repository, dock, point)| {
-                    self.layout.repositories[repository]
-                        .gutter
-                        .map_or(point, |t| dock.on_network(t))
-                }),
-                commit,
-                plan.docks.get(&(commit, index)).copied(),
-                !plan.replanning || commit < plan.frozen,
-            );
+            let mut chosen = if let Some(slot) =
+                avatar.slot.as_ref().filter(|_| avatar.transmitting)
+            {
+                choice.assess(slot.dock).0
+            } else {
+                choice.pick(
+                    avatar.slot.as_ref(),
+                    avatar.slot_origin.map(|(repository, dock, point)| {
+                        self.layout.repositories[repository]
+                            .gutter
+                            .map_or(point, |t| dock.on_network(t))
+                    }),
+                    commit,
+                    plan.docks.get(&(commit, index)).copied(),
+                    !plan.replanning || commit < plan.frozen,
+                )
+            };
             chosen.commit = commit;
             self.record_placement(&chosen);
             let capacity = self.seat_party(&chosen, &party, &cells, plan);
@@ -906,11 +933,15 @@ impl State {
     /// The avatar's current position, or its destination seat while settling.
     fn standing(&self, index: usize) -> Vec3 {
         let avatar = &self.avatars[index];
+        let shift = avatar
+            .group
+            .filter(|group| self.in_party(index, group.lead))
+            .map_or(Vec3::ZERO, |group| self.avatars[group.lead].ring_shift());
         avatar
             .slot
             .as_ref()
             .filter(|_| avatar.settle.is_some())
-            .map_or(avatar.position, Placement::world)
+            .map_or(avatar.position, |slot| slot.world() + shift)
     }
 
     /// Projected name anchors, shifted one avatar radius inward for members on a ring.
@@ -929,6 +960,9 @@ impl State {
                         capacities[lead] > 1
                             && self.in_party(index, lead)
                             && s.offset != Vec2::ZERO
+                            && self.ring_of(index).is_some_and(|(centre, rim)| {
+                                avatar.position.distance(centre) < rim
+                            })
                     })
                     .map(|slot| {
                         let capacity = capacities[lead];
@@ -948,6 +982,9 @@ impl State {
         (0..self.avatars.len())
             .map(|index| {
                 let (centre, rim) = self.ring_of(index)?;
+                if self.avatars[index].position.distance(centre) >= rim {
+                    return None;
+                }
                 let from = self.screen(centre)?;
                 let edge = self.screen(centre + Vec3::X * rim)?;
                 let to = self.screen(self.standing(index))?;
@@ -1283,6 +1320,33 @@ impl State {
             visibility.joint_clear = assignment.clear;
         }
         self.recover_name_lengths(&bodies, texts);
+        self.dim_names_over_held_leads();
+    }
+
+    fn dim_names_over_held_leads(&mut self) {
+        for member in 0..self.avatars.len() {
+            let avatar = &self.avatars[member];
+            let Some(group) = avatar.group.filter(|group| group.lead != member) else {
+                continue;
+            };
+            let lead = &self.avatars[group.lead];
+            let overlap = lead.transmitting
+                && self.in_party(member, group.lead)
+                && avatar
+                    .name_visibility
+                    .placement
+                    .as_ref()
+                    .zip(lead.name_visibility.placement.as_ref())
+                    .is_some_and(|(member, lead)| {
+                        !member
+                            .bounds(self.geometry.label_height)
+                            .intersect(lead.bounds(self.geometry.label_height))
+                            .is_empty()
+                    });
+            if overlap {
+                self.avatars[member].name_visibility.opacity *= 0.5;
+            }
+        }
     }
 
     fn recover_name_lengths(&mut self, bodies: &[Option<Vec2>], texts: &[Rect]) {
@@ -1555,10 +1619,13 @@ impl Choice<'_> {
     ) -> Placement {
         if let Some(parked) = previous {
             let selected = self.assess(parked.dock).0;
-            if self.clearance_cost(&selected) > 0.001 {
+            if self.clearance_cost(&selected) > 0.001
+                || (parked.commit != commit
+                    && self.reserved_cost(selected.point) > 0.001)
+            {
                 return self.nearest(selected.point, true);
             }
-            if parked.commit == commit || selected.overlaps == 0 {
+            if parked.commit == commit || selected.valid() {
                 return selected;
             }
         }
@@ -1595,13 +1662,7 @@ impl Choice<'_> {
                 })
             }))
             .map(|dock| self.assess(dock).0)
-            .filter(|slot| {
-                if same_tile {
-                    slot.overlaps == 0
-                } else {
-                    slot.valid()
-                }
-            })
+            .filter(Placement::valid)
             .map(|slot| {
                 let seconds = super::travel::slot_seconds(
                     point, slot.point, self.cells, self.speed,
@@ -1621,7 +1682,8 @@ impl Choice<'_> {
                     .total_cmp(&self.clearance_cost(&b.0))
                     .then_with(|| {
                         if same_tile {
-                            std::cmp::Ordering::Equal
+                            self.reserved_cost(a.0.point)
+                                .total_cmp(&self.reserved_cost(b.0.point))
                         } else {
                             self.avatar_cost(a.0.point)
                                 .total_cmp(&self.avatar_cost(b.0.point))
@@ -1706,7 +1768,12 @@ impl Choice<'_> {
     fn assess(&self, dock: Dock) -> (Placement, f32) {
         let point = self.point(dock);
         let centre = point + ring_offset(self.capacity, dock.edge, self.radius);
-        let ring = group_radius(self.capacity, self.radius);
+        let transition = if self.capacity > 1 {
+            self.radius * (1.0 - MEMBER_SCALE)
+        } else {
+            0.0
+        };
+        let ring = group_radius(self.capacity, self.radius) + transition;
         let corners = self.envelope.corners(self.tile);
         let span = fan(point, &corners);
         let (low, high) = corners
@@ -1807,7 +1874,7 @@ impl Choice<'_> {
                     (0, _) => 1,
                     _ => 2,
                 };
-                let cost = (p.overlaps, usize::from(!p.half_plane), p.crossings, rank);
+                let cost = (p.overlaps, p.crossings, usize::from(!p.half_plane), rank);
                 (p, cost, span, id)
             })
             .min_by(|a, b| {
@@ -1914,7 +1981,7 @@ impl State {
                 text: name.text.clone(),
                 kind: super::LabelKind::Avatar,
                 scale: name.scale,
-                opacity: avatar.presence * shown,
+                opacity: avatar.name_visibility.opacity * avatar.presence * shown,
                 priority: avatar.activity,
             };
         }
@@ -2014,6 +2081,7 @@ mod tests {
             parked.dock
         );
     }
+
     #[test]
     fn a_new_service_avoids_a_reserved_incumbent_dock() {
         let mut dock = choice(&[], &[]).select(None);

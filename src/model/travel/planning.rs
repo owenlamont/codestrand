@@ -236,8 +236,9 @@ enum Search {
 }
 
 fn shares_parking_point(capture: &Capture, trip: &Trip, begin: u64) -> bool {
-    let source_tile =
-        capture.row(trip.arrival)[trip.source_repository].expect("existing source");
+    let Some(source_tile) = capture.row(trip.arrival)[trip.source_repository] else {
+        return false;
+    };
     let dock = capture
         .pose(trip.author, begin)
         .expect("existing author")
@@ -464,7 +465,8 @@ pub(super) fn trips(
             continue;
         }
         let relocation = prior.repository == service.repository;
-        if (relocation && prior.dock == service.dock)
+        if (relocation
+            && (prior.dock == service.dock || prior.arrivals_land >= service.tick - 1))
             || (!relocation
                 && (!walk || (service.bot && bots == crate::model::BotTravel::Fade))
                 && capture
@@ -474,7 +476,10 @@ pub(super) fn trips(
             continue;
         }
         let earliest = capture.begin + if capture.begin == 0 { 0 } else { 120 };
-        let free = (prior.tick + 1).max(earliest).min(service.tick - 1);
+        let free = (prior.tick + 1)
+            .max(earliest)
+            .max(prior.arrivals_land)
+            .min(service.tick - 1);
         let source = capture
             .pose(service.author, free)
             .expect("existing author")
@@ -524,7 +529,7 @@ pub(super) fn trips(
             }
             best.departure = service
                 .tick
-                .saturating_sub(9)
+                .saturating_sub(super::FADE_TICKS)
                 .max(prior.release.min(service.tick - 1))
                 .max(free);
             best.source = capture
@@ -716,6 +721,7 @@ mod tests {
             replanning: false,
             frozen: 0,
             occupancy: std::collections::BTreeMap::new(),
+            unreached_docks: std::collections::BTreeSet::new(),
             stats: Statistics::default(),
         };
         assert!(plan.sample(0, 69).is_none());
@@ -738,6 +744,7 @@ mod tests {
             replanning: false,
             frozen: 0,
             occupancy: std::collections::BTreeMap::new(),
+            unreached_docks: std::collections::BTreeSet::new(),
             stats: Statistics::default(),
         };
         assert!(!plan.travelling(0, 90));
@@ -753,6 +760,7 @@ mod tests {
             replanning: false,
             frozen: 0,
             occupancy: std::collections::BTreeMap::new(),
+            unreached_docks: std::collections::BTreeSet::new(),
             stats: Statistics::default(),
         }
         .report();
@@ -769,6 +777,7 @@ mod tests {
                 replanning: false,
                 frozen: 0,
                 occupancy: std::collections::BTreeMap::new(),
+                unreached_docks: std::collections::BTreeSet::new(),
                 stats: Statistics::default()
             }
             .report()
@@ -788,6 +797,7 @@ mod tests {
             replanning: false,
             frozen: 0,
             occupancy: std::collections::BTreeMap::new(),
+            unreached_docks: std::collections::BTreeSet::new(),
             stats: Statistics::default(),
         };
         assert!(!plan.travelling(0, 11));

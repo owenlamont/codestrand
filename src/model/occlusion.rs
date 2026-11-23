@@ -44,6 +44,7 @@ struct Disc {
     centre: Vec2,
     radius: f32,
     blocks_walkers: bool,
+    transmitting: bool,
 }
 
 fn escape_points(
@@ -101,19 +102,20 @@ fn clear_position(
                 .then(|| escape_points(from, target, disc, extent, step))
         })
         .flatten()
-        .filter(|&point| allowed(point))
         .chain(std::iter::once(target))
+        .filter(|&point| allowed(point))
         .map(|point| (cost(point), point))
         .min_by(|a, b| a.0.partial_cmp(&b.0).expect("finite disc positions"))
-        .map_or(target, |(_, point)| point)
+        .map_or(from, |(_, point)| point)
 }
 
 fn seat_bounds(state: &State) -> Rect {
     let (focus, distance) = state.overview();
     let zoom = (distance - framing::FIELD_HEIGHT)
         / (framing::DISTANCE - framing::FIELD_HEIGHT);
-    let field =
-        travel::field_rect(crate::layout::packing::Tile::inset(state.avatar_radius()));
+    let margin = state.avatar_radius()
+        + SEAT_CLEARANCE / framing::WORLD_UNITS_PER_REFERENCE_PIXEL;
+    let field = travel::field_rect(crate::layout::packing::Tile::inset(margin));
     let corner = |point| focus.xz() + slots::world(point).xz() * zoom;
     Rect::from_corners(corner(field.min), corner(field.max))
 }
@@ -137,6 +139,7 @@ fn previous_group_seats(
                     centre: position.as_ref()?.xz(),
                     radius: disc_radius(avatar, base, *scale),
                     blocks_walkers: true,
+                    transmitting: avatar.transmitting,
                 },
             ))
         })
@@ -159,6 +162,7 @@ fn seat_order(
         .collect();
     order.sort_by_key(|&(index, blocks, parked)| {
         (
+            !state.avatars[index].transmitting,
             blocks,
             previous[index].is_none(),
             !parked,
@@ -169,6 +173,10 @@ fn seat_order(
     order
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "a placement and its forecast share the same obstacles"
+)]
 pub(super) fn clear_seat_transitions(
     state: &mut State,
     plan: &travel::Plan,
@@ -179,18 +187,42 @@ pub(super) fn clear_seat_transitions(
         * state.scale()
         * state.avatar_scale
         * state.avatar_size;
-    let scales = state.member_scales();
+    let mut scales = state.member_scales();
+    for (index, avatar) in state.avatars.iter().enumerate() {
+        if avatar.transmitting || avatar.dismissed {
+            continue;
+        }
+        if let Some((centre, rim)) = state.ring_of(index)
+            && previous[index]
+                .is_some_and(|from| from.distance(centre) + max_step >= rim)
+        {
+            scales[index] = 1.0;
+        }
+    }
     let birth_step = max_step
         + 2.0 * state.avatar_radius() * framing::WORLD_UNITS_PER_REFERENCE_PIXEL;
     let bounds = seat_bounds(state);
     let order = seat_order(state, plan, previous);
+    let mut gutters = None;
     let mut placed: Vec<Disc> = Vec::with_capacity(order.len());
     let mut approaching: Vec<Disc> = Vec::new();
     let mut obstacles = Vec::with_capacity(order.len());
     let old_seats = previous_group_seats(state, previous, &scales, base);
     for (rank, &(index, blocks_walkers, parked_here)) in order.iter().enumerate() {
         let avatar = &mut state.avatars[index];
-        let target = avatar.position.xz();
+        let target = if !avatar.transmitting
+            && !avatar.travelling
+            && avatar
+                .slot
+                .as_ref()
+                .is_some_and(|slot| slot.offset != Vec2::ZERO)
+        {
+            let target = avatar.position.xz().clamp(bounds.min, bounds.max);
+            previous[index]
+                .map_or(target, |from| from.xz().move_towards(target, max_step))
+        } else {
+            avatar.position.xz()
+        };
         let y = avatar.position.y;
         let nominal =
             disc_radius(avatar, base, scales[index]) / avatar.projection_scale;
@@ -220,9 +252,11 @@ pub(super) fn clear_seat_transitions(
             }
         }
         let mut point = target;
-        if blocks_walkers
+        if !avatar.transmitting
             && obstacles.iter().any(|disc| {
-                target.distance(disc.centre) < radius + disc.radius + SEAT_CLEARANCE
+                (blocks_walkers || disc.transmitting)
+                    && target.distance(disc.centre)
+                        < radius + disc.radius + SEAT_CLEARANCE
             })
         {
             let from = previous[index].map_or(target, Vec3::xz);
@@ -231,9 +265,23 @@ pub(super) fn clear_seat_transitions(
             } else {
                 birth_step
             };
+            let network = (!blocks_walkers).then(|| {
+                gutters
+                    .get_or_insert_with(|| {
+                        travel::network(
+                            state.layout.repositories.iter().filter_map(|r| r.gutter),
+                        )
+                    })
+                    .as_slice()
+            });
             point =
                 clear_position(from, target, step, &obstacles, radius_at, |point| {
-                    bounds.contains(point)
+                    network.map_or_else(
+                        || bounds.contains(point),
+                        |cells| {
+                            travel::on_network(slots::field_point(world(point)), cells)
+                        },
+                    )
                 });
         }
         avatar.position = world(point);
@@ -242,6 +290,7 @@ pub(super) fn clear_seat_transitions(
             centre: point,
             radius: radius_at(point),
             blocks_walkers,
+            transmitting: avatar.transmitting,
         });
         if !blocks_walkers {
             approaching.extend(
@@ -254,6 +303,7 @@ pub(super) fn clear_seat_transitions(
                                 centre,
                                 radius: radius_at(centre),
                                 blocks_walkers: false,
+                                transmitting: false,
                             })
                     }),
             );
@@ -280,7 +330,9 @@ fn clear_remaining_parked_contacts(
 ) {
     let mut obstacles = Vec::new();
     for (rank, &(index, _, parked)) in order.iter().enumerate() {
-        let Some(from) = previous[index].filter(|_| parked) else {
+        let Some(from) =
+            previous[index].filter(|_| parked && !state.avatars[index].transmitting)
+        else {
             continue;
         };
         let current = placed[rank];

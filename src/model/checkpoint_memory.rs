@@ -63,10 +63,10 @@ impl Avatar {
         let (key, name, touched, name_visibility, slot, dock_walk) = retained_fields!(self, Avatar {
             key, name, touched, name_visibility, slot, dock_walk;
             expires, arrived, lifecycle_scale, grey, portrait, position, target, repository,
-            last_transfer_revision, last_active, presence, slot_presence, projection_scale,
+            last_transfer_revision, arrivals_land, last_active, presence, slot_presence, projection_scale,
             activity, commit,
             dock_since, gutter_entry, slot_origin, group, dismissed, ring_presence,
-            ring_capacity, settle, settled, leaving_name, seat, travelling,
+            ring_capacity, settle, settled, leaving_name, seat, travelling, transmitting,
         });
         let (placement,) = retained_fields!(name_visibility, Visibility {
             placement; joint_exhausted, joint_clear, opacity, visible, full_clear_since,

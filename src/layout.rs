@@ -50,7 +50,7 @@ const GOLDEN_ANGLE: f32 = 2.399_963_2;
 const MAX_SPEED: f32 = 3.0;
 const MAX_ACCELERATION: f32 = 48.0;
 const FILE_EASE: f32 = 5.0;
-const FADE_SECONDS: f32 = 0.6;
+pub(super) const FADE_SECONDS: f32 = 0.6;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Presence {

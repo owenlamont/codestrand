@@ -5,6 +5,10 @@ use crate::timeline::Event;
 
 pub(crate) const BIRTH_TICKS: u64 = 90;
 
+pub(super) fn arrival_ticks() -> u64 {
+    u64::from(super::travel::seconds_ticks(super::ARRIVAL_SECONDS, true))
+}
+
 pub(super) fn padding_at(padding: &[(usize, u32)], index: usize) -> u32 {
     padding
         .iter()
@@ -19,6 +23,7 @@ pub(crate) struct Schedule {
     pub(super) birth_protections: Vec<(usize, usize)>,
     pub(super) walk_protections: Vec<(usize, usize)>,
     motion_protections: Vec<(usize, u64)>,
+    ray_holds: Vec<(usize, usize)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -98,14 +103,22 @@ impl Schedule {
     pub(super) fn replay_bytes(&self) -> u128 {
         use super::checkpoint_memory::{buffer_bytes, retained_fields};
 
-        let (starts, services, birth_protections, walk_protections, motion_protections) = retained_fields!(self, Schedule {
-            starts, services, birth_protections, walk_protections, motion_protections;
+        let (
+            starts,
+            services,
+            birth_protections,
+            walk_protections,
+            motion_protections,
+            ray_holds,
+        ) = retained_fields!(self, Schedule {
+            starts, services, birth_protections, walk_protections, motion_protections, ray_holds;
         });
         buffer_bytes::<Time>(starts.capacity())
             + buffer_bytes::<Service>(services.capacity())
             + buffer_bytes::<(usize, usize)>(birth_protections.capacity())
             + buffer_bytes::<(usize, usize)>(walk_protections.capacity())
             + buffer_bytes::<(usize, u64)>(motion_protections.capacity())
+            + buffer_bytes::<(usize, usize)>(ray_holds.capacity())
     }
 
     pub(super) fn for_replay(events: &[Event], options: &super::Options) -> Self {
@@ -116,13 +129,44 @@ impl Schedule {
             .collect();
         let selected = &events[range];
         let opening = seen.is_empty();
-        Self::build(
+        let mut schedule = Self::build(
             selected,
             options.seconds_per_day,
             options.max_idle_seconds,
             |_| 0,
             |index| seen.insert(selected[index].repository) && !(opening && index == 0),
-        )
+        );
+        let mut transmitters = std::collections::HashMap::new();
+        let mut latest_arrival = None;
+        for (index, event) in selected.iter().enumerate() {
+            let mut hold = latest_arrival
+                .filter(|&earlier| schedule.birth_starts_after(index, earlier));
+            for contributor in event.participants() {
+                if let Some((repository, earlier)) =
+                    transmitters.get(&contributor.key).copied()
+                    && repository != event.repository
+                {
+                    hold = hold.max(Some(earlier));
+                    transmitters.remove(&contributor.key);
+                }
+            }
+            if let Some(author) = &event.contributor
+                && event.changes.iter().any(|change| {
+                    matches!(
+                        change.kind,
+                        crate::timeline::Kind::Added
+                            | crate::timeline::Kind::Moved { .. }
+                    )
+                })
+            {
+                transmitters.insert(&author.key, (event.repository, index));
+                latest_arrival = Some(index);
+            }
+            if let Some(earlier) = hold {
+                schedule.ray_holds.push((index, earlier));
+            }
+        }
+        schedule
     }
 
     pub(super) fn protect_walk_after(&mut self, commit: usize) -> bool {
@@ -150,6 +194,7 @@ impl Schedule {
         !self.birth_protections.is_empty()
             || !self.walk_protections.is_empty()
             || !self.motion_protections.is_empty()
+            || !self.ray_holds.is_empty()
             || padding.iter().any(|&(_, ticks)| ticks > 0)
     }
 
@@ -191,6 +236,8 @@ impl Schedule {
         let mut protections = self.birth_protections.iter().peekable();
         let mut walks = self.walk_protections.iter().peekable();
         let mut motions = self.motion_protections.iter().peekable();
+        let mut rays = self.ray_holds.iter().peekable();
+        let ray_ticks = arrival_ticks() + super::travel::FADE_TICKS;
         let mut tile_floor = 0;
         let starts = self.starts[..len]
             .iter()
@@ -223,6 +270,22 @@ impl Schedule {
                     tick = tick.saturating_add(remaining);
                     tile_floor = tile_floor.max(end);
                 }
+                let ray_wait = rays.next_if(|&&(commit, _)| commit == index).map_or(
+                    0,
+                    |&(_, earlier)| {
+                        let settle = if self.birth_starts_after(index, earlier) {
+                            BIRTH_TICKS + 1
+                        } else {
+                            0
+                        };
+                        let ready =
+                            services[earlier].tick.saturating_add(ray_ticks + settle);
+                        u32::try_from(ready.saturating_sub(tick))
+                            .expect("bounded ray wait")
+                    },
+                );
+                extra = extra.saturating_add(u64::from(ray_wait));
+                tick = tick.saturating_add(u64::from(ray_wait));
                 let start = start.after(tick_time(extra));
                 services.push(Service {
                     tick,
@@ -243,7 +306,14 @@ impl Schedule {
             birth_protections: Vec::new(),
             walk_protections: Vec::new(),
             motion_protections: Vec::new(),
+            ray_holds: Vec::new(),
         }
+    }
+
+    fn birth_starts_after(&self, birth: usize, earlier: usize) -> bool {
+        let service = &self.services[birth];
+        service.birth
+            && self.services[earlier].tick.saturating_add(BIRTH_TICKS) < service.tick
     }
 
     pub(super) fn births(&self) -> impl Iterator<Item = (usize, u64)> + '_ {
@@ -354,6 +424,7 @@ impl Schedule {
             birth_protections: Vec::new(),
             walk_protections: Vec::new(),
             motion_protections: Vec::new(),
+            ray_holds: Vec::new(),
         }
     }
 

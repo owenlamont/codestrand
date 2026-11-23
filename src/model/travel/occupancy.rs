@@ -131,6 +131,53 @@ fn anticipate_service_reservations(
 }
 
 impl Simulation {
+    fn reserve_blocked_ray_sources(
+        &self,
+        occupied: &mut Reservations,
+        conflicted: &mut BTreeSet<(usize, usize)>,
+    ) -> usize {
+        let state = &self.state;
+        let radius = state.avatar_radius();
+        let mut blocked = 0;
+        for pulse in &state.pulses {
+            let avatar = &state.avatars[pulse.author];
+            if !avatar.transmitting
+                || super::super::tick_time(state.tick) > avatar.arrivals_land
+                || avatar.repository != pulse.repository
+            {
+                continue;
+            }
+            let Some(tile) = state.layout.repositories[pulse.repository].gutter else {
+                continue;
+            };
+            let Some(corners) =
+                state.service_corners(pulse.repository, &self.envelopes[pulse.commit])
+            else {
+                continue;
+            };
+            if corners.into_iter().any(|to| {
+                self.clear_arrival_start(pulse.author, pulse.repository, to)
+                    .is_none()
+            }) {
+                let owner = avatar
+                    .group
+                    .filter(|group| state.in_party(pulse.author, group.lead))
+                    .map_or(pulse.author, |group| group.lead);
+                let service = (state.avatars[owner].commit, owner);
+                conflicted.insert(service);
+                reserve_other(
+                    occupied.entry(service).or_default(),
+                    tile.low * HALF,
+                    (tile.high - tile.low) * HALF,
+                    super::super::slots::field_point(avatar.position),
+                    radius,
+                );
+                blocked += 1;
+            }
+        }
+        blocked
+    }
+
     fn reserve_frame(
         &self,
         occupied: &mut Reservations,
@@ -144,21 +191,33 @@ impl Simulation {
             .avatars
             .iter()
             .enumerate()
-            // A passing avatar can briefly overlap a parked one. Its route cannot
-            // reserve a dock or move one that stays clear of stationary avatars.
-            .filter(|(i, a)| {
-                a.presence > 0.0 && !self.travel.travelling(*i, state.tick)
-            })
-            .map(|(i, a)| {
-                let point = occlusion::screen(self, a.position);
-                let parked = a
-                    .slot
-                    .as_ref()
-                    .is_some_and(|s| point.distance(s.point) < 0.1);
-                (i, point, parked)
+            .filter(|(_, a)| a.presence > 0.0)
+            .filter_map(|(i, a)| {
+                let travelling = self.travel.travelling(i, state.tick);
+                if travelling && self.visuals != crate::model::Visuals::Seating {
+                    return None;
+                }
+                let position = if travelling && self.travel.walking(i, state.tick) {
+                    self.travel
+                        .sample(i, state.tick)
+                        .map_or(a.position, |(point, _)| {
+                            super::super::slots::world(point)
+                        })
+                } else {
+                    a.position
+                };
+                let point = occlusion::screen(self, position);
+                let parked = !travelling
+                    && a.slot.as_ref().is_some_and(|slot| {
+                        a.transmitting
+                            || !a.travelling
+                                && a.settle.is_none()
+                                && a.position.distance(slot.world()) < 0.001
+                    });
+                Some((i, point, parked, travelling))
             })
             .collect();
-        for &(i, point, applying) in &live {
+        for &(i, point, applying, _) in &live {
             if !applying {
                 continue;
             }
@@ -181,17 +240,18 @@ impl Simulation {
                 .unwrap_or(i);
             let mut foreign = live
                 .iter()
-                .filter(|&&(j, _, _)| {
+                .filter(|&&(j, other, _, travelling)| {
                     i != j
                         && !state.in_party(j, owner)
                         && !(ring_seat && self.shares_ring_participant(i, j))
+                        && (!travelling || point.distance(other) < 2.0 * radius)
                 })
                 .peekable();
             if foreign.peek().is_none() {
                 continue;
             }
             let row = occupied.entry((avatar.commit, owner)).or_default();
-            for &(_, other, _) in foreign {
+            for &(_, other, _, _) in foreign {
                 if super::committing_overlap(
                     point,
                     other,
@@ -225,20 +285,49 @@ impl Simulation {
             && (joins(avatars[a].commit, b) || joins(avatars[b].commit, a))
     }
 
-    pub(in crate::model) fn reserve_service_slots(&mut self) -> bool {
+    pub(in crate::model) fn reserve_service_slots(
+        &mut self,
+        check_walks: bool,
+    ) -> bool {
         let _phase = self.trace.phase(Phase::Reserve);
         let mut previous = std::mem::take(&mut self.travel.occupancy);
         previous.retain(|&(commit, _), _| commit < self.events.len());
         let mut occupied = Reservations::new();
         let mut conflicted = BTreeSet::new();
-        let visuals = std::mem::replace(&mut self.visuals, crate::model::Visuals::None);
+        let visuals =
+            std::mem::replace(&mut self.visuals, crate::model::Visuals::Seating);
         self.restart();
         let mut conflicts = 0;
+        let mut blocked = 0;
         let mut pairs = 0;
         let frames = crate::model::frames_for(self.duration(), 60)
             .expect("bounded schedule")
             + 144;
         let begin = u32::try_from(self.state.tick).expect("bounded window");
+        let mut arrivals: Vec<_> = self
+            .travel
+            .trips
+            .iter()
+            .filter(|trip| {
+                check_walks
+                    && trip.kind != super::TripKind::Relocation
+                    && !trip.fade
+                    && !trip.route.is_empty()
+                    && trip.commit >= self.travel.frozen
+                    && trip.arrival >= u64::from(begin)
+            })
+            .map(|trip| {
+                (
+                    trip.arrival,
+                    trip.commit,
+                    trip.author,
+                    trip.destination_repository,
+                )
+            })
+            .collect();
+        arrivals.sort_unstable();
+        let mut arrivals = arrivals.into_iter().peekable();
+        let mut missed = 0;
         self.trace.count_replay((frames - begin).into());
         for frame in begin..=frames {
             self.progress.report_range(
@@ -248,9 +337,25 @@ impl Simulation {
                 frames.into(),
             );
             self.advance_to(frame, 60);
+            while let Some((_, commit, author, repository)) =
+                arrivals.next_if(|&(tick, ..)| tick <= self.state.tick)
+            {
+                let avatar = &self.state.avatars[author];
+                if avatar.presence > 0.001
+                    && !avatar.beside_gutter(
+                        self.state.layout.repositories[repository].gutter,
+                        self.state.avatar_radius(),
+                    )
+                {
+                    missed += usize::from(
+                        self.travel.unreached_docks.insert((commit, author)),
+                    );
+                }
+            }
             let (conflicting, compared) =
                 self.reserve_frame(&mut occupied, &mut conflicted);
             conflicts += conflicting;
+            blocked += self.reserve_blocked_ray_sources(&mut occupied, &mut conflicted);
             pairs += compared;
         }
         self.trace.count(Counter::PairComparisons, pairs);
@@ -267,14 +372,20 @@ impl Simulation {
         );
         for (key, row) in occupied {
             if conflicted.contains(&key) && key.0 >= self.travel.frozen {
-                previous.insert(key, row.into_row());
+                let kept = previous.entry(key).or_default();
+                let mut combined = Row::default();
+                for (edge, rect) in kept.iter().copied().chain(row.into_row()) {
+                    combined.merge(edge, rect);
+                }
+                *kept = combined.into_row();
             }
         }
         self.travel.occupancy = previous;
         if self.trace.on() {
             eprintln!("committing_overlap_observations={conflicts}");
+            eprintln!("blocked_ray_source_observations={blocked}");
         }
-        conflicts > 0
+        conflicts > 0 || blocked > 0 || missed > 0
     }
 }
 fn reserve_other(row: &mut Row, low: Vec2, span: Vec2, other: Vec2, radius: f32) {
@@ -297,10 +408,11 @@ impl super::Plan {
         window: Option<&crate::model::windows::Planning>,
     ) -> String {
         format!(
-            "{:?}{:?}{:?}{:?}",
+            "{:?}{:?}{:?}{:?}{:?}",
             self.trips,
             self.docks,
             self.occupancy,
+            self.unreached_docks,
             window.map(|window| &window.captured)
         )
     }
@@ -340,12 +452,17 @@ impl Simulation {
         let _phase = self.trace.phase(Phase::RefineServiceSlots);
         let mut previous = None;
         for _ in 0..8 {
-            if !self.reserve_service_slots() {
+            if !self.reserve_service_slots(
+                options.travel_cap != crate::model::TravelCap::None,
+            ) {
                 break;
             }
             self.plan_travel(options, padding);
             let adjusted = self.adjust_travel_padding(options, padding);
-            if adjusted != padding {
+            if adjusted != padding
+                && (options.travel_cap == crate::model::TravelCap::None
+                    || self.travel.unsettled_relocation())
+            {
                 return adjusted;
             }
             if options.replay_everything {

@@ -302,7 +302,20 @@ fn visible_rays_stay_local_over_whole_playback() {
             {
                 detached.get_or_insert((frame, beam.author, repository));
             }
-            assert_eq!(beam.from, simulation.state.beam_start(beam.author, beam.to));
+            let (centre, radius) =
+                simulation.state.beam_ring(beam.author).unwrap_or_else(|| {
+                    let radius = simulation.state.geometry.avatar_radius
+                        * simulation.scale()
+                        * simulation.avatar_disc_scale()
+                        * avatar.projection_scale
+                        * avatar.lifecycle_scale
+                        * avatar.presence;
+                    (avatar.position, radius)
+                });
+            assert!(
+                beam.from == simulation.state.beam_start(beam.author, beam.to)
+                    || (beam.from.distance(centre) - radius).abs() < 0.001
+            );
         }
     }
     assert!(observed > 0);

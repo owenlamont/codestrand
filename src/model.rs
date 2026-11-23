@@ -74,6 +74,7 @@ pub(crate) const FRAGMENT_SPEEDS: std::ops::RangeInclusive<f32> = 0.25..=2.0;
 /// Live preview speed multipliers, both bounds inclusive.
 pub(crate) const PLAYBACK_MULTIPLIERS: std::ops::RangeInclusive<f32> = 0.125..=8.0;
 const ADD_DELAY: f32 = 0.2;
+const ARRIVAL_SECONDS: f32 = ADD_DELAY + crate::layout::FADE_SECONDS;
 const DELETE_DELAY: f32 = 0.0;
 const MIN_AVATAR_HEIGHT: f32 = 3.2;
 
@@ -383,6 +384,7 @@ pub(super) struct Avatar {
     target: Vec3,
     repository: usize,
     last_transfer_revision: u64,
+    arrivals_land: Time,
     touched: Vec<u64>,
     last_active: Time,
     pub presence: f32,
@@ -414,9 +416,39 @@ pub(super) struct Avatar {
     /// The seat offset last parked at, whose change starts a settle.
     seat: Vec2,
     travelling: bool,
+    transmitting: bool,
 }
 
 impl Avatar {
+    fn beside_gutter(
+        &self,
+        gutter: Option<crate::layout::packing::Tile>,
+        radius: f32,
+    ) -> bool {
+        self.presence > 0.0
+            && gutter.is_some_and(|tile| {
+                travel::field_rect(tile)
+                    .inflate(radius)
+                    .contains(slots::field_point(self.position))
+            })
+    }
+
+    fn hold_for_rays(&mut self) {
+        self.dock_walk = None;
+        self.gutter_entry = None;
+        self.slot_origin = None;
+        self.settle = None;
+        self.settled = 1.0;
+        self.travelling = false;
+    }
+
+    fn ring_shift(&self) -> Vec3 {
+        self.slot
+            .as_ref()
+            .filter(|_| self.transmitting)
+            .map_or(Vec3::ZERO, |slot| self.position - slot.world())
+    }
+
     fn seat_target(&self, approaching: impl FnOnce() -> bool) -> (Vec3, Vec2) {
         self.slot
             .as_ref()
@@ -450,10 +482,14 @@ impl Avatar {
         route: Option<Vec3>,
         now: Time,
         reach: f32,
-        seat_step: f32,
+        max_step: f32,
     ) {
         if let Some(point) = route {
-            self.position = point;
+            self.position = if self.presence > 0.0 {
+                self.position.move_towards(point, max_step)
+            } else {
+                point
+            };
             self.settle = None;
             self.settled = 1.0;
             self.leaving_name = None;
@@ -485,7 +521,7 @@ impl Avatar {
                 }
             };
             self.position = if self.presence > 0.0 {
-                self.position.move_towards(seat, seat_step)
+                self.position.move_towards(seat, max_step)
             } else {
                 seat
             };
@@ -494,13 +530,7 @@ impl Avatar {
         self.seat = offset;
     }
 
-    fn update_presence(
-        &mut self,
-        now: Time,
-        dt: f32,
-        ring_capacity: Option<u8>,
-        opacity: f32,
-    ) {
+    fn update_ring(&mut self, dt: f32, ring_capacity: Option<u8>) {
         let ring = if let Some(capacity) = ring_capacity.filter(|_| !self.travelling) {
             self.ring_capacity = self.ring_capacity.max(capacity);
             if capacity > 1 {
@@ -513,8 +543,11 @@ impl Avatar {
             -dt / DISBAND
         };
         self.ring_presence = (self.ring_presence + ring).clamp(0.0, 1.0);
+    }
+
+    fn update_presence(&mut self, now: Time, dt: f32, opacity: f32) {
         self.projection_scale = slots::projection_scale(self.position);
-        let service_visible = now < self.expires;
+        let service_visible = now < self.expires || self.transmitting;
         let service_fade = if service_visible { dt / 0.4 } else { -dt / 1.2 };
         self.slot_presence = (self.slot_presence + service_fade).clamp(0.0, 1.0);
         let fade = if service_visible {
@@ -719,6 +752,7 @@ pub(super) struct Simulation {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Visuals {
     None,
+    Seating,
     All,
 }
 
@@ -1430,7 +1464,7 @@ impl Simulation {
         let beam = if revision > self.state.avatars[author].last_transfer_revision
             && self.can_emit_ray(author, repository)
         {
-            self.clear_ray_start(author, repository, to)
+            self.clear_arrival_start(author, repository, to)
                 .map(|from| Beam {
                     target,
                     author,
@@ -1586,7 +1620,7 @@ impl Simulation {
 
     pub(crate) fn tick_layout(&mut self) {
         let files = self.file_motion(match self.visuals {
-            Visuals::None => FileMotion::Hold,
+            Visuals::None | Visuals::Seating => FileMotion::Hold,
             Visuals::All => FileMotion::Advance,
         });
         self.tick_layout_with_files(files);
@@ -1685,7 +1719,16 @@ impl Simulation {
             }
         }
         let dt = tick_seconds();
-        state.pulses.retain(|pulse| now < pulse.end);
+        state.pulses.retain(|pulse| {
+            now < pulse.end
+                && (self.visuals == Visuals::None
+                    || !self.travel.undocking(pulse.author, state.tick))
+        });
+        if self.visuals == Visuals::None {
+            for avatar in &mut state.avatars {
+                avatar.transmitting = false;
+            }
+        }
         let active = state
             .avatars
             .iter()
@@ -1695,7 +1738,10 @@ impl Simulation {
         state.avatar_scale += (scale - state.avatar_scale) * (1.0 - (-dt / 0.6).exp());
         state.place_slots_planned(&self.envelopes, now, &self.travel);
         self.tick_times.laps.end(Phase::TickSlots);
-        state.advance_avatars(now, dt, &self.travel, self.visuals == Visuals::All);
+        if self.visuals != Visuals::None {
+            state.hold_transmitters(now, &self.travel);
+        }
+        state.advance_avatars(now, dt, &self.travel, self.visuals != Visuals::None);
         self.tick_times.laps.end(Phase::TickAvatars);
         if self.visuals == Visuals::All {
             let texts: Vec<_> = self
@@ -1884,15 +1930,11 @@ impl Simulation {
     fn can_emit_ray(&self, author: usize, repository: usize) -> bool {
         let avatar = &self.state.avatars[author];
         avatar.repository == repository
-            && avatar.presence > 0.0
-            && self.layout().repositories[repository]
-                .gutter
-                .is_some_and(|tile| {
-                    travel::field_rect(tile)
-                        .inflate(0.1)
-                        .contains(slots::field_point(avatar.position))
-                })
-            && !self.travel.travelling(author, self.state.tick)
+            && avatar.transmitting
+            && avatar.beside_gutter(
+                self.layout().repositories[repository].gutter,
+                self.state.avatar_radius(),
+            )
     }
 
     fn surface_target(&self, target: Target) -> Option<Vec3> {
@@ -1913,6 +1955,39 @@ impl Simulation {
         to: Vec3,
     ) -> Option<Vec3> {
         let from = self.state.beam_start(author, to);
+        self.ray_path_clear(repository, from, to).then_some(from)
+    }
+
+    fn clear_arrival_start(
+        &self,
+        author: usize,
+        repository: usize,
+        to: Vec3,
+    ) -> Option<Vec3> {
+        if let Some(from) = self.clear_ray_start(author, repository, to) {
+            return Some(from);
+        }
+        let (centre, radius) = self.state.beam_ring(author).unwrap_or_else(|| {
+            let avatar = &self.state.avatars[author];
+            let radius = self.state.geometry.avatar_radius
+                * self.scale()
+                * self.avatar_disc_scale()
+                * avatar.projection_scale
+                * avatar.lifecycle_scale
+                * avatar.presence;
+            (avatar.position, radius)
+        });
+        let inward = Vec2::new(to.x - centre.x, to.z - centre.z).normalize_or_zero();
+        [0.0_f32, 1.0, -1.0, 2.0, -2.0, 3.0, -3.0, 4.0]
+            .into_iter()
+            .map(|turn| {
+                let direction = Vec2::from_angle(turn * std::f32::consts::FRAC_PI_4);
+                centre + ground(direction.rotate(inward) * radius)
+            })
+            .find(|&from| self.ray_path_clear(repository, from, to))
+    }
+
+    fn ray_path_clear(&self, repository: usize, from: Vec3, to: Vec3) -> bool {
         let low = Vec2::new(from.x, from.z);
         let high = Vec2::new(to.x, to.z);
         let tick = self
@@ -1936,7 +2011,7 @@ impl Simulation {
                             || slots::segment(high - tick, high + tick, rect)
                     })
             });
-        (!crosses).then_some(from)
+        !crosses
     }
 
     #[cfg(test)]
@@ -2204,6 +2279,44 @@ impl State {
         }
     }
 
+    fn hold_transmitters(&mut self, now: Time, travel: &travel::Plan) {
+        for avatar in &mut self.avatars {
+            avatar.transmitting = now <= avatar.arrivals_land;
+        }
+        for pulse in &self.pulses {
+            self.avatars[pulse.author].transmitting = true;
+        }
+        let radius = self.avatar_radius();
+        for (author, avatar) in self.avatars.iter_mut().enumerate() {
+            avatar.transmitting = avatar.transmitting
+                && avatar.beside_gutter(
+                    self.layout.repositories[avatar.repository].gutter,
+                    radius,
+                )
+                && !travel.travelling(author, self.tick);
+        }
+    }
+
+    fn ring_shifts(&self) -> Vec<Vec3> {
+        self.avatars
+            .iter()
+            .enumerate()
+            .map(|(index, avatar)| {
+                avatar
+                    .group
+                    .filter(|group| self.in_party(index, group.lead))
+                    .map_or(Vec3::ZERO, |group| self.avatars[group.lead].ring_shift())
+            })
+            .collect()
+    }
+
+    fn visible_avatar_positions(&self) -> Vec<Option<Vec3>> {
+        self.avatars
+            .iter()
+            .map(|avatar| (avatar.presence > 0.001).then_some(avatar.position))
+            .collect()
+    }
+
     fn advance_avatars(
         &mut self,
         now: Time,
@@ -2211,25 +2324,24 @@ impl State {
         plan: &travel::Plan,
         visuals: bool,
     ) {
-        let capacities: Vec<_> = (0..self.avatars.len())
-            .map(|index| self.capacity(index))
-            .collect();
+        let ring_shifts = self.ring_shifts();
         let reach = self.settle_reach();
         let radius = self.avatar_radius();
         let max_step =
             self.avatar_max_speed * framing::WORLD_UNITS_PER_REFERENCE_PIXEL * dt;
-        let previous = (visuals && self.avatars.len() > 1).then(|| {
-            self.avatars
-                .iter()
-                .map(|avatar| (avatar.presence > 0.001).then_some(avatar.position))
-                .collect::<Vec<_>>()
-        });
+        let previous = (visuals && self.avatars.len() > 1)
+            .then(|| self.visible_avatar_positions());
         let mut network = None;
         for (index, avatar) in self.avatars.iter_mut().enumerate() {
+            avatar.activity *= (-dt / 3.0).exp();
+            if avatar.transmitting {
+                avatar.hold_for_rays();
+                avatar.update_presence(now, dt, 1.0);
+                continue;
+            }
             let mut gutter_entry = None;
             let repository = avatar
                 .slot_origin
-                .take()
                 .map_or(avatar.repository, |(repository, ..)| repository);
             let mut join = |from, to| {
                 let cells = network.get_or_insert_with(|| {
@@ -2274,9 +2386,12 @@ impl State {
             avatar.gutter_entry = gutter_entry;
             let (target, offset) =
                 avatar.seat_target(|| plan.approaching_departure(index, self.tick));
-            avatar.activity *= (-dt / 3.0).exp();
             let from = avatar.position;
-            avatar.walk(target, offset, route, now, reach, max_step);
+            let seat = target + ring_shifts[index];
+            avatar.walk(seat, offset, route, now, reach, max_step);
+            if avatar.position.distance(seat) <= reach {
+                avatar.slot_origin = None;
+            }
             if (route.is_none() || gutter_entry.is_some()) && avatar.presence > 0.0 {
                 let nominal = slots::field_point(avatar.position);
                 let clear = travel::seat_clearance(
@@ -2294,19 +2409,45 @@ impl State {
                     avatar.position = slots::world(clear);
                 }
             }
-            let capacity = avatar
-                .group
-                .filter(|g| g.lead == index)
-                .map(|_| capacities[index]);
-            avatar.update_presence(
-                now,
-                dt,
-                capacity,
-                travel.map_or(1.0, |(_, alpha)| alpha),
-            );
+            avatar.update_presence(now, dt, travel.map_or(1.0, |(_, alpha)| alpha));
         }
         if let Some(previous) = previous {
             occlusion::clear_seat_transitions(self, plan, &previous, max_step);
+        }
+        self.update_rings(dt);
+    }
+
+    fn update_rings(&mut self, dt: f32) {
+        let mut capacities: Vec<_> = self
+            .avatars
+            .iter()
+            .enumerate()
+            .map(|(index, avatar)| {
+                avatar
+                    .group
+                    .filter(|group| group.lead == index)
+                    .map(|_| self.capacity(index))
+            })
+            .collect();
+        let member_radius = self.avatar_radius()
+            * slots::MEMBER_SCALE
+            * framing::WORLD_UNITS_PER_REFERENCE_PIXEL;
+        for (index, avatar) in self.avatars.iter().enumerate() {
+            let Some(lead) = avatar.group.map(|group| group.lead) else {
+                continue;
+            };
+            if avatar.presence > 0.0
+                && !avatar.travelling
+                && self.in_party(index, lead)
+                && self.ring_of(index).is_some_and(|(centre, rim)| {
+                    avatar.position.distance(centre) + member_radius > rim
+                })
+            {
+                capacities[lead] = None;
+            }
+        }
+        for (avatar, capacity) in self.avatars.iter_mut().zip(capacities) {
+            avatar.update_ring(dt, capacity);
         }
     }
 
@@ -2331,6 +2472,7 @@ impl State {
             target: self.focus,
             repository: 0,
             last_transfer_revision: 0,
+            arrivals_land: Time::NEG_INFINITY,
             touched: Vec::new(),
             last_active: now,
             presence: 0.0,
@@ -2353,6 +2495,7 @@ impl State {
             leaving_name: None,
             seat: Vec2::ZERO,
             travelling: false,
+            transmitting: false,
         });
         self.authors.insert(contributor.key.clone(), index);
         index
@@ -2406,6 +2549,10 @@ impl State {
             .collect();
         let arriving_directories =
             self.arriving_directories(&touched, arrival_revision);
+        let arrivals = !arriving_directories.is_empty()
+            || touched
+                .keys()
+                .any(|&id| self.layout.new_file_arrival(id, arrival_revision));
         let aggregated = targets.len() + arriving_directories.len() > BEAM_LIMIT;
         if aggregated {
             targets = self.aggregate(&touched);
@@ -2427,6 +2574,8 @@ impl State {
             let avatar = &mut self.avatars[member];
             if avatar.repository != event.repository {
                 avatar.last_transfer_revision = arrival_revision;
+                avatar.arrivals_land = Time::NEG_INFINITY;
+                avatar.transmitting = false;
                 avatar.dock_walk = None;
                 avatar.settle = None;
                 avatar.slot_origin = avatar
@@ -2447,18 +2596,11 @@ impl State {
             avatar.activity = (avatar.activity + 1.0).min(1000.0);
             avatar.group = Some(group);
             avatar.dismissed = false;
-            let previous = self.pulses.iter().rposition(|pulse| {
-                pulse.author == member && pulse.repository == event.repository
-            });
-            let mut index = 0;
-            self.pulses.retain_mut(|pulse| {
-                let keep = pulse.author != member || Some(index) == previous;
-                if pulse.author == member {
-                    pulse.end = pulse.end.min(start + flight + 0.3);
-                }
-                index += 1;
-                keep
-            });
+            self.retire_previous_pulses(member, event.repository, start + flight + 0.3);
+        }
+        if arrivals {
+            self.avatars[author].arrivals_land =
+                start + ARRIVAL_SECONDS + tick_seconds();
         }
         self.pulses.push_back(Pulse {
             commit: self.next_event,
@@ -2472,6 +2614,21 @@ impl State {
             samples,
         });
         self.capacities = self.compute_capacities();
+    }
+
+    fn retire_previous_pulses(&mut self, author: usize, repository: usize, end: Time) {
+        let previous = self.pulses.iter().rposition(|pulse| {
+            pulse.author == author && pulse.repository == repository
+        });
+        let mut index = 0;
+        self.pulses.retain_mut(|pulse| {
+            let keep = pulse.author != author || Some(index) == previous;
+            if pulse.author == author {
+                pulse.end = pulse.end.min(end);
+            }
+            index += 1;
+            keep
+        });
     }
 
     /// Keep parked participants at their docks, and seat newcomers with the author
@@ -2713,7 +2870,7 @@ impl State {
         let centre = slot.ring_centre(capacity, radius);
         let edge = centre + Vec2::X * slots::group_radius(capacity, radius);
         Some((
-            slots::world(centre),
+            slots::world(centre) + author.ring_shift(),
             slots::world(edge).distance(slots::world(centre)),
         ))
     }
@@ -2728,9 +2885,10 @@ impl State {
         let centre = slot.ring_centre(author.ring_capacity, radius);
         let edge = centre + Vec2::X * slots::group_radius(author.ring_capacity, radius);
         let rim = slots::world(edge).distance(slots::world(centre));
-        let centre = author
-            .position
-            .lerp(slots::world(centre), author.ring_presence);
+        let centre = author.position.lerp(
+            slots::world(centre) + author.ring_shift(),
+            author.ring_presence,
+        );
         Some((centre, rim * shown))
     }
 
@@ -2790,7 +2948,11 @@ impl State {
             .map(|index| {
                 let lead = self.avatars[index].group.map_or(index, |g| g.lead);
                 if self.avatars[index].dismissed
-                    || self.capacity(lead) > 1 && self.in_party(index, lead)
+                    || self.capacity(lead) > 1
+                        && self.in_party(index, lead)
+                        && self.ring_of(index).is_some_and(|(centre, rim)| {
+                            self.avatars[index].position.distance(centre) < rim
+                        })
                 {
                     slots::MEMBER_SCALE
                 } else {
