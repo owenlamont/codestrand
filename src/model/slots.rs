@@ -2656,6 +2656,29 @@ mod tests {
         assert_eq!(clearance.len(), 1);
     }
 
+    #[test]
+    fn a_fading_ring_member_keeps_its_seat_until_it_disappears() {
+        let mut sim = Simulation::new(
+            vec![crate::timeline::synthetic().remove(0)],
+            &Options::default(),
+            &Theme::neon(),
+            &Mappings::default(),
+        );
+        sim.advance_to(60, 60);
+        let avatar = &mut sim.state.avatars[0];
+        avatar.presence = 0.5;
+        avatar.transmitting = false;
+        let slot = avatar.slot.as_mut().unwrap();
+        let offset = Vec2::new(12.0, 0.0);
+        slot.offset = offset;
+        slot.point += offset;
+
+        sim.state
+            .place_slots(&sim.envelopes, crate::model::Time::seconds(12.0));
+
+        assert_eq!(sim.state.avatars[0].slot.as_ref().unwrap().offset, offset);
+    }
+
     fn thirty() -> Simulation {
         let histories = (0..30)
             .map(|i| {
