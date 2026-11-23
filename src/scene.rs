@@ -2017,7 +2017,7 @@ fn directory_arrival_position(
     else {
         return (target, 1.0);
     };
-    if visible {
+    if visible && let Some(beam) = beam {
         beams.push(beam);
     }
     (position, 0.15 + 0.85 * progress)

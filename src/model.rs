@@ -382,6 +382,7 @@ pub(super) struct Avatar {
     pub position: Vec3,
     target: Vec3,
     repository: usize,
+    last_transfer_revision: u64,
     touched: Vec<u64>,
     last_active: Time,
     pub presence: f32,
@@ -1375,6 +1376,7 @@ impl Simulation {
                     position,
                     file.presence,
                     file.flight,
+                    file.arrival_revision,
                 );
                 (
                     self.arrival_position(
@@ -1408,7 +1410,8 @@ impl Simulation {
         mut to: Vec3,
         mut progress: f32,
         flight: Option<crate::layout::DirectoryFlight>,
-    ) -> (Beam, f32) {
+        revision: u64,
+    ) -> (Option<Beam>, f32) {
         if let Some(flight) = flight {
             target = Target::Dir(flight.directory);
             let dir = self.layout().dir(flight.directory);
@@ -1417,25 +1420,38 @@ impl Simulation {
             progress = ((progress - flight.offset) / (1.0 - MAX_ARRIVAL_OFFSET))
                 .clamp(0.0, 1.0);
         }
-        (
-            Beam {
-                target,
-                author,
-                from: self.state.beam_start(author, to),
-                to,
-                width: 1.0,
-            },
-            progress,
-        )
+        let repository = match target {
+            Target::File(id) => self
+                .layout()
+                .dir(self.layout().file(id).expect("arrival file exists").dir),
+            Target::Dir(index) => self.layout().dir(index),
+        }
+        .repository;
+        let beam = if revision > self.state.avatars[author].last_transfer_revision
+            && self.can_emit_ray(author, repository)
+        {
+            self.clear_ray_start(author, repository, to)
+                .map(|from| Beam {
+                    target,
+                    author,
+                    from,
+                    to,
+                    width: 1.0,
+                })
+        } else {
+            None
+        };
+        (beam, progress)
     }
 
     fn arrival_position(
         &self,
-        beam: Beam,
+        beam: Option<Beam>,
         progress: f32,
         to: Vec3,
         aggregate: bool,
     ) -> Vec3 {
+        let Some(beam) = beam else { return to };
         if !aggregate {
             return self.theme.beam_style.point(beam.from, beam.to, progress);
         }
@@ -1452,7 +1468,7 @@ impl Simulation {
         &self,
         index: usize,
         to: Vec3,
-    ) -> Option<(Beam, Vec3, f32)> {
+    ) -> Option<(Option<Beam>, Vec3, f32)> {
         let arrival = self.layout().dir(index).arrival?;
         let (beam, progress) = self.arrival_beam(
             Target::Dir(index),
@@ -1460,6 +1476,7 @@ impl Simulation {
             to,
             arrival.progress,
             arrival.flight,
+            arrival.revision,
         );
         let position =
             self.arrival_position(beam, progress, to, arrival.flight.is_some());
@@ -1469,21 +1486,20 @@ impl Simulation {
     pub(super) fn file_arrival_beams(
         &self,
     ) -> impl Iterator<Item = (usize, Beam)> + '_ {
-        self.layout().arriving_files().map(|(id, file)| {
+        self.layout().arriving_files().filter_map(|(id, file)| {
             let dir = self.layout().dir(file.dir);
             let rise = self.repository_effect(dir.repository).2;
             let to = ground(file.position) + Vec3::Y * rise;
-            (
-                file.dir,
-                self.arrival_beam(
-                    Target::File(id),
-                    file.arrival_author,
-                    to,
-                    file.presence,
-                    file.flight,
-                )
-                .0,
+            self.arrival_beam(
+                Target::File(id),
+                file.arrival_author,
+                to,
+                file.presence,
+                file.flight,
+                file.arrival_revision,
             )
+            .0
+            .map(|beam| (file.dir, beam))
         })
     }
 
@@ -1862,8 +1878,21 @@ impl Simulation {
     }
 
     fn pulse_beams_visible(&self, pulse: &Pulse) -> bool {
-        self.state.avatars[pulse.author].repository == pulse.repository
-            && !self.travel.travelling(pulse.author, self.state.tick)
+        self.can_emit_ray(pulse.author, pulse.repository)
+    }
+
+    fn can_emit_ray(&self, author: usize, repository: usize) -> bool {
+        let avatar = &self.state.avatars[author];
+        avatar.repository == repository
+            && avatar.presence > 0.0
+            && self.layout().repositories[repository]
+                .gutter
+                .is_some_and(|tile| {
+                    travel::field_rect(tile)
+                        .inflate(0.1)
+                        .contains(slots::field_point(avatar.position))
+                })
+            && !self.travel.travelling(author, self.state.tick)
     }
 
     fn surface_target(&self, target: Target) -> Option<Vec3> {
@@ -1873,26 +1902,41 @@ impl Simulation {
 
     fn visible_ray(&self, pulse: &Pulse, target: Target) -> Option<(Vec3, Vec3)> {
         let to = self.surface_target(target)?;
-        let from = self.state.beam_start(pulse.author, to);
+        let from = self.clear_ray_start(pulse.author, pulse.repository, to)?;
+        Some((from, to))
+    }
+
+    fn clear_ray_start(
+        &self,
+        author: usize,
+        repository: usize,
+        to: Vec3,
+    ) -> Option<Vec3> {
+        let from = self.state.beam_start(author, to);
         let low = Vec2::new(from.x, from.z);
         let high = Vec2::new(to.x, to.z);
-        let crosses =
-            self.layout()
-                .repositories
-                .iter()
-                .enumerate()
-                .any(|(index, region)| {
-                    index != pulse.repository
-                        && region.tile.is_some_and(|tile| {
-                            let corners = tile.ground();
-                            slots::segment(
-                                low,
-                                high,
-                                bevy::math::Rect::from_corners(corners[0], corners[2]),
-                            )
-                        })
-                });
-        (!crosses).then_some((from, to))
+        let tick = self
+            .theme
+            .beam_style
+            .endpoint_tick(from, to)
+            .map(|tick| Vec2::new(tick.x, tick.z));
+        let crosses = self
+            .layout()
+            .repositories
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index != repository)
+            .filter_map(|(_, region)| region.tile)
+            .any(|tile| {
+                let corners = tile.ground();
+                let rect = bevy::math::Rect::from_corners(corners[0], corners[2]);
+                slots::segment(low, high, rect)
+                    || tick.is_some_and(|tick| {
+                        slots::segment(low - tick, low + tick, rect)
+                            || slots::segment(high - tick, high + tick, rect)
+                    })
+            });
+        (!crosses).then_some(from)
     }
 
     #[cfg(test)]
@@ -2286,6 +2330,7 @@ impl State {
             position: self.focus + Vec3::Y * MIN_AVATAR_HEIGHT,
             target: self.focus,
             repository: 0,
+            last_transfer_revision: 0,
             touched: Vec::new(),
             last_active: now,
             presence: 0.0,
@@ -2381,6 +2426,7 @@ impl State {
         for (&member, group) in participants.iter().zip(groups) {
             let avatar = &mut self.avatars[member];
             if avatar.repository != event.repository {
+                avatar.last_transfer_revision = arrival_revision;
                 avatar.dock_walk = None;
                 avatar.settle = None;
                 avatar.slot_origin = avatar
@@ -2401,7 +2447,9 @@ impl State {
             avatar.activity = (avatar.activity + 1.0).min(1000.0);
             avatar.group = Some(group);
             avatar.dismissed = false;
-            let previous = self.pulses.iter().rposition(|pulse| pulse.author == member);
+            let previous = self.pulses.iter().rposition(|pulse| {
+                pulse.author == member && pulse.repository == event.repository
+            });
             let mut index = 0;
             self.pulses.retain_mut(|pulse| {
                 let keep = pulse.author != member || Some(index) == previous;

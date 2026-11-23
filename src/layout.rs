@@ -75,7 +75,7 @@ pub(super) struct File {
     pub activity: f32,
     pub author: usize,
     pub arrival_author: usize,
-    arrival_revision: u64,
+    pub arrival_revision: u64,
     pub flight: Option<DirectoryFlight>,
     pub arrival_cancelled: bool,
 }
@@ -128,7 +128,7 @@ pub(super) struct DirectoryArrival {
     pub author: usize,
     delay: f32,
     pub progress: f32,
-    revision: u64,
+    pub revision: u64,
     pub flight: Option<DirectoryFlight>,
 }
 

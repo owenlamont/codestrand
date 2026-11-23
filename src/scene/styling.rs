@@ -510,8 +510,7 @@ pub(super) fn beam_segments(
             )
         })
         .collect();
-    if matches!(theme.beam_style, BeamStyle::Construction) {
-        let tick = (to - from).cross(Vec3::Y).normalize_or(Vec3::X) * 0.13;
+    if let Some(tick) = theme.beam_style.endpoint_tick(from, to) {
         segments.extend([(from - tick, from + tick, 0), (to - tick, to + tick, 0)]);
     }
     segments

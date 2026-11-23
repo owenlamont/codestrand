@@ -24,6 +24,11 @@ pub(crate) enum BeamStyle {
 }
 
 impl BeamStyle {
+    pub(crate) fn endpoint_tick(self, from: Vec3, to: Vec3) -> Option<Vec3> {
+        matches!(self, Self::Construction)
+            .then(|| (to - from).cross(Vec3::Y).normalize_or(Vec3::X) * 0.13)
+    }
+
     pub(crate) fn point(self, from: Vec3, to: Vec3, t: f32) -> Vec3 {
         let height = match self {
             Self::Arch => 4.0 * t * (1.0 - t) * from.distance(to) * 0.25,
