@@ -474,3 +474,56 @@ impl Audit {
 fn overlaps(centre: Vec2, radius: f32, rect: Rect) -> bool {
     centre.distance(centre.clamp(rect.min, rect.max)) + 0.01 < radius
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{contributors::Mappings, model::Options, theme::Theme, timeline};
+
+    #[test]
+    fn a_fading_in_seat_leaves_room_for_the_visible_avatar() {
+        let mut sim = Simulation::new(
+            vec![timeline::synthetic().remove(0)],
+            &Options::default(),
+            &Theme::neon(),
+            &Mappings::default(),
+        );
+        sim.advance_to(60, 60);
+        let state = &mut *sim.state;
+        let base = state.geometry.avatar_radius
+            * state.scale()
+            * state.avatar_scale
+            * state.avatar_size;
+        let incumbent = &mut state.avatars[0];
+        let position = Vec3::Y * super::super::MIN_AVATAR_HEIGHT;
+        incumbent.position = position;
+        incumbent.group = None;
+        incumbent.transmitting = true;
+        incumbent.presence = 1.0;
+        incumbent.lifecycle_scale = 1.0;
+        incumbent.projection_scale = slots::projection_scale(position);
+
+        let mut newcomer = incumbent.clone();
+        newcomer.transmitting = false;
+        newcomer.presence = 1.0 / 24.0;
+        newcomer.position += Vec3::X * (1.5 * base);
+        newcomer.projection_scale = slots::projection_scale(newcomer.position);
+        state.avatars.push(newcomer);
+        clear_seat_transitions(
+            state,
+            &travel::Plan::default(),
+            &[Some(position), None],
+            0.5,
+        );
+
+        let [incumbent, newcomer] = &mut state.avatars[..] else {
+            unreachable!();
+        };
+        newcomer.presence = 1.0;
+        assert_eq!(incumbent.position, position);
+        assert!(
+            incumbent.position.distance(newcomer.position)
+                >= disc_radius(incumbent, base, 1.0) + disc_radius(newcomer, base, 1.0)
+        );
+    }
+}
