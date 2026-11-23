@@ -1096,6 +1096,42 @@ mod tests {
     }
 
     #[test]
+    fn a_repaired_walk_starts_at_the_waiting_avatar() {
+        let mut capture = fixture();
+        let speed = 480.0;
+        let (mut planned, _) =
+            trips(&capture, speed, crate::model::BotTravel::Walk, true);
+        align_arrivals(&capture, &mut planned, speed);
+        let trip = &planned[0];
+        let waiting = Vec2::new(-100.0, 25.0);
+        capture.obstacles = Some(super::super::WalkObstacles {
+            waiting: [(
+                (trip.commit, trip.author),
+                super::super::WaitingPoses {
+                    begin: 0,
+                    points: vec![Some(waiting); 400],
+                },
+            )]
+            .into(),
+            ..Default::default()
+        });
+
+        let repair = timed_approach(
+            &capture,
+            trip,
+            last_release(&capture, trip),
+            speed,
+            &mut Router::default(),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(repair.source, waiting);
+        assert!(repair.sample(repair.departure).0.distance(waiting) < 0.001);
+        assert_eq!(repair.arrival, trip.arrival);
+    }
+
+    #[test]
     fn an_idle_contributor_can_return_to_a_different_seat_without_a_walk() {
         let mut capture = fixture();
         let next = capture.services.last_mut().unwrap();
