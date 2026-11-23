@@ -5,17 +5,23 @@ use bevy::{
     image::{ImageAddressMode, ImageSampler, ImageSamplerDescriptor},
     light::Skybox,
     math::Affine2,
+    mesh::VertexAttributeValues,
     prelude::*,
     render::render_resource::{
-        Extent3d, TextureDimension, TextureFormat, TextureViewDescriptor,
-        TextureViewDimension,
+        Extent3d, PrimitiveTopology, TextureDimension, TextureFormat,
+        TextureViewDescriptor, TextureViewDimension,
     },
 };
 
-use super::SceneCamera;
-use crate::theme::ThemeName;
+use super::{PreviewCamera, SceneCamera, glass_positions};
+use crate::{
+    model::{Simulation, framing::GLASS_BOTTOM},
+    repositories::Boundary,
+    theme::ThemeName,
+};
 
-const GROUND_Y: f32 = -0.18;
+const GROUND_Y: f32 = -0.22;
+const TILE_FLOOR_Y: f32 = -0.18;
 const REPEAT: f32 = 16.0;
 const GROUND_SIZE: u32 = 256;
 const SUN_AZIMUTH: Vec3 = Vec3::NEG_Z;
@@ -24,12 +30,22 @@ const SUN_AZIMUTH: Vec3 = Vec3::NEG_Z;
 struct Environment {
     plane: Entity,
     material: Handle<StandardMaterial>,
-    textures: Vec<(ThemeName, Handle<Image>, Handle<Image>)>,
+    tile_floor: Entity,
+    tile_mesh: Handle<Mesh>,
+    tile_material: Handle<StandardMaterial>,
+    textures: Vec<(ThemeName, EnvironmentImages)>,
+}
+
+struct EnvironmentImages {
+    ground: Handle<Image>,
+    sky: Handle<Image>,
+    tile_floor: Option<Handle<Image>>,
 }
 
 pub(super) struct Textures {
     ground: Image,
     sky: Image,
+    tile_floor: Option<Image>,
 }
 
 impl Textures {
@@ -38,18 +54,12 @@ impl Textures {
         let svg = format!(
             r##"<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256"><rect width="256" height="256" fill="#{base:06x}"/>{art}</svg>"##
         );
-        let tree = resvg::usvg::Tree::from_str(&svg, &resvg::usvg::Options::default())
-            .expect("ground SVG is valid");
-        let mut pixmap = resvg::tiny_skia::Pixmap::new(GROUND_SIZE, GROUND_SIZE)
-            .expect("ground texture fits memory");
-        resvg::render(
-            &tree,
-            resvg::tiny_skia::Transform::identity(),
-            &mut pixmap.as_mut(),
-        );
-        let mut level =
-            image::RgbaImage::from_raw(GROUND_SIZE, GROUND_SIZE, pixmap.take())
-                .expect("ground RGBA pixels");
+        let mut level = image::RgbaImage::from_raw(
+            GROUND_SIZE,
+            GROUND_SIZE,
+            raster_svg(&svg, GROUND_SIZE),
+        )
+        .expect("ground RGBA pixels");
         let mut pixels = level.as_raw().clone();
         while level.width() > 1 {
             let size = level.width() / 2;
@@ -74,8 +84,31 @@ impl Textures {
         Self {
             ground,
             sky: skybox(name, far_ground),
+            tile_floor: name.tile_floor_art().map(|art| {
+                let size = 1024;
+                let svg = format!(
+                    r#"<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024">{art}</svg>"#
+                );
+                let mut image = texture(size, 1);
+                image.sampler = ImageSampler::linear();
+                image.data = Some(raster_svg(&svg, size));
+                image
+            }),
         }
     }
+}
+
+fn raster_svg(svg: &str, size: u32) -> Vec<u8> {
+    let tree = resvg::usvg::Tree::from_str(svg, &resvg::usvg::Options::default())
+        .expect("environment SVG is valid");
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(size, size)
+        .expect("environment texture fits memory");
+    resvg::render(
+        &tree,
+        resvg::tiny_skia::Transform::identity(),
+        &mut pixmap.as_mut(),
+    );
+    pixmap.take()
 }
 
 fn texture(size: u32, layers: u32) -> Image {
@@ -92,22 +125,24 @@ fn texture(size: u32, layers: u32) -> Image {
 }
 
 fn skybox(name: ThemeName, ground: [u8; 4]) -> Image {
-    let size = if name == ThemeName::Outrun {
-        256_u16
-    } else {
-        64
-    };
+    let size = 256_u16;
     let (horizon, zenith) = name.sky();
+    let [r, g, b, a] = ground;
+    let far_ground = Srgba::rgba_u8(r, g, b, a);
     let pixel = |direction: Vec3| {
-        if direction.y < 0.0 {
+        let height = direction.y;
+        // The ground-coloured band keeps the cubemap filter off the plane edge.
+        let blend = ((height - 0.006) / 0.019).clamp(0.0, 1.0);
+        if blend <= 0.0 {
             return ground;
         }
-        let sky = horizon.mix(&zenith, direction.y.sqrt());
-        if name == ThemeName::Outrun {
-            sunset(direction, sky).to_u8_array()
+        let sky = horizon.mix(&zenith, height.sqrt());
+        let sky = if name == ThemeName::Outrun {
+            sunset(direction, sky)
         } else {
-            sky.to_u8_array()
-        }
+            sky
+        };
+        far_ground.mix(&sky, blend).to_u8_array()
     };
     let coordinates =
         (0..size).map(|i| (f32::from(i) + 0.5) * 2.0 / f32::from(size) - 1.0);
@@ -166,9 +201,37 @@ pub(super) fn setup(world: &mut World, name: ThemeName, mesh: Handle<Mesh>) {
             NoFrustumCulling,
         ))
         .id();
+    let tile_material =
+        world
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial {
+                unlit: true,
+                ..default()
+            });
+    let tile_mesh = world.resource_mut::<Assets<Mesh>>().add(
+        Mesh::new(
+            PrimitiveTopology::TriangleList,
+            RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
+        )
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, vec![[0.0; 3]; 3])
+        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0, 1.0, 0.0]; 3])
+        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0; 2]; 3]),
+    );
+    let tile_floor = world
+        .spawn((
+            Mesh3d(tile_mesh.clone()),
+            MeshMaterial3d(tile_material.clone()),
+            Transform::IDENTITY,
+            Visibility::Hidden,
+            NoFrustumCulling,
+        ))
+        .id();
     world.insert_resource(Environment {
         plane,
         material,
+        tile_floor,
+        tile_mesh,
+        tile_material,
         textures: Vec::new(),
     });
     apply(world, name);
@@ -177,12 +240,15 @@ pub(super) fn setup(world: &mut World, name: ThemeName, mesh: Handle<Mesh>) {
 
 pub(super) fn install(world: &mut World, name: ThemeName, textures: Textures) {
     let mut images = world.resource_mut::<Assets<Image>>();
-    let ground = images.add(textures.ground);
-    let sky = images.add(textures.sky);
+    let handles = EnvironmentImages {
+        ground: images.add(textures.ground),
+        sky: images.add(textures.sky),
+        tile_floor: textures.tile_floor.map(|image| images.add(image)),
+    };
     world
         .resource_mut::<Environment>()
         .textures
-        .push((name, ground, sky));
+        .push((name, handles));
 }
 
 pub(super) fn apply(world: &mut World, name: ThemeName) {
@@ -198,17 +264,34 @@ pub(super) fn apply(world: &mut World, name: ThemeName) {
     }
     let environment = world.resource::<Environment>();
     let material = environment.material.clone();
-    let (_, ground, sky) = environment
+    let tile_material = environment.tile_material.clone();
+    let (_, images) = environment
         .textures
         .iter()
         .find(|(loaded, ..)| *loaded == name)
         .expect("theme environment is loaded");
-    let (ground, sky) = (ground.clone(), sky.clone());
-    world
-        .resource_mut::<Assets<StandardMaterial>>()
+    let (ground, sky, tile_floor) = (
+        images.ground.clone(),
+        images.sky.clone(),
+        images.tile_floor.clone(),
+    );
+    let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
+    materials
         .get_mut(&material)
         .expect("ground material")
         .base_color_texture = Some(ground);
+    *materials
+        .get_mut(&tile_material)
+        .expect("tile floor material") = StandardMaterial {
+        base_color: match name {
+            ThemeName::Neon => Color::srgb(0.02, 0.036, 0.06),
+            ThemeName::Phosphor => Color::BLACK,
+            _ => Color::WHITE,
+        },
+        base_color_texture: tile_floor,
+        unlit: true,
+        ..default()
+    };
     let mut camera = world.query_filtered::<Entity, With<SceneCamera>>();
     if let Ok(entity) = camera.single(world) {
         world.entity_mut(entity).insert(Skybox {
@@ -218,6 +301,69 @@ pub(super) fn apply(world: &mut World, name: ThemeName) {
             ..default()
         });
     }
+}
+
+pub(super) fn place_tile_floor(world: &mut World, simulation: &Simulation) {
+    let Some(environment) = world.get_resource::<Environment>() else {
+        return;
+    };
+    let entity = environment.tile_floor;
+    let mesh = environment.tile_mesh.clone();
+    let mut camera =
+        world.query_filtered::<(&Transform, &Projection), With<SceneCamera>>();
+    let Ok((pose, Projection::Perspective(projection))) = camera.single(world) else {
+        return;
+    };
+    let eye = pose.translation;
+    if !matches!(simulation.repository_boundary, Boundary::Glass)
+        || eye.y <= GLASS_BOTTOM
+    {
+        super::set_visible(world, entity, false);
+        return;
+    }
+    let (focus, distance) = simulation.view();
+    let (centre, width) = world
+        .get_resource::<PreviewCamera>()
+        .map_or((focus.xz(), distance * 2.5), |camera| {
+            (camera.pose().0.xz(), projection.far * 4.0)
+        });
+    let positions: Vec<_> = (0..simulation.layout().repositories.len())
+        .filter_map(|index| simulation.visible_repository_tile(index))
+        .flat_map(|tile| glass_positions(Some(tile)))
+        .map(|[x, _, z]| {
+            // Project the finish onto the floor along sightlines through the glass edges.
+            let scale = (eye.y - TILE_FLOOR_Y) / (eye.y - GLASS_BOTTOM);
+            let point = eye.xz() + (Vec2::new(x, z) - eye.xz()) * scale;
+            [point.x, TILE_FLOOR_Y, point.y]
+        })
+        .collect();
+    super::set_visible(world, entity, !positions.is_empty());
+    if positions.is_empty() {
+        return;
+    }
+    let uvs: Vec<_> = positions
+        .iter()
+        .map(|&[x, _, z]| {
+            ((Vec2::new(x, z) - centre) / width + Vec2::splat(0.5)).to_array()
+        })
+        .collect();
+    let meshes = world.resource::<Assets<Mesh>>();
+    let current = meshes.get(&mesh).expect("tile floor mesh");
+    if matches!(
+        (current.attribute(Mesh::ATTRIBUTE_POSITION), current.attribute(Mesh::ATTRIBUTE_UV_0)),
+        (Some(VertexAttributeValues::Float32x3(old_positions)), Some(VertexAttributeValues::Float32x2(old_uvs)))
+            if *old_positions == positions && *old_uvs == uvs
+    ) {
+        return;
+    }
+    let mut meshes = world.resource_mut::<Assets<Mesh>>();
+    let mut mesh = meshes.get_mut(&mesh).expect("tile floor mesh");
+    mesh.insert_attribute(
+        Mesh::ATTRIBUTE_NORMAL,
+        vec![[0.0, 1.0, 0.0]; positions.len()],
+    );
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
 }
 
 pub(super) fn place_ground(world: &mut World) {
@@ -282,10 +428,30 @@ mod tests {
     }
 
     #[test]
+    fn cubemap_texels_at_the_horizon_match_far_ground() {
+        for name in ThemeName::ALL {
+            let textures = Textures::raster(name);
+            let ground = textures.ground.data.as_deref().unwrap().as_chunks::<4>().0;
+            let sky = textures.sky.data.as_deref().unwrap().as_chunks::<4>().0;
+            let size = usize::try_from(textures.sky.width()).unwrap();
+            for face in [0, 1, 4, 5] {
+                let middle = face * size * size + size * (size / 2);
+                assert!(
+                    sky[middle - size..middle + size]
+                        .iter()
+                        .all(|pixel| Some(pixel) == ground.last()),
+                    "{name:?}, face {face}",
+                );
+            }
+        }
+    }
+
+    #[test]
     fn ground_stays_below_glass_and_sunset_stays_world_aligned_as_camera_turns() {
         let mut world = World::new();
         world.init_resource::<Assets<StandardMaterial>>();
         world.init_resource::<Assets<Image>>();
+        world.init_resource::<Assets<Mesh>>();
         let camera = world
             .spawn((
                 SceneCamera,

@@ -1,16 +1,28 @@
+use std::fmt::Write;
+
 use bevy::color::Srgba;
 
 use super::ThemeName;
 
 impl ThemeName {
-    pub(crate) fn gridded_ground_color(self) -> Option<bevy::color::Color> {
-        match self {
-            Self::Neon | Self::Phosphor | Self::Outrun | Self::Blueprint => {
-                let [_, r, g, b] = self.ground().0.to_be_bytes();
-                Some(bevy::color::Color::srgb_u8(r, g, b))
+    pub(crate) fn tile_floor_art(self) -> Option<String> {
+        let art = match self {
+            Self::Neon | Self::Phosphor => return None,
+            Self::Outrun => {
+                r##"<defs><linearGradient id="d" x2="0" y2="1"><stop stop-color="#12022a"/><stop offset="1" stop-color="#3b0a45"/></linearGradient></defs><rect width="1024" height="1024" fill="url(#d)"/>"##
             }
-            Self::RetroDesktop | Self::Atlas | Self::Forge => None,
-        }
+            Self::Blueprint => {
+                r##"<defs><linearGradient id="d" x2="0" y2="1"><stop stop-color="#0d3a73"/><stop offset="1" stop-color="#0f4486"/></linearGradient></defs><rect width="1024" height="1024" fill="url(#d)"/>"##
+            }
+            Self::RetroDesktop => {
+                r##"<rect width="1024" height="1024" fill="#0f7b7b"/><defs><pattern id="p" width="8" height="8" patternUnits="userSpaceOnUse"><path d="M0 0h1v1H0zM4 4h1v1H4z" fill="#146e70"/></pattern></defs><rect width="1024" height="1024" fill="url(#p)"/>"##
+            }
+            Self::Atlas => return Some(atlas_tile_floor()),
+            Self::Forge => {
+                r##"<defs><radialGradient id="d"><stop stop-color="#241109"/><stop offset=".6" stop-color="#140a06"/><stop offset="1" stop-color="#070505"/></radialGradient></defs><rect width="1024" height="1024" fill="url(#d)"/>"##
+            }
+        };
+        Some(art.to_owned())
     }
 
     pub(crate) fn ground(self) -> (u32, &'static str) {
@@ -61,4 +73,18 @@ impl ThemeName {
             Srgba::hex(zenith).expect("sky zenith colour"),
         )
     }
+}
+
+fn atlas_tile_floor() -> String {
+    let mut art = String::from(
+        r##"<defs><linearGradient id="d" x2="0" y2="1"><stop stop-color="#eceee6"/><stop offset="1" stop-color="#e3e6dc"/></linearGradient></defs><rect width="1024" height="1024" fill="url(#d)"/>"##,
+    );
+    for i in -10..35 {
+        let y = i * 38;
+        write!(art, r##"<path d="M-100 {y}q180 -85 350 15t400 -30t500 10" fill="none" stroke="#8e9c83" stroke-width="1" stroke-opacity=".18"/>"##).expect("string write");
+    }
+    for x in (0..1024).step_by(17) {
+        write!(art, r##"<path d="M{x} 0l-400 1024" fill="none" stroke="#8e9c83" stroke-width="1" stroke-opacity=".035"/>"##).expect("string write");
+    }
+    art
 }

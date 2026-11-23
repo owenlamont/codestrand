@@ -1023,20 +1023,11 @@ fn setup_caption(world: &mut World, camera: Entity, repository_labels: usize) {
     caption::setup(world, camera);
 }
 fn repository_glass_material(theme: &Theme, index: usize) -> StandardMaterial {
-    let tint = theme.glass[index % theme.glass.len()].base_color;
-    let alpha = 0.055;
-    let (base_color, alpha_mode) = theme.name.gridded_ground_color().map_or_else(
-        || (tint.with_alpha(alpha), AlphaMode::Blend),
-        |ground| {
-            (
-                ground.to_linear().mix(&tint.to_linear(), alpha).into(),
-                AlphaMode::Opaque,
-            )
-        },
-    );
     StandardMaterial {
-        base_color,
-        alpha_mode,
+        base_color: theme.glass[index % theme.glass.len()]
+            .base_color
+            .with_alpha(0.055),
+        alpha_mode: AlphaMode::Blend,
         unlit: true,
         ..default()
     }
@@ -1474,6 +1465,9 @@ fn preview_camera(world: &mut World, mut navigation: Local<navigation::State>) {
         }
     });
     environment::place_ground(world);
+    world.resource_scope(|world, playback: Mut<Playback>| {
+        environment::place_tile_floor(world, &playback.0);
+    });
 }
 
 pub(super) fn animate(world: &mut World) {
@@ -1505,6 +1499,7 @@ pub(super) fn animate(world: &mut World) {
                 }
                 sync_activity(world, &palette, &mut pools, simulation);
                 sync_repository_regions(world, simulation);
+                environment::place_tile_floor(world, simulation);
                 titles::sync(world, simulation);
             });
         });
@@ -3385,22 +3380,15 @@ mod tests {
     }
 
     #[test]
-    fn gridded_themes_have_opaque_repository_tiles_with_the_glass_tint() {
-        use crate::theme::ThemeName;
-
-        for name in [
-            ThemeName::Neon,
-            ThemeName::Phosphor,
-            ThemeName::Outrun,
-            ThemeName::Blueprint,
-        ] {
+    fn repository_glass_blends_without_writing_depth_in_every_theme() {
+        for name in crate::theme::ThemeName::ALL {
             let theme = name.build();
             let material = repository_glass_material(&theme, 0);
-            assert_eq!(material.alpha_mode, AlphaMode::Opaque, "{name:?}");
-            let ground = name.gridded_ground_color().unwrap().to_linear();
-            let tint = theme.glass[0].base_color.to_linear();
-            let expected = ground.mix(&tint, 0.055);
-            assert_eq!(material.base_color.to_linear(), expected, "{name:?}");
+            assert_eq!(material.alpha_mode, AlphaMode::Blend, "{name:?}");
+            assert_eq!(
+                material.base_color,
+                theme.glass[0].base_color.with_alpha(0.055)
+            );
         }
     }
     #[test]
