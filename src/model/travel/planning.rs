@@ -260,7 +260,8 @@ fn route_proof(points: &[Vec2], epoch: u64) -> serde_json::Value {
 #[derive(Clone, Copy)]
 enum Search {
     Fit { mandatory_birth_walk: bool },
-    Align { blocked: Option<Vec2>, pace: f32 },
+    Align,
+    Repair { blocked: Option<Vec2>, pace: f32 },
 }
 
 fn retain_shared_berth(
@@ -296,7 +297,8 @@ fn search(
     mode: Search,
 ) -> Trip {
     let (align, blocked, pace) = match mode {
-        Search::Align { blocked, pace } => (true, blocked, pace),
+        Search::Align => (true, None, 0.8),
+        Search::Repair { blocked, pace } => (true, blocked, pace),
         Search::Fit { .. } => (false, None, 0.8),
     };
     let mut best = template.clone();
@@ -358,7 +360,10 @@ fn search(
             speed,
             animation_delay,
             align,
-        ) {
+        ) && (!matches!(mode, Search::Repair { .. })
+            || begin != template.departure
+            || route.track != template.route.track)
+        {
             candidate.route = route;
             candidate.proof = Some(route_proof(&points, begin));
             candidate.fade = false;
@@ -374,21 +379,41 @@ fn search(
             best.cutoff = Some(begin);
         }
     }
-    let Search::Fit {
-        mandatory_birth_walk,
-    } = mode
-    else {
-        return template.clone();
-    };
+    match mode {
+        Search::Fit {
+            mandatory_birth_walk: true,
+        } => finish_birth_walk(
+            capture,
+            template,
+            best,
+            first,
+            speed,
+            router,
+            target_fraction,
+        ),
+        Search::Fit {
+            mandatory_birth_walk: false,
+        } => best,
+        Search::Align | Search::Repair { .. } => template.clone(),
+    }
+}
+
+fn finish_birth_walk(
+    capture: &Capture,
+    template: &Trip,
+    mut best: Trip,
+    first: u64,
+    speed: f32,
+    router: &mut Router,
+    target_fraction: Vec2,
+) -> Trip {
     if best.fade
-        && mandatory_birth_walk
         && let Some(approach) =
             fixed_dock_approach(capture, template, first, speed, router, None)
     {
         return approach;
     }
-    if mandatory_birth_walk
-        && template.arrival - first >= crate::model::BIRTH_TICKS * 2
+    if template.arrival - first >= crate::model::BIRTH_TICKS * 2
         && dock_outpaces_walker(capture, template, speed, target_fraction)
     {
         best.failure = Some(super::MOVING_DOCK);
@@ -668,17 +693,7 @@ fn separate_coarrival(
         })?;
     let mut template = trip.clone();
     template.destination = clear;
-    let aligned = search(
-        capture,
-        &template,
-        release,
-        speed,
-        router,
-        Search::Align {
-            blocked: None,
-            pace: 0.8,
-        },
-    );
+    let aligned = search(capture, &template, release, speed, router, Search::Align);
     if aligned.route.track == trip.route.track {
         fixed_dock_approach(capture, &template, release, speed, router, None)
     } else {
@@ -765,7 +780,7 @@ fn timed_approach(
             release,
             speed,
             router,
-            Search::Align { blocked, pace },
+            Search::Repair { blocked, pace },
         );
         (aligned.departure != trip.departure || aligned.route.track != trip.route.track)
             .then_some(aligned)
@@ -784,17 +799,8 @@ pub(super) fn align_arrivals<'a>(
     {
         let release = last_release(capture, trip).max(trip.departure);
         if release < trip.arrival {
-            let aligned = search(
-                capture,
-                trip,
-                release,
-                speed,
-                &mut router,
-                Search::Align {
-                    blocked: None,
-                    pace: 0.8,
-                },
-            );
+            let aligned =
+                search(capture, trip, release, speed, &mut router, Search::Align);
             *trip = if aligned.kind == TripKind::Relocation
                 && needs_alignment(&aligned, capture.frozen)
             {

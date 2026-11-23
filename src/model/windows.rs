@@ -211,7 +211,7 @@ impl Simulation {
             self.travel.require_birth_routes(options.bot_travel)?;
         }
         self.align_travel_arrivals(options);
-        self.repair_walk_departures(options);
+        self.repair_walk_departures(options, padding);
         Ok(pass)
     }
 

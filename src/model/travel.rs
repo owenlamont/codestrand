@@ -147,6 +147,14 @@ impl WalkObstacles {
             || self.coarrivals.contains_key(&key)
     }
 
+    fn keys(&self) -> impl Iterator<Item = (usize, usize)> + '_ {
+        self.blocked
+            .keys()
+            .chain(self.contacted.keys())
+            .chain(self.coarrivals.keys())
+            .copied()
+    }
+
     fn clears(&self, trip: &Trip, tick: u64, point: Vec2) -> bool {
         let Some(index) = tick
             .checked_sub(self.begin)
@@ -849,28 +857,72 @@ fn fade_clearance(capture: &Capture, begin: u64, point: Vec2, radius: f32) -> u6
 
 impl Simulation {
     /// Checks the settled playback for walks that cannot finish clear of other avatars.
-    pub(super) fn repair_walk_departures(&mut self, options: &super::Options) {
+    pub(super) fn repair_walk_departures(
+        &mut self,
+        options: &super::Options,
+        padding: &[(usize, u32)],
+    ) {
+        let Some(blocked) = self.repair_walk_routes(options) else {
+            return;
+        };
+        let mut plan = self.travel.clone();
+        let mut rejected = BTreeSet::new();
+        for trip in &self.travel.trips {
+            let key = (trip.commit, trip.author);
+            if trip.kind == TripKind::Relocation
+                && blocked.contains(&key)
+                && let Some(&dock) = self.travel.docks.get(&key)
+                && plan.reject_dock(key, Some(dock))
+            {
+                rejected.insert(key);
+            }
+        }
+        if rejected.is_empty() {
+            return;
+        }
+        let previous = std::mem::replace(&mut self.travel, plan);
+        let captured = self.window.as_ref().map(|window| window.captured.clone());
+        self.plan_travel(options, padding);
+        self.align_travel_arrivals(options);
+        let retry = self.repair_walk_routes(options).unwrap_or_default();
+        let solved = !rejected.is_subset(&retry) && retry.is_subset(&blocked);
+        if !solved || self.adjust_travel_padding(options, padding) != padding {
+            self.travel = previous;
+            if let Some(window) = &mut self.window {
+                window.captured = captured.expect("saved window services");
+            }
+        }
+    }
+
+    fn repair_walk_routes(
+        &mut self,
+        options: &super::Options,
+    ) -> Option<BTreeSet<(usize, usize)>> {
+        let mut obstacles = self.observe_walk_obstacles()?;
         for _ in 0..4 {
-            let Some(mut obstacles) = self.observe_walk_obstacles() else {
-                break;
-            };
+            let affected = obstacles.keys().collect();
             self.capture_contacted_seats(&mut obstacles);
             let mut capture = capture(self);
             capture.obstacles = Some(obstacles);
-            let _phase = self.trace.phase(Phase::Routes);
-            let (epochs, changed) = planning::realign_blocked_walks(
-                &capture,
-                &mut self.travel.trips,
-                options.avatar_max_speed,
-            );
-            self.trace.count(Counter::RouteCandidates, epochs);
-            self.travel.stats.graph_epochs += epochs;
+            let changed = {
+                let _phase = self.trace.phase(Phase::Routes);
+                let (epochs, changed) = planning::realign_blocked_walks(
+                    &capture,
+                    &mut self.travel.trips,
+                    options.avatar_max_speed,
+                );
+                self.trace.count(Counter::RouteCandidates, epochs);
+                self.travel.stats.graph_epochs += epochs;
+                changed
+            };
             if !changed {
-                break;
+                return Some(affected);
             }
+            self.travel.stats.retained_route_bytes =
+                retained_route_bytes(&self.travel.trips);
+            obstacles = self.observe_walk_obstacles()?;
         }
-        self.travel.stats.retained_route_bytes =
-            retained_route_bytes(&self.travel.trips);
+        Some(obstacles.keys().collect())
     }
 
     pub(super) fn align_travel_arrivals(&mut self, options: &super::Options) {

@@ -982,7 +982,7 @@ impl Simulation {
             simulation.travel.require_birth_routes(options.bot_travel)?;
         }
         simulation.align_travel_arrivals(options);
-        simulation.repair_walk_departures(options);
+        simulation.repair_walk_departures(options, &padding);
         {
             let _phase = trace.phase(Phase::Caption);
             simulation.caption_plan =
