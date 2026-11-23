@@ -53,6 +53,89 @@ fn seating_disc_radius(
 
 const SEAT_CLEARANCE: f32 = 0.75 * framing::WORLD_UNITS_PER_REFERENCE_PIXEL;
 
+#[derive(Clone, Copy, Debug)]
+pub(super) struct BodyDisc {
+    centre: Vec2,
+    radius: f32,
+}
+
+impl BodyDisc {
+    fn clears(self, other: Self) -> bool {
+        self.centre.distance_squared(other.centre)
+            >= (self.radius + other.radius + SEAT_CLEARANCE).powi(2)
+    }
+}
+
+fn seating_base(state: &State) -> f32 {
+    state.geometry.avatar_radius
+        * state.scale()
+        * state.avatar_scale
+        * state.avatar_size
+}
+
+pub(super) fn parked_disc(
+    state: &State,
+    author: usize,
+    member_scale: f32,
+) -> Option<BodyDisc> {
+    let avatar = state.avatars.get(author)?;
+    (avatar.presence > 0.001 && parked(avatar)).then(|| BodyDisc {
+        centre: avatar.position.xz(),
+        radius: seating_disc_radius(
+            avatar,
+            seating_base(state),
+            member_scale,
+            super::tick_time(state.tick),
+        ),
+    })
+}
+
+#[derive(Debug)]
+pub(super) struct Transmitters {
+    base: f32,
+    discs: Vec<(usize, BodyDisc)>,
+}
+
+impl Transmitters {
+    pub(super) fn observe(state: &State) -> Self {
+        let base = seating_base(state);
+        let discs = state
+            .avatars
+            .iter()
+            .zip(state.member_scales())
+            .enumerate()
+            .filter(|(_, (avatar, _))| avatar.transmitting && avatar.presence > 0.001)
+            .map(|(author, (avatar, scale))| {
+                let disc = BodyDisc {
+                    centre: avatar.position.xz(),
+                    radius: full_disc_radius(avatar, base, scale),
+                };
+                (author, disc)
+            })
+            .collect();
+        Self { base, discs }
+    }
+
+    fn walker(point: Vec2, base: f32) -> BodyDisc {
+        let position = slots::world(point);
+        BodyDisc {
+            centre: position.xz(),
+            radius: base * slots::projection_scale(position),
+        }
+    }
+
+    pub(super) fn clears(&self, author: usize, point: Vec2) -> bool {
+        let walker = Self::walker(point, self.base);
+        self.discs
+            .iter()
+            .all(|&(other, disc)| other != author && walker.clears(disc))
+    }
+
+    pub(super) fn clears_body(&self, point: Vec2, disc: BodyDisc) -> bool {
+        Self::walker(point, self.base).clears(disc)
+    }
+}
+
 #[derive(Clone, Copy)]
 struct Disc {
     centre: Vec2,
@@ -231,10 +314,7 @@ pub(super) fn clear_seat_transitions(
     previous: &[Option<Vec3>],
     max_step: f32,
 ) {
-    let base = state.geometry.avatar_radius
-        * state.scale()
-        * state.avatar_scale
-        * state.avatar_size;
+    let base = seating_base(state);
     let mut scales = state.member_scales();
     for (index, avatar) in state.avatars.iter().enumerate() {
         if avatar.transmitting || avatar.dismissed {
@@ -377,16 +457,17 @@ fn clear_remaining_parked_contacts(
     placed: &mut [Disc],
 ) {
     let mut obstacles = Vec::new();
-    for (rank, &(index, _, parked)) in order.iter().enumerate() {
-        let Some(from) =
-            previous[index].filter(|_| parked && !state.avatars[index].transmitting)
-        else {
+    for (rank, &(index, local, parked)) in order.iter().enumerate() {
+        let avatar = &state.avatars[index];
+        let can_yield = (parked || local && avatar.travelling) && !avatar.transmitting;
+        let Some(from) = previous[index].filter(|_| can_yield) else {
             continue;
         };
         let current = placed[rank];
         obstacles.clear();
         obstacles.extend(placed.iter().enumerate().filter_map(|(other, &disc)| {
             (other != rank
+                && (parked || order[other].2)
                 && disc.centre.distance(current.centre)
                     < current.radius + disc.radius + 2.0 * max_step)
                 .then_some(disc)
@@ -460,6 +541,18 @@ pub(in crate::model) fn walk_contacts(
     sim: &Simulation,
     walkers: &[(usize, usize)],
 ) -> Vec<(usize, usize)> {
+    let mut contacts: Vec<_> = walk_contact_pairs(sim, walkers)
+        .into_iter()
+        .map(|(walk, _)| walk)
+        .collect();
+    contacts.dedup();
+    contacts
+}
+
+pub(super) fn walk_contact_pairs(
+    sim: &Simulation,
+    walkers: &[(usize, usize)],
+) -> Vec<((usize, usize), usize)> {
     if walkers.is_empty() {
         return Vec::new();
     }
@@ -468,20 +561,20 @@ pub(in crate::model) fn walk_contacts(
         .iter()
         .filter(|&&(other, ..)| parked(&sim.avatars()[other]))
         .collect();
-    walkers
-        .iter()
-        .copied()
-        .filter(|&(_, author)| {
-            let Some(&(_, centre, radius)) =
-                discs.iter().find(|&&(index, ..)| index == author)
-            else {
-                return false;
-            };
-            parked_discs.iter().any(|&&(other, point, other_radius)| {
-                other != author && discs_overlap(centre, radius, point, other_radius)
-            })
-        })
-        .collect()
+    let mut contacts = Vec::new();
+    for &(commit, author) in walkers {
+        let Some(&(_, centre, radius)) =
+            discs.iter().find(|&&(index, ..)| index == author)
+        else {
+            continue;
+        };
+        for &&(other, point, other_radius) in &parked_discs {
+            if other != author && discs_overlap(centre, radius, point, other_radius) {
+                contacts.push(((commit, author), other));
+            }
+        }
+    }
+    contacts
 }
 
 impl Audit {

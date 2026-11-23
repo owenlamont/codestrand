@@ -1,6 +1,6 @@
 use std::{
     cmp::Reverse,
-    collections::{BTreeMap, BinaryHeap},
+    collections::{BTreeMap, BTreeSet, BinaryHeap},
     mem::size_of,
 };
 
@@ -8,7 +8,9 @@ use bevy::math::{Rect, Vec2};
 use serde::Serialize;
 
 use super::{
-    Simulation, frames_for, slots, tick_time, ticks_duration,
+    Simulation, frames_for,
+    occlusion::Transmitters,
+    slots, tick_time, ticks_duration,
     trace::{Counter, Phase},
 };
 use crate::progress::Stage;
@@ -117,6 +119,53 @@ struct Capture {
     tiles: Vec<Vec<Option<crate::layout::packing::Tile>>>,
     radii: Vec<f32>,
     gutters: Vec<Vec<Option<crate::layout::packing::Tile>>>,
+    obstacles: Option<WalkObstacles>,
+}
+
+#[derive(Debug, Default)]
+struct WalkObstacles {
+    begin: u64,
+    frames: Vec<Transmitters>,
+    blocked: BTreeSet<(usize, usize)>,
+    contacted: BTreeMap<(usize, usize), WalkContact>,
+    // Keep pose tracks only for parked avatars a walk contacted.
+    parked: BTreeMap<usize, Vec<Option<super::occlusion::BodyDisc>>>,
+    coarrivals: BTreeMap<(usize, usize), Vec2>,
+}
+
+#[derive(Debug)]
+struct WalkContact {
+    first: (u64, Vec2),
+    peers: BTreeSet<usize>,
+}
+
+impl WalkObstacles {
+    fn affects(&self, trip: &Trip) -> bool {
+        let key = (trip.commit, trip.author);
+        self.blocked.contains(&key)
+            || self.contacted.contains_key(&key)
+            || self.coarrivals.contains_key(&key)
+    }
+
+    fn clears(&self, trip: &Trip, tick: u64, point: Vec2) -> bool {
+        let Some(index) = tick
+            .checked_sub(self.begin)
+            .and_then(|index| usize::try_from(index).ok())
+        else {
+            return true;
+        };
+        let Some(frame) = self.frames.get(index) else {
+            return true;
+        };
+        frame.clears(trip.author, point)
+            && self
+                .contacted
+                .get(&(trip.commit, trip.author))
+                .into_iter()
+                .flat_map(|contact| &contact.peers)
+                .filter_map(|peer| self.parked[peer].get(index).copied().flatten())
+                .all(|disc| frame.clears_body(point, disc))
+    }
 }
 
 impl Capture {
@@ -799,6 +848,26 @@ fn fade_clearance(capture: &Capture, begin: u64, point: Vec2, radius: f32) -> u6
 }
 
 impl Simulation {
+    /// Checks the settled playback for walks that cannot finish clear of other avatars.
+    pub(super) fn repair_walk_departures(&mut self, options: &super::Options) {
+        let Some(mut obstacles) = self.observe_walk_obstacles() else {
+            return;
+        };
+        self.capture_contacted_seats(&mut obstacles);
+        let mut capture = capture(self);
+        capture.obstacles = Some(obstacles);
+        let _phase = self.trace.phase(Phase::Routes);
+        let epochs = planning::realign_blocked_walks(
+            &capture,
+            &mut self.travel.trips,
+            options.avatar_max_speed,
+        );
+        self.trace.count(Counter::RouteCandidates, epochs);
+        self.travel.stats.graph_epochs += epochs;
+        self.travel.stats.retained_route_bytes =
+            retained_route_bytes(&self.travel.trips);
+    }
+
     pub(super) fn align_travel_arrivals(&mut self, options: &super::Options) {
         if !self
             .travel
@@ -1258,6 +1327,16 @@ impl Router {
         target: Vec2,
         cells: &[Rect],
     ) -> Result<Vec<Vec2>, RouteFailure> {
+        self.route_avoiding(source, target, cells, None)
+    }
+
+    fn route_avoiding(
+        &mut self,
+        source: Vec2,
+        target: Vec2,
+        cells: &[Rect],
+        blocked: Option<Vec2>,
+    ) -> Result<Vec<Vec2>, RouteFailure> {
         self.epochs += 1;
         let snap = |mut point: Vec2| {
             for axis in 0..2 {
@@ -1306,6 +1385,12 @@ impl Router {
             for &next in edges[i].iter().flatten() {
                 let a = points[i];
                 let b = points[next];
+                if blocked.is_some_and(|point| {
+                    let closest = point.clamp(a.min(b), a.max(b));
+                    closest.distance_squared(point) < NETWORK_EPSILON.powi(2)
+                }) {
+                    continue;
+                }
                 #[expect(
                     clippy::cast_possible_truncation,
                     clippy::cast_sign_loss,

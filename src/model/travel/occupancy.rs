@@ -2,9 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use bevy::math::Vec3;
 
-use super::{HALF, Rect, Vec2};
+use super::{HALF, Rect, Trip, Vec2, WalkContact, WalkObstacles};
 use crate::model::{
-    Simulation, occlusion,
+    Simulation, State, occlusion,
     trace::{Counter, Phase},
 };
 
@@ -132,7 +132,178 @@ fn anticipate_service_reservations(
     }
 }
 
+fn coarriving_lead(
+    state: &State,
+    trip: &Trip,
+    previous: &[Option<Vec3>],
+) -> Option<usize> {
+    let group = state.avatars[trip.author].group?;
+    let member = previous.get(trip.author).copied().flatten()?;
+    let lead = previous.get(group.lead).copied().flatten()?;
+    (group.lead != trip.author
+        && state.avatars[group.lead].commit == trip.commit
+        && member.distance_squared(lead) < 1e-8)
+        .then_some(group.lead)
+}
+
 impl Simulation {
+    pub(super) fn observe_walk_obstacles(&mut self) -> Option<WalkObstacles> {
+        let end = self
+            .travel
+            .trips
+            .iter()
+            .filter(|trip| {
+                trip.commit >= self.travel.frozen
+                    && !trip.fade
+                    && !trip.route.is_empty()
+            })
+            .map(|trip| trip.arrival)
+            .max()?;
+        let _phase = self.trace.phase(Phase::Reserve);
+        let visuals =
+            std::mem::replace(&mut self.visuals, crate::model::Visuals::Seating);
+        self.restart();
+        let begin = self.state.tick;
+        self.trace.count_replay(end.saturating_sub(begin));
+        let mut obstacles = WalkObstacles {
+            begin,
+            ..Default::default()
+        };
+        let mut previous = Vec::<Option<Vec3>>::new();
+        let mut walking = Vec::new();
+        let mut arriving = BTreeMap::new();
+        for frame in begin..=end {
+            self.advance_to(u32::try_from(frame).expect("bounded schedule"), 60);
+            self.record_walk_obstacles(
+                &previous,
+                &mut obstacles,
+                &mut walking,
+                &mut arriving,
+            );
+            obstacles
+                .frames
+                .push(occlusion::Transmitters::observe(&self.state));
+            previous.clear();
+            previous.extend(
+                self.state
+                    .avatars
+                    .iter()
+                    .map(|avatar| (avatar.presence > 0.001).then_some(avatar.position)),
+            );
+        }
+        self.trace.add_ticks(&mut self.tick_times);
+        self.restart();
+        self.visuals = visuals;
+        (!(obstacles.blocked.is_empty()
+            && obstacles.contacted.is_empty()
+            && obstacles.coarrivals.is_empty()))
+        .then_some(obstacles)
+    }
+
+    fn record_walk_obstacles(
+        &self,
+        previous: &[Option<Vec3>],
+        obstacles: &mut WalkObstacles,
+        walking: &mut Vec<(usize, usize)>,
+        arriving: &mut BTreeMap<(usize, usize), usize>,
+    ) {
+        let frame = self.state.tick;
+        walking.clear();
+        arriving.clear();
+        for trip in self.travel.trips.iter().filter(|trip| {
+            trip.commit >= self.travel.frozen
+                && !trip.fade
+                && !trip.route.is_empty()
+                && (trip.departure..=trip.arrival).contains(&frame)
+        }) {
+            let Some(avatar) = self
+                .state
+                .avatars
+                .get(trip.author)
+                .filter(|avatar| avatar.presence > 0.001)
+            else {
+                continue;
+            };
+            let key = (trip.commit, trip.author);
+            if frame == trip.arrival {
+                let Some(lead) = coarriving_lead(&self.state, trip, previous) else {
+                    continue;
+                };
+                arriving.insert(key, lead);
+            } else if previous
+                .get(trip.author)
+                .copied()
+                .flatten()
+                .is_some_and(|point| point.distance_squared(avatar.position) < 1e-8)
+                && super::slots::field_point(avatar.position).distance(trip.source)
+                    > super::NETWORK_EPSILON
+            {
+                obstacles.blocked.insert(key);
+            }
+            walking.push(key);
+        }
+        for (walk, peer) in occlusion::walk_contact_pairs(self, walking) {
+            if let Some(&lead) = arriving.get(&walk) {
+                if peer != lead {
+                    continue;
+                }
+                let point =
+                    super::slots::field_point(self.state.avatars[lead].position);
+                obstacles.coarrivals.insert(walk, point);
+                continue;
+            }
+            obstacles
+                .contacted
+                .entry(walk)
+                .or_insert_with(|| WalkContact {
+                    first: (
+                        frame,
+                        super::slots::field_point(self.state.avatars[walk.1].position),
+                    ),
+                    peers: BTreeSet::new(),
+                })
+                .peers
+                .insert(peer);
+        }
+    }
+
+    pub(super) fn capture_contacted_seats(&mut self, obstacles: &mut WalkObstacles) {
+        if obstacles.contacted.is_empty() {
+            return;
+        }
+        let frames = obstacles.frames.len();
+        for &peer in obstacles
+            .contacted
+            .values()
+            .flat_map(|contact| &contact.peers)
+        {
+            obstacles
+                .parked
+                .entry(peer)
+                .or_insert_with(|| Vec::with_capacity(frames));
+        }
+        let _phase = self.trace.phase(Phase::Reserve);
+        let visuals =
+            std::mem::replace(&mut self.visuals, crate::model::Visuals::Seating);
+        self.restart();
+        let begin = u32::try_from(obstacles.begin).expect("bounded schedule");
+        let count = u32::try_from(frames).expect("bounded schedule");
+        self.trace.count_replay(count.saturating_sub(1).into());
+        for frame in begin..begin + count {
+            self.advance_to(frame, 60);
+            let scales = self.state.member_scales();
+            for (&peer, poses) in &mut obstacles.parked {
+                let disc = scales.get(peer).and_then(|&scale| {
+                    occlusion::parked_disc(&self.state, peer, scale)
+                });
+                poses.push(disc);
+            }
+        }
+        self.trace.add_ticks(&mut self.tick_times);
+        self.restart();
+        self.visuals = visuals;
+    }
+
     fn reserve_missed_dock(
         &mut self,
         commit: usize,

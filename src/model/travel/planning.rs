@@ -30,6 +30,12 @@ fn hard_clearance(capture: &Capture, tick: u64, point: Vec2) -> bool {
             .any(|t| super::in_guard(*t, capture.radius(tick), point))
 }
 
+fn route_clearance(capture: &Capture, trip: &Trip, tick: u64, point: Vec2) -> bool {
+    capture.obstacles.as_ref().is_none_or(|obstacles| {
+        !obstacles.affects(trip) || obstacles.clears(trip, tick, point)
+    })
+}
+
 pub(super) fn progress(trip: &Trip) -> f32 {
     (trip.departure..trip.arrival)
         .filter_map(|t| {
@@ -201,7 +207,12 @@ fn moving_route(
                 .lerp(b, u)
         };
         let cells = super::network(row.iter().flatten().copied());
-        if !super::on_network(point, &cells) || !hard_clearance(capture, tick, point) {
+        if !super::on_network(point, &cells)
+            || !hard_clearance(capture, tick, point)
+            || (trip.departure < tick
+                && tick < trip.arrival
+                && !route_clearance(capture, trip, tick, point))
+        {
             return None;
         }
         track.push(point);
@@ -358,7 +369,7 @@ fn search(
     if best.fade
         && mandatory_birth_walk
         && let Some(approach) =
-            fixed_dock_approach(capture, template, first, speed, router)
+            fixed_dock_approach(capture, template, first, speed, router, None)
     {
         return approach;
     }
@@ -395,16 +406,26 @@ fn fixed_dock_approach(
     first: u64,
     speed: f32,
     router: &mut Router,
+    blocked: Option<(u64, Vec2)>,
 ) -> Option<Trip> {
-    let late = (template.kind == TripKind::Relocation)
+    let late = (blocked.is_some() || template.kind == TripKind::Relocation)
         .then_some(template.arrival.saturating_sub(1))
         .filter(|&tick| tick > first);
-    for tick in [first, template.arrival] {
+    let epochs = blocked.map(|(tick, _)| tick).into_iter();
+    for tick in epochs.chain([first, template.arrival]) {
         let cells = super::network(capture.row(tick).iter().flatten().copied());
         for from in late.into_iter().chain([first]) {
             let source = capture.pose(template.author, from)?.point;
             if let Some(approach) = fixed_approach(
-                capture, template, first, speed, router, source, &cells, tick,
+                capture,
+                template,
+                first,
+                speed,
+                router,
+                source,
+                &cells,
+                tick,
+                blocked.map(|(_, point)| point),
             ) {
                 return Some(approach);
             }
@@ -426,8 +447,11 @@ fn fixed_approach(
     source: Vec2,
     cells: &[Rect],
     epoch: u64,
+    blocked: Option<Vec2>,
 ) -> Option<Trip> {
-    let points = router.route(source, template.destination, cells).ok()?;
+    let points = router
+        .route_avoiding(source, template.destination, cells, blocked)
+        .ok()?;
     if points.len() < 2 {
         return None;
     }
@@ -447,6 +471,9 @@ fn fixed_approach(
     if !track.iter().enumerate().all(|(offset, &point)| {
         let tick = departure + offset as u64;
         hard_clearance(capture, tick, point)
+            && (tick == departure
+                || tick == template.arrival
+                || route_clearance(capture, template, tick, point))
             && super::on_network(
                 point,
                 &super::network(capture.row(tick).iter().flatten().copied()),
@@ -586,6 +613,94 @@ pub(super) fn needs_alignment(trip: &Trip, frozen: usize) -> bool {
             < trip.arrival
 }
 
+fn last_release(capture: &Capture, trip: &Trip) -> u64 {
+    let earlier = capture
+        .services
+        .partition_point(|service| service.commit < trip.commit);
+    capture.services[..earlier]
+        .iter()
+        .rev()
+        .find(|service| service.author == trip.author)
+        .map_or(trip.free, |service| service.release.max(trip.free))
+}
+
+fn separate_coarrival(
+    capture: &Capture,
+    trip: &Trip,
+    lead: Vec2,
+    release: u64,
+    speed: f32,
+    router: &mut Router,
+) -> Option<Trip> {
+    // Leave space for a co-author's first step into the ring during service.
+    let separation = 2.0 * (capture.radius(trip.arrival) + speed / 60.0);
+    let cells = super::network(capture.row(trip.arrival).iter().flatten().copied());
+    let clear = (trip.departure..trip.arrival)
+        .rev()
+        .map(|tick| trip.sample(tick).0)
+        .find(|&point| {
+            point.distance_squared(lead) >= separation.powi(2)
+                && super::on_network(point, &cells)
+        })?;
+    let mut template = trip.clone();
+    template.destination = clear;
+    let aligned = search(capture, &template, release, speed, router, Search::Align);
+    if aligned.route.track == trip.route.track {
+        fixed_dock_approach(capture, &template, release, speed, router, None)
+    } else {
+        Some(aligned)
+    }
+}
+
+pub(super) fn realign_blocked_walks(
+    capture: &Capture,
+    trips: &mut [Trip],
+    speed: f32,
+) -> usize {
+    let Some(obstacles) = &capture.obstacles else {
+        return 0;
+    };
+    let mut router = Router::default();
+    for trip in trips.iter_mut().filter(|trip| obstacles.affects(trip)) {
+        let release = last_release(capture, trip).max(capture.begin);
+        if release >= trip.arrival {
+            continue;
+        }
+        if let Some(&lead) = obstacles.coarrivals.get(&(trip.commit, trip.author)) {
+            if let Some(approach) =
+                separate_coarrival(capture, trip, lead, release, speed, &mut router)
+            {
+                *trip = approach;
+            }
+            continue;
+        }
+        let aligned = search(capture, trip, release, speed, &mut router, Search::Align);
+        if aligned.departure != trip.departure
+            || aligned.route.track != trip.route.track
+        {
+            *trip = aligned;
+            continue;
+        }
+        let blocked = obstacles
+            .contacted
+            .get(&(trip.commit, trip.author))
+            .map(|contact| contact.first)
+            .or_else(|| {
+                (trip.departure + 1..trip.arrival).find_map(|tick| {
+                    let (point, _) = trip.sample(tick);
+                    (!route_clearance(capture, trip, tick, point))
+                        .then_some((tick, point))
+                })
+            });
+        if let Some(approach) =
+            fixed_dock_approach(capture, trip, release, speed, &mut router, blocked)
+        {
+            *trip = approach;
+        }
+    }
+    router.epochs
+}
+
 pub(super) fn align_arrivals<'a>(
     capture: &Capture,
     trips: impl IntoIterator<Item = &'a mut Trip>,
@@ -596,16 +711,7 @@ pub(super) fn align_arrivals<'a>(
         .into_iter()
         .filter(|trip| needs_alignment(trip, capture.frozen))
     {
-        let earlier = capture
-            .services
-            .partition_point(|service| service.commit < trip.commit);
-        let release = capture.services[..earlier]
-            .iter()
-            .rev()
-            .find(|service| service.author == trip.author)
-            .map_or(trip.departure, |service| {
-                service.release.max(trip.departure)
-            });
+        let release = last_release(capture, trip).max(trip.departure);
         if release < trip.arrival {
             let aligned =
                 search(capture, trip, release, speed, &mut router, Search::Align);
@@ -613,7 +719,7 @@ pub(super) fn align_arrivals<'a>(
                 && needs_alignment(&aligned, capture.frozen)
             {
                 let first = release.max(aligned.free);
-                fixed_dock_approach(capture, &aligned, first, speed, &mut router)
+                fixed_dock_approach(capture, &aligned, first, speed, &mut router, None)
                     .unwrap_or(aligned)
             } else {
                 aligned
@@ -704,9 +810,15 @@ mod tests {
             pose.point = reflowed;
         }
 
-        let aligned =
-            fixed_dock_approach(&capture, &trip, 70, 480.0, &mut Router::default())
-                .expect("the source has settled before the late departure");
+        let aligned = fixed_dock_approach(
+            &capture,
+            &trip,
+            70,
+            480.0,
+            &mut Router::default(),
+            None,
+        )
+        .expect("the source has settled before the late departure");
 
         assert_eq!(aligned.source, reflowed);
         assert!(!needs_alignment(&aligned, capture.frozen));
@@ -802,6 +914,7 @@ mod tests {
             gutters: vec![vec![Some(a), Some(b)]; 461],
             radii: vec![7.5; 461],
             births: vec![],
+            obstacles: None,
         }
     }
     #[test]
