@@ -625,6 +625,16 @@ impl State {
         };
         let avatar = &self.avatars[index];
         let newcomer = avatar.presence <= 0.0 || avatar.slot.is_none();
+        let reclaiming = |peer: &super::Avatar| {
+            avatar.repository == peer.repository
+                && avatar.slot.as_ref().zip(peer.slot.as_ref()).is_some_and(
+                    |(old, occupied)| {
+                        old.commit != avatar.commit
+                            && old.dock == occupied.dock
+                            && old.offset == occupied.offset
+                    },
+                )
+        };
         self.avatars
             .iter()
             .enumerate()
@@ -633,6 +643,7 @@ impl State {
                     && (peer.presence > 0.0 || now < peer.expires)
                     && (peer.transmitting
                         || newcomer
+                        || reclaiming(peer)
                         || priority(other) < priority(index))
             })
             .flat_map(|(other, peer)| {
