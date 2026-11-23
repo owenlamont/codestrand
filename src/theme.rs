@@ -92,7 +92,6 @@ pub(super) struct Theme {
     pub(crate) avatar_style: AvatarStyle,
     pub(crate) font: FontStyle,
     pub(crate) blackbody: bool,
-    pub(crate) textured_ground: bool,
     pub(crate) edge_dash: Option<f32>,
     pub(crate) label_style: LabelStyle,
     pub(crate) territories: bool,
@@ -111,10 +110,8 @@ pub(super) struct Theme {
     pub(super) activity_growth: f32,
     pub(super) clear: Color,
     pub(super) edge: StandardMaterial,
-    pub(super) grid: StandardMaterial,
     pub(super) descending: StandardMaterial,
     pub(super) rising: StandardMaterial,
-    pub(super) floor: StandardMaterial,
     pub(super) avatars: [StandardMaterial; 6],
     pub(super) glass: [StandardMaterial; 6],
     pub(super) directories: Vec<Vec<StandardMaterial>>,
@@ -157,11 +154,11 @@ impl Theme {
 
         let (directories, directory_edge_widths) = retained_fields!(self, Theme {
             directories, directory_edge_widths;
-            glyph_style, beam_style, avatar_style, font, blackbody, textured_ground, edge_dash,
+            glyph_style, beam_style, avatar_style, font, blackbody, edge_dash,
             label_style, territories, name, glyph_ink, glyphs, glyph_material, heat_gain,
             glyph_texture, file_glyph_transform, file_tile, membership_radii, membership_transform,
-            activity_radii, activity_transform, activity_growth, clear, edge, grid, descending,
-            rising, floor, avatars, glass, directory_node_scale, directory_edge_height,
+            activity_radii, activity_transform, activity_growth, clear, edge, descending,
+            rising, avatars, glass, directory_node_scale, directory_edge_height,
             label, diff_added, diff_removed, label_shadow, heading, label_emphasis,
             label_landmark, avatar_radius, label_height,
         });
@@ -220,7 +217,6 @@ impl Theme {
             avatar_style: AvatarStyle::default(),
             font: FontStyle::default(),
             blackbody: false,
-            textured_ground: false,
             edge_dash: None,
             label_style: LabelStyle::default(),
             territories: false,
@@ -252,10 +248,8 @@ impl Theme {
             activity_growth: 0.45,
             clear: Color::srgb(0.012, 0.023, 0.04),
             edge: solid(Color::srgb(0.09, 0.2, 0.28)),
-            grid: solid(Color::srgb(0.045, 0.09, 0.13)),
             descending: solid(Color::srgb(0.25, 0.85, 0.42)),
             rising: solid(Color::srgb(0.95, 0.28, 0.32)),
-            floor: solid(Color::srgb(0.02, 0.036, 0.06)),
             avatars: developers.map(solid),
             glass: developers.map(|color| StandardMaterial {
                 base_color: color.with_alpha(0.32),
@@ -301,8 +295,6 @@ impl Theme {
         let green = Color::srgb_u8(0x39, 0xff, 0x6a);
         let dark = Color::srgb_u8(0x0b, 0x13, 0x0d);
         theme.clear = Color::BLACK;
-        theme.floor.base_color = Color::BLACK;
-        theme.grid.base_color = Color::srgb(0.045, 0.105, 0.055);
         theme.edge.base_color = Color::srgb(0.10, 0.32, 0.16);
         theme.descending.base_color = Color::srgb(0.45, 0.92, 0.5);
         theme.rising.base_color = Color::srgb(0.85, 0.38, 0.3);
@@ -480,22 +472,16 @@ mod tests {
     }
 
     #[test]
-    fn candidates_have_distinct_valid_art_and_textured_grounds() {
+    fn candidates_have_distinct_valid_glyphs() {
         let mut glyphs = std::collections::HashSet::new();
-        let mut grounds = std::collections::HashSet::new();
         for name in ThemeName::ALL.into_iter().skip(2) {
             let theme = name.build();
-            assert!(theme.textured_ground);
             let glyph = theme.glyph_svg(theme.glyphs[0].svg);
-            let ground = theme.ground_svg();
-            for svg in [&glyph, &ground] {
-                assert!(
-                    resvg::usvg::Tree::from_str(svg, &resvg::usvg::Options::default())
-                        .is_ok()
-                );
-            }
+            assert!(
+                resvg::usvg::Tree::from_str(&glyph, &resvg::usvg::Options::default())
+                    .is_ok()
+            );
             assert!(glyphs.insert(glyph));
-            assert!(grounds.insert(ground));
         }
     }
 
@@ -559,8 +545,6 @@ mod tests {
         assert_eq!(ThemeName::default(), ThemeName::Neon);
         let phosphor = ThemeName::Phosphor.build();
         assert_eq!(phosphor.clear, Color::BLACK);
-        assert_eq!(phosphor.floor.base_color, Color::BLACK);
-        assert!(phosphor.floor.unlit);
         assert_eq!(phosphor.glyph_ink, Some([57, 255, 106]));
     }
 

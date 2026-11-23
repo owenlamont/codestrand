@@ -26,12 +26,12 @@ use crate::{
 const WIDTH: u32 = 1280;
 const HEIGHT: u32 = 720;
 const LABELS: usize = 72;
-const GRID_LINES: i16 = 20;
 const AVATAR_LAYER: usize = 1;
 
 mod caption;
 #[cfg(test)]
 mod collapse_tests;
+mod environment;
 #[cfg(test)]
 mod file_sync_tests;
 mod loading;
@@ -120,8 +120,6 @@ struct Palette {
     beam: Handle<Mesh>,
     segment_beams: Vec<Handle<Mesh>>,
     edge: Handle<StandardMaterial>,
-    floor: Handle<StandardMaterial>,
-    grid: Handle<StandardMaterial>,
     descending: Handle<StandardMaterial>,
     rising: Handle<StandardMaterial>,
     membership_mesh: Handle<Mesh>,
@@ -187,8 +185,6 @@ impl Palette {
             .as_ref()
             .map(|tile| (materials.add(tile.material.clone()), tile.transform));
         let edge = materials.add(theme.edge.clone());
-        let floor = materials.add(theme.floor.clone());
-        let grid = materials.add(theme.grid.clone());
         let descending = materials.add(theme.descending.clone());
         let rising = materials.add(theme.rising.clone());
         let avatars = theme
@@ -223,8 +219,6 @@ impl Palette {
             beam,
             segment_beams,
             edge,
-            floor,
-            grid,
             descending,
             rising,
             membership_mesh,
@@ -403,7 +397,6 @@ struct Pools {
     hues: DirectoryHues,
     avatars: Vec<Entity>,
     groups: Vec<Entity>,
-    grid: Vec<Entity>,
 }
 
 pub(super) fn reset_scene_pools(world: &mut World) {
@@ -413,7 +406,6 @@ pub(super) fn reset_scene_pools(world: &mut World) {
             lod: _,
             names: _,
             hues: _,
-            grid,
             aggregates,
             files,
             beams,
@@ -435,7 +427,6 @@ pub(super) fn reset_scene_pools(world: &mut World) {
         hide_rest(world, &groups, 0);
         world.insert_resource(Pools {
             groups,
-            grid,
             ..default()
         });
     }
@@ -986,26 +977,7 @@ fn setup(world: &mut World) {
     let palette = Palette::new(world, &theme);
     repository_regions(world);
     titles::setup(world);
-    world.spawn((
-        Mesh3d(palette.glyph_mesh.clone()),
-        MeshMaterial3d(palette.floor.clone()),
-        Transform::from_xyz(0.0, -0.18, 0.0)
-            .with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2))
-            .with_scale(Vec3::splat(4000.0)),
-        styling::Ground,
-    ));
-    let grid: Vec<_> = (0..(4 * GRID_LINES + 2))
-        .map(|_| {
-            world
-                .spawn((
-                    Mesh3d(palette.cube.clone()),
-                    MeshMaterial3d(palette.grid.clone()),
-                    Transform::default(),
-                ))
-                .id()
-        })
-        .collect();
-    world.resource_mut::<Pools>().grid = grid;
+    environment::setup(world, theme.name, palette.glyph_mesh.clone());
     world.insert_resource(palette);
     let repository_labels = world.resource::<Playback>().0.layout().repositories.len();
     grow_labels(world, LABELS, &theme, camera);
@@ -1051,11 +1023,20 @@ fn setup_caption(world: &mut World, camera: Entity, repository_labels: usize) {
     caption::setup(world, camera);
 }
 fn repository_glass_material(theme: &Theme, index: usize) -> StandardMaterial {
+    let tint = theme.glass[index % theme.glass.len()].base_color;
+    let alpha = 0.055;
+    let (base_color, alpha_mode) = theme.name.gridded_ground_color().map_or_else(
+        || (tint.with_alpha(alpha), AlphaMode::Blend),
+        |ground| {
+            (
+                ground.to_linear().mix(&tint.to_linear(), alpha).into(),
+                AlphaMode::Opaque,
+            )
+        },
+    );
     StandardMaterial {
-        base_color: theme.glass[index % theme.glass.len()]
-            .base_color
-            .with_alpha(0.055),
-        alpha_mode: AlphaMode::Blend,
+        base_color,
+        alpha_mode,
         unlit: true,
         ..default()
     }
@@ -1220,7 +1201,7 @@ fn preview_direction(
 #[derive(Resource)]
 struct PendingTheme {
     name: crate::theme::ThemeName,
-    task: bevy::tasks::Task<(RasterGlyphs, Option<Image>, Option<Image>)>,
+    task: bevy::tasks::Task<(RasterGlyphs, environment::Textures)>,
 }
 
 struct RasterGlyphs {
@@ -1267,7 +1248,7 @@ fn preview_theme(world: &mut World) {
         .remove_resource::<settings::RequestedTheme>()
         .map(|request| request.0);
     if let Some(mut pending) = world.get_resource_mut::<PendingTheme>() {
-        if let Some((glyphs, ground, backdrop)) =
+        if let Some((glyphs, textures)) =
             bevy::tasks::futures::check_ready(&mut pending.task)
         {
             let name = pending.name;
@@ -1276,7 +1257,7 @@ fn preview_theme(world: &mut World) {
                 .resource_mut::<Palette>()
                 .glyph_textures
                 .push((name, handles));
-            styling::install_images(world, name, ground, backdrop);
+            environment::install(world, name, textures);
             world.remove_resource::<PendingTheme>();
             switch_theme(world, name);
         }
@@ -1299,8 +1280,7 @@ fn preview_theme(world: &mut World) {
     {
         let task = bevy::tasks::AsyncComputeTaskPool::get().spawn(async move {
             let theme = name.build();
-            let (ground, backdrop) = styling::raster_images(&theme);
-            (raster_glyphs(&theme), ground, backdrop)
+            (raster_glyphs(&theme), environment::Textures::raster(name))
         });
         world.insert_resource(PendingTheme { name, task });
         return;
@@ -1368,8 +1348,6 @@ pub(super) fn switch_theme(world: &mut World, name: crate::theme::ThemeName) {
         reshape_meshes(world, &palette, &theme);
         let replacements = [
             (&palette.edge, &theme.edge),
-            (&palette.floor, &theme.floor),
-            (&palette.grid, &theme.grid),
             (&palette.descending, &theme.descending),
             (&palette.rising, &theme.rising),
         ]
@@ -1419,6 +1397,7 @@ pub(super) fn switch_theme(world: &mut World, name: crate::theme::ThemeName) {
     });
     recolor_repository_regions(world, &theme);
     world.insert_resource(ClearColor(theme.clear));
+    environment::apply(world, name);
     if world.contains_resource::<styling::Styles>() {
         styling::apply(world, &theme);
     }
@@ -1494,9 +1473,7 @@ fn preview_camera(world: &mut World, mut navigation: Local<navigation::State>) {
                 Transform::from_translation(eye).with_rotation(camera.rotation());
         }
     });
-    world.resource_scope(|world, playback: Mut<Playback>| {
-        styling::place_ground(world, &playback.0);
-    });
+    environment::place_ground(world);
 }
 
 pub(super) fn animate(world: &mut World) {
@@ -1514,6 +1491,7 @@ pub(super) fn animate(world: &mut World) {
             world.resource_scope(|world, mut pools: Mut<Pools>| {
                 let simulation = &playback.0;
                 place_camera(world, simulation);
+                environment::place_ground(world);
                 sync_lod(world, &mut pools, simulation);
                 if restored
                     || !pools
@@ -2026,7 +2004,9 @@ fn sync_structure(
         fade(world, entity, grey, alpha);
     }
     hide_rest(world, pool, glyphs.len());
-    sync_grid(world, palette, pools, simulation);
+    if world.contains_resource::<styling::Styles>() {
+        styling::sync_territories(world, palette, &pools.hues.slots, simulation);
+    }
 }
 
 fn directory_arrival_position(
@@ -2047,48 +2027,6 @@ fn directory_arrival_position(
         beams.push(beam);
     }
     (position, 0.15 + 0.85 * progress)
-}
-
-fn sync_grid(
-    world: &mut World,
-    palette: &Palette,
-    pools: &Pools,
-    simulation: &Simulation,
-) {
-    if world.contains_resource::<styling::Styles>() {
-        styling::ground(world, palette, &pools.hues.slots, simulation);
-    }
-
-    let (focus, distance) = simulation.view();
-    let extent = distance * 0.5;
-    let spacing = 2.0_f32.powf((extent / 4.0).log2().ceil().max(0.0));
-    let centre = (focus / spacing).round() * spacing;
-    let half = spacing * f32::from(GRID_LINES);
-    let thickness = 0.012 * spacing.sqrt();
-    for (index, &entity) in pools.grid.iter().enumerate() {
-        set_visible(world, entity, !simulation.theme().textured_ground);
-        let line = f32::from(
-            i16::try_from(index).expect("grid pool is small") % (2 * GRID_LINES + 1)
-                - GRID_LINES,
-        );
-        let along_x = index
-            >= usize::try_from(2 * GRID_LINES + 1).expect("grid size is positive");
-        let (translation, scale) = if along_x {
-            (
-                Vec3::new(centre.x, -0.13, centre.z + line * spacing),
-                Vec3::new(2.0 * half, 0.01, thickness),
-            )
-        } else {
-            (
-                Vec3::new(centre.x + line * spacing, -0.13, centre.z),
-                Vec3::new(thickness, 0.01, 2.0 * half),
-            )
-        };
-        if let Some(mut transform) = world.get_mut::<Transform>(entity) {
-            transform
-                .set_if_neq(Transform::from_translation(translation).with_scale(scale));
-        }
-    }
 }
 
 fn set_material(
@@ -3439,12 +3377,30 @@ mod tests {
                 .resource::<Assets<StandardMaterial>>()
                 .get(&handle)
                 .unwrap();
-            assert_eq!(
-                material.base_color,
-                theme.glass[0].base_color.with_alpha(0.055)
-            );
-            assert_eq!(material.alpha_mode, AlphaMode::Blend);
+            let expected = repository_glass_material(&theme, 0);
+            assert_eq!(material.base_color, expected.base_color);
+            assert_eq!(material.alpha_mode, expected.alpha_mode);
             assert_eq!(world.get::<Transform>(entity), Some(&transform));
+        }
+    }
+
+    #[test]
+    fn gridded_themes_have_opaque_repository_tiles_with_the_glass_tint() {
+        use crate::theme::ThemeName;
+
+        for name in [
+            ThemeName::Neon,
+            ThemeName::Phosphor,
+            ThemeName::Outrun,
+            ThemeName::Blueprint,
+        ] {
+            let theme = name.build();
+            let material = repository_glass_material(&theme, 0);
+            assert_eq!(material.alpha_mode, AlphaMode::Opaque, "{name:?}");
+            let ground = name.gridded_ground_color().unwrap().to_linear();
+            let tint = theme.glass[0].base_color.to_linear();
+            let expected = ground.mix(&tint, 0.055);
+            assert_eq!(material.base_color.to_linear(), expected, "{name:?}");
         }
     }
     #[test]
@@ -3923,9 +3879,6 @@ mod tests {
         clock.add_systems(preview_clock);
         clock.run(&mut world);
         animate(&mut world);
-        let grid = world.resource::<Pools>().grid.clone();
-        let grid_transform = *world.get::<Transform>(grid[0]).unwrap();
-        *world.get_mut::<Transform>(grid[0]).unwrap() = Transform::IDENTITY;
         let stale = [(); 7].map(|()| world.spawn_empty().id());
         let stale_styles = styling::seed_replay_pools(&mut world);
         {
@@ -3963,15 +3916,12 @@ mod tests {
         assert!(pools.names.targets.is_empty());
         assert_eq!(pools.hues.slots, [] as [usize; 0]);
         assert!(pools.sync_stamp.is_none());
-        assert_eq!(pools.grid, grid);
         assert!(
             stale
                 .into_iter()
                 .chain(stale_styles)
                 .all(|entity| world.get_entity(entity).is_err())
         );
-        animate(&mut world);
-        assert_eq!(*world.get::<Transform>(grid[0]).unwrap(), grid_transform);
     }
 
     #[test]
@@ -4490,8 +4440,6 @@ mod tests {
         assert_eq!(world.resource::<ClearColor>().0, theme.clear);
         for (handle, expected) in [
             (&palette.edge, &theme.edge),
-            (&palette.floor, &theme.floor),
-            (&palette.grid, &theme.grid),
             (&palette.descending, &theme.descending),
             (&palette.rising, &theme.rising),
         ]
