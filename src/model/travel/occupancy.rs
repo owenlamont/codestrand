@@ -157,8 +157,7 @@ impl Simulation {
                 continue;
             };
             let key = (trip.commit, author);
-            if trip.kind == super::TripKind::Relocation
-                || trip.commit < self.travel.frozen
+            if trip.commit < self.travel.frozen
                 || self.travel.unreached_docks.contains(&key)
             {
                 continue;

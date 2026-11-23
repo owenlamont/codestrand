@@ -627,15 +627,19 @@ impl State {
                         || newcomer
                         || priority(other) < priority(index))
             })
-            .filter_map(|(other, peer)| {
-                let slot = peer.slot.as_ref()?;
-                let tile = self.layout.repositories[peer.repository].gutter?;
-                let point = if peer.transmitting {
-                    field_point(peer.position)
-                } else {
-                    slot.dock.on_network(tile) + slot.offset
-                };
-                Some(disk(point, radius * scales[other]))
+            .flat_map(|(other, peer)| {
+                let dock = peer.slot.as_ref().and_then(|slot| {
+                    self.layout.repositories[peer.repository]
+                        .gutter
+                        .map(|tile| slot.dock.on_network(tile) + slot.offset)
+                });
+                let source = field_point(peer.position);
+                let held =
+                    (peer.transmitting && dock != Some(source)).then_some(source);
+                [dock, held]
+                    .into_iter()
+                    .flatten()
+                    .map(move |point| disk(point, radius * scales[other]))
             })
             .collect()
     }
@@ -714,11 +718,14 @@ impl State {
                 cells: &cells,
                 speed: self.avatar_max_speed,
             };
-            let mut chosen = if let Some(slot) =
-                avatar.slot.as_ref().filter(|_| avatar.transmitting)
-            {
-                choice.assess(slot.dock).0
-            } else {
+            let held = avatar.slot.as_ref().and_then(|slot| {
+                choice.held_dock(
+                    slot.dock,
+                    avatar.transmitting,
+                    choosing && plan.rejected_dock_walk(commit, index),
+                )
+            });
+            let mut chosen = held.unwrap_or_else(|| {
                 choice.pick(
                     avatar.slot.as_ref(),
                     avatar.slot_origin.map(|(repository, dock, point)| {
@@ -730,7 +737,7 @@ impl State {
                     plan.docks.get(&(commit, index)).copied(),
                     !plan.replanning || commit < plan.frozen,
                 )
-            };
+            });
             chosen.commit = commit;
             self.record_placement(&chosen);
             let capacity = self.seat_party(&chosen, &party, &cells, plan);
@@ -1609,6 +1616,19 @@ struct Choice<'a> {
 }
 
 impl Choice<'_> {
+    fn held_dock(
+        &self,
+        dock: Dock,
+        transmitting: bool,
+        blocked: bool,
+    ) -> Option<Placement> {
+        (transmitting || blocked)
+            .then(|| self.assess(dock).0)
+            .filter(|place| {
+                transmitting || (place.valid() && self.clearance_cost(place) <= 0.001)
+            })
+    }
+
     fn pick(
         &self,
         previous: Option<&Placement>,

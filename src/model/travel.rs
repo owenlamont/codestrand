@@ -359,6 +359,10 @@ pub(super) struct Plan {
 }
 
 impl Plan {
+    pub(super) fn rejected_dock_walk(&self, commit: usize, author: usize) -> bool {
+        self.unreached_docks.contains(&(commit, author))
+    }
+
     pub(super) fn replay_bytes(&self) -> u128 {
         let trips = self.trips.capacity() * size_of::<Trip>();
         let routes = self
