@@ -598,6 +598,24 @@ mod tests {
     }
 
     #[test]
+    fn a_relocation_within_the_same_repository_waits_for_the_last_arrival() {
+        let mut capture = fixture();
+        capture.services[0].arrivals_land = 410;
+        capture.services[2].repository = 0;
+        capture.services[2].point = Vec2::ZERO;
+
+        let (planned, _) = trips(&capture, 480.0, crate::model::BotTravel::Walk, true);
+
+        assert!(
+            planned.iter().all(|trip| {
+                trip.kind != TripKind::Relocation
+                    || trip.departure >= capture.services[0].arrivals_land
+            }),
+            "{planned:?}",
+        );
+    }
+
+    #[test]
     fn a_calendar_departure_fades_even_during_an_uncapped_trip() {
         let mut events = crate::timeline::synthetic();
         events.truncate(1);
@@ -648,6 +666,7 @@ mod tests {
                     repository,
                     tick,
                     release,
+                    arrivals_land: 0,
                     point,
                     radius: 7.5,
                     bot: false,

@@ -96,6 +96,8 @@ pub(super) struct Service {
     repository: usize,
     tick: u64,
     release: u64,
+    #[cfg(test)]
+    arrivals_land: u64,
     point: Vec2,
     radius: f32,
     bot: bool,
@@ -673,23 +675,20 @@ fn replay(simulation: &mut Simulation, frames: u32) -> Capture {
                 let author = state.authors[&contributor.key];
                 let avatar = &state.avatars[author];
                 let slot = avatar.slot.as_ref().expect("tile exists before service");
+                let pulse = state
+                    .pulses
+                    .iter()
+                    .find(|p| p.commit == event)
+                    .expect("new pulse");
+                let release = frames_for(pulse.end - 0.3, 60).expect("bounded pulse");
                 capture.services.push(Service {
                     commit: event,
                     author,
                     repository: avatar.repository,
                     tick: state.tick,
-                    release: frames_for(
-                        state
-                            .pulses
-                            .iter()
-                            .find(|p| p.commit == event)
-                            .expect("new pulse")
-                            .end
-                            - 0.3,
-                        60,
-                    )
-                    .expect("bounded pulse")
-                    .into(),
+                    release: release.into(),
+                    #[cfg(test)]
+                    arrivals_land: 0,
                     point: slot.centre(),
                     radius: state.avatar_radius(),
                     bot: contributor.is_bot(),
