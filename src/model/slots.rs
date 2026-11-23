@@ -630,15 +630,28 @@ impl State {
             let gutter = self.layout.repositories[avatar.repository].gutter?;
             Some(slot.dock.on_network(gutter) + slot.offset)
         };
-        let previous = avatar
+        let choosing = avatar
             .slot
             .as_ref()
-            .filter(|slot| slot.commit != avatar.commit)
-            .and_then(|_| projected(avatar));
-        let reclaiming = |peer: &super::Avatar| {
-            previous
+            .is_some_and(|slot| slot.commit != avatar.commit);
+        let current = projected(avatar);
+        let yields_to = |other, peer: &super::Avatar| {
+            if let Some((point, _)) = current
                 .zip(projected(peer))
-                .is_some_and(|(old, occupied)| old.distance_squared(occupied) < 1e-6)
+                .filter(|(first, second)| first.distance_squared(*second) < 1e-6)
+            {
+                if choosing {
+                    return true;
+                }
+                let at_dock = |avatar: &super::Avatar| {
+                    field_point(avatar.position).distance_squared(point) < 1e-4
+                };
+                let peer_seated = at_dock(peer);
+                if at_dock(avatar) != peer_seated {
+                    return peer_seated;
+                }
+            }
+            priority(other) < priority(index)
         };
         self.avatars
             .iter()
@@ -646,10 +659,7 @@ impl State {
             .filter(|&(other, peer)| {
                 !party.contains(&other)
                     && (peer.presence > 0.0 || now < peer.expires)
-                    && (peer.transmitting
-                        || newcomer
-                        || reclaiming(peer)
-                        || priority(other) < priority(index))
+                    && (peer.transmitting || newcomer || yields_to(other, peer))
             })
             .flat_map(|(other, peer)| {
                 let dock = (!travelling[other]).then(|| projected(peer)).flatten();
