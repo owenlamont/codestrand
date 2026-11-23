@@ -659,7 +659,10 @@ impl State {
             .filter(|&(other, peer)| {
                 !party.contains(&other)
                     && (peer.presence > 0.0 || now < peer.expires)
-                    && (peer.transmitting || newcomer || yields_to(other, peer))
+                    && (peer.transmitting
+                        || newcomer
+                        || peer.dock_since == self.tick
+                        || yields_to(other, peer))
             })
             .flat_map(|(other, peer)| {
                 let dock = (!travelling[other]).then(|| projected(peer)).flatten();
