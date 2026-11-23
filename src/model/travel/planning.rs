@@ -152,12 +152,7 @@ fn moving_route(
     let shape = &trip.route;
     let duration = shape.duration + ticks_duration(animation_delay);
     let available = ticks_duration(trip.arrival - trip.departure);
-    if align
-        && (duration > available
-            || trip.kind == TripKind::Relocation
-                && u64::from(super::seconds_ticks(duration, true))
-                    < trip.arrival - trip.departure)
-    {
+    if align && duration > available {
         return None;
     }
     let anchors = route_anchors(capture.row(epoch), trip, points)?;
@@ -211,6 +206,12 @@ fn moving_route(
         }
         track.push(point);
     }
+    if align
+        && trip.kind == TripKind::Relocation
+        && pauses_away_from_source(&track, trip.source)
+    {
+        return None;
+    }
     let peak = track
         .windows(2)
         .map(|p| p[0].distance(p[1]) * 60.0)
@@ -226,6 +227,17 @@ fn moving_route(
         track: track.into(),
         duration: if align { available } else { duration },
     })
+}
+
+fn pauses_away_from_source(track: &[Vec2], source: Vec2) -> bool {
+    let minimum_step = 0.0001 / super::super::framing::WORLD_UNITS_PER_REFERENCE_PIXEL;
+    track
+        .windows(2)
+        .take(track.len().saturating_sub(2))
+        .any(|pair| {
+            pair[0].distance_squared(pair[1]) < minimum_step * minimum_step
+                && pair[1].distance_squared(source) > super::NETWORK_EPSILON.powi(2)
+        })
 }
 
 fn route_proof(points: &[Vec2], epoch: u64) -> serde_json::Value {
@@ -440,6 +452,10 @@ fn fixed_approach(
                 &super::network(capture.row(tick).iter().flatten().copied()),
             )
     }) {
+        return None;
+    }
+    if template.kind == TripKind::Relocation && pauses_away_from_source(&track, source)
+    {
         return None;
     }
     let mut trip = template.clone();
