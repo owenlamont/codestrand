@@ -178,9 +178,6 @@ fn apply_palette(
     hues: [u32; 4],
 ) {
     t.clear = color(ground);
-    t.floor = solid(0x00ff_ffff);
-    t.textured_ground = true;
-    t.grid = solid(ground);
     t.edge = solid(hues[0]);
     t.directories = (0..12).map(|i| vec![solid(hues[i % 4]); 4]).collect();
     t.directory_edge_widths = vec![0.055, 0.045, 0.035, 0.025];

@@ -163,9 +163,9 @@ mod tests {
         let mut app = App::new();
         tag_meshes(&mut app);
         let world = app.world_mut();
-        let grid = world.spawn(Mesh3d::default()).id();
+        let group = world.spawn(Mesh3d::default()).id();
         world.insert_resource(super::super::Pools {
-            grid: vec![grid],
+            groups: vec![group],
             ..default()
         });
         world.resource_mut::<DrawSequence>().0 = u32::MAX - 2;
@@ -175,7 +175,7 @@ mod tests {
             let second = world.spawn(Mesh3d::default()).id();
             world.resource_mut::<super::super::Pools>().beams = vec![first, second];
             world.flush();
-            assert_eq!(world.get::<MeshTag>(grid).unwrap().value, 1);
+            assert_eq!(world.get::<MeshTag>(group).unwrap().value, 1);
             assert_eq!(world.get::<MeshTag>(first).unwrap().value, first_tag);
             assert_eq!(world.get::<MeshTag>(second).unwrap().value, first_tag + 1);
             super::super::reset_scene_pools(world);

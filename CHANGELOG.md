@@ -62,6 +62,8 @@ All notable changes to Codestrand are documented here, following
   ([#221](https://github.com/owenlamont/codestrand/pull/221))
 - The desktop theme is now named Retro Desktop (`retro-desktop`).
   ([#185](https://github.com/owenlamont/codestrand/pull/185))
+- All seven themes have perspective ground planes and distinct skies.
+  ([#230](https://github.com/owenlamont/codestrand/pull/230))
 - Export checks its output directory, camera path syntax and video encoder before
   planning, so a typo fails at once rather than after planning; the default `--video`
   encoder is tried on one frame at the chosen resolution first.
