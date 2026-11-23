@@ -1001,6 +1001,78 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_detour_avoids_the_first_blockage_even_with_a_later_contact() {
+        let mut capture = fixture();
+        let speed = 480.0;
+        let (mut planned, _) =
+            trips(&capture, speed, crate::model::BotTravel::Walk, true);
+        align_arrivals(&capture, &mut planned, speed);
+        let trip = &planned[0];
+        let key = (trip.commit, trip.author);
+        let tick = trip.departure.midpoint(trip.arrival);
+        let blocked_point = trip.sample(tick).0;
+        capture.obstacles = Some(super::super::WalkObstacles {
+            frames: (0..=trip.arrival)
+                .map(|_| super::super::Transmitters::at(1, blocked_point))
+                .collect(),
+            blocked: [(key, (tick, blocked_point))].into(),
+            contacted: [(
+                key,
+                super::super::WalkContact {
+                    first: (trip.arrival - 1, trip.destination),
+                    peers: std::collections::BTreeSet::new(),
+                },
+            )]
+            .into(),
+            ..Default::default()
+        });
+        let arrival = trip.arrival;
+        let destination = trip.destination;
+
+        let (_, repaired) = realign_blocked_walks(&capture, &mut planned, speed);
+
+        assert!(repaired);
+        let detour = &planned[0];
+        assert_eq!(detour.arrival, arrival);
+        assert_eq!(detour.destination, destination);
+        assert!((detour.departure + 1..arrival).all(|tick| route_clearance(
+            &capture,
+            detour,
+            tick,
+            detour.sample(tick).0
+        )));
+    }
+
+    #[test]
+    fn an_idle_contributor_can_return_to_a_different_seat_without_a_walk() {
+        let mut capture = fixture();
+        let next = capture.services.last_mut().unwrap();
+        next.repository = 0;
+        next.point = Vec2::new(-100.0, 25.0);
+        next.dock = dock(3, 0.75);
+        capture.poses[0][399].visible = false;
+
+        let (trips, _) = trips(&capture, 480.0, crate::model::BotTravel::Walk, true);
+
+        assert_eq!(trips.len(), 0);
+    }
+
+    #[test]
+    fn a_relocation_that_reaches_the_same_berth_needs_no_walk() {
+        let capture = fixture();
+        let (mut planned, _) =
+            trips(&capture, 480.0, crate::model::BotTravel::Walk, true);
+        let trip = &mut planned[0];
+        trip.kind = TripKind::Relocation;
+        trip.destination_repository = trip.source_repository;
+        trip.destination = trip.source;
+
+        align_arrivals(&capture, &mut planned, 480.0);
+
+        assert!(planned[0].route.is_empty());
+    }
+
     fn dock(edge: u8, fraction: f32) -> Dock {
         Dock::new(edge, fraction)
     }
