@@ -2036,13 +2036,10 @@ fn directory_arrival_position(
     target: Vec3,
     visible: bool,
 ) -> (Vec3, f32) {
-    let Some((beam, progress)) = simulation.directory_arrival(index, target) else {
+    let Some((beam, position, progress)) = simulation.directory_arrival(index, target)
+    else {
         return (target, 1.0);
     };
-    let position = simulation
-        .theme()
-        .beam_style
-        .point(beam.from, beam.to, progress);
     if visible {
         beams.push(beam);
     }
@@ -5193,6 +5190,46 @@ mod tests {
             }
         }
         assert!(flight_frames >= 35);
+    }
+
+    #[test]
+    fn a_crowded_commit_draws_one_shared_arrival_ray() {
+        let mut event = crate::timeline::synthetic().remove(0);
+        event.changes = (0..30)
+            .map(|index| crate::timeline::FileChange {
+                path: format!("src/file{index}.rs"),
+                kind: crate::timeline::Kind::Added,
+                ..Default::default()
+            })
+            .collect();
+        let theme = Theme::neon();
+        let mut simulation = Simulation::new(
+            vec![event],
+            &model::Options::default(),
+            &theme,
+            &crate::contributors::Mappings::default(),
+        );
+        let mut world = World::new();
+        world.init_resource::<Assets<Mesh>>();
+        world.init_resource::<Assets<Image>>();
+        world.init_resource::<Assets<StandardMaterial>>();
+        let palette = Palette::new(&mut world, &theme);
+        let mut pools = Pools::default();
+        simulation.advance_to(60, 60);
+        assert_eq!(simulation.layout().arriving_files().count(), 30);
+        sync_lod(&mut world, &mut pools, &simulation);
+        sync_structure(&mut world, &palette, &mut pools, &simulation);
+        styling::beams(&mut world, &palette, &mut pools, &simulation);
+        assert_eq!(
+            pools
+                .beams
+                .iter()
+                .filter(|&&entity| {
+                    world.get::<Visibility>(entity) != Some(&Visibility::Hidden)
+                })
+                .count(),
+            1
+        );
     }
 
     #[test]

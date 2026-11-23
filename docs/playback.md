@@ -484,8 +484,12 @@ Live speed keys move through the canonical timeline faster or slower without
 changing commit times, layout, pulses, beams, avatar motion, settling or fades in
 timeline seconds. Changing live speed preserves the current position.
 
-Commits affecting more than 24 files aim diff beams at directories to reduce clutter.
-Visible file and directory arrivals still follow their own rays.
+Commits that would draw more than 24 beams group them by parent directory. If there are
+still more than 24 targets, the deepest groups move up to their parents until the
+beam count fits. New files stream down each shared beam, then settle into their own
+positions. The spacing tightens for large groups to keep the stream within the
+arrival animation. When a commit creates more than 24 directories, each new directory
+keeps its own arrival beam. Commit timing stays the same.
 
 ## Overview detail
 
