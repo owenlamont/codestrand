@@ -2808,7 +2808,7 @@ mod tests {
     }
 
     #[test]
-    fn a_newly_assigned_dock_blocks_later_dock_choices() {
+    fn a_live_dock_blocks_later_claims_until_released() {
         let mut sim = Simulation::new(
             vec![crate::timeline::synthetic().remove(0)],
             &Options::default(),
@@ -2829,23 +2829,30 @@ mod tests {
 
         let assigned = Dock::new(1, 0.25);
         first.slot.as_mut().unwrap().dock = assigned;
-        first.dock_since = tick;
         state.avatars.push(second);
 
-        let clearance = state.incumbent_discs(
-            1,
-            &[1],
-            sim.seconds(),
-            &[1.0, 1.0],
-            state.avatar_radius(),
-            &[false, false],
-        );
-
-        assert_eq!(clearance.len(), 1);
-        assert!(matches!(
-            clearance[0],
-            SeatClearance::Claim(point) if point == assigned.on_network(gutter)
-        ));
+        let clearance = |state: &State| {
+            state.incumbent_discs(
+                1,
+                &[1],
+                sim.seconds(),
+                &[1.0, 1.0],
+                state.avatar_radius(),
+                &[false, false],
+            )
+        };
+        for dock_since in [tick, tick - 20] {
+            state.avatars[0].dock_since = dock_since;
+            let occupied = clearance(&state);
+            assert_eq!(occupied.len(), 1);
+            assert!(matches!(
+                occupied[0],
+                SeatClearance::Claim(point) if point == assigned.on_network(gutter)
+            ));
+        }
+        state.avatars[0].presence = 0.0;
+        state.avatars[0].expires = sim.seconds();
+        assert_eq!(clearance(&state).len(), 0);
     }
 
     #[test]
