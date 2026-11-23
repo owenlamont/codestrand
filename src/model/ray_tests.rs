@@ -240,6 +240,75 @@ fn arrivals_keep_their_ray_during_contributor_transfers() {
 }
 
 #[test]
+fn a_new_directory_waits_for_a_contributor_fading_in() {
+    let template = synthetic().remove(0);
+    let mover = Identity::new("Relay[bot]", "relay@test.invalid");
+    let seed = Identity::new("Seed", "seed@test.invalid");
+    let mut events = Vec::new();
+    for (index, (repository, author, path, kind)) in [
+        (0, mover.clone(), "source.rs", crate::timeline::Kind::Added),
+        (1, seed, "original.rs", crate::timeline::Kind::Added),
+        (
+            1,
+            mover,
+            "new/renamed.rs",
+            crate::timeline::Kind::Moved {
+                from: "original.rs".to_owned(),
+            },
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut event = template.clone();
+        event.commit = format!("commit-{index}");
+        event.seconds = i64::try_from(index).unwrap() * 86_400;
+        event.author = author;
+        event.changes = vec![FileChange {
+            path: path.to_owned(),
+            kind,
+            ..FileChange::default()
+        }];
+        let mut row = [event];
+        crate::repositories::namespace(&mut row, repository);
+        events.extend(row);
+    }
+    let options = Options {
+        seconds_per_day: 0.3,
+        max_idle_seconds: 0.3,
+        travel_cap: TravelCap::Seconds(0.12),
+        bot_travel: BotTravel::Fade,
+        ..Options::default()
+    };
+    let mut simulation = Simulation::with_repositories(
+        events,
+        &options,
+        &Theme::neon(),
+        &Mappings::default(),
+        &["origin".to_owned(), "destination".to_owned()],
+    );
+
+    let mut observed_flight = false;
+    for frame in 0..=simulation.frames(60).unwrap() {
+        simulation.advance_to(frame, 60);
+        for (index, directory) in simulation.layout().dirs() {
+            if !directory.path.ends_with("/new") {
+                continue;
+            }
+            if let Some((beam, _, progress)) =
+                simulation.directory_arrival(index, super::ground(directory.position))
+                && progress > 0.0
+                && progress < 1.0
+            {
+                observed_flight = true;
+                assert!(beam.is_some(), "directory has no ray at frame {frame}");
+            }
+        }
+    }
+    assert!(observed_flight);
+}
+
+#[test]
 fn commit_pulse_waits_for_the_displayed_contributor_to_reach_the_gutter() {
     let mut simulation = Simulation::new(
         vec![synthetic().remove(0)],
