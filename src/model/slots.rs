@@ -785,8 +785,8 @@ impl State {
             let Some(slot) = &mut avatar.slot else {
                 continue;
             };
-            // An author whose group has gone walks back from its seat to its dock.
-            if alone {
+            // Keep the fading body at its ring seat until it is hidden.
+            if alone && avatar.presence <= 0.0 {
                 slot.point -= slot.offset;
                 slot.offset = Vec2::ZERO;
             }
