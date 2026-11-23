@@ -516,12 +516,18 @@ impl State {
             })
             .collect()
     }
-    fn retained_slots(&self, now: super::Time, radius: f32) -> Vec<Option<Rect>> {
-        let capacities = self.compute_capacities();
+    fn retained_slots(
+        &self,
+        now: super::Time,
+        radius: f32,
+        capacities: &[u8],
+        travelling: &[bool],
+    ) -> Vec<Option<Rect>> {
         (0..self.avatars.len())
             .map(|index| {
                 let avatar = &self.avatars[index];
-                if now >= avatar.expires && !avatar.transmitting {
+                if travelling[index] || (now >= avatar.expires && !avatar.transmitting)
+                {
                     return None;
                 }
                 let slot = avatar.slot.as_ref()?;
@@ -531,7 +537,7 @@ impl State {
                 } else {
                     slot.dock.on_network(tile) + slot.offset
                 };
-                self.held_space(index, point, &capacities, radius)
+                self.held_space(index, point, capacities, radius)
             })
             .collect()
     }
@@ -611,6 +617,7 @@ impl State {
         now: super::Time,
         scales: &[f32],
         radius: f32,
+        travelling: &[bool],
     ) -> Vec<Rect> {
         let priority = |index: usize| {
             let avatar = &self.avatars[index];
@@ -628,14 +635,20 @@ impl State {
                         || priority(other) < priority(index))
             })
             .flat_map(|(other, peer)| {
-                let dock = peer.slot.as_ref().and_then(|slot| {
-                    self.layout.repositories[peer.repository]
-                        .gutter
-                        .map(|tile| slot.dock.on_network(tile) + slot.offset)
-                });
+                let dock = peer.slot.as_ref().filter(|_| !travelling[other]).and_then(
+                    |slot| {
+                        self.layout.repositories[peer.repository]
+                            .gutter
+                            .map(|tile| slot.dock.on_network(tile) + slot.offset)
+                    },
+                );
                 let source = field_point(peer.position);
-                let held =
-                    (peer.transmitting && dock != Some(source)).then_some(source);
+                let held = (peer.transmitting
+                    || travelling[other] && peer.presence > 0.0)
+                    .then_some(source)
+                    .filter(|point| {
+                        dock.is_none_or(|dock| point.distance_squared(dock) > 1e-6)
+                    });
                 [dock, held]
                     .into_iter()
                     .flatten()
@@ -650,7 +663,6 @@ impl State {
         now: super::Time,
         plan: &super::travel::Plan,
     ) {
-        let gap = Vec2::splat(self.gutter);
         let beams = tile_obstacles(self);
         let cells = super::travel::network(
             self.layout.repositories.iter().filter_map(|r| r.gutter),
@@ -659,8 +671,9 @@ impl State {
         let name_scale = super::LabelKind::Avatar.font_scale() * self.field_growth;
         let capacities = self.compute_capacities();
         let scales = self.member_scales();
-        let mut occupied = self.hold_idle(now, &capacities, radius);
-        let retained = self.retained_slots(now, radius);
+        let travelling = plan.in_transit(self.tick, self.avatars.len());
+        let mut occupied = self.hold_idle(now, &capacities, radius, &travelling);
+        let retained = self.retained_slots(now, radius, &capacities, &travelling);
         occupied.extend(retained.iter().flatten().copied());
         for index in self.placing_order(now) {
             let avatar = &self.avatars[index];
@@ -698,17 +711,19 @@ impl State {
                 choosing,
             );
             let peers = self.slot_peers(index, plan, choosing);
-            let clearance = self.incumbent_discs(index, &party, now, &scales, radius);
+            let clearance =
+                self.incumbent_discs(index, &party, now, &scales, radius, &travelling);
             let choice = Choice {
                 field: super::travel::field_rect(self.field),
                 tile,
                 gutter: self.layout.repositories[avatar.repository].gutter,
-                gap,
+                gap: Vec2::splat(self.gutter),
                 radius,
                 capacity,
                 beams: &beams,
                 peers: &peers,
                 future: &future,
+                rejected: plan.rejected_docks(commit, index),
                 occupied: &occupied,
                 clearance: &clearance,
                 repository: avatar.repository,
@@ -743,7 +758,9 @@ impl State {
             let capacity = self.seat_party(&chosen, &party, &cells, plan);
             let ring_centre =
                 chosen.point + ring_offset(capacity, chosen.dock.edge, radius);
-            occupied.push(disk(ring_centre, group_radius(capacity, radius)));
+            if !travelling[index] {
+                occupied.push(disk(ring_centre, group_radius(capacity, radius)));
+            }
         }
         self.capacities = self.compute_capacities();
     }
@@ -754,11 +771,12 @@ impl State {
         now: super::Time,
         capacities: &[u8],
         radius: f32,
+        travelling: &[bool],
     ) -> Vec<Rect> {
         let mut occupied = Vec::new();
-        for index in 0..self.avatars.len() {
+        for (index, &travelling) in travelling.iter().enumerate() {
             let avatar = &mut self.avatars[index];
-            if now - avatar.last_active < super::AVATAR_IDLE {
+            if travelling || now - avatar.last_active < super::AVATAR_IDLE {
                 continue;
             }
             let alone =
@@ -1607,6 +1625,7 @@ struct Choice<'a> {
     clearance: &'a [Rect],
     peers: &'a [(Vec2, u8, Vec2)],
     future: &'a [Rect],
+    rejected: &'a [Dock],
     repository: usize,
     text: String,
     scale: f32,
@@ -1625,7 +1644,10 @@ impl Choice<'_> {
         (transmitting || blocked)
             .then(|| self.assess(dock).0)
             .filter(|place| {
-                transmitting || (place.valid() && self.clearance_cost(place) <= 0.001)
+                transmitting
+                    || (!self.rejected.contains(&dock)
+                        && place.valid()
+                        && self.clearance_cost(place) <= 0.001)
             })
     }
 
@@ -1639,7 +1661,8 @@ impl Choice<'_> {
     ) -> Placement {
         if let Some(parked) = previous {
             let selected = self.assess(parked.dock).0;
-            if self.clearance_cost(&selected) > 0.001
+            if self.rejected.contains(&parked.dock)
+                || self.clearance_cost(&selected) > 0.001
                 || (parked.commit != commit
                     && self.reserved_cost(selected.point) > 0.001)
             {
@@ -1649,7 +1672,7 @@ impl Choice<'_> {
                 return selected;
             }
         }
-        if let Some(dock) = planned {
+        if let Some(dock) = planned.filter(|dock| !self.rejected.contains(dock)) {
             let selected = self.assess(dock).0;
             if locked
                 || (selected.valid() && self.reserved_cost(selected.point) <= 0.001)
@@ -1681,6 +1704,7 @@ impl Choice<'_> {
                     fraction: f32::from(i) / 16.0,
                 })
             }))
+            .filter(|dock| !self.rejected.contains(dock))
             .map(|dock| self.assess(dock).0)
             .filter(Placement::valid)
             .map(|slot| {
@@ -1840,6 +1864,7 @@ impl Choice<'_> {
 
     fn select(&self, previous: Option<Dock>) -> Placement {
         if let Some((p, _)) = previous
+            .filter(|dock| !self.rejected.contains(dock))
             .map(|dock| self.assess(dock))
             .filter(|(p, _)| p.valid())
         {
@@ -1887,6 +1912,7 @@ impl Choice<'_> {
         };
         docks
             .enumerate()
+            .filter(|(_, dock)| !self.rejected.contains(dock))
             .map(|(id, dock)| {
                 let (p, span) = self.assess(dock);
                 let rank = match (dock.edge, id) {
@@ -2259,6 +2285,7 @@ mod tests {
             clearance: &[],
             peers: &[],
             future: &[],
+            rejected: &[],
             beams: obstacles,
             cells: &[],
             speed: 480.0,

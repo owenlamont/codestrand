@@ -143,7 +143,7 @@ impl Simulation {
         let gutter = self.state.layout.repositories[repository].gutter;
         avatar.presence > 0.001
             && !avatar.beside_gutter(gutter, self.state.avatar_radius())
-            && self.travel.unreached_docks.insert((commit, author))
+            && self.travel.reject_dock((commit, author), None)
     }
 
     fn reserve_blocked_walks(&mut self, previous: &mut Vec<Option<Vec3>>) -> usize {
@@ -158,7 +158,8 @@ impl Simulation {
             };
             let key = (trip.commit, author);
             if trip.commit < self.travel.frozen
-                || self.travel.unreached_docks.contains(&key)
+                || trip.kind != super::TripKind::Relocation
+                    && self.travel.unreached_docks.contains_key(&key)
             {
                 continue;
             }
@@ -188,7 +189,16 @@ impl Simulation {
         );
         blocked
             .into_iter()
-            .filter(|&key| self.travel.unreached_docks.insert(key))
+            .filter(|&(commit, author)| {
+                let key = (commit, author);
+                let dock = self
+                    .travel
+                    .walking_trip(author, self.state.tick)
+                    .filter(|trip| trip.kind == super::TripKind::Relocation)
+                    .and_then(|_| self.travel.docks.get(&key))
+                    .copied();
+                self.travel.reject_dock(key, dock)
+            })
             .count()
     }
 
@@ -275,10 +285,10 @@ impl Simulation {
                                 && a.settle.is_none()
                                 && a.position.distance(slot.world()) < 0.001
                     });
-                Some((i, point, parked, travelling))
+                Some((i, point, parked))
             })
             .collect();
-        for &(i, point, applying, _) in &live {
+        for &(i, point, applying) in &live {
             if !applying {
                 continue;
             }
@@ -299,20 +309,12 @@ impl Simulation {
                 .map(|group| group.lead)
                 .filter(|&lead| state.in_party(i, lead))
                 .unwrap_or(i);
-            let mut foreign = live
-                .iter()
-                .filter(|&&(j, other, _, travelling)| {
-                    i != j
-                        && !state.in_party(j, owner)
-                        && !(ring_seat && self.shares_ring_participant(i, j))
-                        && (!travelling || point.distance(other) < 2.0 * radius)
-                })
-                .peekable();
-            if foreign.peek().is_none() {
-                continue;
-            }
-            let row = occupied.entry((avatar.commit, owner)).or_default();
-            for &(_, other, _, _) in foreign {
+            let foreign = live.iter().filter(|&&(j, ..)| {
+                i != j
+                    && !state.in_party(j, owner)
+                    && !(ring_seat && self.shares_ring_participant(i, j))
+            });
+            for &(_, other, _) in foreign {
                 if super::committing_overlap(
                     point,
                     other,
@@ -321,9 +323,16 @@ impl Simulation {
                     [true, false],
                 ) {
                     conflicts += 1;
-                    conflicted.insert((avatar.commit, owner));
+                    let service = (avatar.commit, owner);
+                    conflicted.insert(service);
+                    reserve_other(
+                        occupied.entry(service).or_default(),
+                        low,
+                        span,
+                        other,
+                        radius,
+                    );
                 }
-                reserve_other(row, low, span, other, radius);
             }
         }
         (conflicts, pairs)

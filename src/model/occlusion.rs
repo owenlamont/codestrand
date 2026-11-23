@@ -117,7 +117,7 @@ fn clear_position(
         })
         .flatten()
         .chain(std::iter::once(target))
-        .filter(|&point| allowed(point))
+        .filter(|&point| point == from || allowed(point))
         .map(|point| (cost(point), point))
         .min_by(|a, b| a.0.partial_cmp(&b.0).expect("finite disc positions"))
         .map_or(from, |(_, point)| point)
@@ -134,12 +134,12 @@ fn seat_bounds(state: &State) -> Rect {
     Rect::from_corners(corner(field.min), corner(field.max))
 }
 
-fn previous_group_seats(
+fn previous_seats(
     state: &State,
     previous: &[Option<Vec3>],
     scales: &[f32],
     base: f32,
-) -> Vec<Option<(usize, Disc)>> {
+) -> Vec<Option<Disc>> {
     let now = super::tick_time(state.tick);
     state
         .avatars
@@ -147,16 +147,12 @@ fn previous_group_seats(
         .zip(previous)
         .zip(scales)
         .map(|((avatar, position), scale)| {
-            let group = avatar.group?;
-            Some((
-                group.lead,
-                Disc {
-                    centre: position.as_ref()?.xz(),
-                    radius: seating_disc_radius(avatar, base, *scale, now),
-                    blocks_walkers: true,
-                    transmitting: avatar.transmitting,
-                },
-            ))
+            Some(Disc {
+                centre: position.as_ref()?.xz(),
+                radius: seating_disc_radius(avatar, base, *scale, now),
+                blocks_walkers: true,
+                transmitting: avatar.transmitting,
+            })
         })
         .collect()
 }
@@ -222,7 +218,7 @@ pub(super) fn clear_seat_transitions(
     let mut placed: Vec<Disc> = Vec::with_capacity(order.len());
     let mut approaching: Vec<Disc> = Vec::new();
     let mut obstacles = Vec::with_capacity(order.len());
-    let old_seats = previous_group_seats(state, previous, &scales, base);
+    let old_seats = previous_seats(state, previous, &scales, base);
     let now = super::tick_time(state.tick);
     for (rank, &(index, blocks_walkers, parked_here)) in order.iter().enumerate() {
         let avatar = &mut state.avatars[index];
@@ -257,12 +253,11 @@ pub(super) fn clear_seat_transitions(
         );
         if blocks_walkers {
             obstacles.extend(approaching.iter().copied().filter(nearby));
-            if parked_here && let Some(group) = avatar.group {
+            if parked_here {
                 obstacles.extend(order[rank + 1..].iter().filter_map(
-                    |&(other, _, parked_other)| {
-                        let (lead, disc) = old_seats[other]?;
-                        (parked_other && lead == group.lead && nearby(&disc))
-                            .then_some(disc)
+                    |&(other, ..)| {
+                        let disc = old_seats[other]?;
+                        nearby(&disc).then_some(disc)
                     },
                 ));
             }

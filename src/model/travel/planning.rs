@@ -152,7 +152,12 @@ fn moving_route(
     let shape = &trip.route;
     let duration = shape.duration + ticks_duration(animation_delay);
     let available = ticks_duration(trip.arrival - trip.departure);
-    if align && duration > available {
+    if align
+        && (duration > available
+            || trip.kind == TripKind::Relocation
+                && u64::from(super::seconds_ticks(duration, true))
+                    < trip.arrival - trip.departure)
+    {
         return None;
     }
     let anchors = route_anchors(capture.row(epoch), trip, points)?;
@@ -340,7 +345,8 @@ fn search(
     };
     if best.fade
         && mandatory_birth_walk
-        && let Some(approach) = birth_approach(capture, template, first, speed, router)
+        && let Some(approach) =
+            fixed_dock_approach(capture, template, first, speed, router)
     {
         return approach;
     }
@@ -371,7 +377,7 @@ fn dock_outpaces_walker(
     })
 }
 
-fn birth_approach(
+fn fixed_dock_approach(
     capture: &Capture,
     template: &Trip,
     first: u64,
@@ -559,14 +565,14 @@ pub(super) fn needs_alignment(trip: &Trip, frozen: usize) -> bool {
             < trip.arrival
 }
 
-pub(super) fn align_arrivals(
+pub(super) fn align_arrivals<'a>(
     capture: &Capture,
-    trips: &mut [Trip],
+    trips: impl IntoIterator<Item = &'a mut Trip>,
     speed: f32,
 ) -> usize {
     let mut router = Router::default();
     for trip in trips
-        .iter_mut()
+        .into_iter()
         .filter(|trip| needs_alignment(trip, capture.frozen))
     {
         let earlier = capture
@@ -580,7 +586,17 @@ pub(super) fn align_arrivals(
                 service.release.max(trip.departure)
             });
         if release < trip.arrival {
-            *trip = search(capture, trip, release, speed, &mut router, Search::Align);
+            let aligned =
+                search(capture, trip, release, speed, &mut router, Search::Align);
+            *trip = if aligned.kind == TripKind::Relocation
+                && needs_alignment(&aligned, capture.frozen)
+            {
+                let first = release.max(aligned.free);
+                fixed_dock_approach(capture, &aligned, first, speed, &mut router)
+                    .unwrap_or(aligned)
+            } else {
+                aligned
+            };
         }
     }
     router.epochs
@@ -736,7 +752,7 @@ mod tests {
             replanning: false,
             frozen: 0,
             occupancy: std::collections::BTreeMap::new(),
-            unreached_docks: std::collections::BTreeSet::new(),
+            unreached_docks: std::collections::BTreeMap::new(),
             stats: Statistics::default(),
         };
         assert!(plan.sample(0, 69).is_none());
@@ -759,7 +775,7 @@ mod tests {
             replanning: false,
             frozen: 0,
             occupancy: std::collections::BTreeMap::new(),
-            unreached_docks: std::collections::BTreeSet::new(),
+            unreached_docks: std::collections::BTreeMap::new(),
             stats: Statistics::default(),
         };
         assert!(!plan.travelling(0, 90));
@@ -775,7 +791,7 @@ mod tests {
             replanning: false,
             frozen: 0,
             occupancy: std::collections::BTreeMap::new(),
-            unreached_docks: std::collections::BTreeSet::new(),
+            unreached_docks: std::collections::BTreeMap::new(),
             stats: Statistics::default(),
         }
         .report();
@@ -792,7 +808,7 @@ mod tests {
                 replanning: false,
                 frozen: 0,
                 occupancy: std::collections::BTreeMap::new(),
-                unreached_docks: std::collections::BTreeSet::new(),
+                unreached_docks: std::collections::BTreeMap::new(),
                 stats: Statistics::default()
             }
             .report()
@@ -812,7 +828,7 @@ mod tests {
             replanning: false,
             frozen: 0,
             occupancy: std::collections::BTreeMap::new(),
-            unreached_docks: std::collections::BTreeSet::new(),
+            unreached_docks: std::collections::BTreeMap::new(),
             stats: Statistics::default(),
         };
         assert!(!plan.travelling(0, 11));

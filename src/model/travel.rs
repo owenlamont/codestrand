@@ -1,6 +1,6 @@
 use std::{
     cmp::Reverse,
-    collections::{BTreeMap, BTreeSet, BinaryHeap},
+    collections::{BTreeMap, BinaryHeap},
     mem::size_of,
 };
 
@@ -353,14 +353,43 @@ pub(super) struct Plan {
     pub(super) frozen: usize,
     /// Reserved gutter spans by commit and avatar.
     pub(super) occupancy: BTreeMap<(usize, usize), Vec<(u8, Rect)>>,
-    /// Capped walks that failed to reach their dock safely in the seating replay.
-    unreached_docks: BTreeSet<(usize, usize)>,
+    /// Failed relocations reject the destination dock. Transfers use an empty row.
+    unreached_docks: BTreeMap<(usize, usize), Vec<slots::Dock>>,
     pub stats: Statistics,
 }
 
 impl Plan {
     pub(super) fn rejected_dock_walk(&self, commit: usize, author: usize) -> bool {
-        self.unreached_docks.contains(&(commit, author))
+        self.unreached_docks.contains_key(&(commit, author))
+    }
+
+    pub(super) fn rejected_docks(
+        &self,
+        commit: usize,
+        author: usize,
+    ) -> &[slots::Dock] {
+        self.unreached_docks
+            .get(&(commit, author))
+            .map_or(&[], Vec::as_slice)
+    }
+
+    fn reject_dock(&mut self, key: (usize, usize), dock: Option<slots::Dock>) -> bool {
+        use std::collections::btree_map::Entry;
+        match self.unreached_docks.entry(key) {
+            Entry::Vacant(row) => {
+                row.insert(dock.into_iter().collect());
+                true
+            }
+            Entry::Occupied(mut row) => {
+                let Some(dock) = dock
+                    .filter(|dock| row.get().len() < 8 && !row.get().contains(dock))
+                else {
+                    return false;
+                };
+                row.get_mut().push(dock);
+                true
+            }
+        }
     }
 
     pub(super) fn replay_bytes(&self) -> u128 {
@@ -382,10 +411,16 @@ impl Plan {
             .values()
             .map(|spans| (128 + spans.capacity() * size_of::<(u8, Rect)>()) as u128)
             .sum::<u128>();
+        let unreachable = self
+            .unreached_docks
+            .values()
+            .map(|docks| (128 + docks.capacity() * size_of::<slots::Dock>()) as u128)
+            .sum::<u128>();
         trips as u128
             + routes
             + occupancy
-            + (self.docks.len() + self.unreached_docks.len()) as u128 * 128
+            + unreachable
+            + self.docks.len() as u128 * 128
     }
 
     #[cfg(test)]
@@ -516,6 +551,18 @@ impl Plan {
     }
     pub fn travelling(&self, author: usize, tick: u64) -> bool {
         self.trips.iter().any(|t| t.active(author, tick))
+    }
+
+    pub(super) fn in_transit(&self, tick: u64, authors: usize) -> Vec<bool> {
+        let mut travelling = vec![false; authors];
+        for trip in &self.trips {
+            if trip.active(trip.author, tick)
+                && let Some(active) = travelling.get_mut(trip.author)
+            {
+                *active = true;
+            }
+        }
+        travelling
     }
 
     pub(super) fn undocking(&self, author: usize, tick: u64) -> bool {
@@ -878,6 +925,22 @@ impl Simulation {
                 *ticks = ticks.saturating_sub(surplus);
             }
         }
+        for (commit, ticks) in &mut result {
+            let Some(local) = commit.checked_sub(self.offset) else {
+                continue;
+            };
+            if local >= self.travel.frozen
+                && self
+                    .travel
+                    .unreached_docks
+                    .range((local, 0)..=(local, usize::MAX))
+                    .next()
+                    .is_some()
+                && !self.travel.trips.iter().any(|trip| trip.commit == local)
+            {
+                *ticks = 0;
+            }
+        }
         result
     }
     pub(super) fn travel_padding(
@@ -935,13 +998,12 @@ impl Simulation {
         padding: &[(usize, u32)],
     ) {
         let _phase = self.trace.phase(Phase::PlanTravel);
-        let capture = capture(self);
-        let (mut trips, graph_epochs) = self.routes(&capture, options);
+        let (capture, mut trips, graph_epochs) = self.plan_reachable_docks(options);
         let mut unreached_docks = std::mem::take(&mut self.travel.unreached_docks);
-        unreached_docks.retain(|&(commit, _)| commit < self.events.len());
+        unreached_docks.retain(|&(commit, _), _| commit < self.events.len());
         for trip in trips.iter_mut().filter(|trip| {
             trip.kind != TripKind::Relocation
-                && unreached_docks.contains(&(trip.commit, trip.author))
+                && unreached_docks.contains_key(&(trip.commit, trip.author))
         }) {
             trip.departure = trip.arrival.saturating_sub(FADE_TICKS).max(trip.free);
             trip.source = capture
@@ -1027,6 +1089,53 @@ impl Simulation {
             occupancy: std::mem::take(&mut self.travel.occupancy),
             unreached_docks,
         };
+    }
+
+    fn plan_reachable_docks(
+        &mut self,
+        options: &super::Options,
+    ) -> (Capture, Vec<Trip>, usize) {
+        let align_early = |trip: &&mut Trip| {
+            trip.kind == TripKind::Relocation
+                || options.travel_cap == super::TravelCap::None
+        };
+        let captured = capture(self);
+        let (mut trips, mut epochs) = self.routes(&captured, options);
+        epochs += planning::align_arrivals(
+            &captured,
+            trips.iter_mut().filter(align_early),
+            options.avatar_max_speed,
+        );
+        let mut retry = false;
+        for trip in &trips {
+            if trip.kind == TripKind::Relocation
+                && (planning::needs_alignment(trip, captured.frozen)
+                    || trip.fade
+                        && trip.route.duration
+                            <= ticks_duration(trip.arrival - trip.departure))
+                && let Some(service) = captured.services.iter().find(|service| {
+                    service.commit == trip.commit && service.author == trip.author
+                })
+            {
+                let rejected = (options.travel_cap != super::TravelCap::None)
+                    .then_some(service.dock);
+                retry |= self
+                    .travel
+                    .reject_dock((trip.commit, trip.author), rejected);
+            }
+        }
+        if !retry {
+            return (captured, trips, epochs);
+        }
+        let captured = capture(self);
+        let (mut trips, retried_epochs) = self.routes(&captured, options);
+        epochs += retried_epochs;
+        epochs += planning::align_arrivals(
+            &captured,
+            trips.iter_mut().filter(align_early),
+            options.avatar_max_speed,
+        );
+        (captured, trips, epochs)
     }
 }
 
@@ -1379,6 +1488,7 @@ impl Plan {
             |&(commit, _): &(usize, usize)| commit >= next || keep.contains(&commit);
         self.docks.retain(|key, _| kept(key));
         self.occupancy.retain(|key, _| kept(key));
+        self.unreached_docks.retain(|key, _| kept(key));
     }
 }
 
