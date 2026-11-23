@@ -126,7 +126,7 @@ struct Capture {
 struct WalkObstacles {
     begin: u64,
     frames: Vec<Transmitters>,
-    blocked: BTreeSet<(usize, usize)>,
+    blocked: BTreeMap<(usize, usize), (u64, Vec2)>,
     contacted: BTreeMap<(usize, usize), WalkContact>,
     // Keep pose tracks only for parked avatars a walk contacted.
     parked: BTreeMap<usize, Vec<Option<super::occlusion::BodyDisc>>>,
@@ -142,7 +142,7 @@ struct WalkContact {
 impl WalkObstacles {
     fn affects(&self, trip: &Trip) -> bool {
         let key = (trip.commit, trip.author);
-        self.blocked.contains(&key)
+        self.blocked.contains_key(&key)
             || self.contacted.contains_key(&key)
             || self.coarrivals.contains_key(&key)
     }
@@ -850,20 +850,25 @@ fn fade_clearance(capture: &Capture, begin: u64, point: Vec2, radius: f32) -> u6
 impl Simulation {
     /// Checks the settled playback for walks that cannot finish clear of other avatars.
     pub(super) fn repair_walk_departures(&mut self, options: &super::Options) {
-        let Some(mut obstacles) = self.observe_walk_obstacles() else {
-            return;
-        };
-        self.capture_contacted_seats(&mut obstacles);
-        let mut capture = capture(self);
-        capture.obstacles = Some(obstacles);
-        let _phase = self.trace.phase(Phase::Routes);
-        let epochs = planning::realign_blocked_walks(
-            &capture,
-            &mut self.travel.trips,
-            options.avatar_max_speed,
-        );
-        self.trace.count(Counter::RouteCandidates, epochs);
-        self.travel.stats.graph_epochs += epochs;
+        for _ in 0..4 {
+            let Some(mut obstacles) = self.observe_walk_obstacles() else {
+                break;
+            };
+            self.capture_contacted_seats(&mut obstacles);
+            let mut capture = capture(self);
+            capture.obstacles = Some(obstacles);
+            let _phase = self.trace.phase(Phase::Routes);
+            let (epochs, changed) = planning::realign_blocked_walks(
+                &capture,
+                &mut self.travel.trips,
+                options.avatar_max_speed,
+            );
+            self.trace.count(Counter::RouteCandidates, epochs);
+            self.travel.stats.graph_epochs += epochs;
+            if !changed {
+                break;
+            }
+        }
         self.travel.stats.retained_route_bytes =
             retained_route_bytes(&self.travel.trips);
     }

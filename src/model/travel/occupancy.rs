@@ -238,7 +238,10 @@ impl Simulation {
                 && super::slots::field_point(avatar.position).distance(trip.source)
                     > super::NETWORK_EPSILON
             {
-                obstacles.blocked.insert(key);
+                obstacles
+                    .blocked
+                    .entry(key)
+                    .or_insert_with(|| (frame, trip.sample(frame).0));
             }
             walking.push(key);
         }

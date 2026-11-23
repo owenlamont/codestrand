@@ -36,6 +36,10 @@ fn route_clearance(capture: &Capture, trip: &Trip, tick: u64, point: Vec2) -> bo
     })
 }
 
+fn point_on_tile(tile: Tile, fraction: Vec2) -> Vec2 {
+    (tile.low + (tile.high - tile.low) * fraction) * HALF
+}
+
 pub(super) fn progress(trip: &Trip) -> f32 {
     (trip.departure..trip.arrival)
         .filter_map(|t| {
@@ -177,8 +181,7 @@ fn moving_route(
         };
         if elapsed >= shape.duration && tick < trip.arrival {
             let target = row[trip.destination_repository]?;
-            let point =
-                (target.low + (target.high - target.low) * target_fraction) * HALF;
+            let point = point_on_tile(target, target_fraction);
             if !hard_clearance(capture, tick, point) {
                 return None;
             }
@@ -217,10 +220,7 @@ fn moving_route(
         }
         track.push(point);
     }
-    if align
-        && trip.kind == TripKind::Relocation
-        && pauses_away_from_source(&track, trip.source)
-    {
+    if align && pauses_away_from_source(&track, trip.source) {
         return None;
     }
     let peak = track
@@ -260,18 +260,31 @@ fn route_proof(points: &[Vec2], epoch: u64) -> serde_json::Value {
 #[derive(Clone, Copy)]
 enum Search {
     Fit { mandatory_birth_walk: bool },
-    Align,
+    Align { blocked: Option<Vec2>, pace: f32 },
 }
 
-fn shares_parking_point(capture: &Capture, trip: &Trip, begin: u64) -> bool {
-    let Some(source_tile) = capture.row(trip.arrival)[trip.source_repository] else {
-        return false;
-    };
+fn retain_shared_berth(
+    capture: &Capture,
+    trip: &Trip,
+    begin: u64,
+    source: Vec2,
+) -> Option<Trip> {
+    let source_tile = capture.row(trip.arrival)[trip.source_repository]?;
     let dock = capture
         .pose(trip.author, begin)
         .expect("existing author")
         .dock;
-    dock.on_network(source_tile).distance(trip.destination) < super::NETWORK_EPSILON
+    (dock.on_network(source_tile).distance(trip.destination) < super::NETWORK_EPSILON)
+        .then(|| Trip {
+            departure: begin,
+            source,
+            fade: false,
+            route: Route::default(),
+            failure: None,
+            cutoff: None,
+            proof: None,
+            ..trip.clone()
+        })
 }
 
 fn search(
@@ -282,7 +295,10 @@ fn search(
     router: &mut Router,
     mode: Search,
 ) -> Trip {
-    let align = matches!(mode, Search::Align);
+    let (align, blocked, pace) = match mode {
+        Search::Align { blocked, pace } => (true, blocked, pace),
+        Search::Fit { .. } => (false, None, 0.8),
+    };
     let mut best = template.clone();
     let first = release.min(template.arrival - 1).max(template.free);
     let Some(target_tile) =
@@ -311,11 +327,9 @@ fn search(
         {
             continue;
         }
-        let target = (target_tile.low
-            + (target_tile.high - target_tile.low) * target_fraction)
-            * HALF;
+        let target = point_on_tile(target_tile, target_fraction);
         let cells = super::network(row.iter().flatten().copied());
-        let points = match router.route(source, target, &cells) {
+        let points = match router.route_avoiding(source, target, &cells, blocked) {
             Ok(points) => points,
             Err(e) => {
                 best.failure = Some(e.name());
@@ -323,11 +337,11 @@ fn search(
             }
         };
         if points.len() < 2 {
-            if !align && shares_parking_point(capture, template, begin) {
-                best.fade = false;
-                best.route = Route::default();
-                best.failure = None;
-                return best;
+            if (!align || template.kind == TripKind::Relocation)
+                && let Some(parked) =
+                    retain_shared_berth(capture, template, begin, source)
+            {
+                return parked;
             }
             continue;
         }
@@ -335,7 +349,7 @@ fn search(
         candidate.departure = begin;
         candidate.source = source;
         let animation_delay = release.saturating_sub(begin);
-        candidate.route = Route::new(&points, speed * 0.8);
+        candidate.route = Route::new(&points, speed * pace);
         if let Some(route) = moving_route(
             capture,
             &candidate,
@@ -391,7 +405,7 @@ fn dock_outpaces_walker(
     let first = trip.arrival.saturating_sub(crate::model::BIRTH_TICKS + 1);
     let point = |tick| {
         capture.row(tick)[trip.destination_repository]
-            .map(|tile| (tile.low + (tile.high - tile.low) * fraction) * HALF)
+            .map(|tile| point_on_tile(tile, fraction))
     };
     (first..trip.arrival).any(|tick| {
         point(tick)
@@ -481,8 +495,7 @@ fn fixed_approach(
     }) {
         return None;
     }
-    if template.kind == TripKind::Relocation && pauses_away_from_source(&track, source)
-    {
+    if pauses_away_from_source(&track, source) {
         return None;
     }
     let mut trip = template.clone();
@@ -496,6 +509,25 @@ fn fixed_approach(
         ..route
     };
     Some(trip)
+}
+
+fn needs_trip(
+    capture: &Capture,
+    prior: &super::Service,
+    next: &super::Service,
+    must_walk: bool,
+) -> bool {
+    let visible = capture
+        .pose(next.author, next.tick - 1)
+        .is_none_or(|pose| pose.visible);
+    if prior.repository == next.repository {
+        next.authoring
+            && prior.dock != next.dock
+            && prior.arrivals_land < next.tick - 1
+            && visible
+    } else {
+        must_walk || visible
+    }
 }
 
 pub(super) fn trips(
@@ -518,19 +550,11 @@ pub(super) fn trips(
         if commit < capture.frozen {
             continue;
         }
-        let relocation = prior.repository == service.repository;
-        if (relocation
-            && (!service.authoring
-                || prior.dock == service.dock
-                || prior.arrivals_land >= service.tick - 1))
-            || (!relocation
-                && (!walk || (service.bot && bots == crate::model::BotTravel::Fade))
-                && capture
-                    .pose(service.author, service.tick - 1)
-                    .is_some_and(|pose| !pose.visible))
-        {
+        let must_walk = walk && (!service.bot || bots != crate::model::BotTravel::Fade);
+        if !needs_trip(capture, prior, service, must_walk) {
             continue;
         }
+        let relocation = prior.repository == service.repository;
         let earliest = capture.begin + if capture.begin == 0 { 0 } else { 120 };
         let free = (prior.tick + 1)
             .max(earliest)
@@ -644,7 +668,17 @@ fn separate_coarrival(
         })?;
     let mut template = trip.clone();
     template.destination = clear;
-    let aligned = search(capture, &template, release, speed, router, Search::Align);
+    let aligned = search(
+        capture,
+        &template,
+        release,
+        speed,
+        router,
+        Search::Align {
+            blocked: None,
+            pace: 0.8,
+        },
+    );
     if aligned.route.track == trip.route.track {
         fixed_dock_approach(capture, &template, release, speed, router, None)
     } else {
@@ -656,49 +690,86 @@ pub(super) fn realign_blocked_walks(
     capture: &Capture,
     trips: &mut [Trip],
     speed: f32,
-) -> usize {
+) -> (usize, bool) {
     let Some(obstacles) = &capture.obstacles else {
-        return 0;
+        return (0, false);
     };
     let mut router = Router::default();
+    let mut changed = false;
     for trip in trips.iter_mut().filter(|trip| obstacles.affects(trip)) {
         let release = last_release(capture, trip).max(capture.begin);
         if release >= trip.arrival {
             continue;
         }
-        if let Some(&lead) = obstacles.coarrivals.get(&(trip.commit, trip.author)) {
-            if let Some(approach) =
-                separate_coarrival(capture, trip, lead, release, speed, &mut router)
-            {
-                *trip = approach;
-            }
-            continue;
-        }
-        let aligned = search(capture, trip, release, speed, &mut router, Search::Align);
-        if aligned.departure != trip.departure
-            || aligned.route.track != trip.route.track
-        {
-            *trip = aligned;
-            continue;
-        }
-        let blocked = obstacles
-            .contacted
-            .get(&(trip.commit, trip.author))
-            .map(|contact| contact.first)
-            .or_else(|| {
-                (trip.departure + 1..trip.arrival).find_map(|tick| {
-                    let (point, _) = trip.sample(tick);
-                    (!route_clearance(capture, trip, tick, point))
-                        .then_some((tick, point))
-                })
-            });
-        if let Some(approach) =
-            fixed_dock_approach(capture, trip, release, speed, &mut router, blocked)
-        {
+        let different = |candidate: &Trip| {
+            candidate.departure != trip.departure
+                || candidate.route.track != trip.route.track
+        };
+        let key = (trip.commit, trip.author);
+        let approach = if let Some(&lead) = obstacles.coarrivals.get(&key) {
+            separate_coarrival(capture, trip, lead, release, speed, &mut router)
+        } else {
+            repair_walk(capture, trip, release, speed, obstacles, &mut router)
+        };
+        if let Some(approach) = approach.filter(different) {
             *trip = approach;
+            changed = true;
         }
     }
-    router.epochs
+    (router.epochs, changed)
+}
+
+fn repair_walk(
+    capture: &Capture,
+    trip: &Trip,
+    release: u64,
+    speed: f32,
+    obstacles: &super::WalkObstacles,
+    router: &mut Router,
+) -> Option<Trip> {
+    if let Some(direct) = timed_approach(capture, trip, release, speed, router, None) {
+        return Some(direct);
+    }
+    let failed_sample = (trip.departure + 1..trip.arrival).find_map(|tick| {
+        let (point, _) = trip.sample(tick);
+        (!route_clearance(capture, trip, tick, point)).then_some((tick, point))
+    });
+    let key = (trip.commit, trip.author);
+    let blocked = obstacles
+        .blocked
+        .get(&key)
+        .copied()
+        .into_iter()
+        .chain(obstacles.contacted.get(&key).map(|contact| contact.first))
+        .chain(failed_sample)
+        .min_by_key(|&(tick, _)| tick);
+    blocked
+        .and_then(|(_, point)| {
+            timed_approach(capture, trip, release, speed, router, Some(point))
+        })
+        .or_else(|| fixed_dock_approach(capture, trip, release, speed, router, blocked))
+}
+
+fn timed_approach(
+    capture: &Capture,
+    trip: &Trip,
+    release: u64,
+    speed: f32,
+    router: &mut Router,
+    blocked: Option<Vec2>,
+) -> Option<Trip> {
+    [0.8, 1.0].into_iter().find_map(|pace| {
+        let aligned = search(
+            capture,
+            trip,
+            release,
+            speed,
+            router,
+            Search::Align { blocked, pace },
+        );
+        (aligned.departure != trip.departure || aligned.route.track != trip.route.track)
+            .then_some(aligned)
+    })
 }
 
 pub(super) fn align_arrivals<'a>(
@@ -713,8 +784,17 @@ pub(super) fn align_arrivals<'a>(
     {
         let release = last_release(capture, trip).max(trip.departure);
         if release < trip.arrival {
-            let aligned =
-                search(capture, trip, release, speed, &mut router, Search::Align);
+            let aligned = search(
+                capture,
+                trip,
+                release,
+                speed,
+                &mut router,
+                Search::Align {
+                    blocked: None,
+                    pace: 0.8,
+                },
+            );
             *trip = if aligned.kind == TripKind::Relocation
                 && needs_alignment(&aligned, capture.frozen)
             {
@@ -865,7 +945,11 @@ mod tests {
         capture.obstacles = Some(super::super::WalkObstacles {
             begin: blocked_tick,
             frames: vec![transmitter],
-            blocked: [(template.commit, template.author)].into(),
+            blocked: [(
+                (template.commit, template.author),
+                (blocked_tick, blocked_point),
+            )]
+            .into(),
             ..Default::default()
         });
 
