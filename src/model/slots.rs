@@ -2601,6 +2601,39 @@ mod tests {
         )
     }
 
+    #[test]
+    fn a_reflowing_tile_keeps_its_transmitter_dock_reserved() {
+        let mut sim = thirty();
+        sim.advance_to(60, 60);
+        let mut state = sim.state.clone();
+        let dock = state.avatars[0].slot.as_ref().unwrap().dock;
+        let mut newcomer = state.avatars[0].clone();
+        newcomer.slot = None;
+        newcomer.group = None;
+        newcomer.presence = 1.0;
+        newcomer.transmitting = false;
+        newcomer.last_active = sim.seconds();
+        let index = state.avatars.len();
+        let mut plan = crate::model::travel::Plan::default();
+        plan.docks.insert((newcomer.commit, index), dock);
+        state.avatars.push(newcomer);
+
+        let radius = state.avatar_radius();
+        let tile = state.layout.repositories[state.avatars[0].repository]
+            .gutter
+            .unwrap();
+        let dock_point = dock.on_network(tile);
+        let incumbent = &mut state.avatars[0];
+        incumbent.transmitting = true;
+        incumbent.position = super::world(dock_point + Vec2::X * (4.0 * radius));
+        state.place_slots_planned(&sim.envelopes, sim.seconds(), &plan);
+
+        let first = state.avatars[0].slot.as_ref().unwrap();
+        let next = state.avatars[index].slot.as_ref().unwrap();
+        assert_eq!(first.dock, dock);
+        assert!(first.point.distance(next.point) >= 2.0 * radius - 0.001);
+    }
+
     fn validate_envelopes(sim: &Simulation) {
         for pulse in &sim.state.pulses {
             let Some(tile) = sim.layout().repositories[pulse.repository].tile else {
