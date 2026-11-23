@@ -663,7 +663,11 @@ impl State {
                 let dock = (!travelling[other]).then(|| projected(peer)).flatten();
                 if !(peer.transmitting || newcomer || yields_to(other, peer)) {
                     let claim = dock
-                        .filter(|_| peer.presence > 0.0)
+                        .filter(|_| {
+                            peer.presence > 0.0
+                                && (peer.dock_since == self.tick
+                                    || now - peer.last_active >= super::AVATAR_IDLE)
+                        })
                         .map(SeatClearance::Claim);
                     return [claim, None];
                 }
@@ -2843,6 +2847,10 @@ mod tests {
         };
         for dock_since in [tick, tick - 20] {
             state.avatars[0].dock_since = dock_since;
+            if dock_since != tick {
+                state.avatars[0].last_active =
+                    sim.seconds() - super::super::AVATAR_IDLE;
+            }
             let occupied = clearance(&state);
             assert_eq!(occupied.len(), 1);
             assert!(matches!(
