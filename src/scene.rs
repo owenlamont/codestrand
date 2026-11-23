@@ -396,6 +396,7 @@ struct Pools {
     aggregates: Vec<Entity>,
     files: HashMap<u64, Entity>,
     beams: Vec<Entity>,
+    directory_arrival_beams: Vec<model::Beam>,
     fragments: Vec<Entity>,
     edges: Vec<Entity>,
     directories: Vec<Entity>,
@@ -416,6 +417,7 @@ pub(super) fn reset_scene_pools(world: &mut World) {
             aggregates,
             files,
             beams,
+            directory_arrival_beams: _,
             fragments,
             edges,
             directories,
@@ -1949,6 +1951,7 @@ fn sync_structure(
     simulation: &Simulation,
 ) {
     let layout = simulation.layout();
+    pools.directory_arrival_beams.clear();
     pools.hues.sync(layout);
     sync_directory_edges(world, palette, pools, simulation);
     let dirs: Vec<_> = layout.dirs().collect();
@@ -1968,16 +1971,21 @@ fn sync_structure(
             dir.depth,
         );
         let (grey, alpha, rise) = simulation.repository_effect(dir.repository);
+        let detail = pools.lod.detail[index];
+        let target = ground(dir.position).with_y(rise - 0.05);
+        let (position, size) = directory_arrival_position(
+            simulation,
+            &mut pools.directory_arrival_beams,
+            index,
+            target,
+            detail > 0.0,
+        );
         if let Some(mut transform) = world.get_mut::<Transform>(*entity) {
-            let mut translation = ground(dir.position) - Vec3::Y * 0.05;
-            translation.y += rise;
-            transform.set_if_neq(Transform::from_translation(translation).with_scale(
-                simulation.theme().directory_node_scale
-                    * pools.lod.detail[index]
-                    * dir.scale,
+            transform.set_if_neq(Transform::from_translation(position).with_scale(
+                simulation.theme().directory_node_scale * detail * dir.scale * size,
             ));
         }
-        set_visible(world, *entity, pools.lod.detail[index] > 0.0);
+        set_visible(world, *entity, detail > 0.0);
         fade(world, *entity, grey, alpha);
     }
     hide_rest(world, pool, dirs.len());
@@ -2003,6 +2011,15 @@ fn sync_structure(
                 pools.lod.glyph[index],
             );
             folder.translation.y += rise;
+            let (position, size) = directory_arrival_position(
+                simulation,
+                &mut pools.directory_arrival_beams,
+                index,
+                folder.translation,
+                true,
+            );
+            folder.translation = position;
+            folder.scale *= size;
             transform.set_if_neq(folder);
         }
         set_visible(world, entity, true);
@@ -2010,6 +2027,26 @@ fn sync_structure(
     }
     hide_rest(world, pool, glyphs.len());
     sync_grid(world, palette, pools, simulation);
+}
+
+fn directory_arrival_position(
+    simulation: &Simulation,
+    beams: &mut Vec<model::Beam>,
+    index: usize,
+    target: Vec3,
+    visible: bool,
+) -> (Vec3, f32) {
+    let Some((beam, progress)) = simulation.directory_arrival(index, target) else {
+        return (target, 1.0);
+    };
+    let position = simulation
+        .theme()
+        .beam_style
+        .point(beam.from, beam.to, progress);
+    if visible {
+        beams.push(beam);
+    }
+    (position, 0.15 + 0.85 * progress)
 }
 
 fn sync_grid(
@@ -5068,6 +5105,94 @@ mod tests {
         rewind.add("later/a.rs", 0.0, 0);
         hues.sync(&rewind);
         assert_eq!(&hues.slots[..rewind.dir_count()], &[0, 0, 0, 1, 1, 2]);
+    }
+
+    #[test]
+    fn arriving_files_and_directory_follow_visible_rays() {
+        let mut event = crate::timeline::synthetic().remove(0);
+        event.changes = ["src/a.rs", "src/b.rs"]
+            .map(|path| crate::timeline::FileChange {
+                path: path.to_owned(),
+                kind: crate::timeline::Kind::Added,
+                ..Default::default()
+            })
+            .into();
+        let mut edit = event.clone();
+        edit.changes[0].kind = crate::timeline::Kind::Modified;
+        edit.changes.truncate(1);
+        let theme = Theme::neon();
+        let mut simulation = Simulation::new(
+            vec![event, edit.clone(), edit],
+            &model::Options::default(),
+            &theme,
+            &crate::contributors::Mappings::default(),
+        );
+        simulation.repository_boundary = crate::repositories::Boundary::Glass;
+        let mut world = World::new();
+        world.init_resource::<Assets<Mesh>>();
+        world.init_resource::<Assets<Image>>();
+        world.init_resource::<Assets<StandardMaterial>>();
+        let palette = Palette::new(&mut world, &theme);
+        let mut pools = Pools::default();
+        let mut flight_frames = 0;
+        for frame in 0..simulation.frames(60).unwrap() {
+            simulation.advance_to(frame, 60);
+            let layout = simulation.layout();
+            let flights: Vec<_> = layout
+                .files()
+                .filter(|(_, f)| {
+                    f.state == crate::layout::Presence::Arriving && f.presence > 0.0
+                })
+                .collect();
+            if flights.is_empty() {
+                continue;
+            }
+            flight_frames += 1;
+            sync_lod(&mut world, &mut pools, &simulation);
+            sync_files(&mut world, &palette, &mut pools, &simulation);
+            sync_structure(&mut world, &palette, &mut pools, &simulation);
+            styling::beams(&mut world, &palette, &mut pools, &simulation);
+            let source = simulation.avatars()[0].position;
+            let directory = layout.dir(flights[0].1.dir);
+            let arrivals = flights
+                .iter()
+                .map(|(id, file)| {
+                    (pools.files[id], ground(file.position), file.presence)
+                })
+                .chain([(
+                    pools.directories[1],
+                    ground(directory.position) - Vec3::Y * 0.05,
+                    flights[0].1.presence,
+                )]);
+            for (entity, target, progress) in arrivals {
+                let drawn = pools.beams.iter().any(|&beam| {
+                    let transform = world.get::<Transform>(beam).unwrap();
+                    let axis = transform.rotation * Vec3::Y * (transform.scale.y * 0.5);
+                    let material = &world
+                        .get::<MeshMaterial3d<StandardMaterial>>(beam)
+                        .unwrap()
+                        .0;
+                    world.get::<Visibility>(beam) != Some(&Visibility::Hidden)
+                        && transform.translation.distance(source.midpoint(target))
+                            < 1e-4
+                        && (transform.translation + axis).distance(target) < 1e-4
+                        && world
+                            .resource::<Assets<StandardMaterial>>()
+                            .get(material)
+                            .unwrap()
+                            .base_color
+                            .alpha()
+                            > 0.0
+                });
+                assert!(drawn, "missing ray to {target} at frame {frame}");
+                let position = world.get::<Transform>(entity).unwrap().translation;
+                assert!(
+                    position.distance(source.lerp(target, progress)) < 1e-4,
+                    "off ray at frame {frame}: {position} toward {target}"
+                );
+            }
+        }
+        assert!(flight_frames >= 35);
     }
 
     #[test]

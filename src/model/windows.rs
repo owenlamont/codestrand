@@ -28,15 +28,9 @@ impl Simulation {
         diagnostic.assert_clear(self.state.avatar_max_speed);
     }
 
-    fn update_window_clock(
-        &mut self,
-        history: &Schedule,
-        departures: &[Time],
-        endings: &[Time],
-    ) {
+    fn update_window_clock(&mut self, history: &Schedule, departures: &[Time]) {
         self.clock = schedule::Clock::new(history.clone(), self.schedule.clone());
         self.departures = departures.iter().map(|&t| self.clock.present(t)).collect();
-        self.repository_ends = endings.iter().map(|&t| self.clock.present(t)).collect();
         self.births = self.births_for(&self.schedule);
     }
 
@@ -125,7 +119,7 @@ impl Simulation {
         all_events: &[crate::timeline::Event],
         options: &Options,
         repositories: &[String],
-        (history, departures, endings): (&mut Schedule, &[Time], &[Time]),
+        (history, departures): (&mut Schedule, &[Time]),
         events: &Events,
         padding: &mut Vec<(usize, u32)>,
     ) -> anyhow::Result<u32> {
@@ -172,7 +166,7 @@ impl Simulation {
             }
             {
                 let _phase = trace.phase(Phase::WindowClock);
-                self.update_window_clock(history, departures, endings);
+                self.update_window_clock(history, departures);
             }
             {
                 let _phase = trace.phase(Phase::Restart);
@@ -194,7 +188,9 @@ impl Simulation {
             }
             let adjusted = self.adjust_travel_padding(options, padding);
             if adjusted != *padding
-                && (options.travel_cap == TravelCap::None || pass < 4)
+                && (options.travel_cap == TravelCap::None
+                    || self.travel.unsettled_relocation()
+                    || pass < 4)
             {
                 *padding = adjusted;
                 continue;
@@ -214,6 +210,7 @@ impl Simulation {
         if options.travel_cap == TravelCap::None {
             self.travel.require_birth_routes(options.bot_travel)?;
         }
+        self.align_travel_arrivals(options);
         Ok(pass)
     }
 
@@ -234,7 +231,6 @@ impl Simulation {
         self.windowed = true;
         let mut history = self.schedule.clone();
         let departures = self.departures.clone();
-        let endings = self.repository_ends.clone();
         let duration = self.duration();
         let mut end = (Time::ZERO + seconds).min(duration);
         self.window = Some(Planning {
@@ -253,7 +249,7 @@ impl Simulation {
                 all_events,
                 options,
                 repositories,
-                (&mut history, &departures, &endings),
+                (&mut history, &departures),
                 &events,
                 &mut padding,
             )?;

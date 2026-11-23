@@ -52,11 +52,41 @@ pub(super) fn in_guard(
     guard.size().cmpgt(Vec2::ZERO).all() && guard.contains(point)
 }
 
+pub(super) fn seat_clearance(
+    from: Vec2,
+    mut target: Vec2,
+    radius: f32,
+    foreign_tiles: impl Iterator<Item = crate::layout::packing::Tile>,
+) -> Vec2 {
+    for tile in foreign_tiles {
+        let guard = interior(tile, radius);
+        if !guard.size().cmpgt(Vec2::ZERO).all()
+            || !guard.contains(target)
+            || guard.contains(from)
+        {
+            continue;
+        }
+        let mut inside = target;
+        let mut outside = from;
+        for _ in 0..12 {
+            let middle = inside.midpoint(outside);
+            if guard.contains(middle) {
+                inside = middle;
+            } else {
+                outside = middle;
+            }
+        }
+        target = outside;
+    }
+    target
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Pose {
     tick: u64,
     point: Vec2,
     dock: slots::Dock,
+    visible: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -213,6 +243,56 @@ impl Route {
 }
 
 #[derive(Clone, Debug)]
+pub(super) struct DockWalk {
+    start: u64,
+    route: Route,
+}
+
+impl DockWalk {
+    pub(super) fn new(
+        start: u64,
+        [from, source]: [Vec2; 2],
+        [target, seat]: [Vec2; 2],
+        cells: &[Rect],
+        speed: f32,
+    ) -> Option<Self> {
+        let mut points = Router::default().route(source, target, cells).ok()?;
+        if points
+            .first()
+            .is_some_and(|point| point.distance(from) > 0.001)
+        {
+            points.insert(0, from);
+        }
+        if points
+            .last()
+            .is_some_and(|point| point.distance(seat) > 0.001)
+        {
+            points.push(seat);
+        }
+        let route = Route::new(&points, speed);
+        (route.duration > 0.0).then_some(Self { start, route })
+    }
+
+    pub(super) fn sample(&self, tick: u64) -> Option<Vec2> {
+        let elapsed = ticks_duration(tick - self.start);
+        (elapsed < self.route.duration)
+            .then(|| self.route.sample(elapsed))
+            .flatten()
+    }
+
+    pub(super) fn retained_bytes(&self) -> usize {
+        self.route.retained_bytes()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TripKind {
+    Transfer,
+    Birth,
+    Relocation,
+}
+
+#[derive(Clone, Debug)]
 struct Trip {
     author: usize,
     commit: usize,
@@ -222,7 +302,7 @@ struct Trip {
     source: Vec2,
     fade_ticks: u64,
     route: Route,
-    birth: bool,
+    kind: TripKind,
     fade: bool,
     bot: bool,
     source_repository: usize,
@@ -231,6 +311,14 @@ struct Trip {
     failure: Option<&'static str>,
     cutoff: Option<u64>,
     proof: Option<serde_json::Value>,
+}
+
+fn retained_route_bytes(trips: &Vec<Trip>) -> usize {
+    trips.capacity() * size_of::<Trip>()
+        + trips
+            .iter()
+            .map(|trip| trip.route.retained_bytes())
+            .sum::<usize>()
 }
 
 #[derive(Clone, Default, Serialize)]
@@ -296,6 +384,11 @@ impl Plan {
     pub(super) fn trip_count(&self) -> usize {
         self.trips.len()
     }
+    pub(super) fn unsettled_relocation(&self) -> bool {
+        self.trips.iter().any(|trip| {
+            trip.commit >= self.frozen && trip.fade && trip.kind == TripKind::Relocation
+        })
+    }
     /// The first commit whose trip fades although its policy walks; a bot under
     /// `--bot-travel fade` fades by design.
     pub(super) fn first_unresolved(&self, bots: super::BotTravel) -> Option<usize> {
@@ -320,7 +413,9 @@ impl Plan {
         bots: super::BotTravel,
     ) -> anyhow::Result<()> {
         if let Some(trip) = self.trips.iter().find(|trip| {
-            trip.birth && trip.fade && (!trip.bot || bots == super::BotTravel::Walk)
+            trip.kind == TripKind::Birth
+                && trip.fade
+                && (!trip.bot || bots == super::BotTravel::Walk)
         }) {
             anyhow::bail!(
                 "no safe gutter walk to a repository's first commit (event {})",
@@ -409,13 +504,41 @@ impl Plan {
         self.trips.iter().any(|t| t.active(author, tick))
     }
     pub(super) fn walking(&self, author: usize, tick: u64) -> bool {
-        self.trips.iter().any(|t| {
+        self.walking_trip(author, tick).is_some()
+    }
+
+    pub(super) fn walking_forecast(
+        &self,
+        author: usize,
+        tick: u64,
+        ahead: [u64; 3],
+    ) -> impl Iterator<Item = (u64, Vec2)> {
+        self.walking_trip(author, tick)
+            .into_iter()
+            .flat_map(move |trip| {
+                ahead.map(|offset| {
+                    let sample = (tick + offset).min(trip.arrival - 1);
+                    (sample - tick, trip.sample(sample).0)
+                })
+            })
+    }
+
+    fn walking_trip(&self, author: usize, tick: u64) -> Option<&Trip> {
+        self.trips.iter().find(|t| {
             t.author == author
                 && t.departure <= tick
                 && tick < t.arrival
                 && !t.fade
                 && !t.route.is_empty()
         })
+    }
+
+    pub(super) fn departure_connector(&self, author: usize, tick: u64) -> Option<Vec2> {
+        self.walking_trip(author, tick)
+            .filter(|trip| {
+                ticks_duration(tick - trip.departure) < super::SETTLE_SECONDS
+            })
+            .map(|trip| trip.source)
     }
 }
 
@@ -424,6 +547,7 @@ impl Trip {
         self.author == author
             && self.departure <= tick
             && tick < self.arrival
+            && !(self.fade && self.kind == TripKind::Relocation)
             && (self.fade || !self.route.is_empty())
     }
     fn sample(&self, tick: u64) -> (Vec2, f32) {
@@ -528,15 +652,19 @@ fn replay(simulation: &mut Simulation, frames: u32) -> Capture {
             .push(state.layout.repositories.iter().map(|r| r.tile).collect());
         capture.poses.resize_with(state.avatars.len(), Vec::new);
         for (index, avatar) in state.avatars.iter().enumerate() {
+            let visible = avatar.slot_presence > 0.0;
             if let Some(slot) = &avatar.slot
                 && capture.poses[index].last().is_none_or(|last| {
-                    last.point != slot.centre() || last.dock != slot.dock
+                    last.point != slot.centre()
+                        || last.dock != slot.dock
+                        || last.visible != visible
                 })
             {
                 capture.poses[index].push(Pose {
                     tick: state.tick,
                     point: slot.centre(),
                     dock: slot.dock,
+                    visible,
                 });
             }
         }
@@ -544,6 +672,7 @@ fn replay(simulation: &mut Simulation, frames: u32) -> Capture {
             for contributor in simulation.events[event].participants() {
                 let author = state.authors[&contributor.key];
                 let avatar = &state.avatars[author];
+                let slot = avatar.slot.as_ref().expect("tile exists before service");
                 capture.services.push(Service {
                     commit: event,
                     author,
@@ -561,14 +690,10 @@ fn replay(simulation: &mut Simulation, frames: u32) -> Capture {
                     )
                     .expect("bounded pulse")
                     .into(),
-                    point: avatar
-                        .slot
-                        .as_ref()
-                        .expect("tile exists before service")
-                        .centre(),
+                    point: slot.centre(),
                     radius: state.avatar_radius(),
                     bot: contributor.is_bot(),
-                    dock: avatar.slot.as_ref().expect("service slot").dock,
+                    dock: slot.dock,
                 });
             }
         }
@@ -598,6 +723,29 @@ fn fade_clearance(capture: &Capture, begin: u64, point: Vec2, radius: f32) -> u6
 }
 
 impl Simulation {
+    pub(super) fn align_travel_arrivals(&mut self, options: &super::Options) {
+        if !self
+            .travel
+            .trips
+            .iter()
+            .any(|trip| planning::needs_alignment(trip, self.travel.frozen))
+        {
+            return;
+        }
+        // Service slots and their padding are fixed before choosing later departures.
+        let capture = capture(self);
+        let _phase = self.trace.phase(Phase::Routes);
+        let epochs = planning::align_arrivals(
+            &capture,
+            &mut self.travel.trips,
+            options.avatar_max_speed,
+        );
+        self.trace.count(Counter::RouteCandidates, epochs);
+        self.travel.stats.graph_epochs += epochs;
+        self.travel.stats.retained_route_bytes =
+            retained_route_bytes(&self.travel.trips);
+    }
+
     fn routes(
         &self,
         capture: &Capture,
@@ -625,10 +773,16 @@ impl Simulation {
         let mut deficits = std::collections::BTreeMap::<usize, (u32, u32)>::new();
         for trip in self.travel.trips.iter().filter(|t| {
             t.commit >= self.travel.frozen
-                && (!t.bot || options.bot_travel == super::BotTravel::Walk)
+                && (t.kind == TripKind::Relocation
+                    || !t.bot
+                    || options.bot_travel == super::BotTravel::Walk)
                 && t.fade
         }) {
-            let policy = options.travel_cap;
+            let policy = if trip.kind == TripKind::Relocation {
+                super::TravelCap::None
+            } else {
+                options.travel_cap
+            };
             let needed = if trip.route.is_empty() {
                 policy.blocked_ticks()
             } else {
@@ -788,15 +942,14 @@ impl Simulation {
             bot_fades: trips.iter().filter(|t| t.bot && t.fade).count(),
             max_speed: options.avatar_max_speed,
             temporary_capture_bytes: capture.bytes(),
-            retained_route_bytes: trips.capacity() * size_of::<Trip>()
-                + trips
-                    .iter()
-                    .map(|trip| trip.route.retained_bytes())
-                    .sum::<usize>(),
+            retained_route_bytes: retained_route_bytes(&trips),
             graph_epochs,
             routed: trips.iter().filter(|t| !t.fade).count(),
             faded: trips.iter().filter(|t| t.fade).count(),
-            birth_fades: trips.iter().filter(|t| t.birth && t.fade).count(),
+            birth_fades: trips
+                .iter()
+                .filter(|t| t.kind == TripKind::Birth && t.fade)
+                .count(),
             blocked: trips
                 .iter()
                 .filter(|t| !t.bot && t.route.is_empty())
@@ -899,6 +1052,46 @@ pub(super) fn on_network(point: Vec2, cells: &[Rect]) -> bool {
                 .min_element()
                 < JUNCTION_EPSILON
     })
+}
+
+pub(super) fn join_gutter(
+    from: Vec2,
+    target: Vec2,
+    source: Option<crate::layout::packing::Tile>,
+    cells: &[Rect],
+    step: f32,
+) -> (Vec2, Option<Vec2>) {
+    let entrance = if on_network(from, cells) {
+        from
+    } else if let Some(tile) = source {
+        let rect = field_rect(tile);
+        let closest = from.clamp(rect.min, rect.max);
+        [
+            Vec2::new(rect.min.x, closest.y),
+            Vec2::new(rect.max.x, closest.y),
+            Vec2::new(closest.x, rect.min.y),
+            Vec2::new(closest.x, rect.max.y),
+        ]
+        .into_iter()
+        .min_by(|a, b| {
+            from.distance_squared(*a)
+                .total_cmp(&from.distance_squared(*b))
+        })
+        .expect("four gutter edges")
+    } else {
+        return (from, None);
+    };
+    let Ok(path) = Router::default().route(entrance, target, cells) else {
+        return (from, None);
+    };
+    let next = std::iter::once(entrance)
+        .chain(path)
+        .find(|point| point.distance_squared(from) > 0.00001)
+        .unwrap_or(target);
+    (
+        from.move_towards(next, step),
+        (next == entrance).then_some(entrance),
+    )
 }
 
 impl Router {
@@ -1146,6 +1339,64 @@ mod tests {
     use super::*;
 
     #[test]
+    fn parked_avatars_stay_clear_during_seat_transitions() {
+        let mut events = crate::timeline::synthetic();
+        events.truncate(2);
+        events[1].author = events[0].author.clone();
+        events[1].seconds = events[0].seconds + 6 * 86_400;
+        events[0].co_authors.push(crate::timeline::Identity::new(
+            "Grace",
+            "grace@example.test",
+        ));
+        let mut theme = crate::theme::Theme::neon();
+        theme.avatar_radius = 0.29;
+        let mut sim = Simulation::new(
+            events,
+            &super::super::Options {
+                max_idle_seconds: 3.0,
+                ..Default::default()
+            },
+            &theme,
+            &crate::contributors::Mappings::default(),
+        );
+        let first = sim.schedule.commit_ticks().next().unwrap();
+        sim.advance_to(u32::try_from(first + 24).unwrap(), 60);
+        let slot = sim.state.avatars[1].slot.as_ref().unwrap();
+        let normal = slots::world(slot.centre()) - slots::world(slot.point);
+        assert!(normal.length() > 0.0);
+        let source = slot.centre();
+        let destination = source + slot.offset.normalize() * 80.0;
+        let departure = first + 65;
+        sim.travel.trips.push(Trip {
+            author: 1,
+            commit: 1,
+            departure,
+            arrival: departure + 40,
+            destination,
+            source,
+            fade_ticks: 0,
+            route: Route::new(&[source, destination], sim.state.avatar_max_speed),
+            kind: TripKind::Relocation,
+            fade: false,
+            bot: false,
+            source_repository: 0,
+            destination_repository: 0,
+            free: first + 25,
+            failure: None,
+            cutoff: None,
+            proof: None,
+        });
+        sim.restart();
+
+        let mut audit = super::super::occlusion::Audit::default();
+        for frame in 0..=u32::try_from(sim.end_tick()).unwrap() {
+            sim.advance_to(frame, 60);
+            audit.observe(&sim);
+            assert_eq!(audit.parked_avatar_observations, 0, "frame {frame}");
+        }
+    }
+
+    #[test]
     fn holding_files_changes_no_capture_or_reservation() {
         let (events, labels) = super::super::tests::short_repository_history(6);
         let mut sim = Simulation::with_repositories(
@@ -1391,7 +1642,7 @@ mod tests {
             source: Vec2::ZERO,
             fade_ticks: 0,
             route: Route::default(),
-            birth: false,
+            kind: TripKind::Transfer,
             fade: true,
             bot: false,
             source_repository: 0,
@@ -1582,7 +1833,7 @@ mod tests {
             source: Vec2::ZERO,
             fade_ticks: 9,
             route: Route::new(&[Vec2::ZERO, Vec2::new(500.0, 100.0)], 480.0),
-            birth: false,
+            kind: TripKind::Transfer,
             fade: true,
             bot: false,
             source_repository: 0,
@@ -1609,7 +1860,7 @@ mod tests {
             source: Vec2::new(-100.0, 0.0),
             destination: Vec2::ZERO,
             route: Route::new(&[Vec2::new(-100.0, 0.0), Vec2::ZERO], 480.0),
-            birth: false,
+            kind: TripKind::Transfer,
             fade: false,
             bot: false,
             fade_ticks: 9,

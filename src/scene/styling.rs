@@ -793,9 +793,27 @@ pub(super) fn beams(
     pools: &mut super::Pools,
     simulation: &Simulation,
 ) {
+    let arrivals: Vec<_> = simulation
+        .file_arrival_beams()
+        .filter(|(dir, _)| {
+            pools
+                .lod
+                .detail
+                .get(*dir)
+                .is_some_and(|detail| *detail > 0.0)
+        })
+        .map(|(_, beam)| beam)
+        .chain(pools.directory_arrival_beams.iter().copied())
+        .collect();
+    let targets: std::collections::BTreeSet<_> = arrivals
+        .iter()
+        .map(|beam| (beam.author, beam.target))
+        .collect();
     let beams = simulation.beams();
     let segments: Vec<_> = beams
         .iter()
+        .filter(|beam| !targets.contains(&(beam.author, beam.target)))
+        .chain(&arrivals)
         .flat_map(|beam| {
             beam_segments(simulation.theme(), beam.from, beam.to)
                 .into_iter()

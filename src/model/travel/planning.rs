@@ -1,5 +1,5 @@
 use super::{
-    Capture, HALF, Pose, Rect, Route, Router, Trip, Vec2, fade_clearance,
+    Capture, HALF, Pose, Rect, Route, Router, Trip, TripKind, Vec2, fade_clearance,
     ticks_duration,
 };
 use crate::layout::packing::Tile;
@@ -147,10 +147,15 @@ fn moving_route(
     epoch: u64,
     speed: f32,
     animation_delay: u64,
+    align: bool,
 ) -> Option<Route> {
-    let anchors = route_anchors(capture.row(epoch), trip, points)?;
-    let shape = Route::new(points, speed * 0.8);
+    let shape = &trip.route;
     let duration = shape.duration + ticks_duration(animation_delay);
+    let available = ticks_duration(trip.arrival - trip.departure);
+    if align && duration > available {
+        return None;
+    }
+    let anchors = route_anchors(capture.row(epoch), trip, points)?;
     let target = capture.row(epoch)[trip.destination_repository]?;
     let target_fraction =
         (*points.last()? / HALF - target.low) / (target.high - target.low);
@@ -159,6 +164,11 @@ fn moving_route(
         let tick = trip.departure + offset;
         let row = capture.row(tick);
         let elapsed = ticks_duration(offset.saturating_sub(animation_delay));
+        let elapsed = if align {
+            elapsed * (shape.duration / available)
+        } else {
+            elapsed
+        };
         if elapsed >= shape.duration && tick < trip.arrival {
             let target = row[trip.destination_repository]?;
             let point =
@@ -209,7 +219,7 @@ fn moving_route(
     Some(Route {
         legs: Vec::new(),
         track: track.into(),
-        duration,
+        duration: if align { available } else { duration },
     })
 }
 
@@ -218,14 +228,32 @@ fn route_proof(points: &[Vec2], epoch: u64) -> serde_json::Value {
     let length = length * super::super::framing::WORLD_UNITS_PER_REFERENCE_PIXEL;
     serde_json::json!({"network_epoch":epoch,"shortest_network_length":length,"route_network_length":length,"network_points":points.iter().copied().map(super::ground_position).collect::<Vec<_>>()})
 }
+
+#[derive(Clone, Copy)]
+enum Search {
+    Fit { mandatory_birth_walk: bool },
+    Align,
+}
+
+fn shares_parking_point(capture: &Capture, trip: &Trip, begin: u64) -> bool {
+    let source_tile =
+        capture.row(trip.arrival)[trip.source_repository].expect("existing source");
+    let dock = capture
+        .pose(trip.author, begin)
+        .expect("existing author")
+        .dock;
+    dock.on_network(source_tile).distance(trip.destination) < super::NETWORK_EPSILON
+}
+
 fn search(
     capture: &Capture,
     template: &Trip,
     release: u64,
     speed: f32,
     router: &mut Router,
-    mandatory_birth_walk: bool,
+    mode: Search,
 ) -> Trip {
+    let align = matches!(mode, Search::Align);
     let mut best = template.clone();
     let first = release.min(template.arrival - 1).max(template.free);
     let Some(target_tile) =
@@ -235,7 +263,12 @@ fn search(
     };
     let target_fraction = (template.destination / HALF - target_tile.low)
         / (target_tile.high - target_tile.low);
-    for begin in first..template.arrival {
+    for offset in 0..template.arrival - first {
+        let begin = if align {
+            template.arrival - 1 - offset
+        } else {
+            first + offset
+        };
         let row = capture.row(begin);
         let Some(target_tile) = row[template.destination_repository] else {
             continue;
@@ -261,15 +294,7 @@ fn search(
             }
         };
         if points.len() < 2 {
-            let source_tile = capture.row(template.arrival)[template.source_repository]
-                .expect("existing source");
-            let dock = capture
-                .pose(template.author, begin)
-                .expect("existing author")
-                .dock;
-            if dock.on_network(source_tile).distance(template.destination)
-                < super::NETWORK_EPSILON
-            {
+            if !align && shares_parking_point(capture, template, begin) {
                 best.fade = false;
                 best.route = Route::default();
                 best.failure = None;
@@ -278,29 +303,40 @@ fn search(
             continue;
         }
         let mut candidate = template.clone();
-        candidate.proof = Some(route_proof(&points, begin));
         candidate.departure = begin;
         candidate.source = source;
         let animation_delay = release.saturating_sub(begin);
         candidate.route = Route::new(&points, speed * 0.8);
-        candidate.route.duration += ticks_duration(animation_delay);
-        candidate.fade =
-            candidate.route.duration > ticks_duration(candidate.arrival - begin);
-        candidate.failure = Some("moving_network");
-        if let Some(route) =
-            moving_route(capture, &candidate, &points, begin, speed, animation_delay)
-        {
+        if let Some(route) = moving_route(
+            capture,
+            &candidate,
+            &points,
+            begin,
+            speed,
+            animation_delay,
+            align,
+        ) {
             candidate.route = route;
+            candidate.proof = Some(route_proof(&points, begin));
             candidate.fade = false;
             candidate.failure = None;
             return candidate;
         }
-        if best.route.is_empty() {
+        if !align && best.route.is_empty() {
             best = candidate;
+            best.route.duration += ticks_duration(animation_delay);
+            best.proof = Some(route_proof(&points, begin));
             best.fade = true;
+            best.failure = Some("moving_network");
             best.cutoff = Some(begin);
         }
     }
+    let Search::Fit {
+        mandatory_birth_walk,
+    } = mode
+    else {
+        return template.clone();
+    };
     if best.fade
         && mandatory_birth_walk
         && let Some(approach) = birth_approach(capture, template, first, speed, router)
@@ -427,10 +463,13 @@ pub(super) fn trips(
         if commit < capture.frozen {
             continue;
         }
-        if (prior.repository == service.repository && prior.dock == service.dock)
-            || ((!walk || (service.bot && bots == crate::model::BotTravel::Fade))
-                && ticks_duration(service.tick - prior.tick)
-                    >= crate::model::AVATAR_IDLE + 1.2)
+        let relocation = prior.repository == service.repository;
+        if (relocation && prior.dock == service.dock)
+            || (!relocation
+                && (!walk || (service.bot && bots == crate::model::BotTravel::Fade))
+                && capture
+                    .pose(service.author, service.tick - 1)
+                    .is_some_and(|pose| !pose.visible))
         {
             continue;
         }
@@ -440,6 +479,13 @@ pub(super) fn trips(
             .pose(service.author, free)
             .expect("existing author")
             .point;
+        let kind = if relocation {
+            TripKind::Relocation
+        } else if capture.births.binary_search(&commit).is_ok() {
+            TripKind::Birth
+        } else {
+            TripKind::Transfer
+        };
         let mut best = Trip {
             author: service.author,
             commit,
@@ -449,7 +495,7 @@ pub(super) fn trips(
             source,
             fade_ticks: 0,
             route: Route::default(),
-            birth: capture.births.binary_search(&commit).is_ok(),
+            kind,
             fade: true,
             bot: service.bot,
             source_repository: prior.repository,
@@ -459,17 +505,23 @@ pub(super) fn trips(
             cutoff: None,
             proof: None,
         };
-        if !service.bot || bots == crate::model::BotTravel::Walk {
+        if relocation || !service.bot || bots == crate::model::BotTravel::Walk {
             best = search(
                 capture,
                 &best,
                 prior.release,
                 speed,
                 &mut router,
-                walk && best.birth,
+                Search::Fit {
+                    mandatory_birth_walk: relocation
+                        || (walk && kind == TripKind::Birth),
+                },
             );
         }
         if best.route.is_empty() {
+            if relocation {
+                continue;
+            }
             best.departure = service
                 .tick
                 .saturating_sub(9)
@@ -490,6 +542,41 @@ pub(super) fn trips(
         result.push(best);
     }
     (result, router.epochs)
+}
+
+pub(super) fn needs_alignment(trip: &Trip, frozen: usize) -> bool {
+    trip.commit >= frozen
+        && !trip.fade
+        && !trip.route.is_empty()
+        && trip.departure + u64::from(super::seconds_ticks(trip.route.duration, true))
+            < trip.arrival
+}
+
+pub(super) fn align_arrivals(
+    capture: &Capture,
+    trips: &mut [Trip],
+    speed: f32,
+) -> usize {
+    let mut router = Router::default();
+    for trip in trips
+        .iter_mut()
+        .filter(|trip| needs_alignment(trip, capture.frozen))
+    {
+        let earlier = capture
+            .services
+            .partition_point(|service| service.commit < trip.commit);
+        let release = capture.services[..earlier]
+            .iter()
+            .rev()
+            .find(|service| service.author == trip.author)
+            .map_or(trip.departure, |service| {
+                service.release.max(trip.departure)
+            });
+        if release < trip.arrival {
+            *trip = search(capture, trip, release, speed, &mut router, Search::Align);
+        }
+    }
+    router.epochs
 }
 
 #[cfg(test)]
@@ -585,6 +672,7 @@ mod tests {
                                 if author == 0 && tick < 400 { 3 } else { 1 },
                                 0.5,
                             ),
+                            visible: true,
                         })
                         .collect()
                 })
