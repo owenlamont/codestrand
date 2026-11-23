@@ -3515,6 +3515,69 @@ mod tests {
     }
 
     #[test]
+    fn readded_grouped_file_waits_at_the_start_of_its_new_ray() {
+        let event = timeline::synthetic().remove(0);
+        let mut simulation = Simulation::new(
+            vec![event],
+            &Options::default(),
+            &Theme::neon(),
+            &Mappings::default(),
+        );
+        simulation.advance_to(60, 60);
+        let path = format!("{}readded.rs", crate::repositories::prefix(0));
+        let tick = 1.0 / 60.0;
+        let layout = &mut simulation.state.layout;
+        let revision = layout.revision();
+        let id = layout.add(&path, 0.0, 0);
+        let directory = layout.file(id).unwrap().dir;
+        layout.route_arrival(
+            id,
+            revision,
+            directory,
+            crate::layout::DirectoryFlight {
+                directory,
+                offset: super::MAX_ARRIVAL_OFFSET,
+            },
+            false,
+        );
+        for _ in 0..8 {
+            layout.step(tick);
+        }
+        layout.remove(&path, super::DELETE_DELAY, 0).unwrap();
+        layout.step(tick);
+        assert!(layout.file(id).unwrap().arrival_cancelled);
+
+        let revision = layout.revision();
+        assert_eq!(layout.add(&path, tick, 0), id);
+        layout.route_arrival(
+            id,
+            revision,
+            directory,
+            crate::layout::DirectoryFlight {
+                directory,
+                offset: 0.0,
+            },
+            false,
+        );
+        let file = simulation.layout().file(id).unwrap();
+        let (position, _, alpha) = simulation.file_effect(id, file);
+        let (_, beam) = simulation
+            .file_arrival_beams()
+            .find(|(_, beam)| beam.target == super::Target::Dir(directory))
+            .unwrap();
+        assert!(alpha <= 0.0, "delayed arrival had alpha {alpha}");
+        assert!(position.distance(beam.from) < 0.0001);
+
+        simulation.state.layout.step(tick);
+        let file = simulation.layout().file(id).unwrap();
+        assert!(simulation.file_effect(id, file).2 <= 0.0);
+
+        simulation.state.layout.step(tick);
+        let file = simulation.layout().file(id).unwrap();
+        assert!(simulation.file_effect(id, file).2 > 0.0);
+    }
+
+    #[test]
     fn arriving_files_follow_beam_curve_for_every_style() {
         for name in crate::theme::ThemeName::ALL {
             let mut events = crate::timeline::synthetic();

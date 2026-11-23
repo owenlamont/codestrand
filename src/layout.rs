@@ -503,6 +503,9 @@ impl Layout {
         self.revision += 1;
         if let Some(&id) = self.file_index.get(path) {
             let file = self.files.get_mut(&id).expect("indexed files exist");
+            if file.arrival_cancelled {
+                file.presence = 0.0;
+            }
             file.state = Presence::Arriving;
             file.delay = delay;
             file.author = author;
