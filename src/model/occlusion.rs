@@ -97,6 +97,15 @@ pub(super) struct Transmitters {
 }
 
 impl Transmitters {
+    #[cfg(test)]
+    pub(super) fn at(author: usize, point: Vec2) -> Self {
+        let base = 0.5;
+        Self {
+            base,
+            discs: vec![(author, Self::walker(point, base))],
+        }
+    }
+
     pub(super) fn observe(state: &State) -> Self {
         let base = seating_base(state);
         let discs = state

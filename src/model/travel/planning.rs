@@ -849,6 +849,74 @@ mod tests {
         assert!(aligned.track.windows(2).all(|pair| pair[0] != pair[1]));
     }
 
+    #[test]
+    fn a_late_walk_chooses_a_clear_departure_when_a_transmitter_blocks_the_gutter() {
+        let mut capture = fixture();
+        let speed = 480.0;
+        let (mut planned, _) =
+            trips(&capture, speed, crate::model::BotTravel::Walk, true);
+        let template = planned.pop().unwrap();
+        let mut latest = template.clone();
+        align_arrivals(&capture, [&mut latest], speed);
+        let blocked_tick = latest.departure.midpoint(latest.arrival);
+        let (blocked_point, _) = latest.sample(blocked_tick);
+        let transmitter = super::super::Transmitters::at(1, blocked_point);
+        assert!(!transmitter.clears(template.author, blocked_point));
+        capture.obstacles = Some(super::super::WalkObstacles {
+            begin: blocked_tick,
+            frames: vec![transmitter],
+            blocked: [(template.commit, template.author)].into(),
+            ..Default::default()
+        });
+
+        let mut clear = template;
+        realign_blocked_walks(&capture, std::slice::from_mut(&mut clear), speed);
+
+        assert!(clear.departure < latest.departure);
+        assert_eq!(clear.arrival, latest.arrival);
+        assert!(!needs_alignment(&clear, capture.frozen));
+        assert!(route_clearance(
+            &capture,
+            &clear,
+            blocked_tick,
+            clear.sample(blocked_tick).0,
+        ));
+    }
+
+    #[test]
+    fn a_coauthor_finishes_the_walk_clear_of_the_author() {
+        let capture = fixture();
+        let speed = 480.0;
+        let (mut planned, _) =
+            trips(&capture, speed, crate::model::BotTravel::Walk, true);
+        align_arrivals(&capture, &mut planned, speed);
+        let trip = planned.pop().unwrap();
+        let lead = trip.destination;
+
+        let clear = separate_coarrival(
+            &capture,
+            &trip,
+            lead,
+            last_release(&capture, &trip),
+            speed,
+            &mut Router::default(),
+        )
+        .expect("the coauthor can approach along the same gutter");
+
+        assert_eq!(clear.arrival, trip.arrival);
+        assert!(
+            clear.sample(clear.arrival - 1).0.distance(lead)
+                >= 2.0 * capture.radius(clear.arrival)
+        );
+        assert!(
+            clear
+                .route
+                .track
+                .windows(2)
+                .all(|pair| { pair[0].distance(pair[1]) * 60.0 <= speed + 0.05 })
+        );
+    }
+
     fn dock(edge: u8, fraction: f32) -> Dock {
         Dock::new(edge, fraction)
     }

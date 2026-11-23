@@ -1664,6 +1664,31 @@ mod tests {
     }
 
     #[test]
+    fn a_blocked_gutter_has_a_shortest_route_around_the_tile() {
+        let network = [Rect::from_corners(Vec2::splat(-50.0), Vec2::splat(50.0))];
+        let start = Vec2::new(-50.0, -10.0);
+        let goal = Vec2::new(-50.0, 10.0);
+        let mut router = Router::default();
+
+        assert_eq!(router.route(start, goal, &network).unwrap(), [start, goal]);
+        let path = router
+            .route_avoiding(start, goal, &network, Some(Vec2::new(-50.0, 0.0)))
+            .unwrap();
+
+        assert_eq!(
+            path,
+            [
+                start,
+                Vec2::new(-50.0, -50.0),
+                Vec2::new(50.0, -50.0),
+                Vec2::new(50.0, 50.0),
+                Vec2::new(-50.0, 50.0),
+                goal,
+            ]
+        );
+    }
+
+    #[test]
     fn routing_rejects_a_network_above_the_junction_budget() {
         let cells: Vec<_> = (0..2501_u16)
             .map(|i| {
