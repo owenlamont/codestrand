@@ -210,7 +210,8 @@ fn arrivals_keep_their_ray_during_contributor_transfers() {
                 file.flight,
                 file.arrival_revision,
             );
-            if progress > 0.0 && progress < super::ARRIVAL_FLIGHT {
+            let flight_end = file.flight.map_or(1.0, |_| super::ARRIVAL_FLIGHT);
+            if progress > 0.0 && progress < flight_end {
                 file_flights += 1;
                 assert!(beam.is_some(), "file {id} has no ray at frame {frame}");
             }
@@ -218,9 +219,13 @@ fn arrivals_keep_their_ray_during_contributor_transfers() {
         for (index, dir) in simulation.layout().dirs() {
             let to = super::ground(dir.position)
                 + super::Vec3::Y * simulation.repository_effect(dir.repository).2;
+            let flight_end = dir
+                .arrival
+                .and_then(|arrival| arrival.flight)
+                .map_or(1.0, |_| super::ARRIVAL_FLIGHT);
             if let Some((beam, _, progress)) = simulation.directory_arrival(index, to)
                 && progress > 0.0
-                && progress < super::ARRIVAL_FLIGHT
+                && progress < flight_end
             {
                 directory_flights += 1;
                 assert!(
@@ -289,9 +294,10 @@ fn visible_rays_stay_local_over_whole_playback() {
                 crossing.get_or_insert((frame, beam.author, repository, other));
             }
             let gutter = simulation.layout().repositories[repository].gutter.unwrap();
-            if avatar.presence <= 0.0
+            if avatar.repository != repository
+                || avatar.presence <= 0.0
                 || !super::travel::field_rect(gutter)
-                    .inflate(0.1)
+                    .inflate(simulation.state.avatar_radius())
                     .contains(super::slots::field_point(avatar.position))
             {
                 detached.get_or_insert((frame, beam.author, repository));

@@ -2015,6 +2015,20 @@ mod tests {
         );
     }
     #[test]
+    fn a_new_service_avoids_a_reserved_incumbent_dock() {
+        let mut dock = choice(&[], &[]).select(None);
+        dock.commit = 5;
+        let reservation = [disk(dock.point, 12.0)];
+        let mut chooser = choice(&[], &[]);
+        chooser.future = &reservation;
+
+        let next = chooser.pick(Some(&dock), None, 6, None, false);
+
+        assert!(next.valid());
+        assert!(!reservation[0].contains(next.point));
+    }
+
+    #[test]
     fn spread_prefers_an_opposite_fan_and_edge() {
         let peers = [(Vec2::new(-100.0, 0.0), 3, Vec2::ZERO)];
         let mut chooser = choice(&[], &[]);
