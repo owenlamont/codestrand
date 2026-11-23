@@ -2740,6 +2740,46 @@ mod tests {
     }
 
     #[test]
+    fn an_unseated_walk_yields_to_the_avatar_already_at_its_corner() {
+        let mut sim = Simulation::new(
+            vec![crate::timeline::synthetic().remove(0)],
+            &Options::default(),
+            &Theme::neon(),
+            &Mappings::default(),
+        );
+        sim.advance_to(60, 60);
+        let mut state = sim.state.clone();
+        let gutter = state.layout.repositories[0].gutter.unwrap();
+        let corner = Dock::new(2, 0.0);
+        let point = corner.on_network(gutter);
+        let incumbent = &mut state.avatars[0];
+        incumbent.slot.as_mut().unwrap().dock = corner;
+        incumbent.position = super::world(point);
+        incumbent.presence = 1.0;
+        incumbent.transmitting = false;
+        incumbent.dock_since = 50;
+
+        let mut approaching = incumbent.clone();
+        approaching.slot.as_mut().unwrap().dock = Dock::new(3, 0.0);
+        approaching.position = super::world(point + Vec2::Y * 60.0);
+        approaching.dock_since = 1;
+        state.avatars.push(approaching);
+
+        let clearance = |index| {
+            state.incumbent_discs(
+                index,
+                &[index],
+                sim.seconds(),
+                &[1.0, 1.0],
+                state.avatar_radius(),
+                &[false, false],
+            )
+        };
+        assert_eq!(clearance(1).len(), 1);
+        assert_eq!(clearance(0).len(), 0);
+    }
+
+    #[test]
     fn a_fading_ring_member_keeps_its_seat_until_it_disappears() {
         let mut sim = Simulation::new(
             vec![crate::timeline::synthetic().remove(0)],
