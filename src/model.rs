@@ -3727,6 +3727,35 @@ mod tests {
     }
 
     #[test]
+    fn a_readded_visible_file_recovers_in_place() {
+        let event = timeline::synthetic().remove(0);
+        let mut simulation = Simulation::new(
+            vec![event],
+            &Options::default(),
+            &Theme::neon(),
+            &Mappings::default(),
+        );
+        simulation.advance_to(60, 60);
+        let path = format!("{}recovered.rs", crate::repositories::prefix(0));
+        let tick = super::tick_seconds();
+        let id = simulation.state.layout.add(&path, 0.0, 0);
+        for _ in 0..60 {
+            simulation.state.layout.step(tick);
+        }
+        simulation.state.layout.remove(&path, 0.0, 0).unwrap();
+        simulation.state.layout.step(tick);
+        let before = simulation.file_effect(id, simulation.layout().file(id).unwrap());
+
+        let revision = simulation.layout().revision();
+        assert_eq!(simulation.state.layout.add(&path, tick, 0), id);
+        assert!(!simulation.layout().new_file_arrival(id, revision));
+        let restored =
+            simulation.file_effect(id, simulation.layout().file(id).unwrap());
+        assert_eq!(restored.0, before.0);
+        assert_eq!(restored.2, before.2);
+    }
+
+    #[test]
     fn readded_grouped_file_waits_at_the_start_of_its_new_ray() {
         let event = timeline::synthetic().remove(0);
         let mut simulation = Simulation::new(
