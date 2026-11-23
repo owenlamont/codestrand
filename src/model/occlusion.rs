@@ -30,11 +30,25 @@ fn parked(avatar: &Avatar) -> bool {
     !avatar.travelling && avatar.settle.is_none()
 }
 
+fn full_disc_radius(avatar: &Avatar, base: f32, member_scale: f32) -> f32 {
+    base * member_scale * avatar.projection_scale * avatar.lifecycle_scale
+}
+
 fn disc_radius(avatar: &Avatar, base: f32, member_scale: f32) -> f32 {
-    base * member_scale
-        * avatar.projection_scale
-        * avatar.lifecycle_scale
-        * avatar.presence
+    full_disc_radius(avatar, base, member_scale) * avatar.presence
+}
+
+fn seating_disc_radius(
+    avatar: &Avatar,
+    base: f32,
+    member_scale: f32,
+    now: super::Time,
+) -> f32 {
+    if avatar.transmitting || (!avatar.travelling && now < avatar.expires) {
+        full_disc_radius(avatar, base, member_scale)
+    } else {
+        disc_radius(avatar, base, member_scale)
+    }
 }
 
 const SEAT_CLEARANCE: f32 = 0.75 * framing::WORLD_UNITS_PER_REFERENCE_PIXEL;
@@ -126,6 +140,7 @@ fn previous_group_seats(
     scales: &[f32],
     base: f32,
 ) -> Vec<Option<(usize, Disc)>> {
+    let now = super::tick_time(state.tick);
     state
         .avatars
         .iter()
@@ -137,7 +152,7 @@ fn previous_group_seats(
                 group.lead,
                 Disc {
                     centre: position.as_ref()?.xz(),
-                    radius: disc_radius(avatar, base, *scale),
+                    radius: seating_disc_radius(avatar, base, *scale, now),
                     blocks_walkers: true,
                     transmitting: avatar.transmitting,
                 },
@@ -208,6 +223,7 @@ pub(super) fn clear_seat_transitions(
     let mut approaching: Vec<Disc> = Vec::new();
     let mut obstacles = Vec::with_capacity(order.len());
     let old_seats = previous_group_seats(state, previous, &scales, base);
+    let now = super::tick_time(state.tick);
     for (rank, &(index, blocks_walkers, parked_here)) in order.iter().enumerate() {
         let avatar = &mut state.avatars[index];
         let target = if !avatar.transmitting
@@ -224,8 +240,8 @@ pub(super) fn clear_seat_transitions(
             avatar.position.xz()
         };
         let y = avatar.position.y;
-        let nominal =
-            disc_radius(avatar, base, scales[index]) / avatar.projection_scale;
+        let nominal = seating_disc_radius(avatar, base, scales[index], now)
+            / avatar.projection_scale;
         let world = |point: Vec2| Vec3::new(point.x, y, point.y);
         let radius_at = |point: Vec2| nominal * slots::projection_scale(world(point));
         let radius = radius_at(target);
