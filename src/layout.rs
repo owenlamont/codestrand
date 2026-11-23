@@ -55,6 +55,7 @@ pub(super) const FADE_SECONDS: f32 = 0.6;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Presence {
     Arriving,
+    Recovering,
     Present,
     Leaving,
 }
@@ -94,8 +95,26 @@ impl File {
         match self.state {
             Presence::Present => self.visible_presence(dir),
             Presence::Arriving => dir.scale * (0.15 + 0.85 * self.presence),
-            Presence::Leaving => dir.scale,
+            Presence::Leaving | Presence::Recovering => dir.scale,
         }
+    }
+
+    fn restore(&mut self, author: usize, revision: u64) {
+        self.state = if matches!(self.state, Presence::Leaving | Presence::Recovering)
+            && self.presence > 0.0
+            && !self.arrival_cancelled
+        {
+            Presence::Recovering
+        } else {
+            Presence::Arriving
+        };
+        if self.arrival_cancelled {
+            self.presence = 0.0;
+        }
+        self.arrival_author = author;
+        self.arrival_revision = revision;
+        self.flight = None;
+        self.arrival_cancelled = false;
     }
     fn set_slot(&mut self, slot: usize) {
         self.slot = slot;
@@ -503,16 +522,9 @@ impl Layout {
         self.revision += 1;
         if let Some(&id) = self.file_index.get(path) {
             let file = self.files.get_mut(&id).expect("indexed files exist");
-            if file.arrival_cancelled {
-                file.presence = 0.0;
-            }
-            file.state = Presence::Arriving;
+            file.restore(author, self.revision);
             file.delay = delay;
             file.author = author;
-            file.arrival_author = author;
-            file.arrival_revision = self.revision;
-            file.flight = None;
-            file.arrival_cancelled = false;
             file.activity = 1.0;
             self.dirs[file.dir].touch_age = 0.0;
             self.fading.insert(id);
@@ -622,11 +634,7 @@ impl Layout {
         file.activity = 1.0;
         self.dirs[file.dir].touch_age = 0.0;
         if file.state == Presence::Leaving {
-            file.state = Presence::Arriving;
-            file.arrival_author = author;
-            file.arrival_revision = self.revision;
-            file.flight = None;
-            file.arrival_cancelled = false;
+            file.restore(author, self.revision);
         }
         self.index_file(to, id);
         id
@@ -744,7 +752,7 @@ impl Layout {
             file.activity = 0.0;
             file.presence = match file.state {
                 Presence::Leaving => 0.0,
-                Presence::Arriving | Presence::Present => 1.0,
+                Presence::Arriving | Presence::Recovering | Presence::Present => 1.0,
             };
         }
         for _ in 0..steps {
@@ -778,7 +786,7 @@ impl Layout {
                 return true;
             }
             match file.state {
-                Presence::Arriving => {
+                Presence::Arriving | Presence::Recovering => {
                     file.presence = (file.presence + dt / FADE_SECONDS).min(1.0);
                     if file.presence >= 1.0 {
                         file.state = Presence::Present;

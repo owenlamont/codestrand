@@ -1432,6 +1432,11 @@ impl Simulation {
                     alpha * file.presence
                 },
             ),
+            crate::layout::Presence::Recovering => (
+                position + Vec3::Y * (1.0 - file.presence) * self.scale(),
+                grey,
+                alpha * file.presence,
+            ),
             crate::layout::Presence::Present => (position, grey, alpha),
         };
         (position, grey, alpha)
