@@ -73,15 +73,16 @@ _SHOTS: Final = (
         theme="phosphor",
         source="personal",
         options=("--start-date=2026-03-22",),
-        first_frame=236,
-        frames=108,
+        first_frame=164,
+        frames=140,
+        export_fps=20,
     ),
     _Shot(
         name="ty-created",
         theme="neon",
         source="astral",
         options=(*_ASTRAL_PACING, "--start-date=2025-04-28"),
-        first_frame=440,
+        first_frame=168,
         frames=108,
     ),
     _Shot(
@@ -95,8 +96,18 @@ _SHOTS: Final = (
             "--start-date=2016-02-25",
             "--collapse-directories=off",
         ),
-        first_frame=65,
+        first_frame=34,
         frames=96,
+    ),
+    _Shot(
+        name="copilot-coauthor",
+        theme="neon",
+        source="ryl",
+        options=("--start-date=2026-04-26", "--end-date=2026-04-29"),
+        first_frame=42,
+        frames=46,
+        export_fps=60,
+        crop="crop=640:360:224:360,scale=1280:720:flags=lanczos,",
     ),
     _Shot(
         name="file-heat",
@@ -130,6 +141,7 @@ _SHOTS: Final = (
             f"--camera-path={_CAMERAS / 'behind-avatar.toml'}",
         ),
         first_frame=48,
+        # The fixed-point pan lands on the last included frame (227).
         frames=180,
     ),
 )

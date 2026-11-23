@@ -2,3 +2,44 @@
 name = "Owen Lamont"
 emails = ["owenrlamont@gmail.com"]
 github = "owenlamont"
+
+[[contributor]]
+name = "Claude"
+emails = ["noreply@anthropic.com"]
+github = "claude"
+
+[[contributor]]
+name = "Codex"
+emails = ["noreply@openai.com", "codex@openai.com"]
+github = "codex"
+
+[[contributor]]
+name = "Copilot"
+emails = ["223556219+Copilot@users.noreply.github.com"]
+github = "Copilot"
+bot = true
+avatar = "https://avatars.githubusercontent.com/in/1693627?v=4"
+
+[[contributor]]
+name = "Dependabot"
+emails = ["49699333+dependabot[bot]@users.noreply.github.com"]
+github = "dependabot[bot]"
+avatar = "https://avatars.githubusercontent.com/in/29110?v=4"
+
+[[contributor]]
+name = "GitHub Actions"
+emails = ["actions@github.com", "41898282+github-actions[bot]@users.noreply.github.com"]
+github = "github-actions[bot]"
+avatar = "https://avatars.githubusercontent.com/in/15368?v=4"
+
+[[contributor]]
+name = "create-pr-workflow-auth[bot]"
+emails = ["218366549+create-pr-workflow-auth[bot]@users.noreply.github.com"]
+github = "create-pr-workflow-auth[bot]"
+avatar = "https://avatars.githubusercontent.com/u/12672027?v=4"
+
+[[contributor]]
+name = "Renovate"
+emails = ["29139614+renovate[bot]@users.noreply.github.com"]
+github = "renovate[bot]"
+avatar = "https://avatars.githubusercontent.com/in/2740?v=4"

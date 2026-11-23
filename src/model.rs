@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     ops::Range,
     sync::Arc,
     time::Duration,
@@ -85,6 +85,9 @@ const SETTLE_SECONDS: f32 = 0.4;
 /// drift by far less as avatars rescale, and a reseat moves by about a member's width.
 const SEAT_DRIFT: f32 = 1.0;
 const BEAM_LIMIT: usize = 24;
+const ARRIVAL_FLIGHT: f32 = 0.8;
+const ARRIVAL_SPACING: f32 = 0.025;
+const MAX_ARRIVAL_OFFSET: f32 = 0.25;
 const FRAGMENT_TARGETS: usize = 24;
 const SETTLE_TICKS: u32 = 1200;
 /// Ticks of the global replay whose region samples are held before they become inputs.
@@ -1364,46 +1367,101 @@ impl Simulation {
         let position = ground(file.position) + Vec3::Y * rise;
         let (position, grey, alpha) = match file.state {
             crate::layout::Presence::Arriving => {
-                let beam =
-                    self.arrival_beam(Target::File(id), file.arrival_author, position);
+                let (beam, progress) = self.arrival_beam(
+                    Target::File(id),
+                    file.arrival_author,
+                    position,
+                    file.presence,
+                    file.flight,
+                );
                 (
-                    self.theme
-                        .beam_style
-                        .point(beam.from, beam.to, file.presence),
+                    self.arrival_position(
+                        beam,
+                        progress,
+                        position,
+                        file.flight.is_some(),
+                    ),
                     grey,
-                    alpha,
+                    if progress > 0.0 { alpha } else { 0.0 },
                 )
             }
             crate::layout::Presence::Leaving => (
                 position + Vec3::Y * (1.0 - file.presence) * self.scale(),
                 1.0,
-                alpha * file.presence,
+                if file.arrival_cancelled {
+                    0.0
+                } else {
+                    alpha * file.presence
+                },
             ),
             crate::layout::Presence::Present => (position, grey, alpha),
         };
         (position, grey, alpha)
     }
 
-    fn arrival_beam(&self, target: Target, author: usize, to: Vec3) -> Beam {
-        Beam {
-            target,
-            author,
-            from: self.state.beam_start(author, to),
-            to,
-            width: 1.0,
+    fn arrival_beam(
+        &self,
+        mut target: Target,
+        author: usize,
+        mut to: Vec3,
+        mut progress: f32,
+        flight: Option<crate::layout::DirectoryFlight>,
+    ) -> (Beam, f32) {
+        if let Some(flight) = flight {
+            target = Target::Dir(flight.directory);
+            let dir = self.layout().dir(flight.directory);
+            to = ground(dir.position)
+                + Vec3::Y * self.repository_effect(dir.repository).2;
+            progress = ((progress - flight.offset) / (1.0 - MAX_ARRIVAL_OFFSET))
+                .clamp(0.0, 1.0);
         }
+        (
+            Beam {
+                target,
+                author,
+                from: self.state.beam_start(author, to),
+                to,
+                width: 1.0,
+            },
+            progress,
+        )
+    }
+
+    fn arrival_position(
+        &self,
+        beam: Beam,
+        progress: f32,
+        to: Vec3,
+        aggregate: bool,
+    ) -> Vec3 {
+        if !aggregate {
+            return self.theme.beam_style.point(beam.from, beam.to, progress);
+        }
+        let flight = (progress / ARRIVAL_FLIGHT).min(1.0);
+        let settle = ((progress - ARRIVAL_FLIGHT) / (1.0 - ARRIVAL_FLIGHT)).max(0.0);
+        let eased = settle * settle * (3.0 - 2.0 * settle);
+        self.theme
+            .beam_style
+            .point(beam.from, beam.to, flight)
+            .lerp(to, eased)
     }
 
     pub(super) fn directory_arrival(
         &self,
         index: usize,
         to: Vec3,
-    ) -> Option<(Beam, f32)> {
+    ) -> Option<(Beam, Vec3, f32)> {
         let arrival = self.layout().dir(index).arrival?;
-        Some((
-            self.arrival_beam(Target::Dir(index), arrival.author, to),
+        let (beam, progress) = self.arrival_beam(
+            Target::Dir(index),
+            arrival.author,
+            to,
             arrival.progress,
-        ))
+            arrival.flight,
+        );
+        let position =
+            self.arrival_position(beam, progress, to, arrival.flight.is_some());
+        Some((beam, position, progress))
     }
 
     pub(super) fn file_arrival_beams(
@@ -1415,7 +1473,14 @@ impl Simulation {
             let to = ground(file.position) + Vec3::Y * rise;
             (
                 file.dir,
-                self.arrival_beam(Target::File(id), file.arrival_author, to),
+                self.arrival_beam(
+                    Target::File(id),
+                    file.arrival_author,
+                    to,
+                    file.presence,
+                    file.flight,
+                )
+                .0,
             )
         })
     }
@@ -2265,6 +2330,7 @@ impl State {
     ) {
         let participants = self.participants(event, start);
         let author = participants[0];
+        let arrival_revision = self.layout.revision();
         let mut touched = BTreeMap::new();
         let mut samples = Vec::new();
         for change in &event.changes {
@@ -2291,9 +2357,17 @@ impl State {
                 (Target::File(id), 1.0, insertions, removals)
             })
             .collect();
-        let aggregated = targets.len() > BEAM_LIMIT;
+        let arriving_directories =
+            self.arriving_directories(&touched, arrival_revision);
+        let aggregated = targets.len() + arriving_directories.len() > BEAM_LIMIT;
         if aggregated {
             targets = self.aggregate(&touched);
+            self.route_arrivals(
+                arrival_revision,
+                &touched,
+                &targets,
+                &arriving_directories,
+            );
         }
         let centroid = targets
             .iter()
@@ -2487,6 +2561,84 @@ impl State {
                 (Target::Dir(dir), weight, insertions, removals)
             })
             .collect()
+    }
+
+    fn route_arrivals(
+        &mut self,
+        since: u64,
+        touched: &BTreeMap<u64, (u32, u32)>,
+        targets: &[(Target, f32, u32, u32)],
+        arriving_directories: &BTreeSet<usize>,
+    ) {
+        let mut routes: BTreeMap<usize, Vec<(u64, usize, bool)>> = BTreeMap::new();
+        let keep_directory_rays = arriving_directories.len() > BEAM_LIMIT;
+        for &id in touched.keys() {
+            let Some(file) = self.layout.file(id) else {
+                continue;
+            };
+            let arriving = self.layout.new_file_arrival(id, since);
+            if !arriving && !arriving_directories.contains(&file.dir) {
+                continue;
+            }
+            let mut directory = file.dir;
+            while !(keep_directory_rays && arriving_directories.contains(&directory))
+                && targets
+                    .binary_search_by_key(&Target::Dir(directory), |entry| entry.0)
+                    .is_err()
+            {
+                let Some(parent) = self.layout.dir(directory).parent else {
+                    break;
+                };
+                directory = parent;
+            }
+            routes
+                .entry(directory)
+                .or_default()
+                .push((id, file.dir, arriving));
+        }
+        for (directory, files) in routes {
+            let count = files.iter().filter(|(_, _, arriving)| *arriving).count();
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "the offset is an animation fraction"
+            )]
+            let gaps = count.saturating_sub(1).max(1) as f32;
+            let spacing = ARRIVAL_SPACING.min(MAX_ARRIVAL_OFFSET / gaps);
+            let mut offset = 0.0_f32;
+            for (id, parent, arriving) in files {
+                let flight = crate::layout::DirectoryFlight { directory, offset };
+                self.layout.route_arrival(
+                    id,
+                    since,
+                    parent,
+                    flight,
+                    keep_directory_rays,
+                );
+                if arriving {
+                    offset = (offset + spacing).min(MAX_ARRIVAL_OFFSET);
+                }
+            }
+        }
+    }
+
+    fn arriving_directories(
+        &self,
+        touched: &BTreeMap<u64, (u32, u32)>,
+        since: u64,
+    ) -> BTreeSet<usize> {
+        let mut directories = BTreeSet::new();
+        for file in touched.keys().filter_map(|&id| self.layout.file(id)) {
+            let mut directory = file.dir;
+            while self.layout.new_directory_arrival(directory, since)
+                && directories.insert(directory)
+            {
+                let Some(parent) = self.layout.dir(directory).parent else {
+                    break;
+                };
+                directory = parent;
+            }
+        }
+        directories
     }
 
     fn destination(&self, target: Target) -> Option<Vec2> {
@@ -3308,6 +3460,124 @@ mod tests {
     }
 
     #[test]
+    fn file_deleted_before_launch_never_appears() {
+        let event = timeline::synthetic().remove(0);
+        let mut simulation = Simulation::new(
+            vec![event],
+            &Options::default(),
+            &Theme::neon(),
+            &Mappings::default(),
+        );
+        simulation.advance_to(60, 60);
+        let path = format!("{}short-lived.rs", crate::repositories::prefix(0));
+        let id = simulation.state.layout.add(&path, super::ADD_DELAY, 0);
+        let file = simulation.layout().file(id).unwrap();
+        let before_deletion = simulation.file_effect(id, file).2;
+        simulation.state.layout.remove(&path, 0.0, 0).unwrap();
+        let file = simulation.layout().file(id).unwrap();
+        let after_deletion = simulation.file_effect(id, file).2;
+        simulation.state.layout.step(1.0 / 60.0);
+        assert!(simulation.layout().file(id).is_none());
+        assert!(
+            before_deletion <= 0.0 && after_deletion <= 0.0,
+            "file alpha before deletion: {before_deletion}, after: {after_deletion}"
+        );
+    }
+
+    #[test]
+    fn grouped_file_deleted_while_waiting_stays_invisible_during_fade() {
+        let event = timeline::synthetic().remove(0);
+        let mut simulation = Simulation::new(
+            vec![event],
+            &Options::default(),
+            &Theme::neon(),
+            &Mappings::default(),
+        );
+        simulation.advance_to(60, 60);
+        let path = format!("{}short-lived.rs", crate::repositories::prefix(0));
+        let layout = &mut simulation.state.layout;
+        let revision = layout.revision();
+        let id = layout.add(&path, 0.0, 0);
+        let directory = layout.file(id).unwrap().dir;
+        let offset = super::MAX_ARRIVAL_OFFSET;
+        layout.route_arrival(
+            id,
+            revision,
+            directory,
+            crate::layout::DirectoryFlight { directory, offset },
+            false,
+        );
+        layout.step(1.0 / 60.0);
+        layout.remove(&path, 0.0, 0).unwrap();
+        let file = simulation.layout().file(id).unwrap();
+        assert!(file.presence > 0.0 && file.presence < offset);
+        assert!(simulation.file_effect(id, file).2 <= 0.0);
+    }
+
+    #[test]
+    fn readded_grouped_file_waits_at_the_start_of_its_new_ray() {
+        let event = timeline::synthetic().remove(0);
+        let mut simulation = Simulation::new(
+            vec![event],
+            &Options::default(),
+            &Theme::neon(),
+            &Mappings::default(),
+        );
+        simulation.advance_to(60, 60);
+        let path = format!("{}readded.rs", crate::repositories::prefix(0));
+        let tick = 1.0 / 60.0;
+        let layout = &mut simulation.state.layout;
+        let revision = layout.revision();
+        let id = layout.add(&path, 0.0, 0);
+        let directory = layout.file(id).unwrap().dir;
+        layout.route_arrival(
+            id,
+            revision,
+            directory,
+            crate::layout::DirectoryFlight {
+                directory,
+                offset: super::MAX_ARRIVAL_OFFSET,
+            },
+            false,
+        );
+        for _ in 0..8 {
+            layout.step(tick);
+        }
+        layout.remove(&path, super::DELETE_DELAY, 0).unwrap();
+        layout.step(tick);
+        assert!(layout.file(id).unwrap().arrival_cancelled);
+
+        let revision = layout.revision();
+        assert_eq!(layout.add(&path, tick, 0), id);
+        layout.route_arrival(
+            id,
+            revision,
+            directory,
+            crate::layout::DirectoryFlight {
+                directory,
+                offset: 0.0,
+            },
+            false,
+        );
+        let file = simulation.layout().file(id).unwrap();
+        let (position, _, alpha) = simulation.file_effect(id, file);
+        let (_, beam) = simulation
+            .file_arrival_beams()
+            .find(|(_, beam)| beam.target == super::Target::Dir(directory))
+            .unwrap();
+        assert!(alpha <= 0.0, "delayed arrival had alpha {alpha}");
+        assert!(position.distance(beam.from) < 0.0001);
+
+        simulation.state.layout.step(tick);
+        let file = simulation.layout().file(id).unwrap();
+        assert!(simulation.file_effect(id, file).2 <= 0.0);
+
+        simulation.state.layout.step(tick);
+        let file = simulation.layout().file(id).unwrap();
+        assert!(simulation.file_effect(id, file).2 > 0.0);
+    }
+
+    #[test]
     fn arriving_files_follow_beam_curve_for_every_style() {
         for name in crate::theme::ThemeName::ALL {
             let mut events = crate::timeline::synthetic();
@@ -3342,21 +3612,13 @@ mod tests {
     }
 
     #[test]
-    fn crowded_pulses_aggregate_fragments_and_keep_individual_file_arrivals() {
-        for (count, nested, frame) in
-            [(24, false), (25, false), (25, true)].into_iter().flat_map(
-                |(count, nested)| [60, 70].map(move |frame| (count, nested, frame)),
-            )
-        {
+    fn crowded_arrivals_stream_along_one_directory_ray_then_settle() {
+        for count in [23, 25] {
             let mut events = crate::timeline::synthetic();
             events.truncate(1);
             events[0].changes = (0..count)
                 .map(|i| crate::timeline::FileChange {
-                    path: if nested {
-                        format!("src/dir{i}/file.rs")
-                    } else {
-                        format!("src/file{i}.rs")
-                    },
+                    path: format!("src/file{i}.rs"),
                     insertions: 1,
                     removals: 1,
                     ..Default::default()
@@ -3369,12 +3631,27 @@ mod tests {
                 &theme,
                 &crate::contributors::Mappings::default(),
             );
-            sim.advance_to(frame, 60);
+            sim.advance_to(60, 60);
             let aggregated = count > super::BEAM_LIMIT;
             let beams = sim.beams();
             assert_eq!(beams.len(), if aggregated { 1 } else { count });
+            let mut offsets = Vec::new();
             for (id, file) in sim.layout().files() {
                 assert_eq!(file.state, crate::layout::Presence::Arriving);
+                if aggregated {
+                    offsets.push((id, file.flight.unwrap().offset));
+                    let beam = beams[0];
+                    let (position, _, _) = sim.file_effect(id, file);
+                    let flight = file.flight.unwrap();
+                    let progress = ((file.presence - flight.offset)
+                        / (1.0 - super::MAX_ARRIVAL_OFFSET))
+                        .clamp(0.0, 1.0);
+                    let along = (progress / super::ARRIVAL_FLIGHT).min(1.0);
+                    assert!(along < 1.0);
+                    let expected = theme.beam_style.point(beam.from, beam.to, along);
+                    assert!(position.distance(expected) < 0.0001);
+                    continue;
+                }
                 let to = super::ground(file.position);
                 let expected = theme.beam_style.point(
                     sim.state.beam_start(file.author, to),
@@ -3383,9 +3660,11 @@ mod tests {
                 );
                 assert!(
                     sim.file_effect(id, file).0.distance(expected) < 0.0001,
-                    "{count} files, nested={nested}, frame={frame}, file={id}"
+                    "{count} files, file={id}"
                 );
             }
+            offsets.sort_by_key(|&(id, _)| id);
+            assert!(offsets.windows(2).all(|pair| pair[0].1 < pair[1].1));
             let pulse = &sim.state.pulses[0];
             for fragment in sim.fragments() {
                 let (_, target) = fragment.beam.unwrap();
@@ -3395,6 +3674,11 @@ mod tests {
                         .iter()
                         .any(|beam| beam.to == sim.state.point(target).unwrap())
                 );
+            }
+            sim.advance_to(120, 60);
+            for (id, file) in sim.layout().files() {
+                assert_eq!(file.state, crate::layout::Presence::Present);
+                assert_eq!(sim.file_effect(id, file).0, super::ground(file.position));
             }
         }
     }

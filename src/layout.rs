@@ -75,13 +75,17 @@ pub(super) struct File {
     pub activity: f32,
     pub author: usize,
     pub arrival_author: usize,
+    arrival_revision: u64,
+    pub flight: Option<DirectoryFlight>,
+    pub arrival_cancelled: bool,
 }
 
 impl File {
     fn replay_bytes(&self) -> u128 {
         let (path,) = retained_fields!(self, Self {
             path; local_position, dir, slot, slot_offset, position, velocity, presence,
-            state, delay, heat, activity, author, arrival_author,
+            state, delay, heat, activity, author, arrival_author, arrival_revision, flight,
+            arrival_cancelled,
         });
         path.capacity() as u128
     }
@@ -114,18 +118,28 @@ impl File {
 }
 
 #[derive(Clone, Copy, Debug)]
+pub(super) struct DirectoryFlight {
+    pub directory: usize,
+    pub offset: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
 pub(super) struct DirectoryArrival {
     pub author: usize,
     delay: f32,
     pub progress: f32,
+    revision: u64,
+    pub flight: Option<DirectoryFlight>,
 }
 
 impl DirectoryArrival {
-    fn new(author: usize, delay: f32) -> Self {
+    fn new(author: usize, delay: f32, revision: u64) -> Self {
         Self {
             author,
             delay,
             progress: 0.0,
+            revision,
+            flight: None,
         }
     }
 
@@ -395,6 +409,55 @@ impl Layout {
         })
     }
 
+    pub(super) fn route_arrival(
+        &mut self,
+        id: u64,
+        since: u64,
+        mut directory: usize,
+        flight: DirectoryFlight,
+        keep_directory_rays: bool,
+    ) {
+        if let Some(file) = self.files.get_mut(&id)
+            && file.state == Presence::Arriving
+            && file.arrival_revision > since
+        {
+            file.flight = Some(flight);
+        }
+        loop {
+            let dir = &mut self.dirs[directory];
+            let Some(arrival) = &mut dir.arrival else {
+                break;
+            };
+            if arrival.revision <= since || arrival.flight.is_some() {
+                break;
+            }
+            arrival.flight = Some(DirectoryFlight {
+                directory: if keep_directory_rays {
+                    directory
+                } else {
+                    flight.directory
+                },
+                offset: 0.0,
+            });
+            let Some(parent) = dir.parent else {
+                break;
+            };
+            directory = parent;
+        }
+    }
+
+    pub(super) fn new_file_arrival(&self, id: u64, since: u64) -> bool {
+        self.file(id).is_some_and(|file| {
+            file.state == Presence::Arriving && file.arrival_revision > since
+        })
+    }
+
+    pub(super) fn new_directory_arrival(&self, index: usize, since: u64) -> bool {
+        self.dir(index)
+            .arrival
+            .is_some_and(|arrival| arrival.revision > since)
+    }
+
     pub(super) fn file(&self, id: u64) -> Option<&File> {
         self.files.get(&id)
     }
@@ -440,10 +503,16 @@ impl Layout {
         self.revision += 1;
         if let Some(&id) = self.file_index.get(path) {
             let file = self.files.get_mut(&id).expect("indexed files exist");
+            if file.arrival_cancelled {
+                file.presence = 0.0;
+            }
             file.state = Presence::Arriving;
             file.delay = delay;
             file.author = author;
             file.arrival_author = author;
+            file.arrival_revision = self.revision;
+            file.flight = None;
+            file.arrival_cancelled = false;
             file.activity = 1.0;
             self.dirs[file.dir].touch_age = 0.0;
             self.fading.insert(id);
@@ -451,7 +520,7 @@ impl Layout {
         }
         let dir = self.ensure_dir(
             parent_path(path),
-            Some(DirectoryArrival::new(author, delay)),
+            Some(DirectoryArrival::new(author, delay, self.revision)),
         );
         self.dirs[dir].touch_age = 0.0;
         let slot = self.claim_slot(dir);
@@ -476,6 +545,9 @@ impl Layout {
                 activity: 1.0,
                 author,
                 arrival_author: author,
+                arrival_revision: self.revision,
+                flight: None,
+                arrival_cancelled: false,
             },
         );
         self.index_file(path, id);
@@ -504,6 +576,10 @@ impl Layout {
     ) -> Option<u64> {
         let &id = self.file_index.get(path)?;
         let file = self.files.get_mut(&id).expect("indexed files exist");
+        if file.state == Presence::Arriving {
+            file.arrival_cancelled =
+                file.presence <= file.flight.map_or(0.0, |flight| flight.offset);
+        }
         file.state = Presence::Leaving;
         file.delay = delay;
         self.fading.insert(id);
@@ -525,8 +601,10 @@ impl Layout {
             self.fading.remove(&previous);
         }
         self.dirs[self.files[&id].dir].touch_age = 0.0;
-        let dir =
-            self.ensure_dir(parent_path(to), Some(DirectoryArrival::new(author, 0.0)));
+        let dir = self.ensure_dir(
+            parent_path(to),
+            Some(DirectoryArrival::new(author, 0.0, self.revision)),
+        );
         let slot = if self.files[&id].dir == dir {
             self.files[&id].slot
         } else {
@@ -546,6 +624,9 @@ impl Layout {
         if file.state == Presence::Leaving {
             file.state = Presence::Arriving;
             file.arrival_author = author;
+            file.arrival_revision = self.revision;
+            file.flight = None;
+            file.arrival_cancelled = false;
         }
         self.index_file(to, id);
         id

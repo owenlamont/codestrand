@@ -648,7 +648,7 @@ pub(super) fn beams(
     pools: &mut super::Pools,
     simulation: &Simulation,
 ) {
-    let arrivals: Vec<_> = simulation
+    let arrivals: std::collections::BTreeMap<_, _> = simulation
         .file_arrival_beams()
         .filter(|(dir, _)| {
             pools
@@ -659,16 +659,20 @@ pub(super) fn beams(
         })
         .map(|(_, beam)| beam)
         .chain(pools.directory_arrival_beams.iter().copied())
-        .collect();
-    let targets: std::collections::BTreeSet<_> = arrivals
-        .iter()
-        .map(|beam| (beam.author, beam.target))
+        .map(|beam| {
+            let destination = beam.to.to_array().map(f32::to_bits);
+            ((beam.author, beam.target, destination), beam)
+        })
         .collect();
     let beams = simulation.beams();
     let segments: Vec<_> = beams
         .iter()
-        .filter(|beam| !targets.contains(&(beam.author, beam.target)))
-        .chain(&arrivals)
+        .filter(|beam| {
+            let first = (beam.author, beam.target, [u32::MIN; 3]);
+            let last = (beam.author, beam.target, [u32::MAX; 3]);
+            arrivals.range(first..=last).next().is_none()
+        })
+        .chain(arrivals.values())
         .flat_map(|beam| {
             beam_segments(simulation.theme(), beam.from, beam.to)
                 .into_iter()
@@ -1155,6 +1159,47 @@ mod tests {
             cache.radii[0] = 123.0;
             cache.update(&layout);
             assert_eq!(cache.radii[0], 123.0);
+        }
+    }
+
+    #[test]
+    fn overlapping_directory_arrival_keeps_grouped_file_ray() {
+        let mut event = crate::timeline::synthetic().remove(0);
+        event.changes = (0..25)
+            .map(|i| crate::timeline::FileChange {
+                path: format!("src/file{i}.rs"),
+                ..default()
+            })
+            .collect();
+        let theme = Theme::neon();
+        let mut simulation = Simulation::new(
+            vec![event],
+            &crate::model::Options::default(),
+            &theme,
+            &crate::contributors::Mappings::default(),
+        );
+        simulation.advance_to(65, 60);
+        let (_, file_ray) = simulation.file_arrival_beams().next().unwrap();
+        assert!(matches!(file_ray.target, crate::model::Target::Dir(_)));
+        let directory_ray = crate::model::Beam {
+            to: file_ray.to - Vec3::Y * 0.05,
+            ..file_ray
+        };
+        let mut pools = Pools::default();
+        pools.lod.detail = vec![1.0; simulation.layout().dir_count()];
+        pools.directory_arrival_beams.push(directory_ray);
+        let mut world = World::new();
+        world.init_resource::<Assets<Mesh>>();
+        world.init_resource::<Assets<Image>>();
+        world.init_resource::<Assets<StandardMaterial>>();
+        let palette = Palette::new(&mut world, &theme);
+        beams(&mut world, &palette, &mut pools, &simulation);
+        assert_eq!(pools.beams.len(), 2);
+        for ray in [file_ray, directory_ray] {
+            let midpoint = ray.from.midpoint(ray.to);
+            assert!(pools.beams.iter().any(|&entity| {
+                world.get::<Transform>(entity).unwrap().translation == midpoint
+            }));
         }
     }
 

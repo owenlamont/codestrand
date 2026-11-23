@@ -75,7 +75,8 @@ macOS discovers installed fonts through CoreText and Library/Fonts directories.
 | `[` | Halve live speed, down to 0.125x |
 | `]` | Double live speed, up to 8x |
 | `,` / `.` | Previous or next theme |
-| WASD | Move horizontally relative to yaw; release contributor follow |
+| W / S | Move forward / backward along camera aim; release contributor follow |
+| A / D | Strafe left / right horizontally relative to yaw; release contributor follow |
 | Right drag (released) | Orbit with world-Y yaw and pitch clamped to ±90° |
 | Scroll wheel | Zoom; scroll the preset list when over the Display tab |
 | Tab | Follow or cycle visible contributors |
@@ -130,8 +131,9 @@ exactly straight down or up, and yaw still rotates the view at either pole.
 Camera up never opposes world up. The eye stays at least 1.2 world units above the plane,
 above the glass and file geometry, and can look up at contributors at height 3.2.
 Vertical mouse motion changes pitch; horizontal motion changes yaw. Captured mouse
-aim turns about the eye in free mode. WASD uses forward and right from yaw alone,
-stays horizontal and remains well-defined when looking straight down or up.
+aim turns about the eye in free mode. W and S move along the camera's forward and
+backward directions, including pitch. At the floor, movement into the plane slides
+horizontally along the yaw heading. A and D strafe horizontally at every pitch.
 Right-drag orbit remains available with the cursor released.
 Orbit, captured aim and zoom retain the followed
 contributor as the aim; WASD or button elevation releases follow. Released right-drag
@@ -487,8 +489,12 @@ Live speed keys move through the canonical timeline faster or slower without
 changing commit times, layout, pulses, beams, avatar motion, settling or fades in
 timeline seconds. Changing live speed preserves the current position.
 
-Commits affecting more than 24 files aim diff beams at directories to reduce clutter.
-Visible file and directory arrivals still follow their own rays.
+Commits that would draw more than 24 beams group them by parent directory. If there are
+still more than 24 targets, the deepest groups move up to their parents until the
+beam count fits. New files stream down each shared beam, then settle into their own
+positions. The spacing tightens for large groups to keep the stream within the
+arrival animation. When a commit creates more than 24 directories, each new directory
+keeps its own arrival beam. Commit timing stays the same.
 
 ## Overview detail
 
