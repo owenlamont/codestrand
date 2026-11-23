@@ -671,6 +671,26 @@ mod tests {
         assert_eq!(sim.state.avatars[0].presence, 0.0);
     }
 
+    #[test]
+    fn a_late_relocation_leaves_from_the_reflowed_dock() {
+        let mut capture = fixture();
+        let (mut planned, _) =
+            trips(&capture, 480.0, crate::model::BotTravel::Walk, true);
+        let mut trip = planned.pop().unwrap();
+        trip.kind = TripKind::Relocation;
+        let reflowed = Vec2::new(-100.0, 16.0);
+        for pose in &mut capture.poses[0][300..400] {
+            pose.point = reflowed;
+        }
+
+        let aligned =
+            fixed_dock_approach(&capture, &trip, 70, 480.0, &mut Router::default())
+                .expect("the source has settled before the late departure");
+
+        assert_eq!(aligned.source, reflowed);
+        assert!(!needs_alignment(&aligned, capture.frozen));
+    }
+
     fn dock(edge: u8, fraction: f32) -> Dock {
         Dock::new(edge, fraction)
     }

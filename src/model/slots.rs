@@ -2699,6 +2699,48 @@ mod tests {
     }
 
     #[test]
+    fn a_new_commit_yields_to_an_occupied_corner_on_an_adjacent_tile() {
+        let mut sim = Simulation::new(
+            vec![crate::timeline::synthetic().remove(0)],
+            &Options::default(),
+            &Theme::neon(),
+            &Mappings::default(),
+        );
+        sim.advance_to(60, 60);
+        let mut state = sim.state.clone();
+        let incumbent = &mut state.avatars[0];
+        incumbent.presence = 1.0;
+        incumbent.transmitting = false;
+        incumbent.dock_since = 50;
+        let mut arriving = incumbent.clone();
+        arriving.commit += 1;
+        arriving.dock_since = 1;
+        state.avatars.push(arriving);
+
+        let mut adjacent = state.layout.repositories[0].clone();
+        let gutter = adjacent.gutter.unwrap();
+        adjacent.gutter = Some(Tile {
+            low: gutter.low - (gutter.high - gutter.low),
+            high: gutter.low,
+        });
+        state.layout.repositories.push(adjacent);
+        state.avatars[0].slot.as_mut().unwrap().dock = Dock::new(2, 0.0);
+        state.avatars[1].repository = 1;
+        state.avatars[1].slot.as_mut().unwrap().dock = Dock::new(0, 1.0);
+
+        let clearance = state.incumbent_discs(
+            1,
+            &[1],
+            sim.seconds(),
+            &[1.0, 1.0],
+            state.avatar_radius(),
+            &[false, false],
+        );
+
+        assert_eq!(clearance.len(), 1);
+    }
+
+    #[test]
     fn a_fading_ring_member_keeps_its_seat_until_it_disappears() {
         let mut sim = Simulation::new(
             vec![crate::timeline::synthetic().remove(0)],
