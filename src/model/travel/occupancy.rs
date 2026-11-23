@@ -225,6 +225,13 @@ impl Simulation {
                 continue;
             };
             let key = (trip.commit, trip.author);
+            if frame == trip.departure
+                && let Some(&Some(point)) = previous.get(trip.author)
+                && super::slots::field_point(point).distance(trip.source)
+                    > self.state.avatar_max_speed / 60.0
+            {
+                obstacles.displaced.insert(key);
+            }
             if frame == trip.arrival {
                 let Some(lead) = coarriving_lead(&self.state, trip, previous) else {
                     continue;
@@ -305,6 +312,65 @@ impl Simulation {
         self.trace.add_ticks(&mut self.tick_times);
         self.restart();
         self.visuals = visuals;
+    }
+
+    pub(super) fn capture_waiting_origins(&mut self, obstacles: &mut WalkObstacles) {
+        let mut suspended = Vec::new();
+        for (index, trip) in self.travel.trips.iter_mut().enumerate() {
+            let key = (trip.commit, trip.author);
+            if obstacles.displaced.contains(&key)
+                && obstacles.blocked.contains_key(&key)
+            {
+                let begin = trip.free.saturating_sub(1).max(obstacles.begin);
+                obstacles.waiting.insert(
+                    key,
+                    super::WaitingPoses {
+                        begin,
+                        points: Vec::new(),
+                    },
+                );
+                suspended.push((index, std::mem::take(&mut trip.route)));
+            }
+        }
+        if suspended.is_empty() {
+            return;
+        }
+        let end = suspended
+            .iter()
+            .map(|&(index, _)| self.travel.trips[index].arrival - 1)
+            .max()
+            .expect("suspended route");
+        let _phase = self.trace.phase(Phase::Reserve);
+        let visuals =
+            std::mem::replace(&mut self.visuals, crate::model::Visuals::Seating);
+        self.restart();
+        let begin = self.state.tick;
+        self.trace.count_replay(end.saturating_sub(begin));
+        for frame in begin..=end {
+            self.advance_to(u32::try_from(frame).expect("bounded schedule"), 60);
+            for &(index, _) in &suspended {
+                let trip = &self.travel.trips[index];
+                let poses = obstacles
+                    .waiting
+                    .get_mut(&(trip.commit, trip.author))
+                    .expect("suspended route");
+                if (poses.begin..trip.arrival).contains(&frame) {
+                    poses.points.push(
+                        self.state
+                            .avatars
+                            .get(trip.author)
+                            .filter(|avatar| avatar.presence > 0.001)
+                            .map(|avatar| super::slots::field_point(avatar.position)),
+                    );
+                }
+            }
+        }
+        self.trace.add_ticks(&mut self.tick_times);
+        self.restart();
+        self.visuals = visuals;
+        for (index, route) in suspended {
+            self.travel.trips[index].route = route;
+        }
     }
 
     fn reserve_missed_dock(

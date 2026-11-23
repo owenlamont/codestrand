@@ -18,6 +18,21 @@ impl Capture {
     fn radius(&self, tick: u64) -> f32 {
         *super::at_tick(&self.radii, tick.saturating_sub(self.begin))
     }
+
+    fn waiting_position(&self, trip: &Trip, tick: u64) -> Option<Vec2> {
+        let poses = self
+            .obstacles
+            .as_ref()?
+            .waiting
+            .get(&(trip.commit, trip.author))?;
+        let offset = usize::try_from(tick.checked_sub(poses.begin)?).ok()?;
+        poses.points.get(offset).copied().flatten()
+    }
+
+    fn departure_point(&self, trip: &Trip, tick: u64) -> Option<Vec2> {
+        self.waiting_position(trip, tick.saturating_sub(1))
+            .or_else(|| self.pose(trip.author, tick).map(|pose| pose.point))
+    }
 }
 
 fn hard_clearance(capture: &Capture, tick: u64, point: Vec2) -> bool {
@@ -228,8 +243,12 @@ fn moving_route(
         .map(|p| p[0].distance(p[1]) * 60.0)
         .fold(0.0, f32::max);
     let previous = capture
-        .pose(trip.author, trip.departure.saturating_sub(1))?
-        .point;
+        .waiting_position(trip, trip.departure.saturating_sub(1))
+        .or_else(|| {
+            capture
+                .pose(trip.author, trip.departure.saturating_sub(1))
+                .map(|pose| pose.point)
+        })?;
     if peak > speed + 0.05 || track.first()?.distance(previous) * 60.0 > speed + 0.05 {
         return None;
     }
@@ -321,9 +340,8 @@ fn search(
             continue;
         };
         let source = capture
-            .pose(template.author, begin)
-            .expect("existing author")
-            .point;
+            .departure_point(template, begin)
+            .expect("existing author");
         if source.distance(template.destination)
             > speed * ticks_duration(template.arrival - begin)
         {
@@ -454,7 +472,7 @@ fn fixed_dock_approach(
     for tick in epochs.chain([first, template.arrival]) {
         let cells = super::network(capture.row(tick).iter().flatten().copied());
         for from in late.into_iter().chain([first]) {
-            let source = capture.pose(template.author, from)?.point;
+            let source = capture.departure_point(template, from)?;
             if let Some(approach) = fixed_approach(
                 capture,
                 template,
@@ -497,7 +515,7 @@ fn fixed_approach(
     let route = Route::new(&points, speed);
     let duration = u64::from(super::seconds_ticks(route.duration, true));
     let departure = template.arrival.checked_sub(duration)?;
-    if departure < first || capture.pose(template.author, departure)?.point != source {
+    if departure < first || capture.departure_point(template, departure)? != source {
         return None;
     }
     let track: Vec<_> = (departure..=template.arrival)

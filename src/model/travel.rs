@@ -127,10 +127,18 @@ struct WalkObstacles {
     begin: u64,
     frames: Vec<Transmitters>,
     blocked: BTreeMap<(usize, usize), (u64, Vec2)>,
+    displaced: BTreeSet<(usize, usize)>,
+    waiting: BTreeMap<(usize, usize), WaitingPoses>,
     contacted: BTreeMap<(usize, usize), WalkContact>,
     // Keep pose tracks only for parked avatars a walk contacted.
     parked: BTreeMap<usize, Vec<Option<super::occlusion::BodyDisc>>>,
     coarrivals: BTreeMap<(usize, usize), Vec2>,
+}
+
+#[derive(Debug)]
+struct WaitingPoses {
+    begin: u64,
+    points: Vec<Option<Vec2>>,
 }
 
 #[derive(Debug)]
@@ -902,6 +910,7 @@ impl Simulation {
         for _ in 0..4 {
             let affected = obstacles.keys().collect();
             self.capture_contacted_seats(&mut obstacles);
+            self.capture_waiting_origins(&mut obstacles);
             let mut capture = capture(self);
             capture.obstacles = Some(obstacles);
             let changed = {
