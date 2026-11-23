@@ -160,13 +160,21 @@ impl PreviewCamera {
             orbit_eye
         };
         let eye = eye + back * (self.distance - old_distance);
-        self.focus = eye.with_y(eye.y.max(EYE_FLOOR)) - back * self.distance;
+        let eye = eye.with_y(eye.y.max(EYE_FLOOR));
         let yaw = Quat::from_rotation_y(self.yaw);
-        let movement = yaw * Vec3::new(input.pan.x, input.lift, -input.pan.y);
-        self.focus +=
-            movement.clamp_length_max(1.0) * self.distance * 0.7 * dt.min(0.1);
-        let eye = self.focus + back * self.distance;
-        self.focus.y += (EYE_FLOOR - eye.y).max(0.0);
+        let forward_step = -back * input.pan.y;
+        let movement =
+            yaw * Vec3::X * input.pan.x + forward_step + Vec3::Y * input.lift;
+        let step = self.distance * 0.7 * dt.min(0.1) / movement.length().max(1.0);
+        let displacement = movement * step;
+        let mut eye = eye + displacement;
+        if eye.y < EYE_FLOOR && forward_step.y < 0.0 {
+            let fraction_after_impact = (EYE_FLOOR - eye.y) / -displacement.y;
+            let along_floor = yaw * Vec3::NEG_Z * input.pan.y;
+            eye +=
+                (along_floor - forward_step.with_y(0.0)) * step * fraction_after_impact;
+        }
+        self.focus = eye.with_y(eye.y.max(EYE_FLOOR)) - back * self.distance;
     }
 
     fn cycle(&mut self, avatars: &[Avatar]) {
@@ -340,7 +348,7 @@ mod tests {
     }
 
     #[test]
-    fn captured_movement_follows_new_yaw_and_stays_above_the_floor() {
+    fn captured_movement_follows_new_aim() {
         let view = (Vec3::Y * 20.0, 10.0);
         for pan in [Vec2::X, Vec2::Y, Vec2::ONE.normalize()] {
             let mut camera = PreviewCamera::new(view);
@@ -356,23 +364,8 @@ mod tests {
                 &[],
                 0.1,
             );
-            let expected =
-                Quat::from_rotation_y(camera.yaw) * Vec3::new(pan.x, 0.0, -pan.y) * 0.7;
+            let expected = camera.rotation() * Vec3::new(pan.x, 0.0, -pan.y) * 0.7;
             assert!(camera.pose().0.abs_diff_eq(eye + expected, 1e-5));
-        }
-        let mut camera = PreviewCamera::new((Vec3::ZERO, 2.0));
-        for _ in 0..100 {
-            camera.update(
-                &Input {
-                    first_person: true,
-                    pan: Vec2::Y,
-                    ..Default::default()
-                },
-                view,
-                &[],
-                0.1,
-            );
-            assert!(camera.pose().0.y >= EYE_FLOOR);
         }
     }
 
@@ -423,15 +416,14 @@ mod tests {
     }
 
     #[test]
-    fn horizontal_movement_uses_yaw_at_both_poles() {
+    fn strafe_uses_yaw_at_both_poles() {
         let view = (Vec3::Y * 20.0, 10.0);
         for pitch in [-FRAC_PI_2, 0.0, FRAC_PI_2] {
             for first_person in [false, true] {
                 for (yaw, pan, expected) in [
                     (0.0, Vec2::X, Vec3::X),
-                    (0.0, Vec2::Y, Vec3::NEG_Z),
                     (FRAC_PI_2, Vec2::X, Vec3::NEG_Z),
-                    (FRAC_PI_2, Vec2::Y, Vec3::NEG_X),
+                    (FRAC_PI_2, Vec2::NEG_X, Vec3::Z),
                 ] {
                     let mut camera = PreviewCamera::new(view);
                     camera.mode = Mode::Free;
@@ -453,6 +445,62 @@ mod tests {
                     assert!(displacement.y.abs() < 1e-5);
                 }
             }
+        }
+    }
+
+    #[test]
+    fn forward_and_backward_movement_follow_pitch() {
+        use std::f32::consts::{FRAC_1_SQRT_2, FRAC_PI_4};
+
+        let view = (Vec3::Y * 20.0, 10.0);
+        for (pitch, direction) in [
+            (-FRAC_PI_4, Vec3::new(0.0, -FRAC_1_SQRT_2, -FRAC_1_SQRT_2)),
+            (0.0, Vec3::NEG_Z),
+            (FRAC_PI_4, Vec3::new(0.0, FRAC_1_SQRT_2, -FRAC_1_SQRT_2)),
+        ] {
+            for sign in [1.0, -1.0] {
+                let mut camera = PreviewCamera::new(view);
+                camera.mode = Mode::Free;
+                camera.pitch = pitch;
+                let eye = camera.pose().0;
+                camera.update(
+                    &Input {
+                        pan: Vec2::Y * sign,
+                        ..Default::default()
+                    },
+                    view,
+                    &[],
+                    0.1,
+                );
+                let displacement = camera.pose().0 - eye;
+                assert!(
+                    displacement.abs_diff_eq(direction * 0.7 * sign, 1e-5),
+                    "pitch {pitch}, direction {sign}: {displacement:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn descending_movement_reaches_and_slides_along_the_floor() {
+        let view = (Vec3::ZERO, 2.0);
+        for sign in [1.0, -1.0] {
+            let mut camera = PreviewCamera::new(view);
+            camera.mode = Mode::Free;
+            camera.yaw = FRAC_PI_2;
+            camera.pitch = -FRAC_PI_2 * sign;
+            let input = Input {
+                pan: Vec2::Y * sign,
+                ..Default::default()
+            };
+            let eye = Vec3::Y * (EYE_FLOOR + 0.05);
+            camera.focus = eye - camera.rotation() * Vec3::Z * view.1;
+            camera.update(&input, view, &[], 0.1);
+            let floor_eye = eye.with_y(EYE_FLOOR) - Vec3::X * (0.09 * sign);
+            assert!(camera.pose().0.abs_diff_eq(floor_eye, 1e-5));
+            camera.update(&input, view, &[], 0.1);
+            let slide_eye = floor_eye - Vec3::X * (0.14 * sign);
+            assert!(camera.pose().0.abs_diff_eq(slide_eye, 1e-5));
         }
     }
     #[test]
@@ -897,31 +945,9 @@ mod tests {
     }
 
     #[test]
-    fn pan_is_planar_and_relative_to_yaw_and_zoom_is_bounded() {
+    fn zoom_is_bounded() {
         let view = (Vec3::ZERO, 10.0);
         let mut camera = PreviewCamera::new(view);
-        camera.yaw = 0.0;
-        camera.update(
-            &Input {
-                pan: Vec2::Y,
-                ..Input::default()
-            },
-            view,
-            &[],
-            0.5,
-        );
-        assert!(camera.focus.abs_diff_eq(Vec3::new(0.0, 0.0, -0.7), 0.0001));
-        camera.yaw = FRAC_PI_2;
-        camera.update(
-            &Input {
-                pan: Vec2::X,
-                ..Input::default()
-            },
-            view,
-            &[],
-            0.5,
-        );
-        assert!(camera.focus.abs_diff_eq(Vec3::new(0.0, 0.0, -1.4), 0.0001));
         for (zoom, distance) in [
             (1.0, 10.0 * (-0.12_f32).exp()),
             (10000.0, 1.0),
