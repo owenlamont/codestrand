@@ -618,7 +618,7 @@ impl State {
         scales: &[f32],
         radius: f32,
         travelling: &[bool],
-    ) -> Vec<Rect> {
+    ) -> Vec<SeatClearance> {
         let priority = |index: usize| {
             let avatar = &self.avatars[index];
             (avatar.dock_since, index)
@@ -657,15 +657,16 @@ impl State {
             .iter()
             .enumerate()
             .filter(|&(other, peer)| {
-                !party.contains(&other)
-                    && (peer.presence > 0.0 || now < peer.expires)
-                    && (peer.transmitting
-                        || newcomer
-                        || peer.dock_since == self.tick
-                        || yields_to(other, peer))
+                !party.contains(&other) && (peer.presence > 0.0 || now < peer.expires)
             })
             .flat_map(|(other, peer)| {
                 let dock = (!travelling[other]).then(|| projected(peer)).flatten();
+                if !(peer.transmitting || newcomer || yields_to(other, peer)) {
+                    let claim = dock
+                        .filter(|_| peer.dock_since == self.tick)
+                        .map(SeatClearance::Claim);
+                    return [claim, None];
+                }
                 let source = field_point(peer.position);
                 let held = (peer.transmitting
                     || travelling[other] && peer.presence > 0.0)
@@ -673,11 +674,13 @@ impl State {
                     .filter(|point| {
                         dock.is_none_or(|dock| point.distance_squared(dock) > 1e-6)
                     });
-                [dock, held]
-                    .into_iter()
-                    .flatten()
-                    .map(move |point| disk(point, radius * scales[other]))
+                [dock, held].map(|point| {
+                    point.map(|point| {
+                        SeatClearance::Body(disk(point, radius * scales[other]))
+                    })
+                })
             })
+            .flatten()
             .collect()
     }
 
@@ -1636,6 +1639,11 @@ fn attached_rect(body: Vec2, size: Vec2, distance: f32, attachment: u8) -> Rect 
         f32::from(attachment) * std::f32::consts::TAU / 8.0,
     )
 }
+enum SeatClearance {
+    Body(Rect),
+    Claim(Vec2),
+}
+
 struct Choice<'a> {
     field: Rect,
     tile: Tile,
@@ -1647,7 +1655,7 @@ struct Choice<'a> {
     capacity: u8,
     beams: &'a [(usize, Rect)],
     occupied: &'a [Rect],
-    clearance: &'a [Rect],
+    clearance: &'a [SeatClearance],
     peers: &'a [(Vec2, u8, Vec2)],
     future: &'a [Rect],
     rejected: &'a [Dock],
@@ -1780,11 +1788,18 @@ impl Choice<'_> {
             .flat_map(|seat| {
                 let point = slot.point
                     + seat_offset(seat, self.capacity, slot.dock.edge, self.radius);
-                self.clearance.iter().map(move |disc| {
-                    (member_radius + disc.half_size().x
+                self.clearance.iter().map(move |clearance| match clearance {
+                    SeatClearance::Body(disc) => (member_radius + disc.half_size().x
                         - point.distance(disc.center())
                         - 0.001)
-                        .max(0.0)
+                        .max(0.0),
+                    SeatClearance::Claim(claim) => {
+                        if claim.distance_squared(point) < 1e-6 {
+                            f32::INFINITY
+                        } else {
+                            0.0
+                        }
+                    }
                 })
             })
             .sum()
@@ -2827,7 +2842,10 @@ mod tests {
         );
 
         assert_eq!(clearance.len(), 1);
-        assert!(clearance[0].center().distance(assigned.on_network(gutter)) < 1e-4);
+        assert!(matches!(
+            clearance[0],
+            SeatClearance::Claim(point) if point == assigned.on_network(gutter)
+        ));
     }
 
     #[test]
