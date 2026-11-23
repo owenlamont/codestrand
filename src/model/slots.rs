@@ -2622,6 +2622,38 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_returning_contributor_yields_to_the_visible_incumbent() {
+        let mut sim = Simulation::new(
+            vec![crate::timeline::synthetic().remove(0)],
+            &Options::default(),
+            &Theme::neon(),
+            &Mappings::default(),
+        );
+        sim.advance_to(60, 60);
+        let mut state = sim.state.clone();
+        let incumbent = &mut state.avatars[0];
+        incumbent.presence = 1.0;
+        incumbent.transmitting = false;
+        incumbent.dock_since = 50;
+        let mut returning = incumbent.clone();
+        returning.presence = 0.0;
+        returning.dock_since = 1;
+        state.avatars.push(returning);
+        let radius = state.avatar_radius();
+
+        let clearance = state.incumbent_discs(
+            1,
+            &[1],
+            sim.seconds(),
+            &[1.0, 1.0],
+            radius,
+            &[false, false],
+        );
+
+        assert_eq!(clearance.len(), 1);
+    }
+
     fn thirty() -> Simulation {
         let histories = (0..30)
             .map(|i| {
