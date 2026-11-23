@@ -384,13 +384,18 @@ fn fixed_dock_approach(
     speed: f32,
     router: &mut Router,
 ) -> Option<Trip> {
-    let source = capture.pose(template.author, first)?.point;
+    let late = (template.kind == TripKind::Relocation)
+        .then_some(template.arrival.saturating_sub(1))
+        .filter(|&tick| tick > first);
     for tick in [first, template.arrival] {
         let cells = super::network(capture.row(tick).iter().flatten().copied());
-        if let Some(approach) = fixed_approach(
-            capture, template, first, speed, router, source, &cells, tick,
-        ) {
-            return Some(approach);
+        for from in late.into_iter().chain([first]) {
+            let source = capture.pose(template.author, from)?.point;
+            if let Some(approach) = fixed_approach(
+                capture, template, first, speed, router, source, &cells, tick,
+            ) {
+                return Some(approach);
+            }
         }
     }
     None
