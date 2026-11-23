@@ -492,6 +492,36 @@ mod tests {
     use crate::{contributors::Mappings, model::Options, theme::Theme, timeline};
 
     #[test]
+    fn a_crowded_arrival_can_fit_between_two_disc_boundaries() {
+        let obstacles = [
+            (Vec2::new(-0.9, 0.6), 0.36),
+            (Vec2::new(0.6, 0.6), 0.36),
+            (Vec2::new(0.0, 0.3), 0.8),
+            (Vec2::new(0.0, -0.9), 0.36),
+        ]
+        .map(|(centre, radius)| Disc {
+            centre,
+            radius,
+            blocks_walkers: true,
+            transmitting: false,
+        });
+        let radius = 0.35;
+        let point = clear_position(
+            Vec2::ZERO,
+            Vec2::ZERO,
+            1.0,
+            &obstacles,
+            |_| radius,
+            |_| true,
+        );
+
+        assert!(point.length() <= 1.0);
+        for disc in obstacles {
+            assert!(point.distance(disc.centre) >= radius + disc.radius);
+        }
+    }
+
+    #[test]
     fn a_fading_in_seat_leaves_room_for_the_visible_avatar() {
         let mut sim = Simulation::new(
             vec![timeline::synthetic().remove(0)],
