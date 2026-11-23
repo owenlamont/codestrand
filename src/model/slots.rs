@@ -623,7 +623,8 @@ impl State {
             let avatar = &self.avatars[index];
             (avatar.dock_since, index)
         };
-        let newcomer = self.avatars[index].slot.is_none();
+        let avatar = &self.avatars[index];
+        let newcomer = avatar.presence <= 0.0 || avatar.slot.is_none();
         self.avatars
             .iter()
             .enumerate()
@@ -859,10 +860,11 @@ impl State {
                     self.avatar_max_speed,
                 );
             }
-            if avatar
-                .slot
-                .as_ref()
-                .is_none_or(|previous| previous.dock != place.dock)
+            if avatar.presence <= 0.0
+                || avatar
+                    .slot
+                    .as_ref()
+                    .is_none_or(|previous| previous.dock != place.dock)
             {
                 avatar.dock_since = self.tick;
             }
