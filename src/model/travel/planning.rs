@@ -696,6 +696,31 @@ mod tests {
         assert!(!needs_alignment(&aligned, capture.frozen));
     }
 
+    #[test]
+    fn a_relocation_uses_extra_ticks_for_motion_instead_of_early_parking() {
+        let capture = fixture();
+        let (mut planned, _) =
+            trips(&capture, 480.0, crate::model::BotTravel::Walk, true);
+        let mut trip = planned.pop().unwrap();
+        trip.kind = TripKind::Relocation;
+        let cells = super::super::network(
+            capture.row(trip.departure).iter().flatten().copied(),
+        );
+        let points = Router::default()
+            .route(trip.source, trip.destination, &cells)
+            .unwrap();
+        trip.route = Route::new(&points, 384.0);
+        trip.arrival = trip.departure
+            + u64::from(super::super::seconds_ticks(trip.route.duration, true))
+            + 4;
+
+        let aligned =
+            moving_route(&capture, &trip, &points, trip.departure, 480.0, 0, true)
+                .expect("a slightly slower walk can arrive on time");
+
+        assert!(aligned.track.windows(2).all(|pair| pair[0] != pair[1]));
+    }
+
     fn dock(edge: u8, fraction: f32) -> Dock {
         Dock::new(edge, fraction)
     }
