@@ -466,7 +466,9 @@ pub(super) fn trips(
         }
         let relocation = prior.repository == service.repository;
         if (relocation
-            && (prior.dock == service.dock || prior.arrivals_land >= service.tick - 1))
+            && (!service.authoring
+                || prior.dock == service.dock
+                || prior.arrivals_land >= service.tick - 1))
             || (!relocation
                 && (!walk || (service.bot && bots == crate::model::BotTravel::Fade))
                 && capture

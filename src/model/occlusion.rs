@@ -377,42 +377,74 @@ pub(crate) struct Audit {
     pub examples: Vec<serde_json::Value>,
 }
 
+fn visible_discs(sim: &Simulation) -> Vec<(usize, Vec2, f32)> {
+    let (focus, distance) = sim.view();
+    let eye = focus + view_direction() * distance;
+    let screen = |point| {
+        project(eye, focus, &[point])
+            .next()
+            .flatten()
+            .map(|p| p * framing::VIEWPORT * 0.5)
+    };
+    let base = sim.state.geometry.avatar_radius * sim.scale() * sim.avatar_disc_scale();
+    sim.avatars()
+        .iter()
+        .enumerate()
+        .zip(sim.member_scales())
+        .filter(|((_, avatar), _)| avatar.presence > 0.001)
+        .filter_map(|((index, avatar), member_scale)| {
+            let radius = disc_radius(avatar, base, member_scale);
+            if radius <= 0.0 {
+                return None;
+            }
+            let centre = screen(avatar.position)?;
+            let edge = screen(avatar.position + Vec3::X * radius)?;
+            Some((index, centre, centre.distance(edge)))
+        })
+        .collect()
+}
+
+fn discs_overlap(centre: Vec2, radius: f32, other: Vec2, other_radius: f32) -> bool {
+    centre.distance(other) + 0.01 < radius + other_radius
+}
+
+pub(in crate::model) fn walk_contacts(
+    sim: &Simulation,
+    walkers: &[(usize, usize)],
+) -> Vec<(usize, usize)> {
+    if walkers.is_empty() {
+        return Vec::new();
+    }
+    let discs = visible_discs(sim);
+    let parked_discs: Vec<_> = discs
+        .iter()
+        .filter(|&&(other, ..)| parked(&sim.avatars()[other]))
+        .collect();
+    walkers
+        .iter()
+        .copied()
+        .filter(|&(_, author)| {
+            let Some(&(_, centre, radius)) =
+                discs.iter().find(|&&(index, ..)| index == author)
+            else {
+                return false;
+            };
+            parked_discs.iter().any(|&&(other, point, other_radius)| {
+                other != author && discs_overlap(centre, radius, point, other_radius)
+            })
+        })
+        .collect()
+}
+
 impl Audit {
     pub(crate) fn observe(&mut self, sim: &Simulation) {
-        let (focus, distance) = sim.view();
-        let eye = focus + view_direction() * distance;
-        let right = Vec3::X;
-        let screen = |point| {
-            project(eye, focus, &[point])
-                .next()
-                .flatten()
-                .map(|p| p * framing::VIEWPORT * 0.5)
-        };
         let labels: Vec<_> = sim
             .labels_for_detail(|_| true)
             .into_iter()
             .filter(|label| label.opacity > 0.001 && !label.text.is_empty())
             .map(|label| (label_bounds(sim, &label), label.text))
             .collect();
-        let discs: Vec<_> = sim
-            .avatars()
-            .iter()
-            .enumerate()
-            .zip(sim.member_scales())
-            .filter(|((_, avatar), _)| avatar.presence > 0.001)
-            .filter_map(|((index, avatar), member_scale)| {
-                let base = sim.state.geometry.avatar_radius
-                    * sim.scale()
-                    * sim.avatar_disc_scale();
-                let radius = disc_radius(avatar, base, member_scale);
-                if radius <= 0.0 {
-                    return None;
-                }
-                let centre = screen(avatar.position)?;
-                let edge = screen(avatar.position + right * radius)?;
-                Some((index, centre, centre.distance(edge)))
-            })
-            .collect();
+        let discs = visible_discs(sim);
         for &(author, centre, radius) in &discs {
             self.maximum_avatar_radius = self.maximum_avatar_radius.max(radius);
             for (bounds, text) in &labels {
@@ -427,7 +459,7 @@ impl Audit {
         }
         for (index, &(author, centre, radius)) in discs.iter().enumerate() {
             for &(other, point, other_radius) in &discs[index + 1..] {
-                if centre.distance(point) + 0.01 < radius + other_radius {
+                if discs_overlap(centre, radius, point, other_radius) {
                     self.avatar_avatar_observations += 1;
                     self.parked_avatar_observations += u64::from(
                         parked(&sim.state.avatars[author])

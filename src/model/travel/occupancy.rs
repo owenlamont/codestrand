@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use bevy::math::Vec3;
+
 use super::{HALF, Rect, Vec2};
 use crate::model::{
     Simulation, occlusion,
@@ -131,6 +133,66 @@ fn anticipate_service_reservations(
 }
 
 impl Simulation {
+    fn reserve_missed_dock(
+        &mut self,
+        commit: usize,
+        author: usize,
+        repository: usize,
+    ) -> bool {
+        let avatar = &self.state.avatars[author];
+        let gutter = self.state.layout.repositories[repository].gutter;
+        avatar.presence > 0.001
+            && !avatar.beside_gutter(gutter, self.state.avatar_radius())
+            && self.travel.unreached_docks.insert((commit, author))
+    }
+
+    fn reserve_blocked_walks(&mut self, previous: &mut Vec<Option<Vec3>>) -> usize {
+        let mut blocked = Vec::new();
+        let mut walking = Vec::new();
+        for (author, avatar) in self.state.avatars.iter().enumerate() {
+            if !avatar.travelling || avatar.presence <= 0.001 {
+                continue;
+            }
+            let Some(trip) = self.travel.walking_trip(author, self.state.tick) else {
+                continue;
+            };
+            let key = (trip.commit, author);
+            if trip.kind == super::TripKind::Relocation
+                || trip.commit < self.travel.frozen
+                || self.travel.unreached_docks.contains(&key)
+            {
+                continue;
+            }
+            if previous
+                .get(author)
+                .copied()
+                .flatten()
+                .is_some_and(|before| {
+                    before.distance_squared(avatar.position) < 1e-8
+                        && super::slots::field_point(avatar.position)
+                            .distance(trip.source)
+                            > super::NETWORK_EPSILON
+                })
+            {
+                blocked.push(key);
+            } else {
+                walking.push(key);
+            }
+        }
+        blocked.extend(occlusion::walk_contacts(self, &walking));
+        previous.clear();
+        previous.extend(
+            self.state
+                .avatars
+                .iter()
+                .map(|avatar| (avatar.presence > 0.001).then_some(avatar.position)),
+        );
+        blocked
+            .into_iter()
+            .filter(|&key| self.travel.unreached_docks.insert(key))
+            .count()
+    }
+
     fn reserve_blocked_ray_sources(
         &self,
         occupied: &mut Reservations,
@@ -328,6 +390,7 @@ impl Simulation {
         arrivals.sort_unstable();
         let mut arrivals = arrivals.into_iter().peekable();
         let mut missed = 0;
+        let mut positions = Vec::new();
         self.trace.count_replay((frames - begin).into());
         for frame in begin..=frames {
             self.progress.report_range(
@@ -337,20 +400,14 @@ impl Simulation {
                 frames.into(),
             );
             self.advance_to(frame, 60);
+            if check_walks {
+                missed += self.reserve_blocked_walks(&mut positions);
+            }
             while let Some((_, commit, author, repository)) =
                 arrivals.next_if(|&(tick, ..)| tick <= self.state.tick)
             {
-                let avatar = &self.state.avatars[author];
-                if avatar.presence > 0.001
-                    && !avatar.beside_gutter(
-                        self.state.layout.repositories[repository].gutter,
-                        self.state.avatar_radius(),
-                    )
-                {
-                    missed += usize::from(
-                        self.travel.unreached_docks.insert((commit, author)),
-                    );
-                }
+                missed +=
+                    usize::from(self.reserve_missed_dock(commit, author, repository));
             }
             let (conflicting, compared) =
                 self.reserve_frame(&mut occupied, &mut conflicted);
@@ -452,6 +509,7 @@ impl Simulation {
         let _phase = self.trace.phase(Phase::RefineServiceSlots);
         let mut previous = None;
         for _ in 0..8 {
+            self.align_travel_arrivals(options);
             if !self.reserve_service_slots(
                 options.travel_cap != crate::model::TravelCap::None,
             ) {

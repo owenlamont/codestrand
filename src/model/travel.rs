@@ -95,7 +95,6 @@ pub(super) struct Pose {
 pub(super) struct Service {
     pub(super) commit: usize,
     pub(super) author: usize,
-    #[cfg(test)]
     authoring: bool,
     repository: usize,
     tick: u64,
@@ -354,6 +353,7 @@ pub(super) struct Plan {
     pub(super) frozen: usize,
     /// Reserved gutter spans by commit and avatar.
     pub(super) occupancy: BTreeMap<(usize, usize), Vec<(u8, Rect)>>,
+    /// Capped walks that failed to reach their dock safely in the seating replay.
     unreached_docks: BTreeSet<(usize, usize)>,
     pub stats: Statistics,
 }
@@ -693,15 +693,16 @@ fn replay(simulation: &mut Simulation, frames: u32) -> Capture {
             }
         }
         for event in seen..state.next_event {
-            for contributor in simulation.events[event].participants() {
+            for (position, contributor) in
+                simulation.events[event].participants().enumerate()
+            {
                 let author = state.authors[&contributor.key];
                 let avatar = &state.avatars[author];
                 let slot = avatar.slot.as_ref().expect("tile exists before service");
                 capture.services.push(Service {
                     commit: event,
                     author,
-                    #[cfg(test)]
-                    authoring: true,
+                    authoring: position == 0,
                     repository: avatar.repository,
                     tick: state.tick,
                     arrivals_land: super::schedule::first_tick(
