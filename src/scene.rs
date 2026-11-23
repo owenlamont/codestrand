@@ -1652,8 +1652,8 @@ fn sync_files(
             spawn_file(world, palette, simulation.theme(), file.name())
         });
         seen += 1;
-        set_visible(world, entity, true);
         let (position, grey, alpha) = simulation.file_effect(id, file);
+        set_visible(world, entity, alpha > 0.0);
         if let Some(mut transform) = world.get_mut::<Transform>(entity) {
             transform.set_if_neq(Transform::from_translation(position).with_scale(
                 Vec3::splat(file.draw_scale(layout.dir(file.dir)) * detail),
@@ -1711,7 +1711,9 @@ fn sync_files(
             transform.scale *= Vec3::new(grow, grow, 1.0);
         }
         set_visible(world, halo, glowing);
-        fade(world, entity, grey, alpha);
+        if alpha > 0.0 {
+            fade(world, entity, grey, alpha);
+        }
     }
     if seen != pools.files.len() {
         let mut removed: Vec<_> = pools
