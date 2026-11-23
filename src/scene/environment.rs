@@ -1,7 +1,7 @@
 use bevy::{
     asset::RenderAssetUsages,
     camera::{Exposure, visibility::NoFrustumCulling},
-    color::ColorToPacked,
+    color::{ColorToComponents, ColorToPacked},
     image::{ImageAddressMode, ImageSampler, ImageSamplerDescriptor},
     light::Skybox,
     math::Affine2,
@@ -29,6 +29,7 @@ const SUN_AZIMUTH: Vec3 = Vec3::NEG_Z;
 #[derive(Resource)]
 struct Environment {
     plane: Entity,
+    sun: Option<Entity>,
     material: Handle<StandardMaterial>,
     tile_floor: Entity,
     tile_mesh: Handle<Mesh>,
@@ -137,11 +138,6 @@ fn skybox(name: ThemeName, ground: [u8; 4]) -> Image {
             return ground;
         }
         let sky = horizon.mix(&zenith, height.sqrt());
-        let sky = if name == ThemeName::Outrun {
-            sunset(direction, sky)
-        } else {
-            sky
-        };
         far_ground.mix(&sky, blend).to_u8_array()
     };
     let coordinates =
@@ -174,16 +170,90 @@ fn skybox(name: ThemeName, ground: [u8; 4]) -> Image {
     image
 }
 
-fn sunset(direction: Vec3, sky: Srgba) -> Srgba {
-    let centre = (SUN_AZIMUTH + Vec3::Y * 0.12).normalize();
-    let rim = ((0.15 - direction.distance(centre)) / 0.009).clamp(0.0, 1.0);
-    let height = direction.y;
-    let band = ((height / 0.025).fract() * 8.0 - 1.0).clamp(0.0, 1.0);
-    let stripes = band.max(((height - 0.10) / 0.012).clamp(0.0, 1.0));
+fn sun_mesh() -> Mesh {
+    const CENTRE: f32 = 0.12;
+    const RADIUS: f32 = 0.154;
+    const LOWEST_GAP: f32 = 0.027;
+    const GAP_SPACING: f32 = 0.014;
+    const GAP_HALF_WIDTH: f32 = 0.003;
+    const GAP_COUNT: u16 = 7;
+    const ARC_STEPS: u16 = 96;
+
     let pink = Srgba::new(1.0, 88.0 / 255.0, 158.0 / 255.0, 1.0);
     let gold = Srgba::new(1.0, 211.0 / 255.0, 107.0 / 255.0, 1.0);
-    let disc = pink.mix(&gold, (height / 0.27).min(1.0));
-    sky.mix(&disc, rim * stripes)
+    let mut positions = Vec::new();
+    let mut colors = Vec::new();
+    let gap = |index: u16| LOWEST_GAP + f32::from(index) * GAP_SPACING;
+    let lower =
+        std::iter::once(0.006).chain((0..GAP_COUNT).map(|i| gap(i) + GAP_HALF_WIDTH));
+    let upper = (0..GAP_COUNT)
+        .map(|i| gap(i) - GAP_HALF_WIDTH)
+        .chain(std::iter::once(CENTRE + RADIUS));
+    for (bottom, top) in lower.zip(upper) {
+        let bottom = ((bottom - CENTRE) / RADIUS).asin();
+        let top = ((top - CENTRE) / RADIUS).clamp(-1.0, 1.0).asin();
+        let row = |angle: f32| {
+            let (y, x) = angle.sin_cos();
+            let y = CENTRE + RADIUS * y;
+            let x = RADIUS * x.max(0.0);
+            let mut color = LinearRgba::from(pink.mix(&gold, (y / 0.27).min(1.0)));
+            color.alpha = ((y - 0.006) / 0.019).clamp(0.0, 1.0);
+            ([[-x, y, 0.0], [x, y, 0.0]], color.to_f32_array())
+        };
+        let span = top - bottom;
+        let step = span / (span * f32::from(ARC_STEPS)).ceil();
+        let mut angle = bottom;
+        let (mut lower, mut lower_color) = row(angle);
+        while angle < top {
+            angle = (angle + step).min(top);
+            let (upper, upper_color) = row(angle);
+            positions
+                .extend([lower[0], lower[1], upper[0], lower[1], upper[1], upper[0]]);
+            colors.extend([
+                lower_color,
+                lower_color,
+                upper_color,
+                lower_color,
+                upper_color,
+                upper_color,
+            ]);
+            (lower, lower_color) = (upper, upper_color);
+        }
+    }
+    let normals = vec![[0.0, 0.0, 1.0]; positions.len()];
+    Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    )
+    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colors)
+}
+
+fn apply_sun(world: &mut World, name: ThemeName) {
+    let visible = name == ThemeName::Outrun;
+    if let Some(sun) = world.resource::<Environment>().sun {
+        super::set_visible(world, sun, visible);
+    } else if visible {
+        let mesh = world.resource_mut::<Assets<Mesh>>().add(sun_mesh());
+        let material =
+            world
+                .resource_mut::<Assets<StandardMaterial>>()
+                .add(StandardMaterial {
+                    unlit: true,
+                    alpha_mode: AlphaMode::Blend,
+                    ..default()
+                });
+        let sun = world
+            .spawn((
+                Mesh3d(mesh),
+                MeshMaterial3d(material),
+                Visibility::Inherited,
+                NoFrustumCulling,
+            ))
+            .id();
+        world.resource_mut::<Environment>().sun = Some(sun);
+    }
 }
 
 pub(super) fn setup(world: &mut World, name: ThemeName, mesh: Handle<Mesh>) {
@@ -228,6 +298,7 @@ pub(super) fn setup(world: &mut World, name: ThemeName, mesh: Handle<Mesh>) {
         .id();
     world.insert_resource(Environment {
         plane,
+        sun: None,
         material,
         tile_floor,
         tile_mesh,
@@ -301,6 +372,7 @@ pub(super) fn apply(world: &mut World, name: ThemeName) {
             ..default()
         });
     }
+    apply_sun(world, name);
 }
 
 pub(super) fn place_tile_floor(world: &mut World, simulation: &Simulation) {
@@ -371,15 +443,27 @@ pub(super) fn place_ground(world: &mut World) {
         return;
     };
     let (plane, material) = (environment.plane, environment.material.clone());
+    let sun = environment.sun;
     let mut camera =
         world.query_filtered::<(&Transform, &Projection), With<SceneCamera>>();
     let Ok((pose, Projection::Perspective(projection))) = camera.single(world) else {
         return;
     };
     let eye = pose.translation;
+    let far = projection.far;
+    if let Some(sun) = sun {
+        // Bevy's infinite reverse-Z projection keeps the sun behind scene geometry.
+        let distance = far * 2.0;
+        let transform = Transform::from_translation(eye + SUN_AZIMUTH * distance)
+            .with_scale(Vec3::splat(distance));
+        world
+            .get_mut::<Transform>(sun)
+            .expect("sun transform")
+            .set_if_neq(transform);
+    }
     // Whole texture repeats keep the grid fixed as the plane follows the camera.
     let centre = (eye.xz() / REPEAT).round() * REPEAT;
-    let repeats = (projection.far.max((eye.y - GROUND_Y).abs() * 64.0) * 4.0 / REPEAT)
+    let repeats = (far.max((eye.y - GROUND_Y).abs() * 64.0) * 4.0 / REPEAT)
         .log2()
         .ceil()
         .exp2();
@@ -447,6 +531,22 @@ mod tests {
     }
 
     #[test]
+    fn outrun_sun_mesh_has_seven_gaps_between_bands() {
+        let mesh = sun_mesh();
+        let Some(VertexAttributeValues::Float32x3(positions)) =
+            mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+        else {
+            panic!("sun mesh positions");
+        };
+        let rows = positions.as_chunks::<6>().0;
+        let bands = 1 + rows
+            .windows(2)
+            .filter(|pair| pair[1][0][1] > pair[0][2][1])
+            .count();
+        assert_eq!(bands, 8);
+    }
+
+    #[test]
     fn ground_stays_below_glass_and_sunset_stays_world_aligned_as_camera_turns() {
         let mut world = World::new();
         world.init_resource::<Assets<StandardMaterial>>();
@@ -461,21 +561,27 @@ mod tests {
             .id();
         setup(&mut world, ThemeName::Outrun, Handle::default());
         let sky = world.get::<Skybox>(camera).unwrap().image.clone().unwrap();
-        assert_eq!(skybox_pixel(&world, &sky, 4)[0], 255);
-        assert!(skybox_pixel(&world, &sky, 0)[0] < 128);
-        assert!(skybox_pixel(&world, &sky, 5)[0] < 128);
 
-        let plane = world.resource::<Environment>().plane;
-        let material = world.resource::<Environment>().material.clone();
-        for yaw in [0.0, FRAC_PI_2, PI] {
+        let environment = world.resource::<Environment>();
+        let (plane, sun) = (environment.plane, environment.sun.unwrap());
+        let material = environment.material.clone();
+        for (eye, yaw) in [
+            (Vec3::new(0.0, 6.0, 60.0), 0.0),
+            (Vec3::new(8.0, 6.0, 59.0), 8.0_f32.to_radians()),
+            (Vec3::new(203.0, 6.0, -104.0), FRAC_PI_2),
+            (Vec3::new(-203.0, 12.0, 104.0), PI),
+        ] {
             *world.get_mut::<Transform>(camera).unwrap() =
-                Transform::from_xyz(203.0, 6.0, -104.0)
+                Transform::from_translation(eye)
                     .with_rotation(Quat::from_rotation_y(yaw));
             place_ground(&mut world);
             let transform = world.get::<Transform>(plane).unwrap();
             assert!(transform.translation.y < crate::model::framing::GLASS_BOTTOM);
             assert!(transform.local_z().dot(Vec3::Y) > 0.999);
             assert!(transform.scale.x >= 4000.0);
+            let transform = world.get::<Transform>(sun).unwrap();
+            assert_eq!((transform.translation - eye).normalize(), Vec3::NEG_Z);
+            assert_eq!(transform.rotation, Quat::IDENTITY);
             let skybox = world.get::<Skybox>(camera).unwrap();
             assert_eq!(skybox.rotation, Quat::IDENTITY);
             assert_eq!(skybox.image.as_ref(), Some(&sky));
@@ -485,13 +591,9 @@ mod tests {
             materials.get(&material).unwrap().alpha_mode,
             AlphaMode::Opaque
         );
-    }
-
-    fn skybox_pixel(world: &World, sky: &Handle<Image>, face: usize) -> [u8; 4] {
-        let image = world.resource::<Assets<Image>>().get(sky).unwrap();
-        let size = usize::try_from(image.width()).unwrap();
-        let row_above_horizon = 110;
-        let texel = face * size * size + row_above_horizon * size + size / 2;
-        image.data.as_deref().unwrap().as_chunks::<4>().0[texel]
+        apply(&mut world, ThemeName::Neon);
+        assert_eq!(world.get::<Visibility>(sun), Some(&Visibility::Hidden));
+        apply(&mut world, ThemeName::Outrun);
+        assert_eq!(world.get::<Visibility>(sun), Some(&Visibility::Inherited));
     }
 }
