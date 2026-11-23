@@ -306,3 +306,45 @@ fn visible_rays_stay_local_over_whole_playback() {
     );
     assert_eq!(detached, None, "(frame, author, target repository)");
 }
+
+#[test]
+fn contributors_hold_position_and_presence_while_transmitting() {
+    let mut simulation = rapid_repositories(4);
+    let mut previous = Vec::new();
+    let mut observed = 0;
+    for frame in 0..=simulation.frames(60).unwrap() {
+        simulation.advance_to(frame, 60);
+        let files = simulation.file_arrival_beams().map(|(_, beam)| beam);
+        let directories = crate::scene::directory_rays_for_test(&simulation);
+        for beam in simulation
+            .beams()
+            .into_iter()
+            .chain(files)
+            .chain(directories)
+        {
+            let avatar = &simulation.avatars()[beam.author];
+            let Some(&(position, presence)) = previous.get(beam.author) else {
+                continue;
+            };
+            assert_eq!(
+                avatar.position, position,
+                "frame {frame}: {} moved",
+                avatar.name
+            );
+            assert!(
+                avatar.presence >= presence,
+                "frame {frame}: {} faded",
+                avatar.name
+            );
+            observed += 1;
+        }
+        previous.clear();
+        previous.extend(
+            simulation
+                .avatars()
+                .iter()
+                .map(|a| (a.position, a.presence)),
+        );
+    }
+    assert!(observed > 0);
+}
