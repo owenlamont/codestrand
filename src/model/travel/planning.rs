@@ -1045,6 +1045,33 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_walk_tries_an_earlier_departure() {
+        let mut capture = fixture();
+        for pose in &mut capture.poses[0][201..400] {
+            pose.point = Vec2::new(-100.0, 51.0);
+        }
+        let speed = 480.0;
+        let (mut planned, _) =
+            trips(&capture, speed, crate::model::BotTravel::Walk, true);
+        align_arrivals(&capture, &mut planned, speed);
+        let trip = &planned[0];
+        assert_eq!(trip.departure, 200);
+
+        let retry = timed_approach(
+            &capture,
+            trip,
+            last_release(&capture, trip),
+            speed,
+            &mut Router::default(),
+            None,
+        )
+        .unwrap();
+
+        assert!(retry.departure < trip.departure);
+        assert_eq!(retry.arrival, trip.arrival);
+    }
+
+    #[test]
     fn an_idle_contributor_can_return_to_a_different_seat_without_a_walk() {
         let mut capture = fixture();
         let next = capture.services.last_mut().unwrap();
