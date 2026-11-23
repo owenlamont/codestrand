@@ -2790,6 +2790,44 @@ mod tests {
     }
 
     #[test]
+    fn a_newly_assigned_dock_blocks_later_dock_choices() {
+        let mut sim = Simulation::new(
+            vec![crate::timeline::synthetic().remove(0)],
+            &Options::default(),
+            &Theme::neon(),
+            &Mappings::default(),
+        );
+        sim.advance_to(60, 60);
+        let mut state = sim.state.clone();
+        let gutter = state.layout.repositories[0].gutter.unwrap();
+        let tick = state.tick;
+        let first = &mut state.avatars[0];
+        first.presence = 1.0;
+        first.transmitting = false;
+        first.position = super::world(Dock::new(1, 0.75).on_network(gutter));
+        let mut second = first.clone();
+        second.slot.as_mut().unwrap().dock = Dock::new(2, 0.5);
+        second.dock_since = 1;
+
+        let assigned = Dock::new(1, 0.25);
+        first.slot.as_mut().unwrap().dock = assigned;
+        first.dock_since = tick;
+        state.avatars.push(second);
+
+        let clearance = state.incumbent_discs(
+            1,
+            &[1],
+            sim.seconds(),
+            &[1.0, 1.0],
+            state.avatar_radius(),
+            &[false, false],
+        );
+
+        assert_eq!(clearance.len(), 1);
+        assert!(clearance[0].center().distance(assigned.on_network(gutter)) < 1e-4);
+    }
+
+    #[test]
     fn a_fading_ring_member_keeps_its_seat_until_it_disappears() {
         let mut sim = Simulation::new(
             vec![crate::timeline::synthetic().remove(0)],
