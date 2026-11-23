@@ -132,7 +132,6 @@ fn hidden_halo_stays_untouched_and_updates_when_glowing() {
 fn unchanged_file_and_structure_transforms_do_not_change() {
     let (mut world, palette, mut pools, simulation) =
         fixture(vec![Event::at(0, vec![added("src/main.rs")])]);
-    pools.grid.push(world.spawn(Transform::default()).id());
     pools.lod.glyphs = vec![0];
     pools.lod.glyph[0] = 1.0;
     sync_structure(&mut world, &palette, &mut pools, &simulation);
@@ -142,7 +141,6 @@ fn unchanged_file_and_structure_transforms_do_not_change() {
         .chain(&pools.directories)
         .chain(&pools.edges)
         .chain(&pools.aggregates)
-        .chain(&pools.grid)
         .copied()
         .collect();
     world.clear_trackers();

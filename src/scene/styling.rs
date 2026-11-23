@@ -2,11 +2,8 @@ use std::hash::BuildHasher as _;
 
 use crate::{model::Simulation, theme::Theme};
 use bevy::{
-    asset::RenderAssetUsages,
-    image::ImageSampler,
     platform::hash::FixedHasher,
     prelude::*,
-    render::render_resource::{Extent3d, TextureDimension, TextureFormat},
     text::{
         ComputedTextBlock, FontAtlasKey, FontAtlasSet, GlyphCacheKey, ScaleCx,
         add_glyph_to_atlas, get_outlined_glyph_texture,
@@ -294,18 +291,11 @@ pub(super) fn edge_segments(theme: &Theme, from: Vec3, to: Vec3) -> Vec<(Vec3, V
         })
         .collect()
 }
-#[derive(Component)]
-pub(super) struct Ground;
-
 pub(super) const BEAM_SEGMENTS: usize = 16;
 
 #[derive(Resource)]
 pub(super) struct Styles {
-    backdrops: Vec<(crate::theme::ThemeName, Handle<Image>)>,
-    backdrop: Entity,
-    backdrop_material: Handle<StandardMaterial>,
     territory_mesh: Handle<Mesh>,
-    grounds: Vec<(crate::theme::ThemeName, Handle<Image>)>,
     fonts: Vec<(FontStyle, Handle<Font>)>,
     pub(super) beams: Vec<Handle<StandardMaterial>>,
     pub(super) territories: Vec<Handle<StandardMaterial>>,
@@ -338,54 +328,11 @@ pub(super) fn seed_replay_pools(world: &mut World) -> [Entity; 2] {
     [territory, leader]
 }
 
-fn svg_image(svg: &str) -> Image {
-    let tree = resvg::usvg::Tree::from_str(svg, &resvg::usvg::Options::default())
-        .expect("theme ground SVG is valid");
-    let mut pixels = resvg::tiny_skia::Pixmap::new(1024, 1024).expect("ground size");
-    resvg::render(
-        &tree,
-        resvg::tiny_skia::Transform::identity(),
-        &mut pixels.as_mut(),
-    );
-    let mut image = Image::new_uninit(
-        Extent3d {
-            width: 1024,
-            height: 1024,
-            depth_or_array_layers: 1,
-        },
-        TextureDimension::D2,
-        TextureFormat::Rgba8UnormSrgb,
-        RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
-    );
-    image.data = Some(pixels.take());
-    image.sampler = ImageSampler::linear();
-    image
-}
-
 pub(super) fn setup(world: &mut World, theme: &Theme) {
     let territory_mesh = world.resource_mut::<Assets<Mesh>>().add(Annulus::new(
         theme.avatar_radius * 0.99,
         theme.avatar_radius,
     ));
-    let backdrops = Vec::new();
-    let backdrop_material =
-        world
-            .resource_mut::<Assets<StandardMaterial>>()
-            .add(StandardMaterial {
-                unlit: true,
-                alpha_mode: AlphaMode::Blend,
-                ..default()
-            });
-    let mesh = world.resource::<Palette>().glyph_mesh.clone();
-    let backdrop = world
-        .spawn((
-            Mesh3d(mesh),
-            MeshMaterial3d(backdrop_material.clone()),
-            Transform::default(),
-            Visibility::Hidden,
-        ))
-        .id();
-    let grounds = Vec::new();
     let fonts = [
         (
             FontStyle::Tech,
@@ -418,10 +365,6 @@ pub(super) fn setup(world: &mut World, theme: &Theme) {
     let territories = (0..36).map(|_| materials.add(theme.edge.clone())).collect();
     world.insert_resource(Styles {
         territory_mesh,
-        backdrops,
-        backdrop,
-        backdrop_material,
-        grounds,
         fonts,
         beams,
         territories,
@@ -493,43 +436,7 @@ pub(super) fn ring_mesh(theme: &Theme, radii: Vec2) -> Mesh {
     mesh
 }
 
-pub(super) fn raster_images(theme: &Theme) -> (Option<Image>, Option<Image>) {
-    (
-        theme
-            .textured_ground
-            .then(|| svg_image(&theme.ground_svg())),
-        theme.backdrop_svg().map(svg_image),
-    )
-}
-
-pub(super) fn install_images(
-    world: &mut World,
-    name: crate::theme::ThemeName,
-    ground: Option<Image>,
-    backdrop: Option<Image>,
-) {
-    let ground = ground.map(|image| world.resource_mut::<Assets<Image>>().add(image));
-    let backdrop =
-        backdrop.map(|image| world.resource_mut::<Assets<Image>>().add(image));
-    let mut styles = world.resource_mut::<Styles>();
-    if let Some(image) = ground {
-        styles.grounds.push((name, image));
-    }
-    if let Some(image) = backdrop {
-        styles.backdrops.push((name, image));
-    }
-}
-
 pub(super) fn apply(world: &mut World, theme: &Theme) {
-    let styles = world.resource::<Styles>();
-    if (theme.textured_ground
-        && !styles.grounds.iter().any(|(name, _)| *name == theme.name))
-        || (theme.backdrop_svg().is_some()
-            && !styles.backdrops.iter().any(|(name, _)| *name == theme.name))
-    {
-        let (ground, backdrop) = raster_images(theme);
-        install_images(world, theme.name, ground, backdrop);
-    }
     let cameras: Vec<_> = world
         .query_filtered::<Entity, With<SceneCamera>>()
         .iter(world)
@@ -572,10 +479,7 @@ pub(super) fn apply(world: &mut World, theme: &Theme) {
             background.0 = theme.label_background();
             *border = theme.label_border();
         }
-        let floor = world.resource::<Palette>().floor.clone();
         let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
-        materials.get_mut(&styles.backdrop_material).expect("backdrop").base_color_texture = styles.backdrops.iter().find(|(name, _)| *name == theme.name).map(|(_, texture)| texture.clone());
-        materials.get_mut(&floor).expect("floor").base_color_texture = styles.grounds.iter().find(|(name, _)| *name == theme.name).map(|(_, image)| image.clone());
         for (index, handle) in styles.beams.iter().enumerate() {
             let mut material = materials.get_mut(handle).expect("beam style");
             *material = theme.beam_material(u16::try_from(index).expect("16 segments"));
@@ -613,64 +517,15 @@ pub(super) fn beam_segments(
     segments
 }
 
-pub(super) fn ground(
+pub(super) fn sync_territories(
     world: &mut World,
     palette: &Palette,
     hues: &[usize],
     simulation: &Simulation,
 ) {
-    place_ground(world, simulation);
     let theme = simulation.theme();
     world.resource_scope(|world, mut styles: Mut<Styles>| {
         territories(world, palette, hues, simulation, &mut styles, theme);
-    });
-}
-
-pub(super) fn place_ground(world: &mut World, simulation: &Simulation) {
-    let theme = simulation.theme();
-    let (focus, distance) = simulation.view();
-    let (eye, focus) = world.get_resource::<crate::camera::PreviewCamera>().map_or(
-        (focus + crate::model::view_direction() * distance, focus),
-        crate::camera::PreviewCamera::pose,
-    );
-    let distance = eye.distance(focus);
-
-    let (ground_focus, coverage) =
-        if world.contains_resource::<crate::camera::PreviewCamera>() {
-            let far = world
-                .query_filtered::<&Projection, With<SceneCamera>>()
-                .iter(world)
-                .find_map(|projection| match projection {
-                    Projection::Perspective(p) => Some(p.far),
-                    _ => None,
-                })
-                .unwrap_or(1000.0);
-            (eye, far * 4.0)
-        } else {
-            (focus, distance * 2.5)
-        };
-    for mut transform in world
-        .query_filtered::<&mut Transform, With<Ground>>()
-        .iter_mut(world)
-    {
-        *transform = Transform::from_xyz(ground_focus.x, -0.18, ground_focus.z)
-            .with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2))
-            .with_scale(Vec3::splat(coverage));
-    }
-    world.resource_scope(|world, styles: Mut<Styles>| {
-        let backdrop_visible = theme.backdrop_svg().is_some();
-        let horizontal = world
-            .get_resource::<crate::camera::PreviewCamera>()
-            .map_or(Vec3::Z, |camera| camera.rotation() * Vec3::Z)
-            .with_y(0.0)
-            .normalize_or(Vec3::Z);
-        let position = focus - horizontal * distance * 0.8 + Vec3::Y * distance * 0.12;
-        *world
-            .get_mut::<Transform>(styles.backdrop)
-            .expect("backdrop transform") = Transform::from_translation(position)
-            .looking_to(position - eye, Vec3::Y)
-            .with_scale(Vec3::splat(distance * 0.6));
-        set_visible(world, styles.backdrop, backdrop_visible);
     });
 }
 
@@ -1209,62 +1064,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn preview_ground_covers_far_plane_and_backdrop_faces_orbited_camera() {
-        let simulation = Simulation::new(
-            crate::timeline::synthetic(),
-            &crate::model::Options::default(),
-            &ThemeName::Outrun.build(),
-            &crate::contributors::Mappings::default(),
-        );
-        let mut world = World::new();
-        world.insert_resource(super::super::SceneTarget(
-            Handle::<Image>::default().into(),
-        ));
-        world.insert_resource(super::super::Title("test".to_owned()));
-        world.insert_resource(super::super::Playback(simulation));
-        world.init_resource::<super::super::Pools>();
-        world.init_resource::<Assets<Mesh>>();
-        world.init_resource::<Assets<Image>>();
-        world.init_resource::<Assets<StandardMaterial>>();
-        super::super::setup(&mut world);
-        let view = world.resource::<super::super::Playback>().0.view();
-        let mut camera = crate::camera::PreviewCamera::new(view);
-        camera.update(
-            &crate::camera::Input {
-                pan: Vec2::new(200.0, -100.0),
-                orbit: Vec2::new(1.0, -0.3),
-                zoom: -4.0,
-                ..default()
-            },
-            view,
-            &[],
-            1.0,
-        );
-        let (eye, _) = camera.pose();
-        world.insert_resource(camera);
-        world.resource_scope(|world, playback: Mut<super::super::Playback>| {
-            place_ground(world, &playback.0);
-        });
-        let ground = world
-            .query_filtered::<&Transform, With<Ground>>()
-            .single(&world)
-            .unwrap();
-        assert_eq!(ground.translation.x, eye.x);
-        assert_eq!(ground.translation.z, eye.z);
-        assert!(ground.scale.x >= 4000.0);
-        let backdrop = world
-            .get::<Transform>(world.resource::<Styles>().backdrop)
-            .unwrap();
-        assert!(
-            backdrop
-                .local_z()
-                .dot((eye - backdrop.translation).normalize())
-                > 0.999
-        );
-        assert_ne!(eye, view.0 + crate::model::view_direction() * view.1);
-    }
-
     fn reference_owner(layout: &crate::layout::Layout, mut owner: usize) -> usize {
         while let Some(parent) = layout.dir(owner).parent.filter(|&parent| parent != 0)
         {
@@ -1407,27 +1206,5 @@ mod tests {
         }
         let arch = beam_segments(&ThemeName::Outrun.build(), from, to);
         assert!(arch[7].1.y > from.lerp(to, 0.5).y);
-    }
-
-    #[test]
-    fn grounds_render_opaque_and_have_spatial_detail() {
-        for name in ThemeName::ALL.into_iter().skip(2) {
-            let image = svg_image(&name.build().ground_svg());
-            let pixels = image.data.unwrap();
-            assert!(
-                pixels
-                    .as_chunks::<4>()
-                    .0
-                    .iter()
-                    .all(|pixel| pixel[3] == 255)
-            );
-            assert!(
-                pixels
-                    .as_chunks::<4>()
-                    .0
-                    .iter()
-                    .any(|pixel| pixel != &pixels[..4])
-            );
-        }
     }
 }
