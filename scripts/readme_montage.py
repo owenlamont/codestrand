@@ -141,6 +141,7 @@ _SHOTS: Final = (
             f"--camera-path={_CAMERAS / 'behind-avatar.toml'}",
         ),
         first_frame=48,
+        # The fixed-point pan lands on the last included frame (227).
         frames=180,
     ),
 )

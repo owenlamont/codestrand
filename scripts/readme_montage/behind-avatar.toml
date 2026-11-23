@@ -18,6 +18,11 @@ focus = { directory = "src" }
 up = [0.0, 1.0, 0.0]
 
 [[key]]
-frame = 330
-eye = { avatar = "Owen Lamont", offset = [-3.5, 1.0, 8.0] }
-focus = { directory = "src" }
+frame = 151
+eye = { point = [-1.492094, 4.6, 28.275791] }
+focus = { point = [-14.433971, -0.05, -9.056826] }
+
+[[key]]
+frame = 227
+eye = { point = [-6.850124, 4.443032, 28.478685] }
+focus = { point = [-15.982212, -0.05, -9.413008] }
