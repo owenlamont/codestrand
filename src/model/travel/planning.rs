@@ -1132,6 +1132,39 @@ mod tests {
     }
 
     #[test]
+    fn a_displaced_avatar_can_join_the_gutter_in_its_first_step() {
+        let mut capture = fixture();
+        let (planned, _) = trips(&capture, 480.0, crate::model::BotTravel::Walk, true);
+        let trip = &planned[0];
+        let waiting = Vec2::new(-105.0, 25.0);
+        capture.obstacles = Some(super::super::WalkObstacles {
+            waiting: [(
+                (trip.commit, trip.author),
+                super::super::WaitingPoses {
+                    begin: 0,
+                    points: vec![Some(waiting); 400],
+                },
+            )]
+            .into(),
+            ..Default::default()
+        });
+
+        let repair = |speed| {
+            timed_approach(
+                &capture,
+                trip,
+                last_release(&capture, trip),
+                speed,
+                &mut Router::default(),
+                None,
+            )
+        };
+
+        assert_eq!(repair(480.0).unwrap().source, Vec2::new(-100.0, 25.0));
+        assert!(repair(240.0).is_none());
+    }
+
+    #[test]
     fn an_idle_contributor_can_return_to_a_different_seat_without_a_walk() {
         let mut capture = fixture();
         let next = capture.services.last_mut().unwrap();
