@@ -647,22 +647,6 @@ impl Plan {
         self.walking_trip(author, tick).is_some()
     }
 
-    pub(super) fn walking_forecast(
-        &self,
-        author: usize,
-        tick: u64,
-        ahead: [u64; 3],
-    ) -> impl Iterator<Item = (u64, Vec2)> {
-        self.walking_trip(author, tick)
-            .into_iter()
-            .flat_map(move |trip| {
-                ahead.map(|offset| {
-                    let sample = (tick + offset).min(trip.arrival - 1);
-                    (sample - tick, trip.sample(sample).0)
-                })
-            })
-    }
-
     fn walking_trip(&self, author: usize, tick: u64) -> Option<&Trip> {
         self.trips.iter().find(|t| {
             t.author == author
