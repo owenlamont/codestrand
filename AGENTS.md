@@ -81,19 +81,23 @@ Explore steady neon glow without strobing; visual effects must preserve readabil
 
 ### Motion budget
 
-Motion must earn its place: it should show history, not decoration.
+Apply these priorities in order when planning contributor motion.
 
-- Spend motion on content: rays, heat and file changes are what viewers watch.
-- Move avatars only to serve a commit, by the shortest gutter path. Never wander,
-  wait or detour.
-- Spread avatars committing to one repository around its tile rather than bunching
-  them, even at some travel cost.
-- Never park or commit with an avatar on top of another visible avatar; brief
-  overlap while travelling is acceptable.
-- Hold text still. Names and titles move only to avoid imminent occlusion, rarely,
-  planned ahead to minimise changes.
-- Prefer brief occlusion to fast or oscillating text motion.
-- Keep whole-view motion such as camera and tile reflow slow and rare to avoid
-  motion sickness.
-- Too little motion is dull; inefficient or excessive motion looks wrong. Judge new
-  animation in an exported movie, not by its metrics alone.
+1. Keep planning bounded and rays local. Every arriving file and directory travels
+   on a visible ray for its whole flight. In world coordinates, the contributor is
+   beside the target repository and the ray crosses no other tile. Keep the
+   contributor stationary and visible until its last arrival lands. Report the
+   limiting event if the hard constraints cannot fit within the planning bounds.
+2. Keep motion smooth and within the configured speed. Avoid fast reversals,
+   repeated seat swaps and jitter. Keep names and titles steady and whole-view
+   motion slow and rare.
+3. Move avatars to serve commits. Prefer the shortest usable gutter route, progress
+   once underway and little added playback delay. An extra walk around a tile or
+   a delayed departure can make room for requirements with higher priority.
+4. Spread contributors around the repository and avoid sustained overlap between
+   seated avatars where space permits. Brief overlap as one avatar passes another
+   is acceptable. Avoid covering avatars or labels when that can be done without
+   compromising smoother motion.
+
+Spend most motion on rays, heat and file changes. Check new motion in an exported
+movie alongside the metrics.
