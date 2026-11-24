@@ -1963,19 +1963,21 @@ fn sync_structure(
         let (grey, alpha, rise) = simulation.repository_effect(dir.repository);
         let detail = pools.lod.detail[index];
         let target = ground(dir.position).with_y(rise - 0.05);
-        let (position, size) = directory_arrival_position(
+        let pose = directory_arrival_position(
             simulation,
             &mut pools.directory_arrival_beams,
             index,
             target,
             detail > 0.0,
         );
-        if let Some(mut transform) = world.get_mut::<Transform>(*entity) {
+        if let Some((position, size)) = pose
+            && let Some(mut transform) = world.get_mut::<Transform>(*entity)
+        {
             transform.set_if_neq(Transform::from_translation(position).with_scale(
                 simulation.theme().directory_node_scale * detail * dir.scale * size,
             ));
         }
-        set_visible(world, *entity, detail > 0.0);
+        set_visible(world, *entity, detail > 0.0 && pose.is_some());
         fade(world, *entity, grey, alpha);
     }
     hide_rest(world, pool, dirs.len());
@@ -1993,26 +1995,28 @@ fn sync_structure(
         set_mesh(world, entity, palette.directory_folder(slot, dir.depth));
         set_material(world, entity, palette.directory(slot, dir.depth));
         let (grey, alpha, rise) = simulation.repository_effect(dir.repository);
-        if let Some(mut transform) = world.get_mut::<Transform>(entity) {
-            let mut folder = folder_transform(
-                simulation.theme(),
-                dir.position,
-                pools.lod.size[index],
-                pools.lod.glyph[index],
-            );
-            folder.translation.y += rise;
-            let (position, size) = directory_arrival_position(
-                simulation,
-                &mut pools.directory_arrival_beams,
-                index,
-                folder.translation,
-                true,
-            );
+        let mut folder = folder_transform(
+            simulation.theme(),
+            dir.position,
+            pools.lod.size[index],
+            pools.lod.glyph[index],
+        );
+        folder.translation.y += rise;
+        let pose = directory_arrival_position(
+            simulation,
+            &mut pools.directory_arrival_beams,
+            index,
+            folder.translation,
+            true,
+        );
+        if let Some((position, size)) = pose
+            && let Some(mut transform) = world.get_mut::<Transform>(entity)
+        {
             folder.translation = position;
             folder.scale *= size;
             transform.set_if_neq(folder);
         }
-        set_visible(world, entity, true);
+        set_visible(world, entity, pose.is_some());
         fade(world, entity, grey, alpha);
     }
     hide_rest(world, pool, glyphs.len());
@@ -2027,15 +2031,16 @@ fn directory_arrival_position(
     index: usize,
     target: Vec3,
     visible: bool,
-) -> (Vec3, f32) {
+) -> Option<(Vec3, f32)> {
     let Some((beam, position, progress)) = simulation.directory_arrival(index, target)
     else {
-        return (target, 1.0);
+        return Some((target, 1.0));
     };
-    if visible && let Some(beam) = beam {
+    let beam = beam?;
+    if visible {
         beams.push(beam);
     }
-    (position, 0.15 + 0.85 * progress)
+    Some((position, 0.15 + 0.85 * progress))
 }
 
 #[cfg(test)]
@@ -2043,7 +2048,7 @@ pub(super) fn directory_rays_for_test(simulation: &Simulation) -> Vec<model::Bea
     let mut beams = Vec::new();
     for (index, dir) in simulation.layout().dirs() {
         let rise = simulation.repository_effect(dir.repository).2;
-        directory_arrival_position(
+        let _ = directory_arrival_position(
             simulation,
             &mut beams,
             index,
