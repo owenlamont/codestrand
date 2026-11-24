@@ -12,6 +12,9 @@ All notable changes to Codestrand are documented here, following
 - Keep contributor rays beside their target repository and hold contributors in place
   until file and directory arrivals land. New directories stay hidden until their
   arrival rays launch. ([PR #233](https://github.com/owenlamont/codestrand/pull/233))
+- Fade idle contributors shortly after their last visible activity while retaining
+  their berth until inferred departure.
+  ([PR #233](https://github.com/owenlamont/codestrand/pull/233))
 - Keep co-author rings facing the camera and preserve the selected theme and diff
   colours across preview loops. ([PR #233](https://github.com/owenlamont/codestrand/pull/233))
 - Draw the Outrun sun sharply at the world horizon.
