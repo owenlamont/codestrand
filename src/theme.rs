@@ -273,8 +273,8 @@ impl Theme {
             directory_edge_widths: vec![0.20, 0.15, 0.11, 0.08],
             directory_edge_height: 0.025,
             label: Color::srgb(0.72, 0.83, 0.9),
-            diff_added: Color::srgb(0.25, 0.85, 0.42),
-            diff_removed: Color::srgb(0.95, 0.28, 0.32),
+            diff_added: candidates::color(0x0064_ecff),
+            diff_removed: candidates::color(0x00ff_88aa),
             label_shadow: TextShadow {
                 offset: Vec2::splat(1.5),
                 color: Color::srgb(0.008, 0.016, 0.03),
@@ -323,8 +323,8 @@ impl Theme {
         }
         theme.heading = green;
         theme.label = Color::srgb(0.56, 0.85, 0.63);
-        theme.diff_added = Color::srgb(0.45, 0.92, 0.5);
-        theme.diff_removed = Color::srgb(0.85, 0.38, 0.3);
+        theme.diff_added = candidates::color(0x0065_ff78);
+        theme.diff_removed = candidates::color(0x00b2_c99a);
         theme.label_emphasis = Color::srgb(0.77, 1.0, 0.82);
         theme.label_landmark = Color::srgb(0.38, 0.78, 0.48);
         theme.label_shadow.color = dark;

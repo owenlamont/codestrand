@@ -991,7 +991,7 @@ fn setup(world: &mut World) {
             TextFont::from_font_size(24.0),
             UiTransform::default(),
             TextColor(theme.diff_added),
-            BackgroundColor(theme.detail_label_background()),
+            BackgroundColor(theme.diff_background()),
             theme.label_shadow,
             TextLayout::new(Justify::Left, bevy::text::LineBreak::NoWrap),
             Node {
@@ -2887,7 +2887,7 @@ fn diff_samples(world: &mut World, camera: &Camera, transform: &GlobalTransform)
     let playback = &world.resource::<Playback>().0;
     let theme = playback.theme();
     let sample_shadow = theme.label_shadow;
-    let sample_backing = theme.detail_label_background();
+    let sample_backing = theme.diff_background();
 
     let mut replacements = Vec::new();
     let wanted: Vec<_> = playback

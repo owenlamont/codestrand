@@ -162,11 +162,11 @@ pub(super) fn build(name: ThemeName) -> Theme {
     };
     apply_palette(&mut t, ground, ink, accent, fragment, hues);
     let (added, removed) = match name {
-        ThemeName::Outrun => (0x0066_ffaa, 0x00ff_709e),
-        ThemeName::Blueprint => (0x008e_ffca, 0x00ff_b4a6),
-        ThemeName::RetroDesktop => (0x00d8_ffdf, 0x00ff_efef),
-        ThemeName::Atlas => (0x001c_643b, 0x00a1_292d),
-        ThemeName::Forge => (0x008c_e8aa, 0x00ff_8a78),
+        ThemeName::Outrun => (0x0059_f1ff, 0x00ff_79c7),
+        ThemeName::Blueprint => (0x00de_f6ff, 0x00ff_e073),
+        ThemeName::RetroDesktop => (0x0000_0080, 0x0080_0000),
+        ThemeName::Atlas => (0x0024_536f, 0x0085_402b),
+        ThemeName::Forge => (0x00ff_e19a, 0x00ff_a38c),
         ThemeName::Neon | ThemeName::Phosphor => unreachable!("candidate theme"),
     };
     t.diff_added = color(added);
@@ -280,6 +280,18 @@ impl Theme {
         } else {
             background
         }
+    }
+
+    pub(crate) fn diff_background(&self) -> Color {
+        color(match self.name {
+            ThemeName::Neon => 0x0008_1422,
+            ThemeName::Phosphor => 0x0006_130a,
+            ThemeName::Outrun => 0x0018_0929,
+            ThemeName::Blueprint => 0x0009_284d,
+            ThemeName::RetroDesktop => 0x00c0_c0c0,
+            ThemeName::Atlas => 0x00f0_ebdd,
+            ThemeName::Forge => 0x001b_100b,
+        })
     }
 
     pub(crate) fn label_border(&self) -> BorderColor {
