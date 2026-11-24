@@ -211,6 +211,7 @@ impl Simulation {
             self.travel.require_birth_routes(options.bot_travel)?;
         }
         self.align_travel_arrivals(options);
+        self.repair_walk_departures(options, padding);
         Ok(pass)
     }
 
@@ -374,6 +375,7 @@ impl Simulation {
             state: super::SharedState(initial.clone()),
             initial,
             theme: self.theme.clone(),
+            ray_view: None,
             travel: self.travel.clone(),
             visuals: self.visuals,
             progress: crate::progress::Progress::default(),

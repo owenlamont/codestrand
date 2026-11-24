@@ -180,7 +180,7 @@ impl PreviewCamera {
     fn cycle(&mut self, avatars: &[Avatar]) {
         let visible: Vec<_> = avatars
             .iter()
-            .filter(|avatar| avatar.presence > 0.0)
+            .filter(|avatar| avatar.display_presence() > 0.0)
             .collect::<Vec<_>>();
         if visible.is_empty() {
             return;
@@ -704,7 +704,14 @@ mod tests {
             .iter()
             .map(|(name, email)| Event {
                 author: timeline::Identity::new(name, email),
-                ..Event::at(0, Vec::new())
+                ..Event::at(
+                    0,
+                    vec![timeline::FileChange {
+                        path: format!("{name}-{email}.rs"),
+                        kind: timeline::Kind::Added,
+                        ..Default::default()
+                    }],
+                )
             })
             .collect::<Vec<_>>();
         let mut simulation = Simulation::new(

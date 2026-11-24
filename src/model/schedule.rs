@@ -5,6 +5,18 @@ use crate::timeline::Event;
 
 pub(crate) const BIRTH_TICKS: u64 = 90;
 
+pub(super) fn arrival_ticks() -> u64 {
+    u64::from(super::travel::seconds_ticks(super::ARRIVAL_SECONDS, true))
+}
+
+fn creates_arrivals(event: &Event) -> bool {
+    use crate::timeline::Kind;
+    event
+        .changes
+        .iter()
+        .any(|change| matches!(change.kind, Kind::Added | Kind::Moved { .. }))
+}
+
 pub(super) fn padding_at(padding: &[(usize, u32)], index: usize) -> u32 {
     padding
         .iter()
@@ -19,6 +31,7 @@ pub(crate) struct Schedule {
     pub(super) birth_protections: Vec<(usize, usize)>,
     pub(super) walk_protections: Vec<(usize, usize)>,
     motion_protections: Vec<(usize, u64)>,
+    ray_holds: Vec<(usize, usize, u64)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -26,6 +39,7 @@ struct Service {
     tick: u64,
     padding: u32,
     birth: bool,
+    can_form_ring: bool,
     tile_floor: u64,
 }
 
@@ -98,14 +112,22 @@ impl Schedule {
     pub(super) fn replay_bytes(&self) -> u128 {
         use super::checkpoint_memory::{buffer_bytes, retained_fields};
 
-        let (starts, services, birth_protections, walk_protections, motion_protections) = retained_fields!(self, Schedule {
-            starts, services, birth_protections, walk_protections, motion_protections;
+        let (
+            starts,
+            services,
+            birth_protections,
+            walk_protections,
+            motion_protections,
+            ray_holds,
+        ) = retained_fields!(self, Schedule {
+            starts, services, birth_protections, walk_protections, motion_protections, ray_holds;
         });
         buffer_bytes::<Time>(starts.capacity())
             + buffer_bytes::<Service>(services.capacity())
             + buffer_bytes::<(usize, usize)>(birth_protections.capacity())
             + buffer_bytes::<(usize, usize)>(walk_protections.capacity())
             + buffer_bytes::<(usize, u64)>(motion_protections.capacity())
+            + buffer_bytes::<(usize, usize, u64)>(ray_holds.capacity())
     }
 
     pub(super) fn for_replay(events: &[Event], options: &super::Options) -> Self {
@@ -116,13 +138,62 @@ impl Schedule {
             .collect();
         let selected = &events[range];
         let opening = seen.is_empty();
-        Self::build(
+        let mut schedule = Self::build(
             selected,
             options.seconds_per_day,
             options.max_idle_seconds,
             |_| 0,
             |index| seen.insert(selected[index].repository) && !(opening && index == 0),
-        )
+        );
+        let mut transmitters = std::collections::HashMap::new();
+        let mut latest_arrival = None;
+        for (index, event) in selected.iter().enumerate() {
+            let mut hold = latest_arrival
+                .filter(|&earlier| schedule.birth_starts_after(index, earlier));
+            for contributor in event.participants() {
+                if let Some((repository, earlier)) =
+                    transmitters.get(&contributor.key).copied()
+                    && repository != event.repository
+                {
+                    hold = hold.max(Some(earlier));
+                    transmitters.remove(&contributor.key);
+                }
+            }
+            if let Some(author) = &event.contributor
+                && creates_arrivals(event)
+            {
+                transmitters.insert(&author.key, (event.repository, index));
+                latest_arrival = Some(index);
+            }
+            if let Some(earlier) = hold {
+                let settle = if schedule.birth_starts_after(index, earlier) {
+                    BIRTH_TICKS + 1
+                } else {
+                    0
+                };
+                schedule.ray_holds.push((index, earlier, settle));
+            }
+        }
+        schedule
+    }
+
+    pub(super) fn protect_opening_rays(&mut self, events: &[Event], end: u64) {
+        // Overlapping births can move an opening gutter past a stationary source.
+        let mut latest_arrival = None;
+        for (index, (event, service)) in events.iter().zip(&self.services).enumerate() {
+            if service.tick > end {
+                break;
+            }
+            if service.birth
+                && let Some(earlier) = latest_arrival
+            {
+                self.ray_holds.push((index, earlier, BIRTH_TICKS + 1));
+            }
+            if creates_arrivals(event) {
+                latest_arrival = Some(index);
+            }
+        }
+        self.ray_holds.sort_unstable_by_key(|&(commit, ..)| commit);
     }
 
     pub(super) fn protect_walk_after(&mut self, commit: usize) -> bool {
@@ -150,6 +221,7 @@ impl Schedule {
         !self.birth_protections.is_empty()
             || !self.walk_protections.is_empty()
             || !self.motion_protections.is_empty()
+            || !self.ray_holds.is_empty()
             || padding.iter().any(|&(_, ticks)| ticks > 0)
     }
 
@@ -191,6 +263,10 @@ impl Schedule {
         let mut protections = self.birth_protections.iter().peekable();
         let mut walks = self.walk_protections.iter().peekable();
         let mut motions = self.motion_protections.iter().peekable();
+        let mut rays = self.ray_holds.iter().peekable();
+        let ray_ticks = arrival_ticks() + super::travel::FADE_TICKS;
+        let ring_ticks =
+            u64::from(super::travel::seconds_ticks(super::DISBAND, false)) + 1;
         let mut tile_floor = 0;
         let starts = self.starts[..len]
             .iter()
@@ -223,11 +299,23 @@ impl Schedule {
                     tick = tick.saturating_add(remaining);
                     tile_floor = tile_floor.max(end);
                 }
+                let mut ready = tick;
+                while let Some(&(_, earlier, settle)) =
+                    rays.next_if(|&&(commit, ..)| commit == index)
+                {
+                    let earlier = &services[earlier];
+                    let prelude = u64::from(earlier.can_form_ring) * ring_ticks;
+                    ready = ready
+                        .max(earlier.tick.saturating_add(ray_ticks + settle + prelude));
+                }
+                extra = extra.saturating_add(ready - tick);
+                tick = ready;
                 let start = start.after(tick_time(extra));
                 services.push(Service {
                     tick,
                     padding: service.padding.saturating_add(wait),
                     birth: service.birth,
+                    can_form_ring: service.can_form_ring,
                     tile_floor,
                 });
                 if first_tick(start) == tick || tick == u64::MAX {
@@ -243,7 +331,14 @@ impl Schedule {
             birth_protections: Vec::new(),
             walk_protections: Vec::new(),
             motion_protections: Vec::new(),
+            ray_holds: Vec::new(),
         }
+    }
+
+    fn birth_starts_after(&self, birth: usize, earlier: usize) -> bool {
+        let service = &self.services[birth];
+        service.birth
+            && self.services[earlier].tick.saturating_add(BIRTH_TICKS) < service.tick
     }
 
     pub(super) fn births(&self) -> impl Iterator<Item = (usize, u64)> + '_ {
@@ -253,6 +348,19 @@ impl Schedule {
             .filter_map(|(index, service)| {
                 service.birth.then_some((index, service.tick))
             })
+    }
+
+    pub(super) fn last_ring_service(&self) -> Option<Time> {
+        let &latest = self.starts.last()?;
+        self.starts
+            .iter()
+            .zip(&self.services)
+            .rev()
+            .take_while(|&(start, _)| {
+                latest - *start <= 2.0 * super::DISBAND + tick_seconds()
+            })
+            .find(|(_, service)| service.can_form_ring)
+            .map(|(&start, _)| start + super::DISBAND + tick_seconds())
     }
 
     pub(super) fn motion_wait(&self, history: &Self, index: usize) -> u64 {
@@ -343,6 +451,7 @@ impl Schedule {
                         u32::try_from(birth_wait).expect("bounded birth wait"),
                     ),
                     birth,
+                    can_form_ring: !event.co_authors.is_empty(),
                     tile_floor: 0,
                 });
                 start
@@ -354,6 +463,7 @@ impl Schedule {
             birth_protections: Vec::new(),
             walk_protections: Vec::new(),
             motion_protections: Vec::new(),
+            ray_holds: Vec::new(),
         }
     }
 

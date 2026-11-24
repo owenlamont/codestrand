@@ -438,6 +438,7 @@ pub(super) fn reset_scene_pools(world: &mut World) {
 #[derive(PartialEq)]
 struct SyncStamp {
     seconds: model::Time,
+    ray_view: Option<model::RayView>,
     theme: crate::theme::ThemeName,
     collapse: bool,
     rate: u32,
@@ -450,6 +451,7 @@ struct SyncStamp {
 impl SyncStamp {
     fn matches(&self, simulation: &Simulation, lod: &lod::Lod) -> bool {
         self.seconds == simulation.seconds()
+            && self.ray_view == simulation.ray_view()
             && self.theme == simulation.theme().name
             && self.collapse == simulation.collapse_directories
             && self.rate == simulation.playback_multiplier().to_bits()
@@ -462,6 +464,7 @@ impl SyncStamp {
     fn new(simulation: &Simulation, lod: &lod::Lod) -> Self {
         Self {
             seconds: simulation.seconds(),
+            ray_view: simulation.ray_view(),
             theme: simulation.theme().name,
             collapse: simulation.collapse_directories,
             rate: simulation.playback_multiplier().to_bits(),
@@ -691,7 +694,8 @@ pub(super) fn preview(loading: Loading) -> anyhow::Result<()> {
         .add_systems(
             Update,
             preview_camera
-                .after(animate)
+                .after(preview_clock)
+                .before(animate)
                 .run_if(resource_exists::<Playback>),
         );
     loading::track_renderer(&mut app);
@@ -987,7 +991,7 @@ fn setup(world: &mut World) {
             TextFont::from_font_size(24.0),
             UiTransform::default(),
             TextColor(theme.diff_added),
-            BackgroundColor(theme.detail_label_background()),
+            BackgroundColor(theme.diff_background()),
             theme.label_shadow,
             TextLayout::new(Justify::Left, bevy::text::LineBreak::NoWrap),
             Node {
@@ -1034,9 +1038,16 @@ fn repository_glass_material(theme: &Theme, index: usize) -> StandardMaterial {
 }
 fn recolor_repository_regions(world: &mut World, theme: &Theme) {
     let regions: Vec<_> = world
-        .query::<(&RepositoryGlass, &MeshMaterial3d<StandardMaterial>)>()
+        .query::<(
+            &RepositoryGlass,
+            &MeshMaterial3d<StandardMaterial>,
+            Option<&LifecycleMaterial>,
+        )>()
         .iter(world)
-        .map(|(region, material)| (region.0, material.0.clone()))
+        .map(|(region, material, lifecycle)| {
+            let base = lifecycle.map_or(&material.0, |fade| &fade.original);
+            (region.0, base.clone())
+        })
         .collect();
     let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
     for (index, handle) in regions {
@@ -1481,10 +1492,13 @@ pub(super) fn animate(world: &mut World) {
         if !waiting {
             playback.0.advance_to(index, fps);
         }
+        let camera = place_camera(world, &playback.0);
+        playback
+            .0
+            .set_ray_view(model::RayView::new(camera.translation, *camera.forward()));
         world.resource_scope(|world, palette: Mut<Palette>| {
             world.resource_scope(|world, mut pools: Mut<Pools>| {
                 let simulation = &playback.0;
-                place_camera(world, simulation);
                 environment::place_ground(world);
                 sync_lod(world, &mut pools, simulation);
                 if restored
@@ -1865,9 +1879,10 @@ fn sync_directory_edges(
     let edges: Vec<_> = layout
         .dirs()
         .filter_map(|(index, dir)| {
-            if dir
-                .parent
-                .is_some_and(|parent| pools.lod.detail[parent] == 0.0)
+            if !dir.has_landed_file
+                || dir
+                    .parent
+                    .is_some_and(|parent| pools.lod.detail[parent] == 0.0)
             {
                 return None;
             }
@@ -1948,19 +1963,21 @@ fn sync_structure(
         let (grey, alpha, rise) = simulation.repository_effect(dir.repository);
         let detail = pools.lod.detail[index];
         let target = ground(dir.position).with_y(rise - 0.05);
-        let (position, size) = directory_arrival_position(
+        let pose = directory_arrival_position(
             simulation,
             &mut pools.directory_arrival_beams,
             index,
             target,
             detail > 0.0,
         );
-        if let Some(mut transform) = world.get_mut::<Transform>(*entity) {
+        if let Some((position, size)) = pose
+            && let Some(mut transform) = world.get_mut::<Transform>(*entity)
+        {
             transform.set_if_neq(Transform::from_translation(position).with_scale(
                 simulation.theme().directory_node_scale * detail * dir.scale * size,
             ));
         }
-        set_visible(world, *entity, detail > 0.0);
+        set_visible(world, *entity, detail > 0.0 && pose.is_some());
         fade(world, *entity, grey, alpha);
     }
     hide_rest(world, pool, dirs.len());
@@ -1978,26 +1995,28 @@ fn sync_structure(
         set_mesh(world, entity, palette.directory_folder(slot, dir.depth));
         set_material(world, entity, palette.directory(slot, dir.depth));
         let (grey, alpha, rise) = simulation.repository_effect(dir.repository);
-        if let Some(mut transform) = world.get_mut::<Transform>(entity) {
-            let mut folder = folder_transform(
-                simulation.theme(),
-                dir.position,
-                pools.lod.size[index],
-                pools.lod.glyph[index],
-            );
-            folder.translation.y += rise;
-            let (position, size) = directory_arrival_position(
-                simulation,
-                &mut pools.directory_arrival_beams,
-                index,
-                folder.translation,
-                true,
-            );
+        let mut folder = folder_transform(
+            simulation.theme(),
+            dir.position,
+            pools.lod.size[index],
+            pools.lod.glyph[index],
+        );
+        folder.translation.y += rise;
+        let pose = directory_arrival_position(
+            simulation,
+            &mut pools.directory_arrival_beams,
+            index,
+            folder.translation,
+            true,
+        );
+        if let Some((position, size)) = pose
+            && let Some(mut transform) = world.get_mut::<Transform>(entity)
+        {
             folder.translation = position;
             folder.scale *= size;
             transform.set_if_neq(folder);
         }
-        set_visible(world, entity, true);
+        set_visible(world, entity, pose.is_some());
         fade(world, entity, grey, alpha);
     }
     hide_rest(world, pool, glyphs.len());
@@ -2012,15 +2031,32 @@ fn directory_arrival_position(
     index: usize,
     target: Vec3,
     visible: bool,
-) -> (Vec3, f32) {
+) -> Option<(Vec3, f32)> {
     let Some((beam, position, progress)) = simulation.directory_arrival(index, target)
     else {
-        return (target, 1.0);
+        return Some((target, 1.0));
     };
+    let beam = beam?;
     if visible {
         beams.push(beam);
     }
-    (position, 0.15 + 0.85 * progress)
+    Some((position, 0.15 + 0.85 * progress))
+}
+
+#[cfg(test)]
+pub(super) fn directory_rays_for_test(simulation: &Simulation) -> Vec<model::Beam> {
+    let mut beams = Vec::new();
+    for (index, dir) in simulation.layout().dirs() {
+        let rise = simulation.repository_effect(dir.repository).2;
+        let _ = directory_arrival_position(
+            simulation,
+            &mut beams,
+            index,
+            ground(dir.position).with_y(rise - 0.05),
+            true,
+        );
+    }
+    beams
 }
 
 fn set_material(
@@ -2148,13 +2184,31 @@ fn sync_activity(
         pools.avatars.push(entity);
     }
     let scales = simulation.member_scales();
+    let groups = simulation.groups();
+    let rotation = world
+        .query_filtered::<&Transform, With<SceneCamera>>()
+        .single(world)
+        .map_or_else(
+            |_| Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
+            |camera| camera.rotation,
+        );
+    let mut rings = vec![None; avatars.len()];
+    for &(lead, centre, rim, opacity) in &groups {
+        if opacity > 0.0 {
+            rings[lead] = Some((centre, rim));
+        }
+    }
     for (index, &entity) in pools.avatars.iter().enumerate() {
         let avatar = avatars.get(index);
-        let presence = avatar.map_or(0.0, |avatar| avatar.presence);
+        let presence = avatar.map_or(0.0, model::Avatar::display_presence);
         if let (Some(avatar), Some(mut transform)) =
             (avatar, world.get_mut::<Transform>(entity))
         {
-            transform.translation = avatar.position;
+            transform.translation = group_avatar_position(
+                avatar.position,
+                rings[simulation.avatar_group_lead(index)],
+                rotation,
+            );
             transform.scale = Vec3::splat(
                 (presence
                     * simulation.scale()
@@ -2169,9 +2223,24 @@ fn sync_activity(
             fade(world, entity, avatar.grey, presence);
         }
     }
-    sync_groups(world, palette, pools, &simulation.groups());
+    sync_groups(world, palette, pools, simulation.theme(), &groups);
     styling::beams(world, palette, pools, simulation);
     sync_fragments(world, palette, pools, simulation);
+}
+
+fn group_avatar_position(
+    position: Vec3,
+    ring: Option<(Vec3, f32)>,
+    rotation: Quat,
+) -> Vec3 {
+    let Some((centre, rim)) = ring else {
+        return position;
+    };
+    let offset = position - centre;
+    if offset.length_squared() > rim * rim {
+        return position;
+    }
+    centre + rotation * Vec3::new(offset.x, -offset.z, 0.0)
 }
 
 /// Rings each parked group of a commit's contributors in its author's colour.
@@ -2179,13 +2248,17 @@ fn sync_groups(
     world: &mut World,
     palette: &Palette,
     pools: &mut Pools,
-    groups: &[(usize, Vec3, f32)],
+    theme: &Theme,
+    groups: &[(usize, Vec3, f32, f32)],
 ) {
     while pools.groups.len() < groups.len() {
+        let material = world
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial::default());
         let entity = world
             .spawn((
                 Mesh3d(palette.group_ring.clone()),
-                MeshMaterial3d(palette.avatars[0].clone()),
+                MeshMaterial3d(material),
                 Transform::default(),
                 Visibility::Hidden,
                 RenderLayers::layer(AVATAR_LAYER),
@@ -2194,9 +2267,21 @@ fn sync_groups(
             .id();
         pools.groups.push(entity);
     }
-    for (&entity, &(author, centre, rim)) in pools.groups.iter().zip(groups) {
-        let material = palette.avatars[author % palette.avatars.len()].clone();
-        world.entity_mut(entity).insert(MeshMaterial3d(material));
+    for (&entity, &(author, centre, rim, opacity)) in pools.groups.iter().zip(groups) {
+        let handle = world
+            .get::<MeshMaterial3d<StandardMaterial>>(entity)
+            .unwrap()
+            .0
+            .clone();
+        let mut material = theme.avatars[author % theme.avatars.len()].clone();
+        material.base_color = material
+            .base_color
+            .with_alpha(material.base_color.alpha() * opacity);
+        material.alpha_mode = AlphaMode::Blend;
+        *world
+            .resource_mut::<Assets<StandardMaterial>>()
+            .get_mut(&handle)
+            .unwrap() = material;
         if let Some(mut transform) = world.get_mut::<Transform>(entity) {
             transform.translation = centre;
             transform.scale = Vec3::splat(rim);
@@ -2258,7 +2343,7 @@ fn sync_fragments(
     pools.fragments = pool;
 }
 
-fn place_camera(world: &mut World, simulation: &Simulation) {
+fn place_camera(world: &mut World, simulation: &Simulation) -> Transform {
     let exporting = world.contains_resource::<ExportResolution>();
     let (focus, distance) = camera_projection(world).map_or_else(
         || simulation.view(),
@@ -2285,6 +2370,7 @@ fn place_camera(world: &mut World, simulation: &Simulation) {
             perspective.far = (distance * 4.0).max(1000.0);
         }
     }
+    pose
 }
 
 fn camera_projection(world: &mut World) -> Option<(f32, Vec2)> {
@@ -2688,7 +2774,12 @@ fn labels(world: &mut World) {
     let geometry = playback.0.theme();
     let lod = &world.resource::<Pools>().lod;
     let panes = projected_panes(&playback.0, &camera, &transform);
-    let mut avatars = playback.0.avatars().iter().filter(|a| a.presence > 0.0);
+    let mut avatars = playback
+        .0
+        .avatars()
+        .iter()
+        .enumerate()
+        .filter(|(_, avatar)| avatar.presence > 0.0);
     let wanted = playback
         .0
         .labels_with_names(
@@ -2707,16 +2798,27 @@ fn labels(world: &mut World) {
             let pixels_per_ui_unit = physical_height / reference_viewport(&camera).y;
             label.scale = label.kind.font_scale() / pixels_per_ui_unit;
             let (point, anchor) = if label.kind == model::LabelKind::Avatar {
-                let avatar = avatars.next()?;
+                let (index, avatar) = avatars.next()?;
+                if avatar.display_presence() <= 0.0 {
+                    return None;
+                }
+                label.opacity *= avatar.display_presence() / avatar.presence;
+                let position = world
+                    .resource::<Pools>()
+                    .avatars
+                    .get(index)
+                    .and_then(|&entity| world.get::<Transform>(entity))
+                    .map_or(avatar.position, |pose| pose.translation);
                 (
                     project_avatar_name(
                         &camera,
                         &transform,
                         &playback.0,
                         avatar,
+                        position,
                         &label,
                     )?,
-                    avatar.position,
+                    position,
                 )
             } else {
                 (
@@ -2765,20 +2867,17 @@ fn project_avatar_name(
     transform: &GlobalTransform,
     simulation: &Simulation,
     avatar: &model::Avatar,
+    position: Vec3,
     label: &model::Label,
 ) -> Option<Vec2> {
-    let body = project_point(camera, transform, avatar.position)?;
+    let body = project_point(camera, transform, position)?;
     let radius = simulation.theme().avatar_radius
-        * avatar.presence
+        * avatar.display_presence()
         * simulation.scale()
         * simulation.avatar_disc_scale()
         * avatar.projection_scale
         * avatar.lifecycle_scale.max(0.001);
-    let edge = project_point(
-        camera,
-        transform,
-        avatar.position + transform.right() * radius,
-    )?;
+    let edge = project_point(camera, transform, position + transform.right() * radius)?;
     let size = model::label_rect(
         Vec2::ZERO,
         &label.text,
@@ -2793,7 +2892,7 @@ fn diff_samples(world: &mut World, camera: &Camera, transform: &GlobalTransform)
     let playback = &world.resource::<Playback>().0;
     let theme = playback.theme();
     let sample_shadow = theme.label_shadow;
-    let sample_backing = theme.detail_label_background();
+    let sample_backing = theme.diff_background();
 
     let mut replacements = Vec::new();
     let wanted: Vec<_> = playback
@@ -3817,6 +3916,182 @@ mod tests {
     }
 
     #[test]
+    fn a_directory_edge_waits_for_its_first_file_to_land() {
+        let mut event = crate::timeline::synthetic().remove(0);
+        event.changes.truncate(1);
+        event.changes[0].path = "src/nested/first.rs".into();
+        event.changes[0].kind = crate::timeline::Kind::Added;
+        let mut simulation = Simulation::new(
+            vec![event],
+            &model::Options::default(),
+            &Theme::neon(),
+            &crate::contributors::Mappings::default(),
+        );
+        simulation.collapse_directories = false;
+        let frames = simulation.frames(60).unwrap();
+        let mut world = rewind_preview_world(simulation);
+        let mut saw_flight = false;
+        for frame in 0..frames {
+            world.resource_mut::<Frame>().index = frame;
+            animate(&mut world);
+            let rendered_edges = world
+                .resource::<Pools>()
+                .edges
+                .iter()
+                .filter(|&&entity| {
+                    world.get::<Visibility>(entity) == Some(&Visibility::Inherited)
+                })
+                .count();
+            let layout = world.resource::<Playback>().0.layout();
+            let Some((_, file)) = layout.files().next() else {
+                continue;
+            };
+            if file.state == crate::layout::Presence::Present {
+                assert_eq!(rendered_edges, 2);
+                assert!(saw_flight);
+                return;
+            }
+            saw_flight |= file.presence > 0.0;
+            assert_eq!(rendered_edges, 0, "frame {frame}");
+        }
+        panic!("the file never landed");
+    }
+
+    #[test]
+    fn a_new_directory_is_hidden_until_its_arrival_ray_can_launch() {
+        let mut first = crate::timeline::synthetic().remove(0);
+        first.changes.truncate(1);
+        let mut shared = first.clone();
+        shared.seconds += 86_400;
+        shared.commit = "shared".into();
+        shared.changes[0].path = "src/first.rs".into();
+        shared.co_authors.push(crate::timeline::Identity {
+            name: b"Pair".to_vec(),
+            email: b"pair@example.invalid".to_vec(),
+        });
+        let mut simulation = Simulation::new(
+            vec![first, shared],
+            &model::Options::default(),
+            &Theme::neon(),
+            &crate::contributors::Mappings::default(),
+        );
+        simulation.collapse_directories = false;
+        let frames = simulation.frames(60).unwrap();
+        let mut world = rewind_preview_world(simulation);
+        let mut waited = false;
+        for frame in 0..frames {
+            world.resource_mut::<Frame>().index = frame;
+            animate(&mut world);
+            let layout = world.resource::<Playback>().0.layout();
+            let Some((ordinal, (index, dir))) = layout
+                .dirs()
+                .enumerate()
+                .find(|(_, (_, dir))| dir.path.ends_with("/src"))
+            else {
+                continue;
+            };
+            assert!(dir.arrival.is_some());
+            let pools = world.resource::<Pools>();
+            let visible = world.get::<Visibility>(pools.directories[ordinal])
+                == Some(&Visibility::Inherited);
+            let on_ray = pools
+                .directory_arrival_beams
+                .iter()
+                .any(|beam| beam.target == model::Target::Dir(index));
+            assert_eq!(visible, on_ray, "frame {frame}");
+            if on_ray {
+                assert!(waited, "the ring should need a prelude");
+                return;
+            }
+            waited = true;
+        }
+        panic!("the directory never launched");
+    }
+
+    #[test]
+    fn coauthor_avatars_keep_their_offsets_in_the_camera_facing_circle() {
+        let mut event = crate::timeline::synthetic().remove(0);
+        event.co_authors.push(crate::timeline::Identity {
+            name: b"Pair".to_vec(),
+            email: b"pair@example.invalid".to_vec(),
+        });
+        let mut simulation = Simulation::new(
+            vec![event],
+            &model::Options::default(),
+            &Theme::neon(),
+            &crate::contributors::Mappings::default(),
+        );
+        let frame = (0..simulation.frames(60).unwrap())
+            .find(|&frame| {
+                simulation.advance_to(frame, 60);
+                simulation
+                    .groups()
+                    .first()
+                    .is_some_and(|ring| ring.3 >= 1.0)
+            })
+            .expect("an established shared circle");
+        let centre = simulation.groups()[0].1;
+        let ground_offsets: Vec<_> = simulation
+            .avatars()
+            .iter()
+            .map(|avatar| avatar.position - centre)
+            .collect();
+        let mut world = rewind_preview_world(simulation);
+        world.resource_mut::<Frame>().index = frame;
+        for rotation in [
+            Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
+            Quat::from_rotation_y(0.75) * Quat::from_rotation_x(-0.15),
+        ] {
+            world.insert_resource(ScriptedCamera(Transform::from_rotation(rotation)));
+            animate(&mut world);
+            for (&entity, offset) in world
+                .resource::<Pools>()
+                .avatars
+                .iter()
+                .zip(&ground_offsets)
+            {
+                let translation = world.get::<Transform>(entity).unwrap().translation;
+                let on_circle = rotation.inverse() * (translation - centre);
+                assert!(
+                    on_circle.abs_diff_eq(Vec3::new(offset.x, -offset.z, 0.0), 1e-4),
+                    "{on_circle:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_outrun_switch_during_tile_fade_survives_rewind() {
+        let mut simulation = Simulation::new(
+            crate::timeline::synthetic(),
+            &model::Options::default(),
+            &Theme::neon(),
+            &crate::contributors::Mappings::default(),
+        );
+        simulation.repository_boundary = crate::repositories::Boundary::Glass;
+        let mut world = rewind_preview_world(simulation);
+        let tile = world
+            .query_filtered::<Entity, With<RepositoryGlass>>()
+            .single(&world)
+            .unwrap();
+        fade(&mut world, tile, 0.7, 0.4);
+        switch_theme(&mut world, crate::theme::ThemeName::Outrun);
+        world.resource_mut::<Playback>().0.restart();
+        reset_scene_pools(&mut world);
+        animate(&mut world);
+        let material = &world
+            .get::<MeshMaterial3d<StandardMaterial>>(tile)
+            .unwrap()
+            .0;
+        let materials = world.resource::<Assets<StandardMaterial>>();
+        let outrun = crate::theme::ThemeName::Outrun.build();
+        assert_eq!(
+            materials.get(material).unwrap().base_color,
+            repository_glass_material(&outrun, 0).base_color
+        );
+    }
+
+    #[test]
     fn grey_portrait_cache_stays_flat_across_preview_rewinds() {
         let mut events = crate::timeline::synthetic();
         events.truncate(1);
@@ -3917,10 +4192,11 @@ mod tests {
         world.init_resource::<Assets<Mesh>>();
         world.init_resource::<Assets<Image>>();
         world.init_resource::<Assets<StandardMaterial>>();
-        let palette = Palette::new(&mut world, &Theme::neon());
-        let rings = [(0, Vec3::ZERO, 1.0), (1, Vec3::X, 1.0)];
+        let theme = Theme::neon();
+        let palette = Palette::new(&mut world, &theme);
+        let rings = [(0, Vec3::ZERO, 1.0, 0.5), (1, Vec3::X, 1.0, 1.0)];
         let mut pools = Pools::default();
-        sync_groups(&mut world, &palette, &mut pools, &rings);
+        sync_groups(&mut world, &palette, &mut pools, &theme, &rings);
 
         let queue_order = |world: &World, pools: &Pools| {
             let mut entities = pools.groups.clone();
@@ -3936,6 +4212,18 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
         };
+        let first = pools.groups[0];
+        let handle = &world
+            .get::<MeshMaterial3d<StandardMaterial>>(first)
+            .unwrap()
+            .0;
+        let materials = world.resource::<Assets<StandardMaterial>>();
+        assert_eq!(
+            materials.get(handle).unwrap().base_color.alpha(),
+            theme.avatars[0].base_color.alpha() * 0.5
+        );
+        assert_eq!(world.get::<Transform>(first).unwrap().scale, Vec3::ONE);
+
         let first_pass = queue_order(&world, &pools);
         world.insert_resource(pools);
         reset_scene_pools(&mut world);
@@ -3948,7 +4236,7 @@ mod tests {
         for &entity in &pools.groups {
             assert_eq!(world.get::<Visibility>(entity), Some(&Visibility::Hidden));
         }
-        sync_groups(&mut world, &palette, &mut pools, &rings);
+        sync_groups(&mut world, &palette, &mut pools, &theme, &rings);
         assert_eq!(queue_order(&world, &pools), first_pass);
     }
 

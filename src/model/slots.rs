@@ -467,6 +467,19 @@ impl Simulation {
 }
 
 impl State {
+    pub(super) fn service_corners(
+        &self,
+        repository: usize,
+        envelope: &Envelope,
+    ) -> Option<[Vec3; 4]> {
+        let tile = self.layout.repositories[repository].tile?;
+        Some(
+            envelope
+                .corners(tile)
+                .map(|point| ground(framing::field_to_world(point / HALF))),
+        )
+    }
+
     #[cfg(test)]
     pub(super) fn place_slots(&mut self, envelopes: &[Envelope], now: super::Time) {
         self.place_slots_planned(envelopes, now, &super::travel::Plan::default());
@@ -503,18 +516,28 @@ impl State {
             })
             .collect()
     }
-    fn retained_slots(&self, now: super::Time, radius: f32) -> Vec<Option<Rect>> {
-        let capacities = self.compute_capacities();
+    fn retained_slots(
+        &self,
+        now: super::Time,
+        radius: f32,
+        capacities: &[u8],
+        travelling: &[bool],
+    ) -> Vec<Option<Rect>> {
         (0..self.avatars.len())
             .map(|index| {
                 let avatar = &self.avatars[index];
-                if now >= avatar.expires {
+                if travelling[index] || (now >= avatar.expires && !avatar.transmitting)
+                {
                     return None;
                 }
                 let slot = avatar.slot.as_ref()?;
                 let tile = self.layout.repositories[avatar.repository].gutter?;
-                let point = slot.dock.on_network(tile) + slot.offset;
-                self.held_space(index, point, &capacities, radius)
+                let point = if avatar.transmitting {
+                    field_point(avatar.position)
+                } else {
+                    slot.dock.on_network(tile) + slot.offset
+                };
+                self.held_space(index, point, capacities, radius)
             })
             .collect()
     }
@@ -594,28 +617,74 @@ impl State {
         now: super::Time,
         scales: &[f32],
         radius: f32,
-    ) -> Vec<Rect> {
+        travelling: &[bool],
+    ) -> Vec<SeatClearance> {
         let priority = |index: usize| {
             let avatar = &self.avatars[index];
             (avatar.dock_since, index)
         };
-        let newcomer = self.avatars[index].slot.is_none();
+        let avatar = &self.avatars[index];
+        let newcomer = avatar.presence <= 0.0 || avatar.slot.is_none();
+        let projected = |avatar: &super::Avatar| {
+            let slot = avatar.slot.as_ref()?;
+            let gutter = self.layout.repositories[avatar.repository].gutter?;
+            Some(slot.dock.on_network(gutter) + slot.offset)
+        };
+        let choosing = avatar
+            .slot
+            .as_ref()
+            .is_some_and(|slot| slot.commit != avatar.commit);
+        let current = projected(avatar);
+        let yields_to = |other, peer: &super::Avatar| {
+            if let Some((point, _)) = current
+                .zip(projected(peer))
+                .filter(|(first, second)| first.distance_squared(*second) < 1e-6)
+            {
+                if choosing {
+                    return true;
+                }
+                let at_dock = |avatar: &super::Avatar| {
+                    field_point(avatar.position).distance_squared(point) < 1e-4
+                };
+                let peer_seated = at_dock(peer);
+                if at_dock(avatar) != peer_seated {
+                    return peer_seated;
+                }
+            }
+            priority(other) < priority(index)
+        };
         self.avatars
             .iter()
             .enumerate()
             .filter(|&(other, peer)| {
-                !party.contains(&other)
-                    && (peer.presence > 0.0 || now < peer.expires)
-                    && (newcomer || priority(other) < priority(index))
+                !party.contains(&other) && (peer.presence > 0.0 || now < peer.expires)
             })
-            .filter_map(|(other, peer)| {
-                let slot = peer.slot.as_ref()?;
-                let tile = self.layout.repositories[peer.repository].gutter?;
-                Some(disk(
-                    slot.dock.on_network(tile) + slot.offset,
-                    radius * scales[other],
-                ))
+            .flat_map(|(other, peer)| {
+                let dock = (!travelling[other]).then(|| projected(peer)).flatten();
+                if !(peer.transmitting || newcomer || yields_to(other, peer)) {
+                    let claim = dock
+                        .filter(|_| {
+                            peer.presence > 0.0
+                                && (peer.dock_since == self.tick
+                                    || now - peer.last_active >= super::AVATAR_IDLE)
+                        })
+                        .map(SeatClearance::Claim);
+                    return [claim, None];
+                }
+                let source = field_point(peer.position);
+                let held = (peer.transmitting
+                    || travelling[other] && peer.presence > 0.0)
+                    .then_some(source)
+                    .filter(|point| {
+                        dock.is_none_or(|dock| point.distance_squared(dock) > 1e-6)
+                    });
+                [dock, held].map(|point| {
+                    point.map(|point| {
+                        SeatClearance::Body(disk(point, radius * scales[other]))
+                    })
+                })
             })
+            .flatten()
             .collect()
     }
 
@@ -625,7 +694,6 @@ impl State {
         now: super::Time,
         plan: &super::travel::Plan,
     ) {
-        let gap = Vec2::splat(self.gutter);
         let beams = tile_obstacles(self);
         let cells = super::travel::network(
             self.layout.repositories.iter().filter_map(|r| r.gutter),
@@ -634,8 +702,9 @@ impl State {
         let name_scale = super::LabelKind::Avatar.font_scale() * self.field_growth;
         let capacities = self.compute_capacities();
         let scales = self.member_scales();
-        let mut occupied = self.hold_idle(now, &capacities, radius);
-        let retained = self.retained_slots(now, radius);
+        let travelling = plan.in_transit(self.tick, self.avatars.len());
+        let mut occupied = self.hold_idle(now, &capacities, radius, &travelling);
+        let retained = self.retained_slots(now, radius, &capacities, &travelling);
         occupied.extend(retained.iter().flatten().copied());
         for index in self.placing_order(now) {
             let avatar = &self.avatars[index];
@@ -673,17 +742,19 @@ impl State {
                 choosing,
             );
             let peers = self.slot_peers(index, plan, choosing);
-            let clearance = self.incumbent_discs(index, &party, now, &scales, radius);
+            let clearance =
+                self.incumbent_discs(index, &party, now, &scales, radius, &travelling);
             let choice = Choice {
                 field: super::travel::field_rect(self.field),
                 tile,
                 gutter: self.layout.repositories[avatar.repository].gutter,
-                gap,
+                gap: Vec2::splat(self.gutter),
                 radius,
                 capacity,
                 beams: &beams,
                 peers: &peers,
                 future: &future,
+                rejected: plan.rejected_docks(commit, index),
                 occupied: &occupied,
                 clearance: &clearance,
                 repository: avatar.repository,
@@ -693,23 +764,34 @@ impl State {
                 cells: &cells,
                 speed: self.avatar_max_speed,
             };
-            let mut chosen = choice.pick(
-                avatar.slot.as_ref(),
-                avatar.slot_origin.map(|(repository, dock, point)| {
-                    self.layout.repositories[repository]
-                        .gutter
-                        .map_or(point, |t| dock.on_network(t))
-                }),
-                commit,
-                plan.docks.get(&(commit, index)).copied(),
-                !plan.replanning || commit < plan.frozen,
-            );
+            let held = avatar.slot.as_ref().and_then(|slot| {
+                choice.held_dock(
+                    slot.dock,
+                    avatar.transmitting,
+                    choosing && plan.rejected_dock_walk(commit, index),
+                )
+            });
+            let mut chosen = held.unwrap_or_else(|| {
+                choice.pick(
+                    avatar.slot.as_ref(),
+                    avatar.slot_origin.map(|(repository, dock, point)| {
+                        self.layout.repositories[repository]
+                            .gutter
+                            .map_or(point, |t| dock.on_network(t))
+                    }),
+                    commit,
+                    plan.docks.get(&(commit, index)).copied(),
+                    !plan.replanning || commit < plan.frozen,
+                )
+            });
             chosen.commit = commit;
             self.record_placement(&chosen);
             let capacity = self.seat_party(&chosen, &party, &cells, plan);
             let ring_centre =
                 chosen.point + ring_offset(capacity, chosen.dock.edge, radius);
-            occupied.push(disk(ring_centre, group_radius(capacity, radius)));
+            if !travelling[index] {
+                occupied.push(disk(ring_centre, group_radius(capacity, radius)));
+            }
         }
         self.capacities = self.compute_capacities();
     }
@@ -720,11 +802,12 @@ impl State {
         now: super::Time,
         capacities: &[u8],
         radius: f32,
+        travelling: &[bool],
     ) -> Vec<Rect> {
         let mut occupied = Vec::new();
-        for index in 0..self.avatars.len() {
+        for (index, &travelling) in travelling.iter().enumerate() {
             let avatar = &mut self.avatars[index];
-            if now - avatar.last_active < super::AVATAR_IDLE {
+            if travelling || now - avatar.last_active < super::AVATAR_IDLE {
                 continue;
             }
             let alone =
@@ -732,8 +815,8 @@ impl State {
             let Some(slot) = &mut avatar.slot else {
                 continue;
             };
-            // An author whose group has gone walks back from its seat to its dock.
-            if alone {
+            // Keep the fading body at its ring seat until it is hidden.
+            if alone && avatar.presence <= 0.0 {
                 slot.point -= slot.offset;
                 slot.offset = Vec2::ZERO;
             }
@@ -807,10 +890,11 @@ impl State {
                     self.avatar_max_speed,
                 );
             }
-            if avatar
-                .slot
-                .as_ref()
-                .is_none_or(|previous| previous.dock != place.dock)
+            if avatar.presence <= 0.0
+                || avatar
+                    .slot
+                    .as_ref()
+                    .is_none_or(|previous| previous.dock != place.dock)
             {
                 avatar.dock_since = self.tick;
             }
@@ -906,11 +990,15 @@ impl State {
     /// The avatar's current position, or its destination seat while settling.
     fn standing(&self, index: usize) -> Vec3 {
         let avatar = &self.avatars[index];
+        let shift = avatar
+            .group
+            .filter(|group| self.in_party(index, group.lead))
+            .map_or(Vec3::ZERO, |group| self.avatars[group.lead].ring_shift());
         avatar
             .slot
             .as_ref()
             .filter(|_| avatar.settle.is_some())
-            .map_or(avatar.position, Placement::world)
+            .map_or(avatar.position, |slot| slot.world() + shift)
     }
 
     /// Projected name anchors, shifted one avatar radius inward for members on a ring.
@@ -929,6 +1017,9 @@ impl State {
                         capacities[lead] > 1
                             && self.in_party(index, lead)
                             && s.offset != Vec2::ZERO
+                            && self.ring_of(index).is_some_and(|(centre, rim)| {
+                                avatar.position.distance(centre) < rim
+                            })
                     })
                     .map(|slot| {
                         let capacity = capacities[lead];
@@ -948,6 +1039,9 @@ impl State {
         (0..self.avatars.len())
             .map(|index| {
                 let (centre, rim) = self.ring_of(index)?;
+                if self.avatars[index].position.distance(centre) >= rim {
+                    return None;
+                }
                 let from = self.screen(centre)?;
                 let edge = self.screen(centre + Vec3::X * rim)?;
                 let to = self.screen(self.standing(index))?;
@@ -1283,6 +1377,33 @@ impl State {
             visibility.joint_clear = assignment.clear;
         }
         self.recover_name_lengths(&bodies, texts);
+        self.dim_names_over_held_leads();
+    }
+
+    fn dim_names_over_held_leads(&mut self) {
+        for member in 0..self.avatars.len() {
+            let avatar = &self.avatars[member];
+            let Some(group) = avatar.group.filter(|group| group.lead != member) else {
+                continue;
+            };
+            let lead = &self.avatars[group.lead];
+            let overlap = lead.transmitting
+                && self.in_party(member, group.lead)
+                && avatar
+                    .name_visibility
+                    .placement
+                    .as_ref()
+                    .zip(lead.name_visibility.placement.as_ref())
+                    .is_some_and(|(member, lead)| {
+                        !member
+                            .bounds(self.geometry.label_height)
+                            .intersect(lead.bounds(self.geometry.label_height))
+                            .is_empty()
+                    });
+            if overlap {
+                self.avatars[member].name_visibility.opacity *= 0.5;
+            }
+        }
     }
 
     fn recover_name_lengths(&mut self, bodies: &[Option<Vec2>], texts: &[Rect]) {
@@ -1522,6 +1643,11 @@ fn attached_rect(body: Vec2, size: Vec2, distance: f32, attachment: u8) -> Rect 
         f32::from(attachment) * std::f32::consts::TAU / 8.0,
     )
 }
+enum SeatClearance {
+    Body(Rect),
+    Claim(Vec2),
+}
+
 struct Choice<'a> {
     field: Rect,
     tile: Tile,
@@ -1533,9 +1659,10 @@ struct Choice<'a> {
     capacity: u8,
     beams: &'a [(usize, Rect)],
     occupied: &'a [Rect],
-    clearance: &'a [Rect],
+    clearance: &'a [SeatClearance],
     peers: &'a [(Vec2, u8, Vec2)],
     future: &'a [Rect],
+    rejected: &'a [Dock],
     repository: usize,
     text: String,
     scale: f32,
@@ -1545,6 +1672,22 @@ struct Choice<'a> {
 }
 
 impl Choice<'_> {
+    fn held_dock(
+        &self,
+        dock: Dock,
+        transmitting: bool,
+        blocked: bool,
+    ) -> Option<Placement> {
+        (transmitting || blocked)
+            .then(|| self.assess(dock).0)
+            .filter(|place| {
+                transmitting
+                    || (!self.rejected.contains(&dock)
+                        && place.valid()
+                        && self.clearance_cost(place) <= 0.001)
+            })
+    }
+
     fn pick(
         &self,
         previous: Option<&Placement>,
@@ -1555,14 +1698,18 @@ impl Choice<'_> {
     ) -> Placement {
         if let Some(parked) = previous {
             let selected = self.assess(parked.dock).0;
-            if self.clearance_cost(&selected) > 0.001 {
+            if self.rejected.contains(&parked.dock)
+                || self.clearance_cost(&selected) > 0.001
+                || (parked.commit != commit
+                    && self.reserved_cost(selected.point) > 0.001)
+            {
                 return self.nearest(selected.point, true);
             }
-            if parked.commit == commit || selected.overlaps == 0 {
+            if parked.commit == commit || selected.valid() {
                 return selected;
             }
         }
-        if let Some(dock) = planned {
+        if let Some(dock) = planned.filter(|dock| !self.rejected.contains(dock)) {
             let selected = self.assess(dock).0;
             if locked
                 || (selected.valid() && self.reserved_cost(selected.point) <= 0.001)
@@ -1594,14 +1741,9 @@ impl Choice<'_> {
                     fraction: f32::from(i) / 16.0,
                 })
             }))
+            .filter(|dock| !self.rejected.contains(dock))
             .map(|dock| self.assess(dock).0)
-            .filter(|slot| {
-                if same_tile {
-                    slot.overlaps == 0
-                } else {
-                    slot.valid()
-                }
-            })
+            .filter(Placement::valid)
             .map(|slot| {
                 let seconds = super::travel::slot_seconds(
                     point, slot.point, self.cells, self.speed,
@@ -1621,7 +1763,8 @@ impl Choice<'_> {
                     .total_cmp(&self.clearance_cost(&b.0))
                     .then_with(|| {
                         if same_tile {
-                            std::cmp::Ordering::Equal
+                            self.reserved_cost(a.0.point)
+                                .total_cmp(&self.reserved_cost(b.0.point))
                         } else {
                             self.avatar_cost(a.0.point)
                                 .total_cmp(&self.avatar_cost(b.0.point))
@@ -1649,11 +1792,18 @@ impl Choice<'_> {
             .flat_map(|seat| {
                 let point = slot.point
                     + seat_offset(seat, self.capacity, slot.dock.edge, self.radius);
-                self.clearance.iter().map(move |disc| {
-                    (member_radius + disc.half_size().x
+                self.clearance.iter().map(move |clearance| match clearance {
+                    SeatClearance::Body(disc) => (member_radius + disc.half_size().x
                         - point.distance(disc.center())
                         - 0.001)
-                        .max(0.0)
+                        .max(0.0),
+                    SeatClearance::Claim(claim) => {
+                        if claim.distance_squared(point) < 1e-6 {
+                            f32::INFINITY
+                        } else {
+                            0.0
+                        }
+                    }
                 })
             })
             .sum()
@@ -1706,7 +1856,12 @@ impl Choice<'_> {
     fn assess(&self, dock: Dock) -> (Placement, f32) {
         let point = self.point(dock);
         let centre = point + ring_offset(self.capacity, dock.edge, self.radius);
-        let ring = group_radius(self.capacity, self.radius);
+        let transition = if self.capacity > 1 {
+            self.radius * (1.0 - MEMBER_SCALE)
+        } else {
+            0.0
+        };
+        let ring = group_radius(self.capacity, self.radius) + transition;
         let corners = self.envelope.corners(self.tile);
         let span = fan(point, &corners);
         let (low, high) = corners
@@ -1753,6 +1908,7 @@ impl Choice<'_> {
 
     fn select(&self, previous: Option<Dock>) -> Placement {
         if let Some((p, _)) = previous
+            .filter(|dock| !self.rejected.contains(dock))
             .map(|dock| self.assess(dock))
             .filter(|(p, _)| p.valid())
         {
@@ -1800,6 +1956,7 @@ impl Choice<'_> {
         };
         docks
             .enumerate()
+            .filter(|(_, dock)| !self.rejected.contains(dock))
             .map(|(id, dock)| {
                 let (p, span) = self.assess(dock);
                 let rank = match (dock.edge, id) {
@@ -1807,7 +1964,7 @@ impl Choice<'_> {
                     (0, _) => 1,
                     _ => 2,
                 };
-                let cost = (p.overlaps, usize::from(!p.half_plane), p.crossings, rank);
+                let cost = (p.overlaps, p.crossings, usize::from(!p.half_plane), rank);
                 (p, cost, span, id)
             })
             .min_by(|a, b| {
@@ -1914,7 +2071,7 @@ impl State {
                 text: name.text.clone(),
                 kind: super::LabelKind::Avatar,
                 scale: name.scale,
-                opacity: avatar.presence * shown,
+                opacity: avatar.name_visibility.opacity * avatar.presence * shown,
                 priority: avatar.activity,
             };
         }
@@ -2014,6 +2171,21 @@ mod tests {
             parked.dock
         );
     }
+
+    #[test]
+    fn a_new_service_avoids_a_reserved_incumbent_dock() {
+        let mut dock = choice(&[], &[]).select(None);
+        dock.commit = 5;
+        let reservation = [disk(dock.point, 12.0)];
+        let mut chooser = choice(&[], &[]);
+        chooser.future = &reservation;
+
+        let next = chooser.pick(Some(&dock), None, 6, None, false);
+
+        assert!(next.valid());
+        assert!(!reservation[0].contains(next.point));
+    }
+
     #[test]
     fn spread_prefers_an_opposite_fan_and_edge() {
         let peers = [(Vec2::new(-100.0, 0.0), 3, Vec2::ZERO)];
@@ -2157,6 +2329,7 @@ mod tests {
             clearance: &[],
             peers: &[],
             future: &[],
+            rejected: &[],
             beams: obstacles,
             cells: &[],
             speed: 480.0,
@@ -2261,7 +2434,14 @@ mod tests {
             &Mappings::default(),
         );
         let solo = sim.schedule.starts[1];
-        let gone = crate::model::frames_for(solo + 0.5, 60).unwrap();
+        let first_landing = sim.schedule.starts[0]
+            + 2.0 * crate::model::DISBAND
+            + crate::model::ARRIVAL_SECONDS
+            + 3.0 * crate::model::tick_seconds();
+        let last_ray = sim.state.fragment_pace.pulse_end(solo);
+        let disbanded =
+            last_ray + crate::model::DISBAND + 3.0 * crate::model::tick_seconds();
+        let gone = crate::model::frames_for(disbanded.max(first_landing), 60).unwrap();
         let mut last = [None::<Vec3>; 2];
         let mut largest_step = 0.0_f32;
         let mut ring_shown = 0.0_f32;
@@ -2493,6 +2673,226 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_returning_contributor_yields_to_the_visible_incumbent() {
+        let mut sim = Simulation::new(
+            vec![crate::timeline::synthetic().remove(0)],
+            &Options::default(),
+            &Theme::neon(),
+            &Mappings::default(),
+        );
+        sim.advance_to(60, 60);
+        let mut state = sim.state.clone();
+        let incumbent = &mut state.avatars[0];
+        incumbent.presence = 1.0;
+        incumbent.transmitting = false;
+        incumbent.dock_since = 50;
+        let mut returning = incumbent.clone();
+        returning.presence = 0.0;
+        returning.dock_since = 1;
+        state.avatars.push(returning);
+        let radius = state.avatar_radius();
+
+        let clearance = state.incumbent_discs(
+            1,
+            &[1],
+            sim.seconds(),
+            &[1.0, 1.0],
+            radius,
+            &[false, false],
+        );
+
+        assert_eq!(clearance.len(), 1);
+    }
+
+    #[test]
+    fn a_new_commit_yields_to_a_later_occupant_of_its_old_dock() {
+        let mut sim = Simulation::new(
+            vec![crate::timeline::synthetic().remove(0)],
+            &Options::default(),
+            &Theme::neon(),
+            &Mappings::default(),
+        );
+        sim.advance_to(60, 60);
+        let mut state = sim.state.clone();
+        let incumbent = &mut state.avatars[0];
+        incumbent.presence = 1.0;
+        incumbent.transmitting = false;
+        incumbent.dock_since = 50;
+        let mut arriving = incumbent.clone();
+        arriving.commit += 1;
+        arriving.dock_since = 1;
+        state.avatars.push(arriving);
+
+        let clearance = state.incumbent_discs(
+            1,
+            &[1],
+            sim.seconds(),
+            &[1.0, 1.0],
+            state.avatar_radius(),
+            &[false, false],
+        );
+
+        assert_eq!(clearance.len(), 1);
+    }
+
+    #[test]
+    fn a_new_commit_yields_to_an_occupied_corner_on_an_adjacent_tile() {
+        let mut sim = Simulation::new(
+            vec![crate::timeline::synthetic().remove(0)],
+            &Options::default(),
+            &Theme::neon(),
+            &Mappings::default(),
+        );
+        sim.advance_to(60, 60);
+        let mut state = sim.state.clone();
+        let incumbent = &mut state.avatars[0];
+        incumbent.presence = 1.0;
+        incumbent.transmitting = false;
+        incumbent.dock_since = 50;
+        let mut arriving = incumbent.clone();
+        arriving.commit += 1;
+        arriving.dock_since = 1;
+        state.avatars.push(arriving);
+
+        let mut adjacent = state.layout.repositories[0].clone();
+        let gutter = adjacent.gutter.unwrap();
+        adjacent.gutter = Some(Tile {
+            low: gutter.low - (gutter.high - gutter.low),
+            high: gutter.low,
+        });
+        state.layout.repositories.push(adjacent);
+        state.avatars[0].slot.as_mut().unwrap().dock = Dock::new(2, 0.0);
+        state.avatars[1].repository = 1;
+        state.avatars[1].slot.as_mut().unwrap().dock = Dock::new(0, 1.0);
+
+        let clearance = state.incumbent_discs(
+            1,
+            &[1],
+            sim.seconds(),
+            &[1.0, 1.0],
+            state.avatar_radius(),
+            &[false, false],
+        );
+
+        assert_eq!(clearance.len(), 1);
+    }
+
+    #[test]
+    fn an_unseated_walk_yields_to_the_avatar_already_at_its_corner() {
+        let mut sim = Simulation::new(
+            vec![crate::timeline::synthetic().remove(0)],
+            &Options::default(),
+            &Theme::neon(),
+            &Mappings::default(),
+        );
+        sim.advance_to(60, 60);
+        let mut state = sim.state.clone();
+        let gutter = state.layout.repositories[0].gutter.unwrap();
+        let corner = Dock::new(2, 0.0);
+        let point = corner.on_network(gutter);
+        let incumbent = &mut state.avatars[0];
+        incumbent.slot.as_mut().unwrap().dock = corner;
+        incumbent.position = super::world(point);
+        incumbent.presence = 1.0;
+        incumbent.transmitting = false;
+        incumbent.dock_since = 50;
+
+        let mut approaching = incumbent.clone();
+        approaching.slot.as_mut().unwrap().dock = Dock::new(3, 0.0);
+        approaching.position = super::world(point + Vec2::Y * 60.0);
+        approaching.dock_since = 1;
+        state.avatars.push(approaching);
+
+        let clearance = |index| {
+            state.incumbent_discs(
+                index,
+                &[index],
+                sim.seconds(),
+                &[1.0, 1.0],
+                state.avatar_radius(),
+                &[false, false],
+            )
+        };
+        assert_eq!(clearance(1).len(), 1);
+        assert_eq!(clearance(0).len(), 0);
+    }
+
+    #[test]
+    fn a_live_dock_blocks_later_claims_until_released() {
+        let mut sim = Simulation::new(
+            vec![crate::timeline::synthetic().remove(0)],
+            &Options::default(),
+            &Theme::neon(),
+            &Mappings::default(),
+        );
+        sim.advance_to(60, 60);
+        let mut state = sim.state.clone();
+        let gutter = state.layout.repositories[0].gutter.unwrap();
+        let tick = state.tick;
+        let first = &mut state.avatars[0];
+        first.presence = 1.0;
+        first.transmitting = false;
+        first.position = super::world(Dock::new(1, 0.75).on_network(gutter));
+        let mut second = first.clone();
+        second.slot.as_mut().unwrap().dock = Dock::new(2, 0.5);
+        second.dock_since = 1;
+
+        let assigned = Dock::new(1, 0.25);
+        first.slot.as_mut().unwrap().dock = assigned;
+        state.avatars.push(second);
+
+        let clearance = |state: &State| {
+            state.incumbent_discs(
+                1,
+                &[1],
+                sim.seconds(),
+                &[1.0, 1.0],
+                state.avatar_radius(),
+                &[false, false],
+            )
+        };
+        for dock_since in [tick, tick - 20] {
+            state.avatars[0].dock_since = dock_since;
+            if dock_since != tick {
+                state.avatars[0].last_active =
+                    sim.seconds() - super::super::AVATAR_IDLE;
+            }
+            let occupied = clearance(&state);
+            assert_eq!(occupied.len(), 1);
+            assert!(matches!(
+                occupied[0],
+                SeatClearance::Claim(point) if point == assigned.on_network(gutter)
+            ));
+        }
+        state.avatars[0].presence = 0.0;
+        state.avatars[0].expires = sim.seconds();
+        assert_eq!(clearance(&state).len(), 0);
+    }
+
+    #[test]
+    fn a_fading_ring_member_keeps_its_seat_until_it_disappears() {
+        let mut sim = Simulation::new(
+            vec![crate::timeline::synthetic().remove(0)],
+            &Options::default(),
+            &Theme::neon(),
+            &Mappings::default(),
+        );
+        sim.advance_to(60, 60);
+        let avatar = &mut sim.state.avatars[0];
+        avatar.presence = 0.5;
+        avatar.transmitting = false;
+        let slot = avatar.slot.as_mut().unwrap();
+        let offset = Vec2::new(12.0, 0.0);
+        slot.offset = offset;
+        slot.point += offset;
+
+        sim.state
+            .place_slots(&sim.envelopes, crate::model::Time::seconds(12.0));
+
+        assert_eq!(sim.state.avatars[0].slot.as_ref().unwrap().offset, offset);
+    }
+
     fn thirty() -> Simulation {
         let histories = (0..30)
             .map(|i| {
@@ -2517,6 +2917,39 @@ mod tests {
                 .map(|i| format!("Repository {i}"))
                 .collect::<Vec<_>>(),
         )
+    }
+
+    #[test]
+    fn a_reflowing_tile_keeps_its_transmitter_dock_reserved() {
+        let mut sim = thirty();
+        sim.advance_to(60, 60);
+        let mut state = sim.state.clone();
+        let dock = state.avatars[0].slot.as_ref().unwrap().dock;
+        let mut newcomer = state.avatars[0].clone();
+        newcomer.slot = None;
+        newcomer.group = None;
+        newcomer.presence = 1.0;
+        newcomer.transmitting = false;
+        newcomer.last_active = sim.seconds();
+        let index = state.avatars.len();
+        let mut plan = crate::model::travel::Plan::default();
+        plan.docks.insert((newcomer.commit, index), dock);
+        state.avatars.push(newcomer);
+
+        let radius = state.avatar_radius();
+        let tile = state.layout.repositories[state.avatars[0].repository]
+            .gutter
+            .unwrap();
+        let dock_point = dock.on_network(tile);
+        let incumbent = &mut state.avatars[0];
+        incumbent.transmitting = true;
+        incumbent.position = super::world(dock_point + Vec2::X * (4.0 * radius));
+        state.place_slots_planned(&sim.envelopes, sim.seconds(), &plan);
+
+        let first = state.avatars[0].slot.as_ref().unwrap();
+        let next = state.avatars[index].slot.as_ref().unwrap();
+        assert_eq!(first.dock, dock);
+        assert!(first.point.distance(next.point) >= 2.0 * radius - 0.001);
     }
 
     fn validate_envelopes(sim: &Simulation) {
@@ -3032,8 +3465,7 @@ mod tests {
             .collect();
         assert_eq!(shared.len(), 8);
         let mut gathered = std::collections::BTreeSet::new();
-        let frames = crate::model::frames_for(sim.duration(), 60).unwrap();
-        for frame in 0..=frames {
+        for frame in 0..=sim.frames(60).unwrap() {
             sim.advance_to(frame, 60);
             let state = &sim.state;
             let parked: Vec<_> = (0..state.avatars.len())
@@ -3064,12 +3496,25 @@ mod tests {
                 }
             }
             for beam in sim.beams() {
-                let state = &sim.state;
-                let start = match state.beam_ring(beam.author) {
-                    Some((centre, rim)) => (beam.from.distance(centre) - rim).abs(),
-                    None => beam.from.distance(state.avatars[beam.author].position),
-                };
-                assert!(start < 1e-3, "frame {frame}: beam starts off its ring");
+                assert!(
+                    state
+                        .pulses
+                        .iter()
+                        .filter(|pulse| pulse.author == beam.author
+                            && pulse
+                                .targets
+                                .iter()
+                                .any(|&(target, ..)| target == beam.target))
+                        .filter_map(|pulse| pulse.source)
+                        .any(|source| match state.ray_source_ring(source) {
+                            Some((centre, rim)) =>
+                                (beam.from.distance(centre) - rim).abs() < 1e-3,
+                            None =>
+                                beam.from.distance(state.avatars[beam.author].position)
+                                    < 1e-3,
+                        }),
+                    "frame {frame}: beam starts off its chosen source"
+                );
             }
             assert_members_ringed(&sim, frame);
         }

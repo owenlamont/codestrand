@@ -510,8 +510,7 @@ pub(super) fn beam_segments(
             )
         })
         .collect();
-    if matches!(theme.beam_style, BeamStyle::Construction) {
-        let tick = (to - from).cross(Vec3::Y).normalize_or(Vec3::X) * 0.13;
+    if let Some(tick) = theme.beam_style.endpoint_tick(from, to) {
         segments.extend([(from - tick, from + tick, 0), (to - tick, to + tick, 0)]);
     }
     segments
@@ -1019,26 +1018,24 @@ mod tests {
                 theme.font
             };
             let styles = world.resource::<Styles>();
-            let expected = styles
-                .fonts
-                .iter()
-                .find(|(style, _)| *style == kind)
-                .map(|(_, handle)| handle.clone())
-                .unwrap_or_default();
-            let fallback = styles
-                .fonts
-                .iter()
-                .find(|(kind, _)| *kind == FontStyle::Plex)
-                .unwrap()
-                .1
-                .clone();
-            let expected = label_font(expected, fallback);
+            let font_for = |kind| {
+                styles
+                    .fonts
+                    .iter()
+                    .find(|(style, _)| *style == kind)
+                    .map(|(_, handle)| handle.clone())
+            };
+            let expected = label_font(
+                font_for(kind).unwrap_or_default(),
+                font_for(FontStyle::Plex).unwrap(),
+            );
             let mut visible = 0;
-            for (text, font, color, shadow, visibility, transform) in world
+            for (text, font, color, backing, shadow, visibility, transform) in world
                 .query_filtered::<(
                     &Text,
                     &TextFont,
                     &TextColor,
+                    &BackgroundColor,
                     &TextShadow,
                     &Visibility,
                     &UiTransform,
@@ -1055,7 +1052,11 @@ mod tests {
                 } else {
                     theme.diff_removed
                 };
-                assert_eq!(color.0.to_srgba().red, ink.to_srgba().red);
+                assert_eq!(color.0.with_alpha(1.0), ink);
+                assert_eq!(
+                    backing.0,
+                    theme.diff_background().with_alpha(color.0.alpha())
+                );
                 assert_eq!(transform.scale.x, transform.scale.y);
                 assert!(
                     (shadow.color.alpha()

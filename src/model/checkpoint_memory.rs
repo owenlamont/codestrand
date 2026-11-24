@@ -60,12 +60,22 @@ impl State {
 
 impl Avatar {
     fn replay_bytes(&self) -> u128 {
-        let (key, name, touched, name_visibility, slot, dock_walk) = retained_fields!(self, Avatar {
-            key, name, touched, name_visibility, slot, dock_walk;
-            expires, arrived, lifecycle_scale, grey, portrait, position, target, repository,
-            last_active, presence, slot_presence, projection_scale, activity, commit,
+        let (
+            key,
+            name,
+            touched,
+            name_visibility,
+            slot,
+            dock_walk,
+            ring_arrivals,
+            pending_arrivals,
+        ) = retained_fields!(self, Avatar {
+            key, name, touched, name_visibility, slot, dock_walk, ring_arrivals, pending_arrivals;
+            expires, arrived, lifecycle_scale, grey, display_until, display_opacity, portrait, position, target, repository,
+            last_transfer_revision, arrivals_land, body_arrivals_land, last_active, presence, slot_presence, projection_scale,
+            activity, commit,
             dock_since, gutter_entry, slot_origin, group, dismissed, ring_presence,
-            ring_capacity, settle, settled, leaving_name, seat, travelling,
+            ring_capacity, casting_ring, settle, settled, leaving_name, seat, travelling, transmitting,
         });
         let (placement,) = retained_fields!(name_visibility, Visibility {
             placement; joint_exhausted, joint_clear, opacity, visible, full_clear_since,
@@ -73,6 +83,10 @@ impl Avatar {
         name.capacity() as u128
             + key_bytes(key)
             + buffer_bytes::<u64>(touched.capacity())
+            + buffer_bytes::<super::ArrivalsOnRing>(ring_arrivals.capacity())
+            + buffer_bytes::<(std::ops::RangeInclusive<u64>, super::Time)>(
+                pending_arrivals.capacity(),
+            )
             + placement.as_ref().map_or(0, names::Placement::replay_bytes)
             + slot.as_ref().map_or(0, slots::Placement::replay_bytes)
             + dock_walk
@@ -103,6 +117,7 @@ impl Pulse {
     fn replay_bytes(&self) -> u128 {
         let (touched, targets, samples) = retained_fields!(self, Pulse {
             touched, targets, samples; commit, repository, start, end, author, aggregated,
+            group, source, arrival_revisions, arrivals_land,
         });
         buffer_bytes::<u64>(touched.capacity())
             + buffer_bytes::<(super::Target, f32, u32, u32)>(targets.capacity())

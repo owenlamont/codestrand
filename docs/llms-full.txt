@@ -422,14 +422,15 @@ framing reserves space for elevated avatars and labels; clearance guarantees app
 the fitted view. Free orbit and zoom can crop content. File glyphs lie flat with upright
 artwork in the overhead view. Directory structures, membership rings and activity halos
 remain on the file plane.
-Avatar portraits face the camera.
+Avatar portraits face the camera. Co-authors seated in a shared circle retain their
+relative positions in the circle as the camera orbits.
 The plane cannot be viewed from underneath; glass and file surfaces use backface culling.
 
 ## Themes
 
 `--theme` selects the starting theme for preview and export;
-the default is `neon`. Switching themes in preview changes styling:
-layout, playback position and camera stay put.
+the default is `neon`. Switching themes preserves the layout, playback position and
+camera. The selected theme stays active when playback loops.
 
 The seven themes are `neon`, `phosphor`, `outrun`, `blueprint`,
 `retro-desktop`, `atlas` and `forge`. Choose one for preview or export:
@@ -531,8 +532,8 @@ place in the tree. Deleted files grey, rise and fade over 1.2 seconds.
 
 `--contributor-inactivity-days` accepts 1–36,500 calendar days, inclusive. At the
 default of 60 days without a commit across the combined history, Codestrand assumes
-the contributor has left. The avatar greys and fades over 1.2 playback seconds.
-Another commit revives the same contributor.
+the contributor has left and releases their berth. An avatar still visible greys
+and fades over 1.2 playback seconds. Another commit revives the same contributor.
 Departure is an assumption, not platform knowledge. Deadlines follow the compressed,
 padded timeline, using the latest author date reached so reversed dates cannot trigger
 an immediate departure. Playback does not extrapolate contributor departures beyond
@@ -632,6 +633,11 @@ length. Other avatars have no travel cost: walkers never wait or detour for each
 Parking still spreads avatars when clear slots are available.
 A contributor who stays at a repository keeps a valid parking spot when switching
 between author and co-author. Co-authors who are already parked can use separate docks.
+A group sharing a berth fades in a full-size circle around its members. The circle
+can follow contributors who walk together. If the group is still forming when the
+lead-in ends, the author casts from their avatar. An established circle holds its
+radius until its last ray finishes. Rays prefer the point on the camera-facing rim
+nearest the target on screen, subject to the checks for crossing other tiles.
 
 A contributor can depart once its previous commit's last fragment has arrived and the
 moving gutter route can meet the speed limit. Travel overlaps other contributors'
@@ -640,9 +646,10 @@ toward `--avatar-max-speed` world units per second (default `31.4`, range `0.1` 
 `86400`, inclusive).
 Moving junctions follow the gutter network, with every canonical sample checked against
 the speed limit, frame bounds and tile guards. A shared parking point creates no trip.
-Contributors follow their parked gutter slot until their inferred calendar departure,
-then fade over 1.2 playback seconds. Capped playback releases faded lanes and re-enters
-at the next service slot after a long idle gap.
+Avatars appear for a walk, a visible ray or a shared circle. They fade shortly after
+the activity ends and stay visible through brief gaps between related actions.
+A parked avatar can retain its gutter slot until its inferred calendar departure.
+Capped playback releases unused lanes and re-enters at the next service slot.
 
 `--contributor-travel auto` is the default: contributors walk short trips and fade
 when a longer route would delay the commit. `--contributor-travel walk` keeps them
@@ -651,11 +658,12 @@ walking along the shortest safe gutter route, waiting as long as needed.
 travel policy selected for other contributors. Bot classification uses an explicit
 `bot` override
 in `contributors.toml`, then a GitHub noreply login ending in `[bot]`, then the displayed
-name's `[bot]` suffix. Travel policies also apply to single repositories.
+name's `[bot]` suffix. Set `bot = true` to apply the bot travel policy to an agent
+without a bot suffix. Travel policies also apply to single repositories.
 Walking avatars remain visible during travel until an inferred calendar departure.
 With `--contributor-travel walk`, walking trips
 also remain routed across long idle gaps instead of disappearing and re-entering at a
-different repository. After the last service, the normal inactivity fade still applies.
+different repository.
 Trips to a repository's first commit use the selected travel policy. Births follow
 presentation time, so the gutter can open before the first commit. In `walk` mode,
 a later birth can wait when its moving gutter would outrun an active walk.
@@ -767,7 +775,8 @@ still more than 24 targets, the deepest groups move up to their parents until th
 beam count fits. New files stream down each shared beam, then settle into their own
 positions. The spacing tightens for large groups to keep the stream within the
 arrival animation. When a commit creates more than 24 directories, each new directory
-keeps its own arrival beam. Commit timing stays the same.
+keeps its own arrival beam. A new directory edge appears when its first file lands,
+including edges to parent directories. Commit timing stays the same.
 
 ## Overview detail
 
@@ -798,10 +807,10 @@ In repository playback, sampled added lines descend from the contributor; remove
 lines rise from the file and smoothly fade to transparent. The camera-facing snippet
 is the fragment, following the same path and phase above beams, with
 a text shadow and theme backing for contrast. Text and plain prisms crossfade; fully
-visible snippets replace their prisms. Extra fragments stay plain. Every theme supplies
-added/removed colours; Atlas uses dark ink on its light ground. Snippets use alpha
-blending and the theme's monospace font, with IBM Plex Mono for Atlas code beside its
-serif labels.
+visible snippets replace their prisms. Extra fragments stay plain. Each theme pairs
+its own text colours with a contrasting backing. Snippets keep the `+` and `-` prefixes
+and use the theme's monospace font, with IBM Plex Mono for Atlas code beside its serif
+labels.
 Theme switching restyles active snippets without restarting their motion or fade.
 
 `--fragment-speed` scales how fast fragments cross their beams in preview and export

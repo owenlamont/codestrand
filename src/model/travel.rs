@@ -1,6 +1,6 @@
 use std::{
     cmp::Reverse,
-    collections::{BTreeMap, BinaryHeap},
+    collections::{BTreeMap, BTreeSet, BinaryHeap},
     mem::size_of,
 };
 
@@ -8,7 +8,9 @@ use bevy::math::{Rect, Vec2};
 use serde::Serialize;
 
 use super::{
-    Simulation, frames_for, slots, tick_time, ticks_duration,
+    Simulation, frames_for,
+    occlusion::Transmitters,
+    slots, tick_time, ticks_duration,
     trace::{Counter, Phase},
 };
 use crate::progress::Stage;
@@ -20,8 +22,10 @@ const HALF: Vec2 = Vec2::new(640.0, 360.0);
 const NETWORK_EPSILON: f32 = 0.01;
 const JUNCTION_EPSILON: f32 = 0.001;
 const MAX_ROUTE_NODES: usize = 10_000;
+pub(super) const FADE_TICKS: u64 = 9;
 
 const MOVING_DOCK: &str = "moving_dock";
+const UNREACHED_DOCK: &str = "unreached_dock";
 
 pub(super) fn field_rect(tile: crate::layout::packing::Tile) -> Rect {
     Rect::from_corners(tile.low * HALF, tile.high * HALF)
@@ -93,9 +97,11 @@ pub(super) struct Pose {
 pub(super) struct Service {
     pub(super) commit: usize,
     pub(super) author: usize,
+    authoring: bool,
     repository: usize,
     tick: u64,
     release: u64,
+    arrivals_land: u64,
     point: Vec2,
     radius: f32,
     bot: bool,
@@ -113,6 +119,69 @@ struct Capture {
     tiles: Vec<Vec<Option<crate::layout::packing::Tile>>>,
     radii: Vec<f32>,
     gutters: Vec<Vec<Option<crate::layout::packing::Tile>>>,
+    obstacles: Option<WalkObstacles>,
+}
+
+#[derive(Debug, Default)]
+struct WalkObstacles {
+    begin: u64,
+    frames: Vec<Transmitters>,
+    blocked: BTreeMap<(usize, usize), (u64, Vec2)>,
+    displaced: BTreeSet<(usize, usize)>,
+    waiting: BTreeMap<(usize, usize), WaitingPoses>,
+    contacted: BTreeMap<(usize, usize), WalkContact>,
+    // Keep pose tracks only for parked avatars a walk contacted.
+    parked: BTreeMap<usize, Vec<Option<super::occlusion::BodyDisc>>>,
+    coarrivals: BTreeMap<(usize, usize), Vec2>,
+}
+
+#[derive(Debug)]
+struct WaitingPoses {
+    begin: u64,
+    points: Vec<Option<Vec2>>,
+}
+
+#[derive(Debug)]
+struct WalkContact {
+    first: (u64, Vec2),
+    peers: BTreeSet<usize>,
+}
+
+impl WalkObstacles {
+    fn affects(&self, trip: &Trip) -> bool {
+        let key = (trip.commit, trip.author);
+        self.blocked.contains_key(&key)
+            || self.contacted.contains_key(&key)
+            || self.coarrivals.contains_key(&key)
+    }
+
+    fn keys(&self) -> impl Iterator<Item = (usize, usize)> + '_ {
+        self.blocked
+            .keys()
+            .chain(self.contacted.keys())
+            .chain(self.coarrivals.keys())
+            .copied()
+    }
+
+    fn clears(&self, trip: &Trip, tick: u64, point: Vec2) -> bool {
+        let Some(index) = tick
+            .checked_sub(self.begin)
+            .and_then(|index| usize::try_from(index).ok())
+        else {
+            return true;
+        };
+        let Some(frame) = self.frames.get(index) else {
+            return true;
+        };
+        frame.clears(trip.author, point)
+            && self
+                .contacted
+                .get(&(trip.commit, trip.author))
+                .into_iter()
+                .flat_map(|contact| &contact.peers)
+                .filter_map(|peer| self.parked[peer].get(index).copied().flatten())
+                .all(|disc| frame.clears_body(point, disc))
+    }
 }
 
 impl Capture {
@@ -349,10 +418,45 @@ pub(super) struct Plan {
     pub(super) frozen: usize,
     /// Reserved gutter spans by commit and avatar.
     pub(super) occupancy: BTreeMap<(usize, usize), Vec<(u8, Rect)>>,
+    /// Failed relocations reject the destination dock. Transfers use an empty row.
+    unreached_docks: BTreeMap<(usize, usize), Vec<slots::Dock>>,
     pub stats: Statistics,
 }
 
 impl Plan {
+    pub(super) fn rejected_dock_walk(&self, commit: usize, author: usize) -> bool {
+        self.unreached_docks.contains_key(&(commit, author))
+    }
+
+    pub(super) fn rejected_docks(
+        &self,
+        commit: usize,
+        author: usize,
+    ) -> &[slots::Dock] {
+        self.unreached_docks
+            .get(&(commit, author))
+            .map_or(&[], Vec::as_slice)
+    }
+
+    fn reject_dock(&mut self, key: (usize, usize), dock: Option<slots::Dock>) -> bool {
+        use std::collections::btree_map::Entry;
+        match self.unreached_docks.entry(key) {
+            Entry::Vacant(row) => {
+                row.insert(dock.into_iter().collect());
+                true
+            }
+            Entry::Occupied(mut row) => {
+                let Some(dock) = dock
+                    .filter(|dock| row.get().len() < 8 && !row.get().contains(dock))
+                else {
+                    return false;
+                };
+                row.get_mut().push(dock);
+                true
+            }
+        }
+    }
+
     pub(super) fn replay_bytes(&self) -> u128 {
         let trips = self.trips.capacity() * size_of::<Trip>();
         let routes = self
@@ -372,7 +476,16 @@ impl Plan {
             .values()
             .map(|spans| (128 + spans.capacity() * size_of::<(u8, Rect)>()) as u128)
             .sum::<u128>();
-        trips as u128 + routes + occupancy + self.docks.len() as u128 * 128
+        let unreachable = self
+            .unreached_docks
+            .values()
+            .map(|docks| (128 + docks.capacity() * size_of::<slots::Dock>()) as u128)
+            .sum::<u128>();
+        trips as u128
+            + routes
+            + occupancy
+            + unreachable
+            + self.docks.len() as u128 * 128
     }
 
     #[cfg(test)]
@@ -452,6 +565,7 @@ impl Plan {
         Self {
             docks: self.docks,
             occupancy: self.occupancy,
+            unreached_docks: self.unreached_docks,
             frozen: self.frozen,
             trips: self
                 .trips
@@ -503,24 +617,34 @@ impl Plan {
     pub fn travelling(&self, author: usize, tick: u64) -> bool {
         self.trips.iter().any(|t| t.active(author, tick))
     }
-    pub(super) fn walking(&self, author: usize, tick: u64) -> bool {
-        self.walking_trip(author, tick).is_some()
+
+    pub(super) fn in_transit(&self, tick: u64, authors: usize) -> Vec<bool> {
+        let mut travelling = vec![false; authors];
+        for trip in &self.trips {
+            if trip.active(trip.author, tick)
+                && let Some(active) = travelling.get_mut(trip.author)
+            {
+                *active = true;
+            }
+        }
+        travelling
     }
 
-    pub(super) fn walking_forecast(
-        &self,
-        author: usize,
-        tick: u64,
-        ahead: [u64; 3],
-    ) -> impl Iterator<Item = (u64, Vec2)> {
-        self.walking_trip(author, tick)
-            .into_iter()
-            .flat_map(move |trip| {
-                ahead.map(|offset| {
-                    let sample = (tick + offset).min(trip.arrival - 1);
-                    (sample - tick, trip.sample(sample).0)
-                })
-            })
+    pub(super) fn undocking(&self, author: usize, tick: u64) -> bool {
+        let settle = u64::from(seconds_ticks(super::SETTLE_SECONDS, true));
+        self.trips.iter().any(|trip| {
+            trip.author == author
+                && trip.departure >= tick
+                && if trip.fade {
+                    trip.departure == tick
+                } else {
+                    !trip.route.is_empty()
+                        && trip.departure.saturating_sub(settle).max(trip.free) <= tick
+                }
+        })
+    }
+    pub(super) fn walking(&self, author: usize, tick: u64) -> bool {
+        self.walking_trip(author, tick).is_some()
     }
 
     fn walking_trip(&self, author: usize, tick: u64) -> Option<&Trip> {
@@ -558,7 +682,7 @@ impl Trip {
             }
             let duration = trip
                 .fade_ticks
-                .clamp(1, 9)
+                .clamp(1, FADE_TICKS)
                 .min((trip.arrival - trip.departure).max(1));
             return (
                 trip.source,
@@ -669,27 +793,28 @@ fn replay(simulation: &mut Simulation, frames: u32) -> Capture {
             }
         }
         for event in seen..state.next_event {
-            for contributor in simulation.events[event].participants() {
+            for (position, contributor) in
+                simulation.events[event].participants().enumerate()
+            {
                 let author = state.authors[&contributor.key];
                 let avatar = &state.avatars[author];
                 let slot = avatar.slot.as_ref().expect("tile exists before service");
                 capture.services.push(Service {
                     commit: event,
                     author,
+                    authoring: position == 0,
                     repository: avatar.repository,
                     tick: state.tick,
-                    release: frames_for(
-                        state
-                            .pulses
-                            .iter()
-                            .find(|p| p.commit == event)
-                            .expect("new pulse")
-                            .end
-                            - 0.3,
-                        60,
-                    )
-                    .expect("bounded pulse")
-                    .into(),
+                    arrivals_land: super::schedule::first_tick(
+                        avatar.arrivals_land + super::tick_seconds(),
+                    ),
+                    release: state
+                        .pulses
+                        .iter()
+                        .filter(|pulse| pulse.commit == event || pulse.author == author)
+                        .map(|pulse| super::schedule::first_tick(pulse.end - 0.3))
+                        .max()
+                        .unwrap_or(state.tick),
                     point: slot.centre(),
                     radius: state.avatar_radius(),
                     bot: contributor.is_bot(),
@@ -708,7 +833,7 @@ fn replay(simulation: &mut Simulation, frames: u32) -> Capture {
 }
 
 fn fade_clearance(capture: &Capture, begin: u64, point: Vec2, radius: f32) -> u64 {
-    for offset in 0..=9_u64 {
+    for offset in 0..=FADE_TICKS {
         let tick = begin + offset;
         let row = at_tick(&capture.tiles, tick.saturating_sub(capture.begin));
         let tile_collision = row
@@ -719,10 +844,80 @@ fn fade_clearance(capture: &Capture, begin: u64, point: Vec2, radius: f32) -> u6
             return offset;
         }
     }
-    9
+    FADE_TICKS
 }
 
 impl Simulation {
+    /// Checks the settled playback for walks that cannot finish clear of other avatars.
+    pub(super) fn repair_walk_departures(
+        &mut self,
+        options: &super::Options,
+        padding: &[(usize, u32)],
+    ) {
+        let Some(blocked) = self.repair_walk_routes(options) else {
+            return;
+        };
+        let mut plan = self.travel.clone();
+        let mut rejected = BTreeSet::new();
+        for trip in &self.travel.trips {
+            let key = (trip.commit, trip.author);
+            if trip.kind == TripKind::Relocation
+                && blocked.contains(&key)
+                && let Some(&dock) = self.travel.docks.get(&key)
+                && plan.reject_dock(key, Some(dock))
+            {
+                rejected.insert(key);
+            }
+        }
+        if rejected.is_empty() {
+            return;
+        }
+        let previous = std::mem::replace(&mut self.travel, plan);
+        let captured = self.window.as_ref().map(|window| window.captured.clone());
+        self.plan_travel(options, padding);
+        self.align_travel_arrivals(options);
+        let retry = self.repair_walk_routes(options).unwrap_or_default();
+        let solved = !rejected.is_subset(&retry) && retry.is_subset(&blocked);
+        if !solved || self.adjust_travel_padding(options, padding) != padding {
+            self.travel = previous;
+            if let Some(window) = &mut self.window {
+                window.captured = captured.expect("saved window services");
+            }
+        }
+    }
+
+    fn repair_walk_routes(
+        &mut self,
+        options: &super::Options,
+    ) -> Option<BTreeSet<(usize, usize)>> {
+        let mut obstacles = self.observe_walk_obstacles()?;
+        for _ in 0..4 {
+            let affected = obstacles.keys().collect();
+            self.capture_contacted_seats(&mut obstacles);
+            self.capture_waiting_origins(&mut obstacles);
+            let mut capture = capture(self);
+            capture.obstacles = Some(obstacles);
+            let changed = {
+                let _phase = self.trace.phase(Phase::Routes);
+                let (epochs, changed) = planning::realign_blocked_walks(
+                    &capture,
+                    &mut self.travel.trips,
+                    options.avatar_max_speed,
+                );
+                self.trace.count(Counter::RouteCandidates, epochs);
+                self.travel.stats.graph_epochs += epochs;
+                changed
+            };
+            if !changed {
+                return Some(affected);
+            }
+            self.travel.stats.retained_route_bytes =
+                retained_route_bytes(&self.travel.trips);
+            obstacles = self.observe_walk_obstacles()?;
+        }
+        Some(obstacles.keys().collect())
+    }
+
     pub(super) fn align_travel_arrivals(&mut self, options: &super::Options) {
         if !self
             .travel
@@ -777,6 +972,7 @@ impl Simulation {
                     || !t.bot
                     || options.bot_travel == super::BotTravel::Walk)
                 && t.fade
+                && t.failure != Some(UNREACHED_DOCK)
         }) {
             let policy = if trip.kind == TripKind::Relocation {
                 super::TravelCap::None
@@ -848,6 +1044,22 @@ impl Simulation {
                 *ticks = ticks.saturating_sub(surplus);
             }
         }
+        for (commit, ticks) in &mut result {
+            let Some(local) = commit.checked_sub(self.offset) else {
+                continue;
+            };
+            if local >= self.travel.frozen
+                && self
+                    .travel
+                    .unreached_docks
+                    .range((local, 0)..=(local, usize::MAX))
+                    .next()
+                    .is_some()
+                && !self.travel.trips.iter().any(|trip| trip.commit == local)
+            {
+                *ticks = 0;
+            }
+        }
         result
     }
     pub(super) fn travel_padding(
@@ -905,8 +1117,24 @@ impl Simulation {
         padding: &[(usize, u32)],
     ) {
         let _phase = self.trace.phase(Phase::PlanTravel);
-        let capture = capture(self);
-        let (mut trips, graph_epochs) = self.routes(&capture, options);
+        let (capture, mut trips, graph_epochs) = self.plan_reachable_docks(options);
+        let mut unreached_docks = std::mem::take(&mut self.travel.unreached_docks);
+        unreached_docks.retain(|&(commit, _), _| commit < self.events.len());
+        for trip in trips.iter_mut().filter(|trip| {
+            trip.kind != TripKind::Relocation
+                && unreached_docks.contains_key(&(trip.commit, trip.author))
+        }) {
+            trip.departure = trip.arrival.saturating_sub(FADE_TICKS).max(trip.free);
+            trip.source = capture
+                .pose(trip.author, trip.departure)
+                .map_or(trip.source, |pose| pose.point);
+            trip.fade_ticks = FADE_TICKS.min(trip.arrival - trip.departure);
+            trip.fade = true;
+            trip.route = Route::default();
+            trip.failure = Some(UNREACHED_DOCK);
+            trip.cutoff = None;
+            trip.proof = None;
+        }
         trips.extend(
             self.travel
                 .trips
@@ -978,7 +1206,55 @@ impl Simulation {
             replanning: false,
             frozen: self.travel.frozen,
             occupancy: std::mem::take(&mut self.travel.occupancy),
+            unreached_docks,
         };
+    }
+
+    fn plan_reachable_docks(
+        &mut self,
+        options: &super::Options,
+    ) -> (Capture, Vec<Trip>, usize) {
+        let align_early = |trip: &&mut Trip| {
+            trip.kind == TripKind::Relocation
+                || options.travel_cap == super::TravelCap::None
+        };
+        let captured = capture(self);
+        let (mut trips, mut epochs) = self.routes(&captured, options);
+        epochs += planning::align_arrivals(
+            &captured,
+            trips.iter_mut().filter(align_early),
+            options.avatar_max_speed,
+        );
+        let mut retry = false;
+        for trip in &trips {
+            if trip.kind == TripKind::Relocation
+                && (planning::needs_alignment(trip, captured.frozen)
+                    || trip.fade
+                        && trip.route.duration
+                            <= ticks_duration(trip.arrival - trip.departure))
+                && let Some(service) = captured.services.iter().find(|service| {
+                    service.commit == trip.commit && service.author == trip.author
+                })
+            {
+                let rejected = (options.travel_cap != super::TravelCap::None)
+                    .then_some(service.dock);
+                retry |= self
+                    .travel
+                    .reject_dock((trip.commit, trip.author), rejected);
+            }
+        }
+        if !retry {
+            return (captured, trips, epochs);
+        }
+        let captured = capture(self);
+        let (mut trips, retried_epochs) = self.routes(&captured, options);
+        epochs += retried_epochs;
+        epochs += planning::align_arrivals(
+            &captured,
+            trips.iter_mut().filter(align_early),
+            options.avatar_max_speed,
+        );
+        (captured, trips, epochs)
     }
 }
 
@@ -1054,6 +1330,22 @@ pub(super) fn on_network(point: Vec2, cells: &[Rect]) -> bool {
     })
 }
 
+fn nearest_gutter_edge(from: Vec2, rect: Rect) -> Vec2 {
+    let closest = from.clamp(rect.min, rect.max);
+    [
+        Vec2::new(rect.min.x, closest.y),
+        Vec2::new(rect.max.x, closest.y),
+        Vec2::new(closest.x, rect.min.y),
+        Vec2::new(closest.x, rect.max.y),
+    ]
+    .into_iter()
+    .min_by(|a, b| {
+        from.distance_squared(*a)
+            .total_cmp(&from.distance_squared(*b))
+    })
+    .expect("four gutter edges")
+}
+
 pub(super) fn join_gutter(
     from: Vec2,
     target: Vec2,
@@ -1064,20 +1356,7 @@ pub(super) fn join_gutter(
     let entrance = if on_network(from, cells) {
         from
     } else if let Some(tile) = source {
-        let rect = field_rect(tile);
-        let closest = from.clamp(rect.min, rect.max);
-        [
-            Vec2::new(rect.min.x, closest.y),
-            Vec2::new(rect.max.x, closest.y),
-            Vec2::new(closest.x, rect.min.y),
-            Vec2::new(closest.x, rect.max.y),
-        ]
-        .into_iter()
-        .min_by(|a, b| {
-            from.distance_squared(*a)
-                .total_cmp(&from.distance_squared(*b))
-        })
-        .expect("four gutter edges")
+        nearest_gutter_edge(from, field_rect(tile))
     } else {
         return (from, None);
     };
@@ -1100,6 +1379,16 @@ impl Router {
         source: Vec2,
         target: Vec2,
         cells: &[Rect],
+    ) -> Result<Vec<Vec2>, RouteFailure> {
+        self.route_avoiding(source, target, cells, None)
+    }
+
+    fn route_avoiding(
+        &mut self,
+        source: Vec2,
+        target: Vec2,
+        cells: &[Rect],
+        blocked: Option<Vec2>,
     ) -> Result<Vec<Vec2>, RouteFailure> {
         self.epochs += 1;
         let snap = |mut point: Vec2| {
@@ -1149,6 +1438,12 @@ impl Router {
             for &next in edges[i].iter().flatten() {
                 let a = points[i];
                 let b = points[next];
+                if blocked.is_some_and(|point| {
+                    let closest = point.clamp(a.min(b), a.max(b));
+                    closest.distance_squared(point) < NETWORK_EPSILON.powi(2)
+                }) {
+                    continue;
+                }
                 #[expect(
                     clippy::cast_possible_truncation,
                     clippy::cast_sign_loss,
@@ -1331,12 +1626,74 @@ impl Plan {
             |&(commit, _): &(usize, usize)| commit >= next || keep.contains(&commit);
         self.docks.retain(|key, _| kept(key));
         self.occupancy.retain(|key, _| kept(key));
+        self.unreached_docks.retain(|key, _| kept(key));
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_passing_avatar_can_cross_a_stationary_transmitter() {
+        use bevy::math::Vec3;
+        let mut sim = Simulation::new(
+            vec![crate::timeline::synthetic().remove(0)],
+            &super::super::Options::default(),
+            &crate::theme::Theme::neon(),
+            &crate::contributors::Mappings::default(),
+        );
+        sim.advance_to(60, 60);
+        let state = &mut *sim.state;
+        let centre = Vec3::Y * super::super::MIN_AVATAR_HEIGHT;
+        let transmitter = &mut state.avatars[0];
+        transmitter.position = centre;
+        transmitter.group = None;
+        transmitter.transmitting = true;
+        transmitter.presence = 1.0;
+        transmitter.projection_scale = slots::projection_scale(centre);
+
+        let before = centre - 0.3 * Vec3::X;
+        let target = centre + 0.2 * Vec3::X;
+        let mut walker = transmitter.clone();
+        walker.transmitting = false;
+        walker.travelling = true;
+        walker.position = target;
+        walker.projection_scale = slots::projection_scale(target);
+        state.avatars.push(walker);
+        let source = slots::field_point(before);
+        let destination = slots::field_point(target + Vec3::X);
+        let mut plan = Plan::default();
+        plan.trips.push(Trip {
+            author: 1,
+            commit: 0,
+            departure: state.tick,
+            arrival: state.tick + 4,
+            destination,
+            source,
+            fade_ticks: 0,
+            route: Route::new(&[source, destination], state.avatar_max_speed),
+            kind: TripKind::Relocation,
+            fade: false,
+            bot: false,
+            source_repository: 0,
+            destination_repository: 0,
+            free: state.tick,
+            failure: None,
+            cutoff: None,
+            proof: None,
+        });
+
+        super::super::occlusion::clear_seat_transitions(
+            state,
+            &plan,
+            &[Some(centre), Some(before)],
+            0.5,
+        );
+
+        assert_eq!(state.avatars[0].position, centre);
+        assert_eq!(state.avatars[1].position, target);
+    }
 
     #[test]
     fn parked_avatars_stay_clear_during_seat_transitions() {
@@ -1414,10 +1771,35 @@ mod tests {
             sim.advance_all_files = advance;
             sim.travel = planned.clone();
             let captured = format!("{:?}", capture(&mut sim));
-            let conflicts = sim.reserve_service_slots();
+            let conflicts = sim.reserve_service_slots(true);
             (captured, conflicts, sim.travel.round_state(None))
         });
         assert_eq!(held, advanced);
+    }
+
+    #[test]
+    fn a_blocked_gutter_has_a_shortest_route_around_the_tile() {
+        let network = [Rect::from_corners(Vec2::splat(-50.0), Vec2::splat(50.0))];
+        let start = Vec2::new(-50.0, -10.0);
+        let goal = Vec2::new(-50.0, 10.0);
+        let mut router = Router::default();
+
+        assert_eq!(router.route(start, goal, &network).unwrap(), [start, goal]);
+        let path = router
+            .route_avoiding(start, goal, &network, Some(Vec2::new(-50.0, 0.0)))
+            .unwrap();
+
+        assert_eq!(
+            path,
+            [
+                start,
+                Vec2::new(-50.0, -50.0),
+                Vec2::new(50.0, -50.0),
+                Vec2::new(50.0, 50.0),
+                Vec2::new(-50.0, 50.0),
+                goal,
+            ]
+        );
     }
 
     #[test]
@@ -1725,12 +2107,15 @@ mod tests {
                 seconds_per_day: 0.3,
                 ..Default::default()
             };
-            let nominal = super::super::Schedule::for_replay(&events, &options);
+            let mappings = crate::contributors::Mappings::default();
+            mappings.apply(&mut events);
+            let nominal = super::super::Schedule::for_replay(&events, &options)
+                .with_travel(events.len(), |_| 0);
             let sim = Simulation::with_repositories(
                 events,
                 &options,
                 &crate::theme::Theme::neon(),
-                &crate::contributors::Mappings::default(),
+                &mappings,
                 &["A".into(), "B".into()],
             );
             if bot {

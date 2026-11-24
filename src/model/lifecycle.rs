@@ -83,7 +83,10 @@ pub(super) fn activity_duration(schedule: &Schedule, pace: FragmentPace) -> Time
         .starts
         .last()
         .map_or(Time::ZERO, |&start| pace.pulse_end(start));
-    schedule.duration().max(last_pulse)
+    let last_ring = schedule
+        .last_ring_service()
+        .map_or(Time::ZERO, |start| pace.pulse_end(start) + super::DISBAND);
+    schedule.duration().max(last_pulse).max(last_ring)
 }
 
 /// For each played event, bit `rank` is set when its participant at that rank (the author

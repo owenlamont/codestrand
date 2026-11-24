@@ -1,8 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{HALF, Rect, Vec2};
+use bevy::math::Vec3;
+
+use super::{HALF, Rect, Trip, Vec2, WalkContact, WalkObstacles};
 use crate::model::{
-    Simulation, occlusion,
+    Simulation, State, occlusion,
     trace::{Counter, Phase},
 };
 
@@ -130,7 +132,387 @@ fn anticipate_service_reservations(
     }
 }
 
+fn coarriving_lead(
+    state: &State,
+    trip: &Trip,
+    previous: &[Option<Vec3>],
+) -> Option<usize> {
+    let group = state.avatars[trip.author].group?;
+    let member = previous.get(trip.author).copied().flatten()?;
+    let lead = previous.get(group.lead).copied().flatten()?;
+    (group.lead != trip.author
+        && state.avatars[group.lead].commit == trip.commit
+        && member.distance_squared(lead) < 1e-8)
+        .then_some(group.lead)
+}
+
 impl Simulation {
+    pub(super) fn observe_walk_obstacles(&mut self) -> Option<WalkObstacles> {
+        let end = self
+            .travel
+            .trips
+            .iter()
+            .filter(|trip| {
+                trip.commit >= self.travel.frozen
+                    && !trip.fade
+                    && !trip.route.is_empty()
+            })
+            .map(|trip| trip.arrival)
+            .max()?;
+        let _phase = self.trace.phase(Phase::Reserve);
+        let visuals =
+            std::mem::replace(&mut self.visuals, crate::model::Visuals::Seating);
+        self.restart();
+        let begin = self.state.tick;
+        self.trace.count_replay(end.saturating_sub(begin));
+        let mut obstacles = WalkObstacles {
+            begin,
+            ..Default::default()
+        };
+        let mut previous = Vec::<Option<Vec3>>::new();
+        let mut walking = Vec::new();
+        let mut arriving = BTreeMap::new();
+        for frame in begin..=end {
+            self.advance_to(u32::try_from(frame).expect("bounded schedule"), 60);
+            self.record_walk_obstacles(
+                &previous,
+                &mut obstacles,
+                &mut walking,
+                &mut arriving,
+            );
+            obstacles
+                .frames
+                .push(occlusion::Transmitters::observe(&self.state));
+            previous.clear();
+            previous.extend(
+                self.state
+                    .avatars
+                    .iter()
+                    .map(|avatar| (avatar.presence > 0.001).then_some(avatar.position)),
+            );
+        }
+        self.trace.add_ticks(&mut self.tick_times);
+        self.restart();
+        self.visuals = visuals;
+        (!(obstacles.blocked.is_empty()
+            && obstacles.contacted.is_empty()
+            && obstacles.coarrivals.is_empty()))
+        .then_some(obstacles)
+    }
+
+    fn record_walk_obstacles(
+        &self,
+        previous: &[Option<Vec3>],
+        obstacles: &mut WalkObstacles,
+        walking: &mut Vec<(usize, usize)>,
+        arriving: &mut BTreeMap<(usize, usize), usize>,
+    ) {
+        let frame = self.state.tick;
+        walking.clear();
+        arriving.clear();
+        for trip in self.travel.trips.iter().filter(|trip| {
+            trip.commit >= self.travel.frozen
+                && !trip.fade
+                && !trip.route.is_empty()
+                && (trip.departure..=trip.arrival).contains(&frame)
+        }) {
+            let Some(avatar) = self
+                .state
+                .avatars
+                .get(trip.author)
+                .filter(|avatar| avatar.presence > 0.001)
+            else {
+                continue;
+            };
+            let key = (trip.commit, trip.author);
+            if frame == trip.departure
+                && let Some(&Some(point)) = previous.get(trip.author)
+                && super::slots::field_point(point).distance(trip.source)
+                    > self.state.avatar_max_speed / 60.0
+            {
+                obstacles.displaced.insert(key);
+            }
+            if frame == trip.arrival {
+                let Some(lead) = coarriving_lead(&self.state, trip, previous) else {
+                    continue;
+                };
+                arriving.insert(key, lead);
+            } else if previous
+                .get(trip.author)
+                .copied()
+                .flatten()
+                .is_some_and(|point| point.distance_squared(avatar.position) < 1e-8)
+                && super::slots::field_point(avatar.position).distance(trip.source)
+                    > super::NETWORK_EPSILON
+            {
+                obstacles
+                    .blocked
+                    .entry(key)
+                    .or_insert_with(|| (frame, trip.sample(frame).0));
+            }
+            walking.push(key);
+        }
+        for (walk, peer) in occlusion::walk_contact_pairs(self, walking) {
+            if let Some(&lead) = arriving.get(&walk) {
+                if peer != lead {
+                    continue;
+                }
+                let point =
+                    super::slots::field_point(self.state.avatars[lead].position);
+                obstacles.coarrivals.insert(walk, point);
+                continue;
+            }
+            obstacles
+                .contacted
+                .entry(walk)
+                .or_insert_with(|| WalkContact {
+                    first: (
+                        frame,
+                        super::slots::field_point(self.state.avatars[walk.1].position),
+                    ),
+                    peers: BTreeSet::new(),
+                })
+                .peers
+                .insert(peer);
+        }
+    }
+
+    pub(super) fn capture_contacted_seats(&mut self, obstacles: &mut WalkObstacles) {
+        if obstacles.contacted.is_empty() {
+            return;
+        }
+        let frames = obstacles.frames.len();
+        for &peer in obstacles
+            .contacted
+            .values()
+            .flat_map(|contact| &contact.peers)
+        {
+            obstacles
+                .parked
+                .entry(peer)
+                .or_insert_with(|| Vec::with_capacity(frames));
+        }
+        let _phase = self.trace.phase(Phase::Reserve);
+        let visuals =
+            std::mem::replace(&mut self.visuals, crate::model::Visuals::Seating);
+        self.restart();
+        let begin = u32::try_from(obstacles.begin).expect("bounded schedule");
+        let count = u32::try_from(frames).expect("bounded schedule");
+        self.trace.count_replay(count.saturating_sub(1).into());
+        for frame in begin..begin + count {
+            self.advance_to(frame, 60);
+            let scales = self.state.member_scales();
+            for (&peer, poses) in &mut obstacles.parked {
+                let disc = scales.get(peer).and_then(|&scale| {
+                    occlusion::parked_disc(&self.state, peer, scale)
+                });
+                poses.push(disc);
+            }
+        }
+        self.trace.add_ticks(&mut self.tick_times);
+        self.restart();
+        self.visuals = visuals;
+    }
+
+    pub(super) fn capture_waiting_origins(&mut self, obstacles: &mut WalkObstacles) {
+        let mut suspended = Vec::new();
+        for (index, trip) in self.travel.trips.iter_mut().enumerate() {
+            let key = (trip.commit, trip.author);
+            if obstacles.displaced.contains(&key)
+                && obstacles.blocked.contains_key(&key)
+            {
+                let begin = trip.free.saturating_sub(1).max(obstacles.begin);
+                obstacles.waiting.insert(
+                    key,
+                    super::WaitingPoses {
+                        begin,
+                        points: Vec::new(),
+                    },
+                );
+                suspended.push((index, std::mem::take(&mut trip.route)));
+            }
+        }
+        if suspended.is_empty() {
+            return;
+        }
+        let end = suspended
+            .iter()
+            .map(|&(index, _)| self.travel.trips[index].arrival - 1)
+            .max()
+            .expect("suspended route");
+        let _phase = self.trace.phase(Phase::Reserve);
+        let visuals =
+            std::mem::replace(&mut self.visuals, crate::model::Visuals::Seating);
+        self.restart();
+        let begin = self.state.tick;
+        self.trace.count_replay(end.saturating_sub(begin));
+        for frame in begin..=end {
+            self.advance_to(u32::try_from(frame).expect("bounded schedule"), 60);
+            for &(index, _) in &suspended {
+                let trip = &self.travel.trips[index];
+                let poses = obstacles
+                    .waiting
+                    .get_mut(&(trip.commit, trip.author))
+                    .expect("suspended route");
+                if (poses.begin..trip.arrival).contains(&frame) {
+                    poses.points.push(
+                        self.state
+                            .avatars
+                            .get(trip.author)
+                            .filter(|avatar| avatar.presence > 0.001)
+                            .map(|avatar| super::slots::field_point(avatar.position)),
+                    );
+                }
+            }
+        }
+        self.trace.add_ticks(&mut self.tick_times);
+        self.restart();
+        self.visuals = visuals;
+        for (index, route) in suspended {
+            self.travel.trips[index].route = route;
+        }
+    }
+
+    fn reserve_missed_dock(
+        &mut self,
+        commit: usize,
+        author: usize,
+        repository: usize,
+    ) -> bool {
+        let avatar = &self.state.avatars[author];
+        let gutter = self.state.layout.repositories[repository].gutter;
+        avatar.presence > 0.001
+            && !avatar.beside_gutter(gutter, self.state.avatar_radius())
+            && self.travel.reject_dock((commit, author), None)
+    }
+
+    fn reserve_blocked_walks(&mut self, previous: &mut Vec<Option<Vec3>>) -> usize {
+        let mut blocked = Vec::new();
+        let mut walking = Vec::new();
+        for (author, avatar) in self.state.avatars.iter().enumerate() {
+            if !avatar.travelling || avatar.presence <= 0.001 {
+                continue;
+            }
+            let Some(trip) = self.travel.walking_trip(author, self.state.tick) else {
+                continue;
+            };
+            let key = (trip.commit, author);
+            if trip.commit < self.travel.frozen
+                || trip.kind != super::TripKind::Relocation
+                    && self.travel.unreached_docks.contains_key(&key)
+            {
+                continue;
+            }
+            if previous
+                .get(author)
+                .copied()
+                .flatten()
+                .is_some_and(|before| {
+                    before.distance_squared(avatar.position) < 1e-8
+                        && super::slots::field_point(avatar.position)
+                            .distance(trip.source)
+                            > super::NETWORK_EPSILON
+                })
+            {
+                blocked.push(key);
+            } else {
+                walking.push(key);
+            }
+        }
+        blocked.extend(occlusion::walk_contacts(self, &walking));
+        previous.clear();
+        previous.extend(
+            self.state
+                .avatars
+                .iter()
+                .map(|avatar| (avatar.presence > 0.001).then_some(avatar.position)),
+        );
+        blocked
+            .into_iter()
+            .filter(|&(commit, author)| {
+                let key = (commit, author);
+                let dock = self
+                    .travel
+                    .walking_trip(author, self.state.tick)
+                    .filter(|trip| trip.kind == super::TripKind::Relocation)
+                    .and_then(|_| self.travel.docks.get(&key))
+                    .copied();
+                self.travel.reject_dock(key, dock)
+            })
+            .count()
+    }
+
+    fn reserve_blocked_ray_sources(
+        &mut self,
+        occupied: &mut Reservations,
+        conflicted: &mut BTreeSet<(usize, usize)>,
+    ) -> usize {
+        let state = &self.state;
+        let now = super::super::tick_time(state.tick);
+        let radius = state.avatar_radius();
+        let mut blocked = 0;
+        let mut displaced = Vec::new();
+        for pulse in &state.pulses {
+            let avatar = &state.avatars[pulse.author];
+            if now > avatar.arrivals_land || avatar.repository != pulse.repository {
+                continue;
+            }
+            let service_owner = || {
+                let owner = avatar
+                    .group
+                    .filter(|group| state.in_party(pulse.author, group.lead))
+                    .map_or(pulse.author, |group| group.lead);
+                let avatar = &state.avatars[owner];
+                ((avatar.commit, owner), avatar.slot.as_ref())
+            };
+            if !avatar.transmitting {
+                // A moving gutter can disqualify a dock during its file flight.
+                if avatar.commit == pulse.commit
+                    && pulse.commit >= self.travel.frozen
+                    && avatar.presence > 0.0
+                    && now >= pulse.start + super::super::ADD_DELAY
+                    && !self.travel.travelling(pulse.author, state.tick)
+                    && let (key, Some(slot)) = service_owner()
+                    && key.0 >= self.travel.frozen
+                {
+                    displaced.push((key, slot.dock));
+                }
+                continue;
+            }
+            let Some(tile) = state.layout.repositories[pulse.repository].gutter else {
+                continue;
+            };
+            let Some(corners) =
+                state.service_corners(pulse.repository, &self.envelopes[pulse.commit])
+            else {
+                continue;
+            };
+            if corners.into_iter().any(|to| {
+                let ring = pulse
+                    .source
+                    .and_then(|source| state.ray_source_ring(source));
+                self.clear_arrival_start(pulse.author, pulse.repository, to, ring)
+                    .is_none()
+            }) {
+                let (service, _) = service_owner();
+                conflicted.insert(service);
+                reserve_other(
+                    occupied.entry(service).or_default(),
+                    tile.low * HALF,
+                    (tile.high - tile.low) * HALF,
+                    super::super::slots::field_point(avatar.position),
+                    radius,
+                );
+                blocked += 1;
+            }
+        }
+        blocked
+            + displaced
+                .into_iter()
+                .filter(|&(key, dock)| self.travel.reject_dock(key, Some(dock)))
+                .count()
+    }
+
     fn reserve_frame(
         &self,
         occupied: &mut Reservations,
@@ -144,18 +526,30 @@ impl Simulation {
             .avatars
             .iter()
             .enumerate()
-            // A passing avatar can briefly overlap a parked one. Its route cannot
-            // reserve a dock or move one that stays clear of stationary avatars.
-            .filter(|(i, a)| {
-                a.presence > 0.0 && !self.travel.travelling(*i, state.tick)
-            })
-            .map(|(i, a)| {
-                let point = occlusion::screen(self, a.position);
-                let parked = a
-                    .slot
-                    .as_ref()
-                    .is_some_and(|s| point.distance(s.point) < 0.1);
-                (i, point, parked)
+            .filter(|(_, a)| a.presence > 0.0)
+            .filter_map(|(i, a)| {
+                let travelling = self.travel.travelling(i, state.tick);
+                if travelling && self.visuals != crate::model::Visuals::Seating {
+                    return None;
+                }
+                let position = if travelling && self.travel.walking(i, state.tick) {
+                    self.travel
+                        .sample(i, state.tick)
+                        .map_or(a.position, |(point, _)| {
+                            super::super::slots::world(point)
+                        })
+                } else {
+                    a.position
+                };
+                let point = occlusion::screen(self, position);
+                let parked = !travelling
+                    && a.slot.as_ref().is_some_and(|slot| {
+                        a.transmitting
+                            || !a.travelling
+                                && a.settle.is_none()
+                                && a.position.distance(slot.world()) < 0.001
+                    });
+                Some((i, point, parked))
             })
             .collect();
         for &(i, point, applying) in &live {
@@ -179,18 +573,11 @@ impl Simulation {
                 .map(|group| group.lead)
                 .filter(|&lead| state.in_party(i, lead))
                 .unwrap_or(i);
-            let mut foreign = live
-                .iter()
-                .filter(|&&(j, _, _)| {
-                    i != j
-                        && !state.in_party(j, owner)
-                        && !(ring_seat && self.shares_ring_participant(i, j))
-                })
-                .peekable();
-            if foreign.peek().is_none() {
-                continue;
-            }
-            let row = occupied.entry((avatar.commit, owner)).or_default();
+            let foreign = live.iter().filter(|&&(j, ..)| {
+                i != j
+                    && !state.in_party(j, owner)
+                    && !(ring_seat && self.shares_ring_participant(i, j))
+            });
             for &(_, other, _) in foreign {
                 if super::committing_overlap(
                     point,
@@ -200,9 +587,16 @@ impl Simulation {
                     [true, false],
                 ) {
                     conflicts += 1;
-                    conflicted.insert((avatar.commit, owner));
+                    let service = (avatar.commit, owner);
+                    conflicted.insert(service);
+                    reserve_other(
+                        occupied.entry(service).or_default(),
+                        low,
+                        span,
+                        other,
+                        radius,
+                    );
                 }
-                reserve_other(row, low, span, other, radius);
             }
         }
         (conflicts, pairs)
@@ -225,20 +619,50 @@ impl Simulation {
             && (joins(avatars[a].commit, b) || joins(avatars[b].commit, a))
     }
 
-    pub(in crate::model) fn reserve_service_slots(&mut self) -> bool {
+    pub(in crate::model) fn reserve_service_slots(
+        &mut self,
+        check_walks: bool,
+    ) -> bool {
         let _phase = self.trace.phase(Phase::Reserve);
         let mut previous = std::mem::take(&mut self.travel.occupancy);
         previous.retain(|&(commit, _), _| commit < self.events.len());
         let mut occupied = Reservations::new();
         let mut conflicted = BTreeSet::new();
-        let visuals = std::mem::replace(&mut self.visuals, crate::model::Visuals::None);
+        let visuals =
+            std::mem::replace(&mut self.visuals, crate::model::Visuals::Seating);
         self.restart();
         let mut conflicts = 0;
+        let mut blocked = 0;
         let mut pairs = 0;
         let frames = crate::model::frames_for(self.duration(), 60)
             .expect("bounded schedule")
             + 144;
         let begin = u32::try_from(self.state.tick).expect("bounded window");
+        let mut arrivals: Vec<_> = self
+            .travel
+            .trips
+            .iter()
+            .filter(|trip| {
+                check_walks
+                    && trip.kind != super::TripKind::Relocation
+                    && !trip.fade
+                    && !trip.route.is_empty()
+                    && trip.commit >= self.travel.frozen
+                    && trip.arrival >= u64::from(begin)
+            })
+            .map(|trip| {
+                (
+                    trip.arrival,
+                    trip.commit,
+                    trip.author,
+                    trip.destination_repository,
+                )
+            })
+            .collect();
+        arrivals.sort_unstable();
+        let mut arrivals = arrivals.into_iter().peekable();
+        let mut missed = 0;
+        let mut positions = Vec::new();
         self.trace.count_replay((frames - begin).into());
         for frame in begin..=frames {
             self.progress.report_range(
@@ -248,9 +672,19 @@ impl Simulation {
                 frames.into(),
             );
             self.advance_to(frame, 60);
+            if check_walks {
+                missed += self.reserve_blocked_walks(&mut positions);
+            }
+            while let Some((_, commit, author, repository)) =
+                arrivals.next_if(|&(tick, ..)| tick <= self.state.tick)
+            {
+                missed +=
+                    usize::from(self.reserve_missed_dock(commit, author, repository));
+            }
             let (conflicting, compared) =
                 self.reserve_frame(&mut occupied, &mut conflicted);
             conflicts += conflicting;
+            blocked += self.reserve_blocked_ray_sources(&mut occupied, &mut conflicted);
             pairs += compared;
         }
         self.trace.count(Counter::PairComparisons, pairs);
@@ -267,14 +701,20 @@ impl Simulation {
         );
         for (key, row) in occupied {
             if conflicted.contains(&key) && key.0 >= self.travel.frozen {
-                previous.insert(key, row.into_row());
+                let kept = previous.entry(key).or_default();
+                let mut combined = Row::default();
+                for (edge, rect) in kept.iter().copied().chain(row.into_row()) {
+                    combined.merge(edge, rect);
+                }
+                *kept = combined.into_row();
             }
         }
         self.travel.occupancy = previous;
         if self.trace.on() {
             eprintln!("committing_overlap_observations={conflicts}");
+            eprintln!("blocked_ray_source_observations={blocked}");
         }
-        conflicts > 0
+        conflicts > 0 || blocked > 0 || missed > 0
     }
 }
 fn reserve_other(row: &mut Row, low: Vec2, span: Vec2, other: Vec2, radius: f32) {
@@ -297,10 +737,11 @@ impl super::Plan {
         window: Option<&crate::model::windows::Planning>,
     ) -> String {
         format!(
-            "{:?}{:?}{:?}{:?}",
+            "{:?}{:?}{:?}{:?}{:?}",
             self.trips,
             self.docks,
             self.occupancy,
+            self.unreached_docks,
             window.map(|window| &window.captured)
         )
     }
@@ -340,12 +781,18 @@ impl Simulation {
         let _phase = self.trace.phase(Phase::RefineServiceSlots);
         let mut previous = None;
         for _ in 0..8 {
-            if !self.reserve_service_slots() {
+            self.align_travel_arrivals(options);
+            if !self.reserve_service_slots(
+                options.travel_cap != crate::model::TravelCap::None,
+            ) {
                 break;
             }
             self.plan_travel(options, padding);
             let adjusted = self.adjust_travel_padding(options, padding);
-            if adjusted != padding {
+            if adjusted != padding
+                && (options.travel_cap == crate::model::TravelCap::None
+                    || self.travel.unsettled_relocation())
+            {
                 return adjusted;
             }
             if options.replay_everything {
@@ -368,7 +815,58 @@ fn repeated_round(previous: Option<&str>, round: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Rect, Vec2};
+    use super::{BTreeSet, Rect, Reservations, Simulation, Vec2};
+
+    #[test]
+    fn a_gutter_moving_past_an_arrival_source_rejects_its_dock() {
+        let mut events = Vec::new();
+        for repository in 0_u16..2 {
+            let mut event = crate::timeline::synthetic().remove(0);
+            event.seconds += i64::from(repository) * 86_400;
+            crate::repositories::namespace(
+                std::slice::from_mut(&mut event),
+                usize::from(repository),
+            );
+            events.push(event);
+        }
+        let mut simulation = Simulation::with_repositories(
+            events,
+            &crate::model::Options::default(),
+            &crate::theme::Theme::neon(),
+            &crate::contributors::Mappings::default(),
+            &["first".into(), "second".into()],
+        );
+        simulation.advance_to(75, 60);
+        let pulse = simulation.state.pulses.front().unwrap();
+        let (commit, author, repository) =
+            (pulse.commit, pulse.author, pulse.repository);
+        let now = crate::model::tick_time(simulation.state.tick);
+        assert!(now >= pulse.start + crate::model::ADD_DELAY);
+        let radius = simulation.state.avatar_radius();
+        let state = &mut *simulation.state;
+        let avatar = &mut state.avatars[author];
+        let position = avatar.position;
+        let dock = avatar.slot.as_ref().unwrap().dock;
+        assert!(avatar.transmitting);
+        assert_eq!(avatar.commit, commit);
+        let gutter = state.layout.repositories[repository]
+            .gutter
+            .as_mut()
+            .unwrap();
+        gutter.low.x -= 4.0;
+        gutter.high.x -= 4.0;
+        assert!(!avatar.beside_gutter(Some(*gutter), radius));
+        assert!(now < avatar.arrivals_land);
+
+        state.hold_transmitters(now, &simulation.travel);
+        simulation.reserve_blocked_ray_sources(
+            &mut Reservations::new(),
+            &mut BTreeSet::new(),
+        );
+
+        assert_eq!(simulation.travel.rejected_docks(commit, author), &[dock]);
+        assert_eq!(simulation.state.avatars[author].position, position);
+    }
 
     #[test]
     fn refinement_settles_only_when_a_comparable_round_repeats() {

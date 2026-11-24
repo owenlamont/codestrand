@@ -50,11 +50,12 @@ const GOLDEN_ANGLE: f32 = 2.399_963_2;
 const MAX_SPEED: f32 = 3.0;
 const MAX_ACCELERATION: f32 = 48.0;
 const FILE_EASE: f32 = 5.0;
-const FADE_SECONDS: f32 = 0.6;
+pub(super) const FADE_SECONDS: f32 = 0.6;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Presence {
     Arriving,
+    Recovering,
     Present,
     Leaving,
 }
@@ -75,7 +76,7 @@ pub(super) struct File {
     pub activity: f32,
     pub author: usize,
     pub arrival_author: usize,
-    arrival_revision: u64,
+    pub arrival_revision: u64,
     pub flight: Option<DirectoryFlight>,
     pub arrival_cancelled: bool,
 }
@@ -94,8 +95,26 @@ impl File {
         match self.state {
             Presence::Present => self.visible_presence(dir),
             Presence::Arriving => dir.scale * (0.15 + 0.85 * self.presence),
-            Presence::Leaving => dir.scale,
+            Presence::Leaving | Presence::Recovering => dir.scale,
         }
+    }
+
+    fn restore(&mut self, author: usize, revision: u64) {
+        self.state = if matches!(self.state, Presence::Leaving | Presence::Recovering)
+            && self.presence > 0.0
+            && !self.arrival_cancelled
+        {
+            Presence::Recovering
+        } else {
+            Presence::Arriving
+        };
+        if self.arrival_cancelled {
+            self.presence = 0.0;
+        }
+        self.arrival_author = author;
+        self.arrival_revision = revision;
+        self.flight = None;
+        self.arrival_cancelled = false;
     }
     fn set_slot(&mut self, slot: usize) {
         self.slot = slot;
@@ -128,7 +147,7 @@ pub(super) struct DirectoryArrival {
     pub author: usize,
     delay: f32,
     pub progress: f32,
-    revision: u64,
+    pub revision: u64,
     pub flight: Option<DirectoryFlight>,
 }
 
@@ -168,6 +187,7 @@ pub(super) struct Dir {
     pub live: bool,
     pub touch_age: f32,
     pub arrival: Option<DirectoryArrival>,
+    pub(super) has_landed_file: bool,
     reserve: f32,
 }
 
@@ -175,7 +195,7 @@ impl Dir {
     fn replay_bytes(&self) -> u128 {
         let (path, slots) = retained_fields!(self, Self {
             path, slots; local_position, scale, repository, parent, depth, position, files,
-            children, live, touch_age, reserve, arrival,
+            children, live, touch_age, reserve, arrival, has_landed_file,
         });
         path.capacity() as u128 + buffer_bytes::<Option<u64>>(slots.capacity())
     }
@@ -195,7 +215,18 @@ impl Dir {
             live: true,
             touch_age: f32::INFINITY,
             arrival: None,
+            has_landed_file: false,
             reserve: 0.4,
+        }
+    }
+
+    fn mark_file_landed(dirs: &mut [Self], mut index: usize) {
+        while !dirs[index].has_landed_file {
+            dirs[index].has_landed_file = true;
+            let Some(parent) = dirs[index].parent else {
+                break;
+            };
+            index = parent;
         }
     }
 
@@ -503,16 +534,9 @@ impl Layout {
         self.revision += 1;
         if let Some(&id) = self.file_index.get(path) {
             let file = self.files.get_mut(&id).expect("indexed files exist");
-            if file.arrival_cancelled {
-                file.presence = 0.0;
-            }
-            file.state = Presence::Arriving;
+            file.restore(author, self.revision);
             file.delay = delay;
             file.author = author;
-            file.arrival_author = author;
-            file.arrival_revision = self.revision;
-            file.flight = None;
-            file.arrival_cancelled = false;
             file.activity = 1.0;
             self.dirs[file.dir].touch_age = 0.0;
             self.fading.insert(id);
@@ -564,7 +588,28 @@ impl Layout {
                 self.dirs[file.dir].touch_age = 0.0;
                 id
             }
-            None => self.add(path, 0.0, author),
+            None => self.add(path, crate::model::tick_seconds(), author),
+        }
+    }
+
+    pub(super) fn delay_new_arrivals(
+        &mut self,
+        files: impl Iterator<Item = u64>,
+        directories: impl Iterator<Item = usize>,
+        since: u64,
+        delay: f32,
+    ) {
+        for id in files {
+            if self.new_file_arrival(id, since) {
+                self.files.get_mut(&id).expect("arrival still exists").delay += delay;
+            }
+        }
+        for index in directories {
+            self.dirs[index]
+                .arrival
+                .as_mut()
+                .expect("new directory flight")
+                .delay += delay;
         }
     }
 
@@ -592,8 +637,9 @@ impl Layout {
     /// Keeps the file's identity and current position while it glides to its new slot.
     pub(super) fn rename(&mut self, from: &str, to: &str, author: usize) -> u64 {
         self.revision += 1;
+        let delay = crate::model::tick_seconds();
         let Some(id) = self.file_index.remove(from) else {
-            return self.add(to, 0.0, author);
+            return self.add(to, delay, author);
         };
         if let Some(previous) = self.file_index.remove(to) {
             self.release(previous);
@@ -603,7 +649,7 @@ impl Layout {
         self.dirs[self.files[&id].dir].touch_age = 0.0;
         let dir = self.ensure_dir(
             parent_path(to),
-            Some(DirectoryArrival::new(author, 0.0, self.revision)),
+            Some(DirectoryArrival::new(author, delay, self.revision)),
         );
         let slot = if self.files[&id].dir == dir {
             self.files[&id].slot
@@ -622,11 +668,13 @@ impl Layout {
         file.activity = 1.0;
         self.dirs[file.dir].touch_age = 0.0;
         if file.state == Presence::Leaving {
-            file.state = Presence::Arriving;
-            file.arrival_author = author;
-            file.arrival_revision = self.revision;
-            file.flight = None;
-            file.arrival_cancelled = false;
+            file.restore(author, self.revision);
+            if file.state == Presence::Arriving {
+                file.delay = file.delay.max(delay);
+            }
+        }
+        if file.state == Presence::Present {
+            Dir::mark_file_landed(&mut self.dirs, dir);
         }
         self.index_file(to, id);
         id
@@ -744,8 +792,11 @@ impl Layout {
             file.activity = 0.0;
             file.presence = match file.state {
                 Presence::Leaving => 0.0,
-                Presence::Arriving | Presence::Present => 1.0,
+                Presence::Arriving | Presence::Recovering | Presence::Present => 1.0,
             };
+            if file.presence >= 1.0 {
+                Dir::mark_file_landed(&mut self.dirs, file.dir);
+            }
         }
         for _ in 0..steps {
             let time = self.plan.time;
@@ -769,6 +820,7 @@ impl Layout {
         }
         let mut gone = Vec::new();
         let files = &mut self.files;
+        let dirs = &mut self.dirs;
         self.fading.retain(|id| {
             let Some(file) = files.get_mut(id) else {
                 return false;
@@ -778,10 +830,11 @@ impl Layout {
                 return true;
             }
             match file.state {
-                Presence::Arriving => {
+                Presence::Arriving | Presence::Recovering => {
                     file.presence = (file.presence + dt / FADE_SECONDS).min(1.0);
                     if file.presence >= 1.0 {
                         file.state = Presence::Present;
+                        Dir::mark_file_landed(dirs, file.dir);
                     }
                 }
                 Presence::Leaving => {
@@ -886,6 +939,7 @@ impl Layout {
                 dir.live = true;
                 dir.position = position;
                 dir.arrival = dir.parent.and(arrival);
+                dir.has_landed_file = false;
                 if let Some(rested) = self.reserve_fixed_points.get_mut(index) {
                     *rested = None;
                 }

@@ -35,8 +35,15 @@ fn oblique_names_stay_tangent_to_the_projected_portrait() {
             },
             ..default()
         };
-        let point =
-            project_avatar_name(&camera, &transform, &sim, avatar, &label).unwrap();
+        let point = project_avatar_name(
+            &camera,
+            &transform,
+            &sim,
+            avatar,
+            avatar.position,
+            &label,
+        )
+        .unwrap();
         let body = camera
             .world_to_viewport(&transform, avatar.position)
             .unwrap();
