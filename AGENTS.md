@@ -86,7 +86,8 @@ Apply these priorities in order when planning contributor motion.
 1. Keep planning bounded and rays local. Every arriving file and directory travels
    on a visible ray for its whole flight. In world coordinates, the contributor is
    beside the target repository and the ray crosses no other tile. Keep the
-   contributor stationary and visible until its last arrival lands. Report the
+   contributor visible and anchored to the same spot on its tile until its last
+   arrival lands. The anchor moves with the tile edge during resizing. Report the
    limiting event if the hard constraints cannot fit within the planning bounds.
 2. Keep motion smooth and within the configured speed. Avoid fast reversals,
    repeated seat swaps and jitter. Keep names and titles steady and whole-view

@@ -1643,6 +1643,8 @@ impl Simulation {
         self.tick_times.laps.end(Phase::TickPacking);
         self.tick_local_layout(files);
         if let Some((regions, offsets, scales)) = placement {
+            // Carry occupied berths first so seat selection sees the new gutter positions.
+            self.state.carry_docked_avatars(&regions, &self.travel);
             self.state
                 .layout
                 .place_regions(regions, &offsets, &scales, files);
@@ -2286,6 +2288,41 @@ impl State {
             let author = self.participants(event, Time::ZERO)[0];
             for change in &event.changes {
                 apply(&mut self.layout, change, author);
+            }
+        }
+    }
+
+    fn carry_docked_avatars(
+        &mut self,
+        regions: &[crate::layout::RepositoryRegion],
+        travel: &travel::Plan,
+    ) {
+        for (index, avatar) in self.avatars.iter_mut().enumerate() {
+            let before = self.layout.repositories[avatar.repository].gutter;
+            let after = regions[avatar.repository].gutter;
+            let Some((before, after)) = before.zip(after) else {
+                continue;
+            };
+            if before.low == after.low && before.high == after.high
+                || avatar.presence <= 0.0
+                || avatar.travelling
+                || avatar.dock_walk.is_some()
+                || avatar.settle.is_some()
+                || travel.travelling(index, self.tick)
+            {
+                continue;
+            }
+            let Some(slot) = avatar.slot.as_mut() else {
+                continue;
+            };
+            if avatar.transmitting
+                || avatar.position.distance_squared(slot.world()) < 1e-8
+            {
+                let from = slot.dock.on_network(before);
+                let to = slot.dock.on_network(after);
+                let delta = to - from;
+                avatar.position += slots::world(to) - slots::world(from);
+                slot.point += delta;
             }
         }
     }
