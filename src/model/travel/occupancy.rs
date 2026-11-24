@@ -443,19 +443,40 @@ impl Simulation {
     }
 
     fn reserve_blocked_ray_sources(
-        &self,
+        &mut self,
         occupied: &mut Reservations,
         conflicted: &mut BTreeSet<(usize, usize)>,
     ) -> usize {
         let state = &self.state;
+        let now = super::super::tick_time(state.tick);
         let radius = state.avatar_radius();
         let mut blocked = 0;
+        let mut displaced = Vec::new();
         for pulse in &state.pulses {
             let avatar = &state.avatars[pulse.author];
-            if !avatar.transmitting
-                || super::super::tick_time(state.tick) > avatar.arrivals_land
-                || avatar.repository != pulse.repository
-            {
+            if now > avatar.arrivals_land || avatar.repository != pulse.repository {
+                continue;
+            }
+            let service_owner = || {
+                let owner = avatar
+                    .group
+                    .filter(|group| state.in_party(pulse.author, group.lead))
+                    .map_or(pulse.author, |group| group.lead);
+                let avatar = &state.avatars[owner];
+                ((avatar.commit, owner), avatar.slot.as_ref())
+            };
+            if !avatar.transmitting {
+                // A moving gutter can disqualify a dock during its file flight.
+                if avatar.commit == pulse.commit
+                    && pulse.commit >= self.travel.frozen
+                    && avatar.presence > 0.0
+                    && now >= pulse.start + super::super::ADD_DELAY
+                    && !self.travel.travelling(pulse.author, state.tick)
+                    && let (key, Some(slot)) = service_owner()
+                    && key.0 >= self.travel.frozen
+                {
+                    displaced.push((key, slot.dock));
+                }
                 continue;
             }
             let Some(tile) = state.layout.repositories[pulse.repository].gutter else {
@@ -470,11 +491,7 @@ impl Simulation {
                 self.clear_arrival_start(pulse.author, pulse.repository, to)
                     .is_none()
             }) {
-                let owner = avatar
-                    .group
-                    .filter(|group| state.in_party(pulse.author, group.lead))
-                    .map_or(pulse.author, |group| group.lead);
-                let service = (state.avatars[owner].commit, owner);
+                let (service, _) = service_owner();
                 conflicted.insert(service);
                 reserve_other(
                     occupied.entry(service).or_default(),
@@ -487,6 +504,10 @@ impl Simulation {
             }
         }
         blocked
+            + displaced
+                .into_iter()
+                .filter(|&(key, dock)| self.travel.reject_dock(key, Some(dock)))
+                .count()
     }
 
     fn reserve_frame(
