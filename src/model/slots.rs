@@ -2434,7 +2434,14 @@ mod tests {
             &Mappings::default(),
         );
         let solo = sim.schedule.starts[1];
-        let gone = crate::model::frames_for(solo + 0.5, 60).unwrap();
+        let first_landing = sim.schedule.starts[0]
+            + 2.0 * crate::model::DISBAND
+            + crate::model::ARRIVAL_SECONDS
+            + 3.0 * crate::model::tick_seconds();
+        let last_ray = solo + sim.state.fragment_pace.flight() + 0.3;
+        let disbanded =
+            last_ray + crate::model::DISBAND + 3.0 * crate::model::tick_seconds();
+        let gone = crate::model::frames_for(disbanded.max(first_landing), 60).unwrap();
         let mut last = [None::<Vec3>; 2];
         let mut largest_step = 0.0_f32;
         let mut ring_shown = 0.0_f32;
@@ -3458,8 +3465,7 @@ mod tests {
             .collect();
         assert_eq!(shared.len(), 8);
         let mut gathered = std::collections::BTreeSet::new();
-        let frames = crate::model::frames_for(sim.duration(), 60).unwrap();
-        for frame in 0..=frames {
+        for frame in 0..=sim.frames(60).unwrap() {
             sim.advance_to(frame, 60);
             let state = &sim.state;
             let parked: Vec<_> = (0..state.avatars.len())
@@ -3490,12 +3496,25 @@ mod tests {
                 }
             }
             for beam in sim.beams() {
-                let state = &sim.state;
-                let start = match state.beam_ring(beam.author) {
-                    Some((centre, rim)) => (beam.from.distance(centre) - rim).abs(),
-                    None => beam.from.distance(state.avatars[beam.author].position),
-                };
-                assert!(start < 1e-3, "frame {frame}: beam starts off its ring");
+                assert!(
+                    state
+                        .pulses
+                        .iter()
+                        .filter(|pulse| pulse.author == beam.author
+                            && pulse
+                                .targets
+                                .iter()
+                                .any(|&(target, ..)| target == beam.target))
+                        .filter_map(|pulse| pulse.source)
+                        .any(|source| match state.ray_source_ring(source) {
+                            Some((centre, rim)) =>
+                                (beam.from.distance(centre) - rim).abs() < 1e-3,
+                            None =>
+                                beam.from.distance(state.avatars[beam.author].position)
+                                    < 1e-3,
+                        }),
+                    "frame {frame}: beam starts off its chosen source"
+                );
             }
             assert_members_ringed(&sim, frame);
         }

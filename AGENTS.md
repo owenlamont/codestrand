@@ -89,6 +89,8 @@ Apply these priorities in order when planning contributor motion.
    contributor visible and anchored to the same spot on its tile until its last
    arrival lands. The anchor moves with the tile edge during resizing. Report the
    limiting event if the hard constraints cannot fit within the planning bounds.
+   A co-author circle casts only at full radius and holds it until its last ray
+   finishes. Prefer the closest visible point on the circle that keeps the ray local.
 2. Keep motion smooth and within the configured speed. Avoid fast reversals,
    repeated seat swaps and jitter. Keep names and titles steady and whole-view
    motion slow and rare.

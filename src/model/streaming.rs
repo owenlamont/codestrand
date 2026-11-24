@@ -308,7 +308,7 @@ impl Simulation {
         ) = retained_fields!(self, Simulation {
             file_ids, first_arrivals, finals, departures, repository_ends, caption_plan,
             packing, envelopes, schedule, clock, births, initial, state, theme, travel;
-            repository_exits, caption_style, repository_boundary, collapse_directories,
+            repository_exits, caption_style, repository_boundary, collapse_directories, ray_view,
             diff_text_distance, events, offset, unread_before,
             total, playback_multiplier, heat_half_life, visuals, progress, trace,
             tick_times, window, boundaries, windowed, stream, ready_end,

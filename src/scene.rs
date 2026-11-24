@@ -438,6 +438,7 @@ pub(super) fn reset_scene_pools(world: &mut World) {
 #[derive(PartialEq)]
 struct SyncStamp {
     seconds: model::Time,
+    ray_view: Option<model::RayView>,
     theme: crate::theme::ThemeName,
     collapse: bool,
     rate: u32,
@@ -450,6 +451,7 @@ struct SyncStamp {
 impl SyncStamp {
     fn matches(&self, simulation: &Simulation, lod: &lod::Lod) -> bool {
         self.seconds == simulation.seconds()
+            && self.ray_view == simulation.ray_view()
             && self.theme == simulation.theme().name
             && self.collapse == simulation.collapse_directories
             && self.rate == simulation.playback_multiplier().to_bits()
@@ -462,6 +464,7 @@ impl SyncStamp {
     fn new(simulation: &Simulation, lod: &lod::Lod) -> Self {
         Self {
             seconds: simulation.seconds(),
+            ray_view: simulation.ray_view(),
             theme: simulation.theme().name,
             collapse: simulation.collapse_directories,
             rate: simulation.playback_multiplier().to_bits(),
@@ -691,7 +694,8 @@ pub(super) fn preview(loading: Loading) -> anyhow::Result<()> {
         .add_systems(
             Update,
             preview_camera
-                .after(animate)
+                .after(preview_clock)
+                .before(animate)
                 .run_if(resource_exists::<Playback>),
         );
     loading::track_renderer(&mut app);
@@ -1481,10 +1485,13 @@ pub(super) fn animate(world: &mut World) {
         if !waiting {
             playback.0.advance_to(index, fps);
         }
+        let camera = place_camera(world, &playback.0);
+        playback
+            .0
+            .set_ray_view(model::RayView::new(camera.translation, *camera.forward()));
         world.resource_scope(|world, palette: Mut<Palette>| {
             world.resource_scope(|world, mut pools: Mut<Pools>| {
                 let simulation = &playback.0;
-                place_camera(world, simulation);
                 environment::place_ground(world);
                 sync_lod(world, &mut pools, simulation);
                 if restored
@@ -2274,7 +2281,7 @@ fn sync_fragments(
     pools.fragments = pool;
 }
 
-fn place_camera(world: &mut World, simulation: &Simulation) {
+fn place_camera(world: &mut World, simulation: &Simulation) -> Transform {
     let exporting = world.contains_resource::<ExportResolution>();
     let (focus, distance) = camera_projection(world).map_or_else(
         || simulation.view(),
@@ -2301,6 +2308,7 @@ fn place_camera(world: &mut World, simulation: &Simulation) {
             perspective.far = (distance * 4.0).max(1000.0);
         }
     }
+    pose
 }
 
 fn camera_projection(world: &mut World) -> Option<(f32, Vec2)> {

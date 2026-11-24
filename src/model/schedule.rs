@@ -39,6 +39,7 @@ struct Service {
     tick: u64,
     padding: u32,
     birth: bool,
+    can_form_ring: bool,
     tile_floor: u64,
 }
 
@@ -264,6 +265,8 @@ impl Schedule {
         let mut motions = self.motion_protections.iter().peekable();
         let mut rays = self.ray_holds.iter().peekable();
         let ray_ticks = arrival_ticks() + super::travel::FADE_TICKS;
+        let ring_ticks =
+            u64::from(super::travel::seconds_ticks(super::DISBAND, false)) + 1;
         let mut tile_floor = 0;
         let starts = self.starts[..len]
             .iter()
@@ -300,8 +303,10 @@ impl Schedule {
                 while let Some(&(_, earlier, settle)) =
                     rays.next_if(|&&(commit, ..)| commit == index)
                 {
+                    let earlier = &services[earlier];
+                    let prelude = u64::from(earlier.can_form_ring) * ring_ticks;
                     ready = ready
-                        .max(services[earlier].tick.saturating_add(ray_ticks + settle));
+                        .max(earlier.tick.saturating_add(ray_ticks + settle + prelude));
                 }
                 extra = extra.saturating_add(ready - tick);
                 tick = ready;
@@ -310,6 +315,7 @@ impl Schedule {
                     tick,
                     padding: service.padding.saturating_add(wait),
                     birth: service.birth,
+                    can_form_ring: service.can_form_ring,
                     tile_floor,
                 });
                 if first_tick(start) == tick || tick == u64::MAX {
@@ -342,6 +348,19 @@ impl Schedule {
             .filter_map(|(index, service)| {
                 service.birth.then_some((index, service.tick))
             })
+    }
+
+    pub(super) fn last_ring_service(&self) -> Option<Time> {
+        let &latest = self.starts.last()?;
+        self.starts
+            .iter()
+            .zip(&self.services)
+            .rev()
+            .take_while(|&(start, _)| {
+                latest - *start <= 2.0 * super::DISBAND + tick_seconds()
+            })
+            .find(|(_, service)| service.can_form_ring)
+            .map(|(&start, _)| start + super::DISBAND + tick_seconds())
     }
 
     pub(super) fn motion_wait(&self, history: &Self, index: usize) -> u64 {
@@ -432,6 +451,7 @@ impl Schedule {
                         u32::try_from(birth_wait).expect("bounded birth wait"),
                     ),
                     birth,
+                    can_form_ring: !event.co_authors.is_empty(),
                     tile_floor: 0,
                 });
                 start

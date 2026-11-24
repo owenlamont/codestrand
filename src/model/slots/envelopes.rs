@@ -70,7 +70,11 @@ impl Snapshots {
 
     pub(in crate::model) fn capture(&mut self, state: &State) {
         let now = crate::model::tick_time(state.tick);
-        for pulse in state.pulses.iter().filter(|p| now < p.end) {
+        for pulse in state
+            .pulses
+            .iter()
+            .filter(|p| p.start <= now && now < p.end)
+        {
             assert!(
                 self.frames.len() < self.frames.capacity(),
                 "each commit's pulse is live for at most `pulse_ticks` ticks"

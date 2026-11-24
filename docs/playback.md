@@ -359,6 +359,11 @@ length. Other avatars have no travel cost: walkers never wait or detour for each
 Parking still spreads avatars when clear slots are available.
 A contributor who stays at a repository keeps a valid parking spot when switching
 between author and co-author. Co-authors who are already parked can use separate docks.
+When a new group shares a berth, it has a short lead-in to form its circle.
+If the group is still forming when the lead-in ends, the author casts from their
+avatar for that commit. A circle casts only at full size and holds its radius until
+its last ray finishes. Rays prefer the point on the camera-facing circle nearest
+the target on screen, subject to the checks for crossing other tiles.
 
 A contributor can depart once its previous commit's last fragment has arrived and the
 moving gutter route can meet the speed limit. Travel overlaps other contributors'

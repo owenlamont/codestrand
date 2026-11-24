@@ -375,6 +375,7 @@ impl Simulation {
             state: super::SharedState(initial.clone()),
             initial,
             theme: self.theme.clone(),
+            ray_view: None,
             travel: self.travel.clone(),
             visuals: self.visuals,
             progress: crate::progress::Progress::default(),

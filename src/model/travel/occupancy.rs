@@ -488,7 +488,10 @@ impl Simulation {
                 continue;
             };
             if corners.into_iter().any(|to| {
-                self.clear_arrival_start(pulse.author, pulse.repository, to)
+                let ring = pulse
+                    .source
+                    .and_then(|source| state.ray_source_ring(source));
+                self.clear_arrival_start(pulse.author, pulse.repository, to, ring)
                     .is_none()
             }) {
                 let (service, _) = service_owner();

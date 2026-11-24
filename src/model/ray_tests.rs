@@ -371,19 +371,31 @@ fn visible_rays_stay_local_over_whole_playback() {
             {
                 detached.get_or_insert((frame, beam.author, repository));
             }
-            let (centre, radius) =
-                simulation.state.beam_ring(beam.author).unwrap_or_else(|| {
-                    let radius = simulation.state.geometry.avatar_radius
-                        * simulation.scale()
-                        * simulation.avatar_disc_scale()
-                        * avatar.projection_scale
-                        * avatar.lifecycle_scale
-                        * avatar.presence;
-                    (avatar.position, radius)
-                });
+            let radius = simulation.state.geometry.avatar_radius
+                * simulation.scale()
+                * simulation.avatar_disc_scale()
+                * avatar.projection_scale
+                * avatar.lifecycle_scale
+                * avatar.presence;
+            let sources = simulation
+                .state
+                .pulses
+                .iter()
+                .filter(|pulse| pulse.author == beam.author)
+                .filter_map(|pulse| pulse.source)
+                .chain(
+                    avatar
+                        .ring_arrivals
+                        .iter()
+                        .map(|flight| super::RaySource::Ring(flight.lead)),
+                );
             assert!(
-                beam.from == simulation.state.beam_start(beam.author, beam.to)
-                    || (beam.from.distance(centre) - radius).abs() < 0.001
+                beam.from == avatar.position
+                    || (beam.from.distance(avatar.position) - radius).abs() < 0.001
+                    || sources
+                        .filter_map(|source| simulation.state.ray_source_ring(source))
+                        .any(|(centre, rim)| (beam.from.distance(centre) - rim).abs()
+                            < 0.001)
             );
         }
     }

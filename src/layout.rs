@@ -580,6 +580,27 @@ impl Layout {
         }
     }
 
+    pub(super) fn delay_new_arrivals(
+        &mut self,
+        files: impl Iterator<Item = u64>,
+        directories: impl Iterator<Item = usize>,
+        since: u64,
+        delay: f32,
+    ) {
+        for id in files {
+            if self.new_file_arrival(id, since) {
+                self.files.get_mut(&id).expect("arrival still exists").delay += delay;
+            }
+        }
+        for index in directories {
+            self.dirs[index]
+                .arrival
+                .as_mut()
+                .expect("new directory flight")
+                .delay += delay;
+        }
+    }
+
     pub(super) fn remove(
         &mut self,
         path: &str,
