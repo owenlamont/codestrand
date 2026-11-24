@@ -5,6 +5,18 @@ All notable changes to Codestrand are documented here, following
 
 ## Unreleased
 
+## v0.3.1 - 2026-11-24
+
+### Fixed
+
+- Keep contributor rays beside their target repository and hold contributors in place
+  until file and directory arrivals land. New directories stay hidden until their
+  arrival rays launch. ([PR #233](https://github.com/owenlamont/codestrand/pull/233))
+- Keep co-author rings facing the camera and preserve the selected theme and diff
+  colours across preview loops. ([PR #233](https://github.com/owenlamont/codestrand/pull/233))
+- Draw the Outrun sun sharply at the world horizon.
+  ([PR #235](https://github.com/owenlamont/codestrand/pull/235))
+
 ## v0.3.0 - 2026-11-23
 
 ### Added
