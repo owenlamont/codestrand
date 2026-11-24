@@ -3205,6 +3205,88 @@ mod tests {
     }
 
     #[test]
+    fn arrivals_stay_on_their_rays_during_a_many_tile_opening() {
+        let mut events = Vec::new();
+        let count = 12;
+        let opening = (0..count).map(|repository| (false, repository));
+        let revisits = (0..count)
+            .step_by(2)
+            .chain((1..count).rev().step_by(2))
+            .map(|repository| (true, repository));
+        let identity = |name: String| crate::timeline::Identity {
+            email: format!("{}@example.invalid", name.replace(' ', "-")).into(),
+            name: name.into(),
+        };
+        for (revisit, repository) in opening.chain(revisits) {
+            let mut event = crate::timeline::synthetic().remove(0);
+            event.seconds = i64::try_from(events.len()).unwrap() * 86_400;
+            event.commit = format!("commit-{}", events.len());
+            event.author = identity(if revisit {
+                "Rapid".into()
+            } else {
+                format!("Seed {repository}")
+            });
+            if revisit && repository % 3 < 2 {
+                let mut bot = identity("GitHub Actions[bot]".into());
+                if repository % 3 == 0 {
+                    std::mem::swap(&mut event.author, &mut bot);
+                }
+                event.co_authors = vec![bot];
+            }
+            event.changes[0].path = format!("round-{}/new.rs", u8::from(revisit));
+            crate::repositories::namespace(
+                std::slice::from_mut(&mut event),
+                repository,
+            );
+            events.push(event);
+        }
+        let labels: Vec<_> = (0..count)
+            .map(|repository| format!("repo-{repository}"))
+            .collect();
+        let mut simulation = Simulation::with_repositories(
+            events,
+            &Options {
+                seconds_per_day: 0.02,
+                max_idle_seconds: 0.05,
+                travel_cap: TravelCap::Seconds(0.12),
+                bot_travel: BotTravel::Fade,
+                fragment_speed: 0.25,
+                ..Options::default()
+            },
+            &Theme::neon(),
+            &Mappings::default(),
+            &labels,
+        );
+        let mut flights = 0;
+        for frame in 0..simulation.frames(60).unwrap() {
+            simulation.advance_to(frame, 60);
+            for (id, file) in simulation.layout().arriving_files() {
+                let dir = simulation.layout().dir(file.dir);
+                let to = ground(file.position)
+                    + Vec3::Y * simulation.repository_effect(dir.repository).2;
+                let (_, _, alpha) = simulation.file_effect(id, file);
+                let (beam, progress) = simulation.arrival_beam(
+                    Target::File(id),
+                    file.arrival_author,
+                    to,
+                    file.presence,
+                    file.flight,
+                    file.arrival_revision,
+                );
+                if alpha > 0.0 && 0.0 < progress && progress < 1.0 {
+                    flights += 1;
+                    assert!(
+                        beam.is_some(),
+                        "{} lost its ray at frame {frame}",
+                        file.name()
+                    );
+                }
+            }
+        }
+        assert!(flights > 0);
+    }
+
+    #[test]
     fn tile_content_stays_inside_visible_births_and_exits() {
         for day_rate in [0.02, 0.05, 0.18] {
             let day = 86_400;
