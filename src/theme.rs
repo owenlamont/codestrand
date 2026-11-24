@@ -431,6 +431,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn diff_text_palette_has_readable_contrast_for_every_theme() {
+        use bevy::color::Luminance;
+
+        for name in ThemeName::ALL {
+            let theme = name.build();
+            let backing = theme.diff_background();
+            assert_eq!(backing.alpha(), 1.0);
+            assert_ne!(theme.diff_added, theme.diff_removed);
+            for ink in [theme.diff_added, theme.diff_removed] {
+                let ink = ink.to_linear().luminance();
+                let backing = backing.to_linear().luminance();
+                let contrast = (ink.max(backing) + 0.05) / (ink.min(backing) + 0.05);
+                assert!(contrast >= 4.5, "{name:?} at {contrast:.2}:1");
+            }
+        }
+    }
+
+    #[test]
     fn forge_interpolates_the_approved_ramp_and_clamps() {
         let theme = ThemeName::Forge.build();
         for (heat, hex) in candidates::BLACKBODY {

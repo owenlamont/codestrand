@@ -3769,6 +3769,108 @@ mod tests {
     }
 
     #[test]
+    fn a_parked_coauthor_without_a_circle_does_not_reappear() {
+        let mut template = crate::timeline::synthetic().remove(0);
+        let pair = crate::timeline::Identity {
+            name: b"Pair".to_vec(),
+            email: b"pair@example.invalid".to_vec(),
+        };
+        let mut first = template.clone();
+        first.author = pair.clone();
+        template.seconds += 86_400;
+        template.commit = "shared".into();
+        template.co_authors.push(pair);
+        let mut sim = Simulation::new(
+            vec![first, template],
+            &Options {
+                seconds_per_day: 4.0,
+                max_idle_seconds: 4.0,
+                ..Options::default()
+            },
+            &Theme::neon(),
+            &Mappings::default(),
+        );
+        let mut first_ray = false;
+        let mut later_ray = false;
+        for frame in 0..sim.frames(60).unwrap() {
+            sim.advance_to(frame, 60);
+            let Some(pair) = sim.avatars().first() else {
+                continue;
+            };
+            for beam in sim.beams() {
+                first_ray |= beam.author == 0;
+                if pair.commit == 1 && beam.author == 1 && sim.groups().is_empty() {
+                    later_ray = true;
+                    assert_eq!(pair.display_presence(), 0.0, "frame {frame}");
+                    assert!(pair.presence > 0.0);
+                }
+            }
+        }
+        assert!(first_ray && later_ray);
+    }
+
+    #[test]
+    fn a_commit_without_drawable_rays_does_not_raise_a_parked_author() {
+        let mut template = crate::timeline::synthetic().remove(0);
+        let mut silent = template.clone();
+        silent.author = crate::timeline::Identity {
+            name: b"helper[bot]".to_vec(),
+            email: b"helper@example.invalid".to_vec(),
+        };
+        silent.seconds += 86_400;
+        silent.changes.clear();
+        let second = silent.seconds;
+        template.commit = "later".into();
+        template.seconds += 2 * 86_400;
+        let first = crate::timeline::synthetic().remove(0);
+        let mut sim = Simulation::new(
+            vec![first, silent, template],
+            &Options::default(),
+            &Theme::neon(),
+            &Mappings::default(),
+        );
+        let mut applied = false;
+        for frame in 0..sim.frames(60).unwrap() {
+            sim.advance_to(frame, 60);
+            for avatar in sim
+                .avatars()
+                .iter()
+                .filter(|avatar| avatar.name == "helper[bot]")
+            {
+                applied |= avatar.presence > 0.0;
+                assert_eq!(
+                    avatar.display_presence(),
+                    0.0,
+                    "frame {frame} after {second}"
+                );
+            }
+        }
+        assert!(applied);
+    }
+
+    #[test]
+    fn a_short_activity_does_not_keep_fading_an_avatar_in() {
+        let mut sim = Simulation::new(
+            crate::timeline::synthetic(),
+            &Options::default(),
+            &Theme::neon(),
+            &Mappings::default(),
+        );
+        sim.advance_to(60, 60);
+        let avatar = &mut sim.state.avatars[0];
+        avatar.display_opacity = 0.0;
+        let now = Time::seconds(1.0);
+        let dt = tick_seconds();
+        avatar.update_display(now, dt, true);
+        let seen = avatar.display_opacity;
+        assert!(seen > 0.0);
+        avatar.update_display(now + dt, dt, false);
+        assert_eq!(avatar.display_opacity, seen);
+        avatar.update_display(now + DISPLAY_GRACE + dt, dt, false);
+        assert_eq!(avatar.display_opacity, 0.0);
+    }
+
+    #[test]
     fn idle_bot_fades_during_an_unrelated_contributors_history() {
         let template = crate::timeline::synthetic().remove(0);
         let mut events = vec![template.clone()];
