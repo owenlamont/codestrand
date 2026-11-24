@@ -1441,6 +1441,12 @@ impl Packing {
             }))
     }
 
+    pub(crate) fn opening_end(&self) -> Option<u64> {
+        self.opening
+            .as_ref()
+            .map(|opening| u64::try_from(opening.end).expect("bounded opening ticks"))
+    }
+
     pub(crate) fn expanding_neighbours(
         &self,
         repository: usize,

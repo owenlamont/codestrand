@@ -1226,6 +1226,11 @@ impl Simulation {
         simulation.births = simulation.births_for(&simulation.schedule);
         let snapshots = simulation.plan_repositories(prior_active, options)?;
         simulation.schedule.birth_protections = simulation.birth_protections();
+        if let Some(end) = simulation.packing.opening_end() {
+            simulation
+                .schedule
+                .protect_opening_rays(&simulation.events, end);
+        }
         simulation
             .schedule
             .protect_tile_motion(simulation.packing.motion_intervals());

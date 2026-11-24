@@ -9,6 +9,14 @@ pub(super) fn arrival_ticks() -> u64 {
     u64::from(super::travel::seconds_ticks(super::ARRIVAL_SECONDS, true))
 }
 
+fn creates_arrivals(event: &Event) -> bool {
+    use crate::timeline::Kind;
+    event
+        .changes
+        .iter()
+        .any(|change| matches!(change.kind, Kind::Added | Kind::Moved { .. }))
+}
+
 pub(super) fn padding_at(padding: &[(usize, u32)], index: usize) -> u32 {
     padding
         .iter()
@@ -23,7 +31,7 @@ pub(crate) struct Schedule {
     pub(super) birth_protections: Vec<(usize, usize)>,
     pub(super) walk_protections: Vec<(usize, usize)>,
     motion_protections: Vec<(usize, u64)>,
-    ray_holds: Vec<(usize, usize)>,
+    ray_holds: Vec<(usize, usize, u64)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -118,7 +126,7 @@ impl Schedule {
             + buffer_bytes::<(usize, usize)>(birth_protections.capacity())
             + buffer_bytes::<(usize, usize)>(walk_protections.capacity())
             + buffer_bytes::<(usize, u64)>(motion_protections.capacity())
-            + buffer_bytes::<(usize, usize)>(ray_holds.capacity())
+            + buffer_bytes::<(usize, usize, u64)>(ray_holds.capacity())
     }
 
     pub(super) fn for_replay(events: &[Event], options: &super::Options) -> Self {
@@ -151,22 +159,40 @@ impl Schedule {
                 }
             }
             if let Some(author) = &event.contributor
-                && event.changes.iter().any(|change| {
-                    matches!(
-                        change.kind,
-                        crate::timeline::Kind::Added
-                            | crate::timeline::Kind::Moved { .. }
-                    )
-                })
+                && creates_arrivals(event)
             {
                 transmitters.insert(&author.key, (event.repository, index));
                 latest_arrival = Some(index);
             }
             if let Some(earlier) = hold {
-                schedule.ray_holds.push((index, earlier));
+                let settle = if schedule.birth_starts_after(index, earlier) {
+                    BIRTH_TICKS + 1
+                } else {
+                    0
+                };
+                schedule.ray_holds.push((index, earlier, settle));
             }
         }
         schedule
+    }
+
+    pub(super) fn protect_opening_rays(&mut self, events: &[Event], end: u64) {
+        // Overlapping births can move an opening gutter past a stationary source.
+        let mut latest_arrival = None;
+        for (index, (event, service)) in events.iter().zip(&self.services).enumerate() {
+            if service.tick > end {
+                break;
+            }
+            if service.birth
+                && let Some(earlier) = latest_arrival
+            {
+                self.ray_holds.push((index, earlier, BIRTH_TICKS + 1));
+            }
+            if creates_arrivals(event) {
+                latest_arrival = Some(index);
+            }
+        }
+        self.ray_holds.sort_unstable_by_key(|&(commit, ..)| commit);
     }
 
     pub(super) fn protect_walk_after(&mut self, commit: usize) -> bool {
@@ -270,22 +296,15 @@ impl Schedule {
                     tick = tick.saturating_add(remaining);
                     tile_floor = tile_floor.max(end);
                 }
-                let ray_wait = rays.next_if(|&&(commit, _)| commit == index).map_or(
-                    0,
-                    |&(_, earlier)| {
-                        let settle = if self.birth_starts_after(index, earlier) {
-                            BIRTH_TICKS + 1
-                        } else {
-                            0
-                        };
-                        let ready =
-                            services[earlier].tick.saturating_add(ray_ticks + settle);
-                        u32::try_from(ready.saturating_sub(tick))
-                            .expect("bounded ray wait")
-                    },
-                );
-                extra = extra.saturating_add(u64::from(ray_wait));
-                tick = tick.saturating_add(u64::from(ray_wait));
+                let mut ready = tick;
+                while let Some(&(_, earlier, settle)) =
+                    rays.next_if(|&&(commit, ..)| commit == index)
+                {
+                    ready = ready
+                        .max(services[earlier].tick.saturating_add(ray_ticks + settle));
+                }
+                extra = extra.saturating_add(ready - tick);
+                tick = ready;
                 let start = start.after(tick_time(extra));
                 services.push(Service {
                     tick,
