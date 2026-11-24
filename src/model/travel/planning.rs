@@ -1163,32 +1163,34 @@ mod tests {
         let mut capture = fixture();
         let (planned, _) = trips(&capture, 480.0, crate::model::BotTravel::Walk, true);
         let trip = &planned[0];
-        let waiting = Vec2::new(-105.0, 25.0);
-        capture.obstacles = Some(super::super::WalkObstacles {
-            waiting: [(
-                (trip.commit, trip.author),
-                super::super::WaitingPoses {
-                    begin: 0,
-                    points: vec![Some(waiting); 400],
-                },
-            )]
-            .into(),
-            ..Default::default()
-        });
+        let edge = Vec2::new(-100.0, 25.0);
+        for waiting in [edge - 5.0 * Vec2::X, edge + 5.0 * Vec2::X] {
+            capture.obstacles = Some(super::super::WalkObstacles {
+                waiting: [(
+                    (trip.commit, trip.author),
+                    super::super::WaitingPoses {
+                        begin: 0,
+                        points: vec![Some(waiting); 400],
+                    },
+                )]
+                .into(),
+                ..Default::default()
+            });
 
-        let repair = |speed| {
-            timed_approach(
-                &capture,
-                trip,
-                last_release(&capture, trip),
-                speed,
-                &mut Router::default(),
-                None,
-            )
-        };
+            let repair = |speed| {
+                timed_approach(
+                    &capture,
+                    trip,
+                    last_release(&capture, trip),
+                    speed,
+                    &mut Router::default(),
+                    None,
+                )
+            };
 
-        assert_eq!(repair(480.0).unwrap().source, Vec2::new(-100.0, 25.0));
-        assert!(repair(240.0).is_none());
+            assert_eq!(repair(480.0).unwrap().source, edge);
+            assert!(repair(240.0).is_none());
+        }
     }
 
     #[test]
