@@ -3911,6 +3911,131 @@ mod tests {
     }
 
     #[test]
+    fn a_directory_edge_waits_for_its_first_file_to_land() {
+        let mut event = crate::timeline::synthetic().remove(0);
+        event.changes.truncate(1);
+        event.changes[0].path = "src/nested/first.rs".into();
+        event.changes[0].kind = crate::timeline::Kind::Added;
+        let mut simulation = Simulation::new(
+            vec![event],
+            &model::Options::default(),
+            &Theme::neon(),
+            &crate::contributors::Mappings::default(),
+        );
+        simulation.collapse_directories = false;
+        let frames = simulation.frames(60).unwrap();
+        let mut world = rewind_preview_world(simulation);
+        let mut saw_flight = false;
+        for frame in 0..frames {
+            world.resource_mut::<Frame>().index = frame;
+            animate(&mut world);
+            let rendered_edges = world
+                .resource::<Pools>()
+                .edges
+                .iter()
+                .filter(|&&entity| {
+                    world.get::<Visibility>(entity) == Some(&Visibility::Inherited)
+                })
+                .count();
+            let layout = world.resource::<Playback>().0.layout();
+            let Some((_, file)) = layout.files().next() else {
+                continue;
+            };
+            if file.state == crate::layout::Presence::Present {
+                assert_eq!(rendered_edges, 2);
+                assert!(saw_flight);
+                return;
+            }
+            saw_flight |= file.presence > 0.0;
+            assert_eq!(rendered_edges, 0, "frame {frame}");
+        }
+        panic!("the file never landed");
+    }
+
+    #[test]
+    fn coauthor_avatars_keep_their_offsets_in_the_camera_facing_circle() {
+        let mut event = crate::timeline::synthetic().remove(0);
+        event.co_authors.push(crate::timeline::Identity {
+            name: b"Pair".to_vec(),
+            email: b"pair@example.invalid".to_vec(),
+        });
+        let mut simulation = Simulation::new(
+            vec![event],
+            &model::Options::default(),
+            &Theme::neon(),
+            &crate::contributors::Mappings::default(),
+        );
+        let frame = (0..simulation.frames(60).unwrap())
+            .find(|&frame| {
+                simulation.advance_to(frame, 60);
+                simulation
+                    .groups()
+                    .first()
+                    .is_some_and(|ring| ring.3 >= 1.0)
+            })
+            .expect("an established shared circle");
+        let centre = simulation.groups()[0].1;
+        let ground_offsets: Vec<_> = simulation
+            .avatars()
+            .iter()
+            .map(|avatar| avatar.position - centre)
+            .collect();
+        let mut world = rewind_preview_world(simulation);
+        world.resource_mut::<Frame>().index = frame;
+        for rotation in [
+            Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
+            Quat::from_rotation_y(0.75) * Quat::from_rotation_x(-0.15),
+        ] {
+            world.insert_resource(ScriptedCamera(Transform::from_rotation(rotation)));
+            animate(&mut world);
+            for (&entity, offset) in world
+                .resource::<Pools>()
+                .avatars
+                .iter()
+                .zip(&ground_offsets)
+            {
+                let translation = world.get::<Transform>(entity).unwrap().translation;
+                let on_circle = rotation.inverse() * (translation - centre);
+                assert!(
+                    on_circle.abs_diff_eq(Vec3::new(offset.x, -offset.z, 0.0), 1e-4),
+                    "{on_circle:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_outrun_switch_during_tile_fade_survives_rewind() {
+        let mut simulation = Simulation::new(
+            crate::timeline::synthetic(),
+            &model::Options::default(),
+            &Theme::neon(),
+            &crate::contributors::Mappings::default(),
+        );
+        simulation.repository_boundary = crate::repositories::Boundary::Glass;
+        let mut world = rewind_preview_world(simulation);
+        let tile = world
+            .query_filtered::<Entity, With<RepositoryGlass>>()
+            .single(&world)
+            .unwrap();
+        fade(&mut world, tile, 0.7, 0.4);
+        switch_theme(&mut world, crate::theme::ThemeName::Outrun);
+        world.resource_mut::<Playback>().0.restart();
+        reset_scene_pools(&mut world);
+        animate(&mut world);
+        let material = &world
+            .get::<MeshMaterial3d<StandardMaterial>>(tile)
+            .unwrap()
+            .0;
+        let materials = world.resource::<Assets<StandardMaterial>>();
+        let outrun = crate::theme::ThemeName::Outrun.build();
+        assert_eq!(
+            materials.get(material).unwrap().base_color,
+            repository_glass_material(&outrun, 0).base_color
+        );
+    }
+
+    #[test]
     fn grey_portrait_cache_stays_flat_across_preview_rewinds() {
         let mut events = crate::timeline::synthetic();
         events.truncate(1);
