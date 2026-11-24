@@ -79,6 +79,7 @@ const DELETE_DELAY: f32 = 0.0;
 const MIN_AVATAR_HEIGHT: f32 = 3.2;
 
 const AVATAR_IDLE: f32 = 5.0;
+const DISPLAY_GRACE: f32 = 0.3;
 const ARRIVAL_SCALE: f32 = 1.15;
 /// Seconds a disbanding group's ring, and the co-authors leaving with it, take to fade.
 const DISBAND: f32 = 0.4;
@@ -408,8 +409,8 @@ pub(super) struct Avatar {
     pub grey: f32,
     pub key: Key,
     pub name: String,
-    idle_after: f32,
-    idle_opacity: f32,
+    display_until: Time,
+    display_opacity: f32,
     pub portrait: Option<std::sync::Arc<crate::avatars::Portrait>>,
     pub position: Vec3,
     target: Vec3,
@@ -597,16 +598,20 @@ impl Avatar {
     }
 
     pub(super) fn display_presence(&self) -> f32 {
-        self.presence * self.idle_opacity
+        self.presence * self.display_opacity
+    }
+
+    fn update_display(&mut self, now: Time, dt: f32, active: bool) {
+        if active {
+            self.display_until = now + DISPLAY_GRACE;
+            self.display_opacity = (self.display_opacity + dt / DISBAND).min(1.0);
+        } else if now > self.display_until {
+            self.display_opacity = (self.display_opacity - dt / DISBAND).max(0.0);
+        }
     }
 
     fn update_presence(&mut self, now: Time, dt: f32, opacity: f32) {
         self.projection_scale = slots::projection_scale(self.position);
-        let idle = !self.transmitting
-            && !self.travelling
-            && now - self.last_active > self.idle_after;
-        let idle_fade = if idle { -dt / DISBAND } else { dt / DISBAND };
-        self.idle_opacity = (self.idle_opacity + idle_fade).clamp(0.0, 1.0);
         let service_visible = now < self.expires || self.transmitting;
         let service_fade = if service_visible { dt / 0.4 } else { -dt / 1.2 };
         self.slot_presence = (self.slot_presence + service_fade).clamp(0.0, 1.0);
@@ -1633,20 +1638,22 @@ impl Simulation {
         &self,
     ) -> impl Iterator<Item = (usize, Beam)> + '_ {
         self.layout().arriving_files().filter_map(|(id, file)| {
-            let dir = self.layout().dir(file.dir);
-            let rise = self.repository_effect(dir.repository).2;
-            let to = ground(file.position) + Vec3::Y * rise;
-            self.arrival_beam(
-                Target::File(id),
-                file.arrival_author,
-                to,
-                file.presence,
-                file.flight,
-                file.arrival_revision,
-            )
-            .0
-            .map(|beam| (file.dir, beam))
+            self.file_arrival_ray(id, file).map(|beam| (file.dir, beam))
         })
+    }
+
+    fn file_arrival_ray(&self, id: u64, file: &crate::layout::File) -> Option<Beam> {
+        let dir = self.layout().dir(file.dir);
+        let rise = self.repository_effect(dir.repository).2;
+        self.arrival_beam(
+            Target::File(id),
+            file.arrival_author,
+            ground(file.position) + Vec3::Y * rise,
+            file.presence,
+            file.flight,
+            file.arrival_revision,
+        )
+        .0
     }
 
     pub(super) fn restart(&mut self) {
@@ -1858,6 +1865,7 @@ impl Simulation {
         state.advance_avatars(now, dt, &self.travel, self.visuals != Visuals::None);
         self.tick_times.laps.end(Phase::TickAvatars);
         if self.visuals == Visuals::All {
+            self.update_display_activity(now, dt);
             let texts: Vec<_> = self
                 .labels_for_detail(|_| true)
                 .iter()
@@ -1868,6 +1876,96 @@ impl Simulation {
             self.tick_times.laps.end(Phase::TickLabels);
             self.state.place_names(dt, &self.travel, &texts);
             self.tick_times.laps.end(Phase::TickNames);
+        }
+    }
+
+    fn update_display_activity(&mut self, now: Time, dt: f32) {
+        let mut active = vec![false; self.state.avatars.len()];
+        let mut grouped = active.clone();
+        for pulse in &self.state.pulses {
+            let author = pulse.author;
+            if now >= pulse.start
+                && now < pulse.end
+                && self.pulse_beams_visible(pulse)
+                && pulse
+                    .targets
+                    .iter()
+                    .any(|&(target, ..)| self.visible_ray(pulse, target).is_some())
+            {
+                active[author] = true;
+                if let Some(RaySource::Ring(lead)) = pulse.source {
+                    grouped[lead] = true;
+                }
+            } else if now < pulse.start
+                && let Some(lead) = pulse.group
+                && self.state.in_party(author, lead)
+                && (!pulse.targets.is_empty() || pulse.arrivals_land.is_some())
+                && self.state.visible_ring(lead).is_some()
+                && !self.state.body_rays_overlap_group(lead, now)
+            {
+                grouped[lead] = true;
+            }
+        }
+        if self
+            .state
+            .avatars
+            .iter()
+            .enumerate()
+            .any(|(index, avatar)| avatar.transmitting && !active[index])
+        {
+            self.record_arrival_activity(&mut active);
+        }
+        for (index, avatar) in self.state.avatars.iter().enumerate() {
+            if active[index] {
+                for arrival in &avatar.ring_arrivals {
+                    grouped[arrival.lead] = true;
+                }
+            }
+        }
+        if grouped.contains(&true) {
+            let mut rims = vec![None; grouped.len()];
+            for (lead, centre, rim, _) in self.groups() {
+                if grouped[lead] {
+                    rims[lead] = Some((centre, rim * rim));
+                }
+            }
+            for (index, flag) in active.iter_mut().enumerate() {
+                let avatar = &self.state.avatars[index];
+                let lead = self.avatar_group_lead(index);
+                *flag |= rims[lead].is_some_and(|(centre, radius_squared)| {
+                    avatar.position.distance_squared(centre) <= radius_squared
+                });
+            }
+        }
+        for (index, flag) in active.iter_mut().enumerate() {
+            let avatar = &self.state.avatars[index];
+            *flag |= avatar.travelling && self.travel.walking(index, self.state.tick);
+        }
+        for (avatar, active) in self.state.avatars.iter_mut().zip(active) {
+            avatar.update_display(now, dt, active);
+        }
+    }
+
+    fn record_arrival_activity(&self, active: &mut [bool]) {
+        for (id, file) in self.layout().arriving_files() {
+            if !active[file.arrival_author] && self.file_arrival_ray(id, file).is_some()
+            {
+                active[file.arrival_author] = true;
+            }
+        }
+        for (index, dir) in self.layout().dirs() {
+            if let Some(arrival) = dir.arrival
+                && !active[arrival.author]
+                && self
+                    .directory_arrival(
+                        index,
+                        ground(dir.position)
+                            .with_y(self.repository_effect(dir.repository).2 - 0.05),
+                    )
+                    .is_some_and(|(beam, _, _)| beam.is_some())
+            {
+                active[arrival.author] = true;
+            }
         }
     }
 
@@ -2805,14 +2903,8 @@ impl State {
             grey: 0.0,
             key: contributor.key.clone(),
             name: contributor.name.clone(),
-            idle_after: if contributor.is_bot() {
-                self.fragment_pace.pulse_end(Time::ZERO) - Time::ZERO
-                    + DISBAND
-                    + tick_seconds()
-            } else {
-                f32::INFINITY
-            },
-            idle_opacity: 1.0,
+            display_until: Time::NEG_INFINITY,
+            display_opacity: 0.0,
             portrait: contributor.portrait.clone(),
             position: self.focus + Vec3::Y * MIN_AVATAR_HEIGHT,
             target: self.focus,

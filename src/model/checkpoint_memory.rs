@@ -71,7 +71,7 @@ impl Avatar {
             pending_arrivals,
         ) = retained_fields!(self, Avatar {
             key, name, touched, name_visibility, slot, dock_walk, ring_arrivals, pending_arrivals;
-            expires, arrived, lifecycle_scale, grey, idle_after, idle_opacity, portrait, position, target, repository,
+            expires, arrived, lifecycle_scale, grey, display_until, display_opacity, portrait, position, target, repository,
             last_transfer_revision, arrivals_land, body_arrivals_land, last_active, presence, slot_presence, projection_scale,
             activity, commit,
             dock_since, gutter_entry, slot_origin, group, dismissed, ring_presence,

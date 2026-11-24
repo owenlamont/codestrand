@@ -129,9 +129,10 @@ impl PreviewCamera {
                 self.distance =
                     (self.distance * (-input.zoom * 0.12).exp()).clamp(1.0, 20_000.0);
                 if let Mode::Follow { key, .. } = &self.mode {
-                    if let Some(avatar) = avatars.iter().find(|avatar| {
-                        &avatar.key == key && avatar.display_presence() > 0.0
-                    }) {
+                    if let Some(avatar) = avatars
+                        .iter()
+                        .find(|avatar| &avatar.key == key && avatar.presence > 0.0)
+                    {
                         self.focus =
                             self.focus.lerp(avatar.position, 1.0 - (-dt / 0.3).exp());
                     } else {
