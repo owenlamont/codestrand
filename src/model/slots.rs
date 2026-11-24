@@ -2438,7 +2438,7 @@ mod tests {
             + 2.0 * crate::model::DISBAND
             + crate::model::ARRIVAL_SECONDS
             + 3.0 * crate::model::tick_seconds();
-        let last_ray = solo + sim.state.fragment_pace.flight() + 0.3;
+        let last_ray = sim.state.fragment_pace.pulse_end(solo);
         let disbanded =
             last_ray + crate::model::DISBAND + 3.0 * crate::model::tick_seconds();
         let gone = crate::model::frames_for(disbanded.max(first_landing), 60).unwrap();

@@ -60,10 +60,19 @@ impl State {
 
 impl Avatar {
     fn replay_bytes(&self) -> u128 {
-        let (key, name, touched, name_visibility, slot, dock_walk, ring_arrivals) = retained_fields!(self, Avatar {
-            key, name, touched, name_visibility, slot, dock_walk, ring_arrivals;
-            expires, arrived, lifecycle_scale, grey, portrait, position, target, repository,
-            last_transfer_revision, arrivals_begin, arrivals_land, last_active, presence, slot_presence, projection_scale,
+        let (
+            key,
+            name,
+            touched,
+            name_visibility,
+            slot,
+            dock_walk,
+            ring_arrivals,
+            pending_arrivals,
+        ) = retained_fields!(self, Avatar {
+            key, name, touched, name_visibility, slot, dock_walk, ring_arrivals, pending_arrivals;
+            expires, arrived, lifecycle_scale, grey, idle_after, portrait, position, target, repository,
+            last_transfer_revision, arrivals_land, body_arrivals_land, last_active, presence, slot_presence, projection_scale,
             activity, commit,
             dock_since, gutter_entry, slot_origin, group, dismissed, ring_presence,
             ring_capacity, casting_ring, settle, settled, leaving_name, seat, travelling, transmitting,
@@ -75,6 +84,9 @@ impl Avatar {
             + key_bytes(key)
             + buffer_bytes::<u64>(touched.capacity())
             + buffer_bytes::<super::ArrivalsOnRing>(ring_arrivals.capacity())
+            + buffer_bytes::<(std::ops::RangeInclusive<u64>, super::Time)>(
+                pending_arrivals.capacity(),
+            )
             + placement.as_ref().map_or(0, names::Placement::replay_bytes)
             + slot.as_ref().map_or(0, slots::Placement::replay_bytes)
             + dock_walk

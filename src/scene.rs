@@ -2192,7 +2192,13 @@ fn sync_activity(
             fade(world, entity, avatar.grey, presence);
         }
     }
-    sync_groups(world, palette, pools, &simulation.groups());
+    sync_groups(
+        world,
+        palette,
+        pools,
+        simulation.theme(),
+        &simulation.groups(),
+    );
     styling::beams(world, palette, pools, simulation);
     sync_fragments(world, palette, pools, simulation);
 }
@@ -2202,13 +2208,17 @@ fn sync_groups(
     world: &mut World,
     palette: &Palette,
     pools: &mut Pools,
-    groups: &[(usize, Vec3, f32)],
+    theme: &Theme,
+    groups: &[(usize, Vec3, f32, f32)],
 ) {
     while pools.groups.len() < groups.len() {
+        let material = world
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial::default());
         let entity = world
             .spawn((
                 Mesh3d(palette.group_ring.clone()),
-                MeshMaterial3d(palette.avatars[0].clone()),
+                MeshMaterial3d(material),
                 Transform::default(),
                 Visibility::Hidden,
                 RenderLayers::layer(AVATAR_LAYER),
@@ -2217,9 +2227,21 @@ fn sync_groups(
             .id();
         pools.groups.push(entity);
     }
-    for (&entity, &(author, centre, rim)) in pools.groups.iter().zip(groups) {
-        let material = palette.avatars[author % palette.avatars.len()].clone();
-        world.entity_mut(entity).insert(MeshMaterial3d(material));
+    for (&entity, &(author, centre, rim, opacity)) in pools.groups.iter().zip(groups) {
+        let handle = world
+            .get::<MeshMaterial3d<StandardMaterial>>(entity)
+            .unwrap()
+            .0
+            .clone();
+        let mut material = theme.avatars[author % theme.avatars.len()].clone();
+        material.base_color = material
+            .base_color
+            .with_alpha(material.base_color.alpha() * opacity);
+        material.alpha_mode = AlphaMode::Blend;
+        *world
+            .resource_mut::<Assets<StandardMaterial>>()
+            .get_mut(&handle)
+            .unwrap() = material;
         if let Some(mut transform) = world.get_mut::<Transform>(entity) {
             transform.translation = centre;
             transform.scale = Vec3::splat(rim);
@@ -3941,10 +3963,11 @@ mod tests {
         world.init_resource::<Assets<Mesh>>();
         world.init_resource::<Assets<Image>>();
         world.init_resource::<Assets<StandardMaterial>>();
-        let palette = Palette::new(&mut world, &Theme::neon());
-        let rings = [(0, Vec3::ZERO, 1.0), (1, Vec3::X, 1.0)];
+        let theme = Theme::neon();
+        let palette = Palette::new(&mut world, &theme);
+        let rings = [(0, Vec3::ZERO, 1.0, 0.5), (1, Vec3::X, 1.0, 1.0)];
         let mut pools = Pools::default();
-        sync_groups(&mut world, &palette, &mut pools, &rings);
+        sync_groups(&mut world, &palette, &mut pools, &theme, &rings);
 
         let queue_order = |world: &World, pools: &Pools| {
             let mut entities = pools.groups.clone();
@@ -3960,6 +3983,18 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
         };
+        let first = pools.groups[0];
+        let handle = &world
+            .get::<MeshMaterial3d<StandardMaterial>>(first)
+            .unwrap()
+            .0;
+        let materials = world.resource::<Assets<StandardMaterial>>();
+        assert_eq!(
+            materials.get(handle).unwrap().base_color.alpha(),
+            theme.avatars[0].base_color.alpha() * 0.5
+        );
+        assert_eq!(world.get::<Transform>(first).unwrap().scale, Vec3::ONE);
+
         let first_pass = queue_order(&world, &pools);
         world.insert_resource(pools);
         reset_scene_pools(&mut world);
@@ -3972,7 +4007,7 @@ mod tests {
         for &entity in &pools.groups {
             assert_eq!(world.get::<Visibility>(entity), Some(&Visibility::Hidden));
         }
-        sync_groups(&mut world, &palette, &mut pools, &rings);
+        sync_groups(&mut world, &palette, &mut pools, &theme, &rings);
         assert_eq!(queue_order(&world, &pools), first_pass);
     }
 

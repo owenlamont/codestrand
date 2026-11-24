@@ -359,11 +359,11 @@ length. Other avatars have no travel cost: walkers never wait or detour for each
 Parking still spreads avatars when clear slots are available.
 A contributor who stays at a repository keeps a valid parking spot when switching
 between author and co-author. Co-authors who are already parked can use separate docks.
-When a new group shares a berth, it has a short lead-in to form its circle.
-If the group is still forming when the lead-in ends, the author casts from their
-avatar for that commit. A circle casts only at full size and holds its radius until
-its last ray finishes. Rays prefer the point on the camera-facing circle nearest
-the target on screen, subject to the checks for crossing other tiles.
+A group sharing a berth fades in a full-size circle around its members. The circle
+can follow contributors who walk together. If the group is still forming when the
+lead-in ends, the author casts from their avatar. An established circle holds its
+radius until its last ray finishes. Rays prefer the point on the camera-facing rim
+nearest the target on screen, subject to the checks for crossing other tiles.
 
 A contributor can depart once its previous commit's last fragment has arrived and the
 moving gutter route can meet the speed limit. Travel overlaps other contributors'
@@ -383,11 +383,13 @@ walking along the shortest safe gutter route, waiting as long as needed.
 travel policy selected for other contributors. Bot classification uses an explicit
 `bot` override
 in `contributors.toml`, then a GitHub noreply login ending in `[bot]`, then the displayed
-name's `[bot]` suffix. Travel policies also apply to single repositories.
+name's `[bot]` suffix. Set `bot = true` for an agent without a bot suffix. Parked bots
+fade shortly after service while human contributors follow calendar inactivity.
+Travel policies also apply to single repositories.
 Walking avatars remain visible during travel until an inferred calendar departure.
 With `--contributor-travel walk`, walking trips
 also remain routed across long idle gaps instead of disappearing and re-entering at a
-different repository. After the last service, the normal inactivity fade still applies.
+different repository.
 Trips to a repository's first commit use the selected travel policy. Births follow
 presentation time, so the gutter can open before the first commit. In `walk` mode,
 a later birth can wait when its moving gutter would outrun an active walk.
