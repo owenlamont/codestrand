@@ -396,10 +396,12 @@ fn visible_rays_stay_local_over_whole_playback() {
 }
 
 #[test]
-fn contributors_hold_position_and_presence_while_transmitting() {
+fn contributors_hold_their_berth_and_presence_while_transmitting() {
+    type Berth = (super::Vec3, super::slots::Dock);
     let mut simulation = rapid_repositories(4);
-    let mut previous = Vec::new();
+    let mut previous: Vec<(super::Vec3, f32, usize, Option<Berth>)> = Vec::new();
     let mut observed = 0;
+    let mut carried = 0;
     for frame in 0..=simulation.frames(60).unwrap() {
         simulation.advance_to(frame, 60);
         let files = simulation.file_arrival_beams().map(|(_, beam)| beam);
@@ -411,14 +413,26 @@ fn contributors_hold_position_and_presence_while_transmitting() {
             .chain(directories)
         {
             let avatar = &simulation.avatars()[beam.author];
-            let Some(&(position, presence)) = previous.get(beam.author) else {
+            let Some(&(position, presence, repository, anchor)) =
+                previous.get(beam.author)
+            else {
                 continue;
             };
-            assert_eq!(
-                avatar.position, position,
-                "frame {frame}: {} moved",
-                avatar.name
-            );
+            let movement = avatar.position - position;
+            if movement.length_squared() > 1e-8 {
+                let (point, dock) = anchor.expect("a moving transmitter has a berth");
+                let gutter =
+                    simulation.layout().repositories[repository].gutter.unwrap();
+                let expected = super::slots::world(dock.on_network(gutter)) - point;
+                assert_eq!(avatar.repository, repository);
+                assert_eq!(avatar.slot.as_ref().unwrap().dock, dock);
+                assert!(
+                    movement.distance(expected) < 1e-4,
+                    "frame {frame}: {} moved relative to their berth",
+                    avatar.name
+                );
+                carried += 1;
+            }
             assert!(
                 avatar.presence >= presence,
                 "frame {frame}: {} faded",
@@ -427,12 +441,19 @@ fn contributors_hold_position_and_presence_while_transmitting() {
             observed += 1;
         }
         previous.clear();
-        previous.extend(
-            simulation
-                .avatars()
-                .iter()
-                .map(|a| (a.position, a.presence)),
-        );
+        previous.extend(simulation.avatars().iter().map(|avatar| {
+            let region = &simulation.layout().repositories[avatar.repository];
+            let anchor =
+                avatar
+                    .slot
+                    .as_ref()
+                    .zip(region.gutter)
+                    .map(|(slot, gutter)| {
+                        (super::slots::world(slot.dock.on_network(gutter)), slot.dock)
+                    });
+            (avatar.position, avatar.presence, avatar.repository, anchor)
+        }));
     }
     assert!(observed > 0);
+    assert!(carried > 0);
 }
