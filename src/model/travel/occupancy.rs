@@ -791,7 +791,58 @@ fn repeated_round(previous: Option<&str>, round: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Rect, Vec2};
+    use super::{BTreeSet, Rect, Reservations, Simulation, Vec2};
+
+    #[test]
+    fn a_gutter_moving_past_an_arrival_source_rejects_its_dock() {
+        let mut events = Vec::new();
+        for repository in 0_u16..2 {
+            let mut event = crate::timeline::synthetic().remove(0);
+            event.seconds += i64::from(repository) * 86_400;
+            crate::repositories::namespace(
+                std::slice::from_mut(&mut event),
+                usize::from(repository),
+            );
+            events.push(event);
+        }
+        let mut simulation = Simulation::with_repositories(
+            events,
+            &crate::model::Options::default(),
+            &crate::theme::Theme::neon(),
+            &crate::contributors::Mappings::default(),
+            &["first".into(), "second".into()],
+        );
+        simulation.advance_to(75, 60);
+        let pulse = simulation.state.pulses.front().unwrap();
+        let (commit, author, repository) =
+            (pulse.commit, pulse.author, pulse.repository);
+        let now = crate::model::tick_time(simulation.state.tick);
+        assert!(now >= pulse.start + crate::model::ADD_DELAY);
+        let radius = simulation.state.avatar_radius();
+        let state = &mut *simulation.state;
+        let avatar = &mut state.avatars[author];
+        let position = avatar.position;
+        let dock = avatar.slot.as_ref().unwrap().dock;
+        assert!(avatar.transmitting);
+        assert_eq!(avatar.commit, commit);
+        let gutter = state.layout.repositories[repository]
+            .gutter
+            .as_mut()
+            .unwrap();
+        gutter.low.x -= 4.0;
+        gutter.high.x -= 4.0;
+        assert!(!avatar.beside_gutter(Some(*gutter), radius));
+        assert!(now < avatar.arrivals_land);
+
+        state.hold_transmitters(now, &simulation.travel);
+        simulation.reserve_blocked_ray_sources(
+            &mut Reservations::new(),
+            &mut BTreeSet::new(),
+        );
+
+        assert_eq!(simulation.travel.rejected_docks(commit, author), &[dock]);
+        assert_eq!(simulation.state.avatars[author].position, position);
+    }
 
     #[test]
     fn refinement_settles_only_when_a_comparable_round_repeats() {
