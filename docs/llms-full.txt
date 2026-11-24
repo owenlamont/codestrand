@@ -422,14 +422,15 @@ framing reserves space for elevated avatars and labels; clearance guarantees app
 the fitted view. Free orbit and zoom can crop content. File glyphs lie flat with upright
 artwork in the overhead view. Directory structures, membership rings and activity halos
 remain on the file plane.
-Avatar portraits face the camera.
+Avatar portraits face the camera. Co-authors seated in a shared circle retain their
+relative positions in the circle as the camera orbits.
 The plane cannot be viewed from underneath; glass and file surfaces use backface culling.
 
 ## Themes
 
 `--theme` selects the starting theme for preview and export;
-the default is `neon`. Switching themes in preview changes styling:
-layout, playback position and camera stay put.
+the default is `neon`. Switching themes preserves the layout, playback position and
+camera. The selected theme stays active when playback loops.
 
 The seven themes are `neon`, `phosphor`, `outrun`, `blueprint`,
 `retro-desktop`, `atlas` and `forge`. Choose one for preview or export:
@@ -774,7 +775,8 @@ still more than 24 targets, the deepest groups move up to their parents until th
 beam count fits. New files stream down each shared beam, then settle into their own
 positions. The spacing tightens for large groups to keep the stream within the
 arrival animation. When a commit creates more than 24 directories, each new directory
-keeps its own arrival beam. Commit timing stays the same.
+keeps its own arrival beam. A new directory edge appears when its first file lands,
+including edges to parent directories. Commit timing stays the same.
 
 ## Overview detail
 

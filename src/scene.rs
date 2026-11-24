@@ -1038,9 +1038,16 @@ fn repository_glass_material(theme: &Theme, index: usize) -> StandardMaterial {
 }
 fn recolor_repository_regions(world: &mut World, theme: &Theme) {
     let regions: Vec<_> = world
-        .query::<(&RepositoryGlass, &MeshMaterial3d<StandardMaterial>)>()
+        .query::<(
+            &RepositoryGlass,
+            &MeshMaterial3d<StandardMaterial>,
+            Option<&LifecycleMaterial>,
+        )>()
         .iter(world)
-        .map(|(region, material)| (region.0, material.0.clone()))
+        .map(|(region, material, lifecycle)| {
+            let base = lifecycle.map_or(&material.0, |fade| &fade.original);
+            (region.0, base.clone())
+        })
         .collect();
     let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
     for (index, handle) in regions {
@@ -1872,9 +1879,10 @@ fn sync_directory_edges(
     let edges: Vec<_> = layout
         .dirs()
         .filter_map(|(index, dir)| {
-            if dir
-                .parent
-                .is_some_and(|parent| pools.lod.detail[parent] == 0.0)
+            if !dir.has_landed_file
+                || dir
+                    .parent
+                    .is_some_and(|parent| pools.lod.detail[parent] == 0.0)
             {
                 return None;
             }
@@ -2171,13 +2179,31 @@ fn sync_activity(
         pools.avatars.push(entity);
     }
     let scales = simulation.member_scales();
+    let groups = simulation.groups();
+    let rotation = world
+        .query_filtered::<&Transform, With<SceneCamera>>()
+        .single(world)
+        .map_or_else(
+            |_| Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
+            |camera| camera.rotation,
+        );
+    let mut rings = vec![None; avatars.len()];
+    for &(lead, centre, rim, opacity) in &groups {
+        if opacity > 0.0 {
+            rings[lead] = Some((centre, rim));
+        }
+    }
     for (index, &entity) in pools.avatars.iter().enumerate() {
         let avatar = avatars.get(index);
         let presence = avatar.map_or(0.0, model::Avatar::display_presence);
         if let (Some(avatar), Some(mut transform)) =
             (avatar, world.get_mut::<Transform>(entity))
         {
-            transform.translation = avatar.position;
+            transform.translation = group_avatar_position(
+                avatar.position,
+                rings[simulation.avatar_group_lead(index)],
+                rotation,
+            );
             transform.scale = Vec3::splat(
                 (presence
                     * simulation.scale()
@@ -2192,15 +2218,24 @@ fn sync_activity(
             fade(world, entity, avatar.grey, presence);
         }
     }
-    sync_groups(
-        world,
-        palette,
-        pools,
-        simulation.theme(),
-        &simulation.groups(),
-    );
+    sync_groups(world, palette, pools, simulation.theme(), &groups);
     styling::beams(world, palette, pools, simulation);
     sync_fragments(world, palette, pools, simulation);
+}
+
+fn group_avatar_position(
+    position: Vec3,
+    ring: Option<(Vec3, f32)>,
+    rotation: Quat,
+) -> Vec3 {
+    let Some((centre, rim)) = ring else {
+        return position;
+    };
+    let offset = position - centre;
+    if offset.length_squared() > rim * rim {
+        return position;
+    }
+    centre + rotation * Vec3::new(offset.x, -offset.z, 0.0)
 }
 
 /// Rings each parked group of a commit's contributors in its author's colour.
@@ -2734,7 +2769,12 @@ fn labels(world: &mut World) {
     let geometry = playback.0.theme();
     let lod = &world.resource::<Pools>().lod;
     let panes = projected_panes(&playback.0, &camera, &transform);
-    let mut avatars = playback.0.avatars().iter().filter(|a| a.presence > 0.0);
+    let mut avatars = playback
+        .0
+        .avatars()
+        .iter()
+        .enumerate()
+        .filter(|(_, avatar)| avatar.presence > 0.0);
     let wanted = playback
         .0
         .labels_with_names(
@@ -2753,20 +2793,27 @@ fn labels(world: &mut World) {
             let pixels_per_ui_unit = physical_height / reference_viewport(&camera).y;
             label.scale = label.kind.font_scale() / pixels_per_ui_unit;
             let (point, anchor) = if label.kind == model::LabelKind::Avatar {
-                let avatar = avatars.next()?;
+                let (index, avatar) = avatars.next()?;
                 if avatar.display_presence() <= 0.0 {
                     return None;
                 }
                 label.opacity *= avatar.display_presence() / avatar.presence;
+                let position = world
+                    .resource::<Pools>()
+                    .avatars
+                    .get(index)
+                    .and_then(|&entity| world.get::<Transform>(entity))
+                    .map_or(avatar.position, |pose| pose.translation);
                 (
                     project_avatar_name(
                         &camera,
                         &transform,
                         &playback.0,
                         avatar,
+                        position,
                         &label,
                     )?,
-                    avatar.position,
+                    position,
                 )
             } else {
                 (
@@ -2815,20 +2862,17 @@ fn project_avatar_name(
     transform: &GlobalTransform,
     simulation: &Simulation,
     avatar: &model::Avatar,
+    position: Vec3,
     label: &model::Label,
 ) -> Option<Vec2> {
-    let body = project_point(camera, transform, avatar.position)?;
+    let body = project_point(camera, transform, position)?;
     let radius = simulation.theme().avatar_radius
         * avatar.display_presence()
         * simulation.scale()
         * simulation.avatar_disc_scale()
         * avatar.projection_scale
         * avatar.lifecycle_scale.max(0.001);
-    let edge = project_point(
-        camera,
-        transform,
-        avatar.position + transform.right() * radius,
-    )?;
+    let edge = project_point(camera, transform, position + transform.right() * radius)?;
     let size = model::label_rect(
         Vec2::ZERO,
         &label.text,

@@ -2065,6 +2065,13 @@ impl Simulation {
             .collect()
     }
 
+    pub(super) fn avatar_group_lead(&self, index: usize) -> usize {
+        self.state.avatars[index]
+            .group
+            .filter(|group| self.state.in_party(index, group.lead))
+            .map_or(index, |group| group.lead)
+    }
+
     fn pulse_beams_visible(&self, pulse: &Pulse) -> bool {
         self.can_emit_ray(pulse.author, pulse.repository)
     }

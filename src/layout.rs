@@ -187,6 +187,7 @@ pub(super) struct Dir {
     pub live: bool,
     pub touch_age: f32,
     pub arrival: Option<DirectoryArrival>,
+    pub(super) has_landed_file: bool,
     reserve: f32,
 }
 
@@ -194,7 +195,7 @@ impl Dir {
     fn replay_bytes(&self) -> u128 {
         let (path, slots) = retained_fields!(self, Self {
             path, slots; local_position, scale, repository, parent, depth, position, files,
-            children, live, touch_age, reserve, arrival,
+            children, live, touch_age, reserve, arrival, has_landed_file,
         });
         path.capacity() as u128 + buffer_bytes::<Option<u64>>(slots.capacity())
     }
@@ -214,7 +215,18 @@ impl Dir {
             live: true,
             touch_age: f32::INFINITY,
             arrival: None,
+            has_landed_file: false,
             reserve: 0.4,
+        }
+    }
+
+    fn mark_file_landed(dirs: &mut [Self], mut index: usize) {
+        while !dirs[index].has_landed_file {
+            dirs[index].has_landed_file = true;
+            let Some(parent) = dirs[index].parent else {
+                break;
+            };
+            index = parent;
         }
     }
 
@@ -661,6 +673,9 @@ impl Layout {
                 file.delay = file.delay.max(delay);
             }
         }
+        if file.state == Presence::Present {
+            Dir::mark_file_landed(&mut self.dirs, dir);
+        }
         self.index_file(to, id);
         id
     }
@@ -779,6 +794,9 @@ impl Layout {
                 Presence::Leaving => 0.0,
                 Presence::Arriving | Presence::Recovering | Presence::Present => 1.0,
             };
+            if file.presence >= 1.0 {
+                Dir::mark_file_landed(&mut self.dirs, file.dir);
+            }
         }
         for _ in 0..steps {
             let time = self.plan.time;
@@ -802,6 +820,7 @@ impl Layout {
         }
         let mut gone = Vec::new();
         let files = &mut self.files;
+        let dirs = &mut self.dirs;
         self.fading.retain(|id| {
             let Some(file) = files.get_mut(id) else {
                 return false;
@@ -815,6 +834,7 @@ impl Layout {
                     file.presence = (file.presence + dt / FADE_SECONDS).min(1.0);
                     if file.presence >= 1.0 {
                         file.state = Presence::Present;
+                        Dir::mark_file_landed(dirs, file.dir);
                     }
                 }
                 Presence::Leaving => {
@@ -919,6 +939,7 @@ impl Layout {
                 dir.live = true;
                 dir.position = position;
                 dir.arrival = dir.parent.and(arrival);
+                dir.has_landed_file = false;
                 if let Some(rested) = self.reserve_fixed_points.get_mut(index) {
                     *rested = None;
                 }
