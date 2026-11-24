@@ -3247,6 +3247,50 @@ mod tests {
     }
 
     #[test]
+    fn parked_avatars_follow_their_berth_while_the_tile_resizes() {
+        let mut simulation = Simulation::two_synthetic_repositories();
+        simulation.advance_to(75, 60);
+        for (translation, length_scale) in [(0.2, 1.0), (0.0, 0.5), (0.0, 1.5)] {
+            let mut state = (*simulation.state).clone();
+            let mut regions = state.layout.repositories.clone();
+            let author = state.pulses.front().unwrap().author;
+            let avatar = &mut state.avatars[author];
+            let gutter = regions[avatar.repository].gutter.as_mut().unwrap();
+            let slot = avatar.slot.as_mut().unwrap();
+            slot.dock = slots::Dock::new(1, 0.25);
+            slot.point = slot.dock.on_network(*gutter) + slot.offset;
+            avatar.position = slot.world();
+            let (dock, offset) = (slot.dock, slot.offset);
+            avatar.transmitting = true;
+            avatar.travelling = false;
+            avatar.dock_walk = None;
+            avatar.settle = None;
+            let previous = avatar.position;
+            let mut walking = avatar.clone();
+            walking.transmitting = false;
+            walking.travelling = true;
+            let mut parked = avatar.clone();
+            parked.transmitting = false;
+            let original_length = gutter.high.y - gutter.low.y;
+            gutter.low += Vec2::splat(translation);
+            gutter.high += Vec2::new(
+                translation,
+                translation + original_length * (length_scale - 1.0),
+            );
+            let expected = slots::world(dock.on_network(*gutter) + offset);
+            let parked_id = state.avatars.len();
+            state.avatars.extend([parked, walking]);
+
+            state.carry_docked_avatars(&regions, &travel::Plan::default());
+
+            assert_ne!(expected, previous);
+            assert!(state.avatars[author].position.distance(expected) < 1e-5);
+            assert!(state.avatars[parked_id].position.distance(expected) < 1e-5);
+            assert_eq!(state.avatars[parked_id + 1].position, previous);
+        }
+    }
+
+    #[test]
     fn arrivals_stay_on_their_rays_during_a_many_tile_opening() {
         let mut events = Vec::new();
         let count = 12;
