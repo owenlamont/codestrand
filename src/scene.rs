@@ -3953,6 +3953,57 @@ mod tests {
     }
 
     #[test]
+    fn a_new_directory_is_hidden_until_its_arrival_ray_can_launch() {
+        let mut first = crate::timeline::synthetic().remove(0);
+        first.changes.truncate(1);
+        let mut shared = first.clone();
+        shared.seconds += 86_400;
+        shared.commit = "shared".into();
+        shared.changes[0].path = "src/first.rs".into();
+        shared.co_authors.push(crate::timeline::Identity {
+            name: b"Pair".to_vec(),
+            email: b"pair@example.invalid".to_vec(),
+        });
+        let mut simulation = Simulation::new(
+            vec![first, shared],
+            &model::Options::default(),
+            &Theme::neon(),
+            &crate::contributors::Mappings::default(),
+        );
+        simulation.collapse_directories = false;
+        let frames = simulation.frames(60).unwrap();
+        let mut world = rewind_preview_world(simulation);
+        let mut waited = false;
+        for frame in 0..frames {
+            world.resource_mut::<Frame>().index = frame;
+            animate(&mut world);
+            let layout = world.resource::<Playback>().0.layout();
+            let Some((ordinal, (index, dir))) = layout
+                .dirs()
+                .enumerate()
+                .find(|(_, (_, dir))| dir.path.ends_with("/src"))
+            else {
+                continue;
+            };
+            assert!(dir.arrival.is_some());
+            let pools = world.resource::<Pools>();
+            let visible = world.get::<Visibility>(pools.directories[ordinal])
+                == Some(&Visibility::Inherited);
+            let on_ray = pools
+                .directory_arrival_beams
+                .iter()
+                .any(|beam| beam.target == model::Target::Dir(index));
+            assert_eq!(visible, on_ray, "frame {frame}");
+            if on_ray {
+                assert!(waited, "the ring should need a prelude");
+                return;
+            }
+            waited = true;
+        }
+        panic!("the directory never launched");
+    }
+
+    #[test]
     fn coauthor_avatars_keep_their_offsets_in_the_camera_facing_circle() {
         let mut event = crate::timeline::synthetic().remove(0);
         event.co_authors.push(crate::timeline::Identity {
