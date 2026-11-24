@@ -1651,6 +1651,67 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_passing_avatar_can_cross_a_stationary_transmitter() {
+        use bevy::math::Vec3;
+        let mut sim = Simulation::new(
+            vec![crate::timeline::synthetic().remove(0)],
+            &super::super::Options::default(),
+            &crate::theme::Theme::neon(),
+            &crate::contributors::Mappings::default(),
+        );
+        sim.advance_to(60, 60);
+        let state = &mut *sim.state;
+        let centre = Vec3::Y * super::super::MIN_AVATAR_HEIGHT;
+        let transmitter = &mut state.avatars[0];
+        transmitter.position = centre;
+        transmitter.group = None;
+        transmitter.transmitting = true;
+        transmitter.presence = 1.0;
+        transmitter.projection_scale = slots::projection_scale(centre);
+
+        let before = centre - 0.3 * Vec3::X;
+        let target = centre + 0.2 * Vec3::X;
+        let mut walker = transmitter.clone();
+        walker.transmitting = false;
+        walker.travelling = true;
+        walker.position = target;
+        walker.projection_scale = slots::projection_scale(target);
+        state.avatars.push(walker);
+        let source = slots::field_point(before);
+        let destination = slots::field_point(target + Vec3::X);
+        let mut plan = Plan::default();
+        plan.trips.push(Trip {
+            author: 1,
+            commit: 0,
+            departure: state.tick,
+            arrival: state.tick + 4,
+            destination,
+            source,
+            fade_ticks: 0,
+            route: Route::new(&[source, destination], state.avatar_max_speed),
+            kind: TripKind::Relocation,
+            fade: false,
+            bot: false,
+            source_repository: 0,
+            destination_repository: 0,
+            free: state.tick,
+            failure: None,
+            cutoff: None,
+            proof: None,
+        });
+
+        super::super::occlusion::clear_seat_transitions(
+            state,
+            &plan,
+            &[Some(centre), Some(before)],
+            0.5,
+        );
+
+        assert_eq!(state.avatars[0].position, centre);
+        assert_eq!(state.avatars[1].position, target);
+    }
+
+    #[test]
     fn parked_avatars_stay_clear_during_seat_transitions() {
         let mut events = crate::timeline::synthetic();
         events.truncate(2);
