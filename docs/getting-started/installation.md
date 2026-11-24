@@ -1,7 +1,7 @@
 # Installation
 
 Codestrand ships as a native binary. Choose a channel matching your tools.
-The guides describe 0.3.0. Check `codestrand --version` and the command's `--help`
+The guides describe 0.3.1. Check `codestrand --version` and the command's `--help`
 after installing. To try the latest changes from source:
 
 ```sh

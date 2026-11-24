@@ -49,7 +49,7 @@ Source: https://codestrand.pages.dev/getting-started/installation/
 # Installation
 
 Codestrand ships as a native binary. Choose a channel matching your tools.
-The guides describe 0.3.0. Check `codestrand --version` and the command's `--help`
+The guides describe 0.3.1. Check `codestrand --version` and the command's `--help`
 after installing. To try the latest changes from source:
 
 ```sh
@@ -1413,7 +1413,7 @@ Source: https://codestrand.pages.dev/troubleshooting/
 
 Open a new terminal after installing and confirm the installation directory is on
 `PATH`. Use `codestrand --version` and `codestrand --help` to check which binary
-runs. The guides describe 0.3.0. Upgrade an older release if an option is
+runs. The guides describe 0.3.1. Upgrade an older release if an option is
 missing. See [installation](https://codestrand.pages.dev/getting-started/installation/) for supported targets.
 
 ## Repository or revision cannot be read
