@@ -1346,6 +1346,22 @@ pub(super) fn on_network(point: Vec2, cells: &[Rect]) -> bool {
     })
 }
 
+fn nearest_gutter_edge(from: Vec2, rect: Rect) -> Vec2 {
+    let closest = from.clamp(rect.min, rect.max);
+    [
+        Vec2::new(rect.min.x, closest.y),
+        Vec2::new(rect.max.x, closest.y),
+        Vec2::new(closest.x, rect.min.y),
+        Vec2::new(closest.x, rect.max.y),
+    ]
+    .into_iter()
+    .min_by(|a, b| {
+        from.distance_squared(*a)
+            .total_cmp(&from.distance_squared(*b))
+    })
+    .expect("four gutter edges")
+}
+
 pub(super) fn join_gutter(
     from: Vec2,
     target: Vec2,
@@ -1356,20 +1372,7 @@ pub(super) fn join_gutter(
     let entrance = if on_network(from, cells) {
         from
     } else if let Some(tile) = source {
-        let rect = field_rect(tile);
-        let closest = from.clamp(rect.min, rect.max);
-        [
-            Vec2::new(rect.min.x, closest.y),
-            Vec2::new(rect.max.x, closest.y),
-            Vec2::new(closest.x, rect.min.y),
-            Vec2::new(closest.x, rect.max.y),
-        ]
-        .into_iter()
-        .min_by(|a, b| {
-            from.distance_squared(*a)
-                .total_cmp(&from.distance_squared(*b))
-        })
-        .expect("four gutter edges")
+        nearest_gutter_edge(from, field_rect(tile))
     } else {
         return (from, None);
     };

@@ -39,7 +39,7 @@ impl Capture {
         }
         let entrance = cells
             .iter()
-            .map(|cell| waiting.clamp(cell.min, cell.max))
+            .map(|&cell| super::nearest_gutter_edge(waiting, cell))
             .min_by(|a, b| {
                 waiting
                     .distance_squared(*a)
