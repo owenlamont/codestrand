@@ -409,6 +409,7 @@ pub(super) struct Avatar {
     pub key: Key,
     pub name: String,
     idle_after: f32,
+    idle_opacity: f32,
     pub portrait: Option<std::sync::Arc<crate::avatars::Portrait>>,
     pub position: Vec3,
     target: Vec3,
@@ -595,15 +596,23 @@ impl Avatar {
         self.ring_presence = (self.ring_presence + ring).clamp(0.0, 1.0);
     }
 
+    pub(super) fn display_presence(&self) -> f32 {
+        self.presence * self.idle_opacity
+    }
+
     fn update_presence(&mut self, now: Time, dt: f32, opacity: f32) {
         self.projection_scale = slots::projection_scale(self.position);
-        let idle_bot = !self.travelling && now - self.last_active > self.idle_after;
-        let service_visible = self.transmitting || now < self.expires && !idle_bot;
+        let idle = !self.transmitting
+            && !self.travelling
+            && now - self.last_active > self.idle_after;
+        let idle_fade = if idle { -dt / DISBAND } else { dt / DISBAND };
+        self.idle_opacity = (self.idle_opacity + idle_fade).clamp(0.0, 1.0);
+        let service_visible = now < self.expires || self.transmitting;
         let service_fade = if service_visible { dt / 0.4 } else { -dt / 1.2 };
         self.slot_presence = (self.slot_presence + service_fade).clamp(0.0, 1.0);
         let fade = if service_visible {
             dt / 0.4
-        } else if self.dismissed || idle_bot {
+        } else if self.dismissed {
             -dt / DISBAND
         } else {
             -dt / lifecycle::EXIT
@@ -2049,7 +2058,7 @@ impl Simulation {
                 let opacity = if locked {
                     1.0
                 } else {
-                    avatar.ring_presence * avatar.presence
+                    avatar.ring_presence * avatar.display_presence()
                 };
                 Some((lead, centre, rim, opacity))
             })
@@ -2796,6 +2805,7 @@ impl State {
             } else {
                 f32::INFINITY
             },
+            idle_opacity: 1.0,
             portrait: contributor.portrait.clone(),
             position: self.focus + Vec3::Y * MIN_AVATAR_HEIGHT,
             target: self.focus,
@@ -3688,8 +3698,9 @@ mod tests {
             }
         }
         assert!(cast);
-        assert_eq!(sim.avatars()[0].presence, 0.0);
-        assert!(sim.avatars()[1].presence > 0.0);
+        assert_eq!(sim.avatars()[0].display_presence(), 0.0);
+        assert!(sim.avatars()[0].presence > 0.0);
+        assert!(sim.avatars()[1].display_presence() > 0.0);
     }
 
     #[test]

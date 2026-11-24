@@ -2173,7 +2173,7 @@ fn sync_activity(
     let scales = simulation.member_scales();
     for (index, &entity) in pools.avatars.iter().enumerate() {
         let avatar = avatars.get(index);
-        let presence = avatar.map_or(0.0, |avatar| avatar.presence);
+        let presence = avatar.map_or(0.0, model::Avatar::display_presence);
         if let (Some(avatar), Some(mut transform)) =
             (avatar, world.get_mut::<Transform>(entity))
         {
@@ -2754,6 +2754,10 @@ fn labels(world: &mut World) {
             label.scale = label.kind.font_scale() / pixels_per_ui_unit;
             let (point, anchor) = if label.kind == model::LabelKind::Avatar {
                 let avatar = avatars.next()?;
+                if avatar.display_presence() <= 0.0 {
+                    return None;
+                }
+                label.opacity *= avatar.display_presence() / avatar.presence;
                 (
                     project_avatar_name(
                         &camera,
@@ -2815,7 +2819,7 @@ fn project_avatar_name(
 ) -> Option<Vec2> {
     let body = project_point(camera, transform, avatar.position)?;
     let radius = simulation.theme().avatar_radius
-        * avatar.presence
+        * avatar.display_presence()
         * simulation.scale()
         * simulation.avatar_disc_scale()
         * avatar.projection_scale
