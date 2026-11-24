@@ -3631,6 +3631,264 @@ mod tests {
     }
 
     #[test]
+    fn a_visible_coauthor_circle_encloses_its_seated_members() {
+        let mut event = crate::timeline::synthetic().remove(0);
+        event.co_authors.push(crate::timeline::Identity {
+            name: b"Pair".to_vec(),
+            email: b"pair@example.invalid".to_vec(),
+        });
+        let mut sim = Simulation::new(
+            vec![event],
+            &Options::default(),
+            &Theme::neon(),
+            &Mappings::default(),
+        );
+        let mut visible = false;
+        for frame in 0..sim.frames(60).unwrap() {
+            sim.advance_to(frame, 60);
+            for (_, centre, radius, _) in sim.groups() {
+                visible = true;
+                assert!(
+                    sim.avatars()
+                        .iter()
+                        .all(|avatar| avatar.position.distance(centre) <= radius),
+                    "frame {frame}: ring does not enclose both contributors",
+                );
+            }
+        }
+        assert!(visible);
+    }
+
+    #[test]
+    fn idle_bot_fades_during_an_unrelated_contributors_history() {
+        let template = crate::timeline::synthetic().remove(0);
+        let mut events = vec![template.clone()];
+        events[0].author = crate::timeline::Identity {
+            name: b"helper[bot]".to_vec(),
+            email: b"helper@example.invalid".to_vec(),
+        };
+        for day in 1..=12 {
+            let mut event = template.clone();
+            event.seconds += day * 86_400;
+            event.commit = format!("later-{day}");
+            events.push(event);
+        }
+        let mut sim = Simulation::new(
+            events,
+            &Options::default(),
+            &Theme::neon(),
+            &Mappings::default(),
+        );
+        let mut cast = false;
+        for frame in 0..sim.frames(60).unwrap() {
+            sim.advance_to(frame, 60);
+            for beam in sim.beams().into_iter().filter(|beam| beam.author == 0) {
+                cast = true;
+                assert!(sim.avatars()[beam.author].presence > 0.0);
+            }
+        }
+        assert!(cast);
+        assert_eq!(sim.avatars()[0].presence, 0.0);
+        assert!(sim.avatars()[1].presence > 0.0);
+    }
+
+    #[test]
+    fn a_visible_circle_never_draws_a_solo_ray_from_inside_its_rim() {
+        let mut events = crate::timeline::synthetic();
+        events.truncate(2);
+        events[0].co_authors.push(crate::timeline::Identity {
+            name: b"Pair".to_vec(),
+            email: b"pair@example.invalid".to_vec(),
+        });
+        let mut sim = Simulation::new(
+            events,
+            &Options::default(),
+            &Theme::neon(),
+            &Mappings::default(),
+        );
+        let normal = -super::view_direction();
+        let mut solo_rays = 0;
+        let mut paired_rays = 0;
+        for frame in 0..sim.frames(60).unwrap() {
+            sim.advance_to(frame, 60);
+            let (focus, distance) = sim.view();
+            sim.set_ray_view(super::RayView::new(focus - normal * distance, normal));
+            let circle = sim.groups().first().map(|ring| (ring.1, ring.2));
+            for beam in sim
+                .beams()
+                .into_iter()
+                .chain(sim.file_arrival_beams().map(|(_, beam)| beam))
+            {
+                let solo = sim.seconds() >= sim.schedule.starts[1];
+                if solo {
+                    solo_rays += 1;
+                }
+                if let Some((centre, radius)) = circle
+                    && sim.avatars()[beam.author].position.distance(centre) < radius
+                {
+                    let spoke = beam.from - centre;
+                    assert!(
+                        spoke.dot(normal).abs() < 1e-4
+                            && (spoke.length() - radius).abs() < 1e-4,
+                        "frame {frame}"
+                    );
+                    paired_rays += usize::from(!solo);
+                }
+            }
+        }
+        assert!(solo_rays > 0 && paired_rays > 0);
+    }
+
+    #[test]
+    fn a_superseded_commit_still_assigns_the_source_of_its_pending_arrivals() {
+        let mut event = crate::timeline::synthetic().remove(0);
+        event.co_authors.push(crate::timeline::Identity {
+            name: b"Pair".to_vec(),
+            email: b"pair@example.invalid".to_vec(),
+        });
+        let mut sim = Simulation::new(
+            vec![event],
+            &Options::default(),
+            &Theme::neon(),
+            &Mappings::default(),
+        );
+        let first = super::frames_for(sim.schedule.starts[0], 60).unwrap();
+        sim.advance_to(first, 60);
+        let state = &mut *sim.state;
+        let original = state.pulses.front().unwrap().clone();
+        assert!(original.awaits_arrival_source(super::tick_time(state.tick)));
+        let mut later = original.clone();
+        later.commit += 1;
+        later.arrivals_land = None;
+        state.pulses.push_back(later);
+        state.retire_previous_pulses(
+            original.author,
+            original.repository,
+            original.end,
+        );
+        assert!(
+            state
+                .pulses
+                .iter()
+                .any(|pulse| pulse.commit == original.commit)
+        );
+    }
+
+    #[test]
+    fn a_new_arrival_waits_for_its_own_commit_when_a_ray_is_already_active() {
+        let event = crate::timeline::synthetic().remove(0);
+        let mut sim = Simulation::new(
+            vec![event],
+            &Options::default(),
+            &Theme::neon(),
+            &Mappings::default(),
+        );
+        for frame in 0..sim.frames(60).unwrap() {
+            sim.advance_to(frame, 60);
+            let arrival = sim.layout().arriving_files().find_map(|(id, file)| {
+                let target = Target::File(id);
+                let to = super::ground(file.position);
+                sim.arrival_beam(target, 0, to, 0.25, None, file.arrival_revision)
+                    .0
+                    .map(|_| (target, to, file.arrival_revision))
+            });
+            if let Some((target, to, revision)) = arrival {
+                let later = revision + 1;
+                let start = sim.seconds() + super::DISBAND;
+                sim.state.avatars[0].record_arrivals(start, Some(later..=later));
+                assert!(
+                    sim.arrival_beam(target, 0, to, 0.25, None, revision)
+                        .0
+                        .is_some()
+                );
+                assert!(
+                    sim.arrival_beam(target, 0, to, 0.25, None, later)
+                        .0
+                        .is_none()
+                );
+                return;
+            }
+        }
+        panic!("the first commit never had a file arrival ray");
+    }
+
+    #[test]
+    fn a_new_circle_waits_for_existing_avatar_rays_to_finish() {
+        let mut event = crate::timeline::synthetic().remove(0);
+        event.co_authors.push(crate::timeline::Identity {
+            name: b"Pair".to_vec(),
+            email: b"pair@example.invalid".to_vec(),
+        });
+        let mut sim = Simulation::new(
+            vec![event],
+            &Options::default(),
+            &Theme::neon(),
+            &Mappings::default(),
+        );
+        for frame in 0..sim.frames(60).unwrap() {
+            sim.advance_to(frame, 60);
+            if sim
+                .avatars()
+                .first()
+                .is_some_and(|author| author.casting_ring.is_some())
+            {
+                let now = sim.seconds();
+                let state = &mut *sim.state;
+                state.avatars[0].casting_ring = None;
+                state.pulses[0].source = Some(super::RaySource::Avatar);
+                assert!(state.lock_source_ring(0, 0, now).is_none());
+                assert_eq!(sim.groups().as_slice(), &[]);
+                return;
+            }
+        }
+        panic!("the pair never formed a casting circle");
+    }
+
+    #[test]
+    fn a_coauthor_circle_follows_members_who_walk_together() {
+        let mut event = crate::timeline::synthetic().remove(0);
+        event.co_authors.push(crate::timeline::Identity {
+            name: b"Pair".to_vec(),
+            email: b"pair@example.invalid".to_vec(),
+        });
+        let mut sim = Simulation::new(
+            vec![event],
+            &Options::default(),
+            &Theme::neon(),
+            &Mappings::default(),
+        );
+        let mut established = false;
+        for frame in 0..sim.frames(60).unwrap() {
+            sim.advance_to(frame, 60);
+            if sim
+                .avatars()
+                .first()
+                .is_some_and(|avatar| avatar.ring_presence >= 1.0)
+            {
+                established = true;
+                break;
+            }
+        }
+        assert!(established);
+        let state = &mut *sim.state;
+        state.avatars[0].casting_ring = None;
+        let (first, radius) = state.visible_ring(0).unwrap();
+        for avatar in &mut state.avatars {
+            avatar.transmitting = false;
+            avatar.travelling = true;
+            avatar.position += Vec3::X;
+        }
+        state.update_rings(tick_seconds());
+        let (next, after) = state.visible_ring(0).unwrap();
+        assert_eq!(state.avatars[0].ring_presence, 1.0);
+        assert_eq!(after, radius);
+        assert!(next.distance(first + Vec3::X) < 1e-4);
+        state.avatars[1].position += Vec3::X * (radius * 3.0);
+        state.update_rings(tick_seconds());
+        assert!(state.avatars[0].ring_presence < 1.0);
+    }
+
+    #[test]
     fn a_casting_circle_keeps_its_radius_for_the_whole_flight() {
         let mut event = crate::timeline::synthetic().remove(0);
         event.co_authors.push(crate::timeline::Identity {
