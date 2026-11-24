@@ -3516,6 +3516,54 @@ mod tests {
     }
 
     #[test]
+    fn a_shallow_view_aims_at_the_target_as_seen_from_the_ring() {
+        let view = super::RayView::new(Vec3::ZERO, Vec3::Z);
+        let centre = Vec3::new(2.0, 0.0, 4.0);
+        let target = Vec3::new(3.0, 0.0, 12.0);
+
+        assert_eq!(view.towards(centre, target), Vec3::NEG_X);
+    }
+
+    #[test]
+    fn a_casting_circle_keeps_its_radius_for_the_whole_flight() {
+        let mut event = crate::timeline::synthetic().remove(0);
+        event.co_authors.push(crate::timeline::Identity {
+            name: b"Pair".to_vec(),
+            email: b"pair@example.invalid".to_vec(),
+        });
+        let mut simulation = Simulation::new(
+            vec![event],
+            &Options::default(),
+            &Theme::neon(),
+            &Mappings::default(),
+        );
+        let eye = Vec3::new(0.0, 12.0, 85.0);
+        let normal = -eye.normalize();
+        simulation.set_ray_view(super::RayView::new(eye, normal));
+        let mut radius = None;
+        let mut ring_arrivals = 0;
+        for frame in 0..simulation.frames(60).unwrap() {
+            simulation.advance_to(frame, 60);
+            if let Some(pulse) = simulation.state.pulses.front()
+                && let Some(super::RaySource::Ring(lead)) = pulse.source
+            {
+                let (centre, rim) = simulation.state.visible_ring(lead).unwrap();
+                assert_eq!(simulation.state.avatars[lead].ring_presence, 1.0);
+                assert_eq!(rim, *radius.get_or_insert(rim), "frame {frame}");
+                for (_, beam) in simulation.file_arrival_beams() {
+                    let spoke = beam.from - centre;
+                    assert!(spoke.dot(normal).abs() < 1e-4);
+                    assert!((spoke.length() - rim).abs() < 1e-4);
+                    ring_arrivals += 1;
+                }
+            }
+        }
+        assert!(radius.is_some());
+        assert!(ring_arrivals > 0);
+        assert!(simulation.state.avatars[0].casting_ring.is_none());
+    }
+
+    #[test]
     fn parked_avatars_follow_their_berth_while_the_tile_resizes() {
         let mut simulation = Simulation::two_synthetic_repositories();
         simulation.advance_to(75, 60);
