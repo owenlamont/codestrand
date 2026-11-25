@@ -25,14 +25,20 @@ pub(super) struct RepositoryRegion {
     pub outline: Vec<Vec2>,
     pub height: f32,
     pub rotated: bool,
+    pub stretch: Vec2,
 }
 
 impl RepositoryRegion {
     fn replay_bytes(&self) -> u128 {
         let (label, outline) = retained_fields!(self, Self {
-            label, outline; low, high, live, items, tile, gutter, height, rotated,
+            label, outline; low, high, live, items, tile, gutter, height, rotated, stretch,
         });
         label.capacity() as u128 + buffer_bytes::<Vec2>(outline.capacity())
+    }
+
+    pub(crate) fn local_axes(&self, point: Vec2) -> Vec2 {
+        let point = if self.rotated { point.perp() } else { point };
+        point * self.stretch
     }
 
     pub(super) fn corners(&self) -> [Vec2; 4] {

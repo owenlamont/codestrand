@@ -5,6 +5,7 @@ use bevy::math::{FloatExt, Vec2};
 use super::{RepositoryRegion, outline};
 use crate::model::{BIRTH_TICKS, caption, framing};
 
+mod aspect;
 mod fit;
 mod held;
 mod reflow;
@@ -1118,6 +1119,9 @@ pub(crate) struct Packing {
     rotated: Vec<bool>,
     content_scales: Arc<[f32]>,
     center_jumps: Arc<[(usize, Vec2)]>,
+    aspects: aspect::Plan,
+    display_aspects: Option<aspect::Plan>,
+    aspect_checkpoint: Option<aspect::Plan>,
     exits: Arc<[Option<crate::model::RepositoryExit>]>,
     tiling: TilingCache,
     /// Tiles every sample from scratch; tests compare against it.
@@ -1196,6 +1200,7 @@ impl Input {
             tile: None,
             gutter: None,
             rotated: false,
+            stretch: Vec2::ONE,
         }
     }
 }
@@ -1234,7 +1239,7 @@ impl Packing {
 
         let (nodes, rotated, birth_order, opening) = retained_fields!(self, Packing {
             nodes, rotated, birth_order, opening;
-            gutter_scale, growth, reflows, labels, inputs, samples, exits, content_scales, center_jumps,
+            gutter_scale, growth, reflows, labels, inputs, samples, exits, content_scales, center_jumps, aspects, display_aspects, aspect_checkpoint,
             tiling, fresh_tiling,
         });
         let opening = opening.as_ref().map_or(0, |opening| {
@@ -1528,7 +1533,6 @@ impl Packing {
                         .is_none_or(|change| change.tick > opening.end)
                 });
         let rotated = rotations(&nodes, &regions, &samples, space);
-        drop(items);
         let mut packing = Self {
             gutter_scale,
             growth: space.growth,
@@ -1542,12 +1546,20 @@ impl Packing {
             rotated,
             content_scales: Arc::default(),
             center_jumps: Arc::default(),
+            aspects: aspect::Plan::default(),
+            display_aspects: None,
+            aspect_checkpoint: None,
             exits,
             tiling: TilingCache::default(),
             fresh_tiling: false,
         };
-        packing.center_jumps = packing.plan_center_jumps();
+        packing.center_jumps = packing.plan_center_jumps(&items);
         packing.content_scales = packing.plan_content_scales();
+        packing.aspects = packing.build_aspects(
+            u64::try_from(packing.inputs.len() - 1).expect("bounded packing rows"),
+            None,
+            |tick| (tick, tick, Vec::new()),
+        );
         Ok(packing)
     }
 
@@ -1580,7 +1592,7 @@ impl Packing {
         presence: Option<&[f32]>,
         selected: impl Fn(usize) -> bool,
     ) -> Option<(Vec<RepositoryRegion>, Vec<Vec2>, Vec<f32>)> {
-        self.sample_rows(tick, tick, &[], presence, selected)
+        self.sample_rows(tick, tick, &[], presence, None, selected)
     }
 
     pub(crate) fn sample_split(
@@ -1589,8 +1601,9 @@ impl Packing {
         content: u64,
         births: &[(usize, u64)],
         repositories: Option<&[usize]>,
+        display_tick: u64,
     ) -> Option<(Vec<RepositoryRegion>, Vec<Vec2>, Vec<f32>)> {
-        self.sample_rows(tiles, content, births, None, |index| {
+        self.sample_rows(tiles, content, births, None, Some(display_tick), |index| {
             repositories.is_none_or(|selected| selected.contains(&index))
         })
     }
@@ -1672,6 +1685,7 @@ impl Packing {
         tick: u64,
         births: &[(usize, u64)],
         presence: Option<&[f32]>,
+        display_tick: Option<u64>,
         selected: impl Fn(usize) -> bool,
     ) -> Option<(Vec<RepositoryRegion>, Vec<Vec2>, Vec<f32>)> {
         let tick = usize::try_from(tick)
@@ -1682,6 +1696,10 @@ impl Packing {
             .min(self.samples.len() - 1);
         let sample = &self.samples[tiles];
         let placement = self.fit_rows(tiles, tick, births, presence, None);
+        let aspect = display_tick.zip(self.display_aspects.as_ref()).unwrap_or((
+            u64::try_from(tiles).expect("bounded tile row"),
+            &self.aspects,
+        ));
         let mut regions: Vec<_> = self.inputs[tick]
             .iter()
             .zip(self.labels.iter())
@@ -1690,25 +1708,34 @@ impl Packing {
         let mut origins = Vec::with_capacity(regions.len());
         let mut scales = Vec::with_capacity(regions.len());
         for (i, r) in regions.iter_mut().enumerate() {
-            let turn = |p: Vec2| if self.rotated[i] { p.perp() } else { p };
+            let stretch = aspect.1.sample(i, aspect.0);
+            let turn = |p: Vec2| (if self.rotated[i] { p.perp() } else { p }) * stretch;
             let tile = placement[i].tile.filter(|_| selected(i));
-            let origin = if tile.is_some() {
+            let mut origin = if tile.is_some() {
                 placement[i].origin
             } else {
                 Vec2::ZERO
             };
-            let scale = if tile.is_some() {
+            let mut scale = if tile.is_some() {
                 placement[i].scale
             } else {
                 0.0
             };
+            let center = placement[i].center * stretch;
+            if stretch != Vec2::ONE
+                && let Some(tile) = tile
+            {
+                let shape: Vec<_> = r.outline.iter().copied().map(turn).collect();
+                scale = scale.min(self.fit_scale(tile, &shape, r.height, center));
+                origin = framing::field_to_world(tile.low.midpoint(tile.high))
+                    - center * scale;
+            }
             let low = turn(r.low);
             let high = turn(r.high);
             if self.center_jumps.is_empty() {
                 r.low = low.min(high) * scale + origin;
                 r.high = low.max(high) * scale + origin;
             } else {
-                let center = placement[i].center;
                 let radius = (low - center).abs().max((high - center).abs());
                 r.low = (center - radius) * scale + origin;
                 r.high = (center + radius) * scale + origin;
@@ -1730,6 +1757,7 @@ impl Packing {
                         .unwrap_or(1.0)
                         .clamp(0.0, 1.0));
             r.rotated = self.rotated[i];
+            r.stretch = stretch;
             for point in &mut r.outline {
                 *point = turn(*point) * scale + origin;
             }
@@ -2049,7 +2077,84 @@ impl Packing {
             .collect()
     }
 
-    fn plan_center_jumps(&self) -> Arc<[(usize, Vec2)]> {
+    fn build_aspects(
+        &self,
+        end: u64,
+        checkpoint: Option<&aspect::Plan>,
+        mut rows: impl FnMut(u64) -> (u64, u64, Vec<(usize, u64)>),
+    ) -> aspect::Plan {
+        if self.rotated.len() < 2 || self.inputs.is_empty() {
+            return aspect::Plan::default();
+        }
+        let mut tiling = Tiling::default();
+        aspect::Plan::build(self.rotated.len(), end, checkpoint, |shown, tracks| {
+            let (tiles, content, births) = rows(shown);
+            let max = self.inputs.len() - 1;
+            let tiles = usize::try_from(tiles).unwrap_or(usize::MAX).min(max);
+            let content = usize::try_from(content).unwrap_or(usize::MAX).min(max);
+            let layout = self.layout_at(tiles, &births, None, Some(&mut tiling));
+            for (repo, (track, tile)) in tracks.iter_mut().zip(layout.tiles).enumerate()
+            {
+                track.observe(shown, tile, |tile| {
+                    self.aspect_target(repo, tile, tiles, content)
+                });
+            }
+        })
+    }
+
+    pub(crate) fn replan_display_aspects(
+        &mut self,
+        end: u64,
+        rows: impl FnMut(u64) -> (u64, u64, Vec<(usize, u64)>),
+    ) {
+        self.display_aspects =
+            Some(self.build_aspects(end, self.aspect_checkpoint.as_ref(), rows));
+    }
+
+    pub(crate) fn checkpoint_display_aspects(
+        &mut self,
+        boundary: u64,
+        rows: impl FnMut(u64) -> (u64, u64, Vec<(usize, u64)>),
+    ) {
+        self.aspect_checkpoint =
+            Some(self.build_aspects(boundary, self.aspect_checkpoint.as_ref(), rows));
+    }
+
+    fn aspect_target(
+        &self,
+        repo: usize,
+        tile: Tile,
+        tiles: usize,
+        content: usize,
+    ) -> Vec2 {
+        let input = &self.inputs[content][repo];
+        let shape = input.shape(self.rotated[repo]);
+        let (low, high) = outline::bounds(&shape);
+        let (tile_low, tile_high) = outline::bounds(&tile.usable().ground());
+        let room = (tile_high - tile_low) / (high - low).max(Vec2::splat(1e-5));
+        let desired = (room / room.min_element()).clamp(Vec2::ONE, Vec2::splat(4.0));
+        let center = self.content_center(content, &shape);
+        let scale = self.content_scales[tiles * self.rotated.len() + repo]
+            .min(self.fit_scale(tile, &shape, input.height, center));
+        let mut expanded = shape.to_vec();
+        let mut fits = 0.0_f32;
+        let mut fails = 1.0;
+        for _ in 0..10 {
+            let mix = fits.midpoint(fails);
+            let stretch = Vec2::ONE.lerp(desired, mix);
+            for (point, &original) in expanded.iter_mut().zip(shape.iter()) {
+                *point = original * stretch;
+            }
+            if self.fit_scale(tile, &expanded, input.height, center * stretch) >= scale
+            {
+                fits = mix;
+            } else {
+                fails = mix;
+            }
+        }
+        Vec2::ONE.lerp(desired, fits)
+    }
+    fn plan_center_jumps(&self, items: &[Vec<f32>]) -> Arc<[(usize, Vec2)]> {
         // Keep the fit used by shared-gutter travel planning for multi-repository playback.
         if self.rotated.len() != 1 {
             return Arc::default();
@@ -2063,7 +2168,10 @@ impl Packing {
                 let delta =
                     after.low.midpoint(after.high) - before.low.midpoint(before.high);
                 let delta = if self.rotated[0] { delta.perp() } else { delta };
-                (before.live && after.live && delta.length_squared() > 0.25)
+                (before.live
+                    && after.live
+                    && items[index][0] > 1.0
+                    && delta.length_squared() > 0.25)
                     .then_some((index + 1, delta))
             })
             .collect()
@@ -2197,6 +2305,7 @@ mod tests {
                 outline: outline::rectangle(-Vec2::ONE, Vec2::ONE),
                 height: 0.105,
                 rotated: false,
+                stretch: Vec2::ONE,
             })
             .collect()
     }
@@ -2424,6 +2533,7 @@ mod tests {
                             outline: outline::rectangle(-size, size),
                             height: 0.105,
                             rotated: false,
+                            stretch: Vec2::ONE,
                         }
                     })
                     .collect()

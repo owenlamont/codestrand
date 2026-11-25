@@ -312,10 +312,17 @@ impl Route {
 }
 
 #[derive(Clone, Debug)]
+struct GutterWalk {
+    rect: Rect,
+    leave_seat: Option<(Vec2, f32)>,
+    enter_seat: Option<(Vec2, f32)>,
+}
+
+#[derive(Clone, Debug)]
 pub(super) struct DockWalk {
     start: u64,
     route: Route,
-    gutter: Option<Rect>,
+    gutter: Option<GutterWalk>,
 }
 
 impl DockWalk {
@@ -328,23 +335,28 @@ impl DockWalk {
         speed: f32,
     ) -> Option<Self> {
         let mut points = Router::default().route(source, target, cells).ok()?;
-        let gutter = (!gutter.is_empty()
-            && points.iter().all(|&point| on_network(point, &[gutter])))
-        .then_some(gutter);
-        if points
-            .first()
-            .is_some_and(|point| point.distance(from) > 0.001)
-        {
+        let source = *points.first()?;
+        let target = *points.last()?;
+        let follows_gutter = !gutter.is_empty()
+            && points.iter().all(|&point| on_network(point, &[gutter]));
+        let leaves_seat = source.distance(from) > 0.001;
+        let enters_seat = target.distance(seat) > 0.001;
+        if leaves_seat {
             points.insert(0, from);
         }
-        if points
-            .last()
-            .is_some_and(|point| point.distance(seat) > 0.001)
-        {
+        if enters_seat {
             points.push(seat);
         }
         let route = Route::new(&points, speed);
-        (route.duration > 0.0).then_some(Self {
+        if route.duration <= 0.0 {
+            return None;
+        }
+        let gutter = follows_gutter.then(|| GutterWalk {
+            rect: gutter,
+            leave_seat: leaves_seat.then(|| (source, route.legs[0].duration)),
+            enter_seat: enters_seat.then(|| (target, route.legs.last().unwrap().start)),
+        });
+        Some(Self {
             start,
             route,
             gutter,
@@ -356,13 +368,26 @@ impl DockWalk {
         let point = (elapsed < self.route.duration)
             .then(|| self.route.sample(elapsed))
             .flatten()?;
-        Some(match self.gutter.zip(gutter) {
-            Some((before, now)) if before != now => {
-                let fraction = (point - before.min) / before.size();
-                now.min + fraction * now.size()
-            }
-            _ => point,
-        })
+        let Some((walk, now)) = self
+            .gutter
+            .as_ref()
+            .zip(gutter)
+            .filter(|(walk, now)| walk.rect != *now)
+        else {
+            return Some(point);
+        };
+        let carry = |position| {
+            let fraction = (position - walk.rect.min) / walk.rect.size();
+            now.min + fraction * now.size()
+        };
+        let connector = walk
+            .leave_seat
+            .filter(|&(_, end)| elapsed < end)
+            .or_else(|| walk.enter_seat.filter(|&(_, start)| elapsed >= start));
+        Some(
+            connector
+                .map_or_else(|| carry(point), |(dock, _)| point + (carry(dock) - dock)),
+        )
     }
 
     pub(super) fn retained_bytes(&self) -> usize {

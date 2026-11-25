@@ -79,14 +79,9 @@ impl Edge {
 
     fn nondegenerate(self) -> bool {
         let [start, end] = self.vector(0);
-        let delta = end - start;
-        let span = delta.length_squared();
-        let nearest = if span == 0.0 {
-            start
-        } else {
-            start + delta * (-start.dot(delta) / span).clamp(0.0, 1.0)
-        };
-        nearest.length_squared() > 0.0
+        start.length_squared() > 0.0
+            && end.length_squared() > 0.0
+            && (start.perp_dot(end) != 0.0 || start.dot(end) >= 0.0)
     }
 }
 
@@ -122,6 +117,7 @@ struct DirectoryFrame {
 #[derive(Default)]
 pub(super) struct DirectoryAudit {
     previous: Vec<DirectoryFrame>,
+    stretches: Vec<Vec2>,
 }
 
 impl DirectoryAudit {
@@ -131,6 +127,7 @@ impl DirectoryAudit {
         previous_tiles: &[Option<Tile>],
     ) -> Result<(usize, usize), proptest::test_runner::TestCaseError> {
         let layout = sim.layout();
+        self.audit_stretch(sim, previous_tiles)?;
         let current: Vec<_> = (0..layout.dir_count())
             .map(|id| {
                 let dir = layout.dir(id);
@@ -145,15 +142,16 @@ impl DirectoryAudit {
                 }
             })
             .collect();
+        audit_footprints(sim)?;
         let mut edges = Vec::new();
         let mut retained = 0;
         let mut resizing = 0;
         for (child, after) in current.iter().enumerate() {
             let dir = layout.dir(child);
             let Some(parent) = dir.parent else { continue };
-            let before = self.previous.get(child).filter(|frame| frame.scale > 0.0);
-            let swept = before.filter(|_| after.scale > 0.0);
-            if !after.visible_edge && !swept.is_some_and(|frame| frame.visible_edge) {
+            let before = self.previous.get(child);
+            let swept = before.filter(|frame| frame.scale > 0.0 && after.scale > 0.0);
+            if !after.visible_edge && !before.is_some_and(|frame| frame.visible_edge) {
                 continue;
             }
             if let Some(before) =
@@ -173,22 +171,16 @@ impl DirectoryAudit {
                 }
             }
             let ids = [parent, child];
-            let to = ids.map(|id| current[id].position);
-            let from = swept.map_or(to, |_| ids.map(|id| self.previous[id].position));
-            if after.visible_edge
-                && let Some(tile) = layout.repositories[dir.repository].tile
-            {
-                let usable = tile.usable();
-                for id in ids {
-                    let point = framing::world_to_field(layout.dir(id).position);
-                    proptest::prop_assert!(
-                        point.cmpge(usable.low - Vec2::splat(0.0001)).all()
-                            && point.cmple(usable.high + Vec2::splat(0.0001)).all(),
-                        "tick {}: directory {} escaped its usable tile",
-                        sim.state.tick,
-                        layout.dir(id).path
-                    );
-                }
+            let mut to = ids.map(|id| current[id].position);
+            let mut from =
+                before.map_or(to, |_| ids.map(|id| self.previous[id].position));
+            // A collapsed fit makes every edge a homothetic copy of the visible endpoint.
+            if before.is_some_and(|frame| frame.scale <= 0.0) {
+                proptest::prop_assert_eq!(from[0], from[1]);
+                from = to;
+            } else if after.scale <= 0.0 {
+                proptest::prop_assert_eq!(to[0], to[1]);
+                to = from;
             }
             let edge = Edge { ids, from, to };
             proptest::prop_assert!(
@@ -219,7 +211,69 @@ impl DirectoryAudit {
         self.previous = current;
         Ok((retained, resizing))
     }
+    fn audit_stretch(
+        &mut self,
+        sim: &Simulation,
+        previous_tiles: &[Option<Tile>],
+    ) -> Result<(), proptest::test_runner::TestCaseError> {
+        let layout = sim.layout();
+        for (repo, region) in layout.repositories.iter().enumerate() {
+            if let Some((old, new)) =
+                previous_tiles.get(repo).copied().flatten().zip(region.tile)
+                && ((old.low - new.low).abs().max_element() > 1e-5
+                    || (old.high - new.high).abs().max_element() > 1e-5)
+            {
+                proptest::prop_assert_eq!(
+                    self.stretches[repo],
+                    region.stretch,
+                    "tick {}: repo {} reshaped while its tile was moving",
+                    sim.state.tick,
+                    repo
+                );
+            }
+        }
+        self.stretches = layout
+            .repositories
+            .iter()
+            .map(|region| region.stretch)
+            .collect();
+        Ok(())
+    }
 }
+fn audit_footprints(
+    sim: &Simulation,
+) -> Result<(), proptest::test_runner::TestCaseError> {
+    let layout = sim.layout();
+    for (_, dir) in layout.dirs().filter(|(_, dir)| dir.scale > 0.0) {
+        let Some(tile) = layout.repositories[dir.repository].tile else {
+            continue;
+        };
+        let usable = tile.usable();
+        let pad = Vec2::splat(dir.radius());
+        for corner in [dir.position - pad, dir.position + pad] {
+            let point = framing::world_to_field(corner);
+            proptest::prop_assert!(
+                point.cmpge(usable.low - Vec2::splat(0.0001)).all()
+                    && point.cmple(usable.high + Vec2::splat(0.0001)).all(),
+                "tick {}: directory {} escaped its usable tile",
+                sim.state.tick,
+                dir.path
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn an_edge_cannot_collapse_between_nonzero_samples() {
+    let edge = Edge {
+        ids: [0, 1],
+        from: [DVec2::ZERO, DVec2::X],
+        to: [DVec2::ZERO, DVec2::NEG_X * 48.0],
+    };
+    assert!(!edge.nondegenerate());
+}
+
 #[test]
 fn edge_crossing_inside_an_interval_fails_with_legal_ends_and_midpoint() {
     let horizontal = [DVec2::NEG_X, DVec2::X];

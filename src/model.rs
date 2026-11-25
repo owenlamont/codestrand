@@ -1142,6 +1142,7 @@ impl Simulation {
             self.clock = clock;
         }
         self.schedule = schedule;
+        self.replan_display_aspects();
         self.state = SharedState(self.initial.clone());
         self.plan_avatar_envelopes(None);
         self.travel = preferences;
@@ -1706,15 +1707,14 @@ impl Simulation {
         }
     }
 
-    fn packing_sample(
-        &self,
+    fn packing_rows(
+        clock: &schedule::Clock,
+        births: &[(usize, u64, u64)],
         tick: u64,
-        repositories: Option<&[usize]>,
-    ) -> Option<(Vec<crate::layout::RepositoryRegion>, Vec<Vec2>, Vec<f32>)> {
-        let (tiles, content) = self.clock.rows(tick);
+    ) -> (u64, u64, Vec<(usize, u64)>) {
+        let (tiles, content) = clock.rows(tick);
         let span = BIRTH_TICKS + 1;
-        let births: Vec<_> = self
-            .births
+        let births: Vec<_> = births
             .iter()
             .filter_map(|&(repository, ready, history)| {
                 let elapsed = |tick: u64, end: u64| {
@@ -1724,8 +1724,39 @@ impl Simulation {
                 (shown != elapsed(tiles, history)).then_some((repository, shown))
             })
             .collect();
-        self.packing
-            .sample_split(tiles, content, &births, repositories)
+        (tiles, content, births)
+    }
+
+    fn replan_display_aspects(&mut self) {
+        let end = self.window.as_ref().map_or_else(
+            || self.end_tick(),
+            |window| self.clock.present(window.end).ticks(true),
+        );
+        let clock = &self.clock;
+        let births = &self.births;
+        self.packing.replan_display_aspects(end, |tick| {
+            Self::packing_rows(clock, births, tick)
+        });
+    }
+
+    fn packing_sample(
+        &self,
+        tick: u64,
+        repositories: Option<&[usize]>,
+    ) -> Option<(Vec<crate::layout::RepositoryRegion>, Vec<Vec2>, Vec<f32>)> {
+        let (tiles, content, births) =
+            Self::packing_rows(&self.clock, &self.births, tick);
+        let (mut regions, mut origins, mut scales) =
+            self.packing
+                .sample_split(tiles, content, &births, repositories, tick)?;
+        if tick == self.state.tick {
+            self.layout().constrain_directory_fit(
+                &mut regions,
+                &mut origins,
+                &mut scales,
+            );
+        }
+        Some((regions, origins, scales))
     }
 
     pub(super) fn visible_repository_tile(
@@ -1757,9 +1788,10 @@ impl Simulation {
 
     fn tick_layout_with_files(&mut self, files: FileMotion) {
         self.tick_times.laps.begin(&self.trace);
-        let placement = self.packing_sample(self.state.tick + 1, None);
-        self.tick_times.laps.end(Phase::TickPacking);
         self.tick_local_layout(files);
+        self.tick_times.laps.begin(&self.trace);
+        let placement = self.packing_sample(self.state.tick, None);
+        self.tick_times.laps.end(Phase::TickPacking);
         if let Some((regions, offsets, scales)) = placement {
             // Carry occupied berths first so seat selection sees the new gutter positions.
             self.state.carry_docked_avatars(&regions, &self.travel);
