@@ -396,8 +396,11 @@ pub(super) fn can_reweight(
         return false;
     }
     let future: Vec<_> = future.iter().map(|&items| items.max(1.0)).collect();
-    tiles(nodes, &future, presence, space)
-        .is_some_and(|after| Density::new(&after, live).improves(baseline, baseline))
+    tiles(nodes, &future, presence, space).is_some_and(|after| {
+        let density = Density::new(&after, live);
+        density.worst <= super::DENSITY_TOLERANCE
+            || density.improves(baseline, baseline)
+    })
 }
 
 fn totals(tiles: &[Option<Tile>], weights: &[f32]) -> (f32, f32) {
@@ -608,6 +611,18 @@ mod tests {
         let space = Space::new(4.0, 1.0);
         assert!(can_reweight(&nodes, &held, &live, &live, &[1.0; 3], space));
         assert!(!can_reweight(&nodes, &live, &live, &live, &[1.0; 3], space));
+        let held = [703.0, 165.0, 132.0];
+        let live = [702.0, 184.0, 114.0];
+        let space = Space::new(8.0, 1.0);
+        let presence = [1.0; 3];
+        let before =
+            Density::new(&tiles(&nodes, &held, &presence, space).unwrap(), &live);
+        let after =
+            Density::new(&tiles(&nodes, &live, &presence, space).unwrap(), &live);
+        assert!(before.worst > super::super::DENSITY_TOLERANCE);
+        assert!(after.worst <= super::super::DENSITY_TOLERANCE);
+        assert!(!after.improves(before, before));
+        assert!(can_reweight(&nodes, &held, &live, &live, &presence, space));
     }
 
     #[test]
