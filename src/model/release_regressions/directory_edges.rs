@@ -245,11 +245,12 @@ fn audit_footprints(
 ) -> Result<(), proptest::test_runner::TestCaseError> {
     let layout = sim.layout();
     for (_, dir) in layout.dirs().filter(|(_, dir)| dir.scale > 0.0) {
-        let Some(tile) = layout.repositories[dir.repository].tile else {
+        let region = &layout.repositories[dir.repository];
+        let Some(tile) = region.tile else {
             continue;
         };
         let usable = tile.usable();
-        let pad = Vec2::splat(dir.radius());
+        let pad = region.stretch * dir.radius();
         for corner in [dir.position - pad, dir.position + pad] {
             let point = framing::world_to_field(corner);
             proptest::prop_assert!(

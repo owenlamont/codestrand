@@ -53,6 +53,17 @@ impl Plan {
         }
     }
 
+    pub(super) fn replay_bytes(&self) -> u128 {
+        use crate::model::checkpoint_memory::buffer_bytes;
+
+        buffer_bytes::<Track>(self.tracks.len() + 2)
+            + self
+                .tracks
+                .iter()
+                .map(|track| buffer_bytes::<Change>(track.changes.capacity() + 2))
+                .sum::<u128>()
+    }
+
     pub(super) fn sample(&self, repository: usize, tick: u64) -> Vec2 {
         self.tracks.get(repository).map_or(Vec2::ONE, |track| {
             let next = track.changes.partition_point(|change| change.start <= tick);
@@ -66,7 +77,8 @@ impl Plan {
 pub(super) struct Track {
     reference: Option<Tile>,
     stable_since: u64,
-    settled_aspect: Option<f32>,
+    previous_tick: u64,
+    settled: Option<(f32, Vec2)>,
     changes: Arc<Vec<Change>>,
 }
 
@@ -77,12 +89,7 @@ impl Track {
         tile: Option<Tile>,
         target: impl FnOnce(Tile) -> Vec2,
     ) {
-        if let Some(last) = self.changes.last()
-            && tick == last.start + RESHAPE_DURATION + 1
-            && last.stop == last.start + RESHAPE_DURATION
-        {
-            self.settled_aspect = Some(last.aspect);
-        }
+        let previous = std::mem::replace(&mut self.previous_tick, tick);
 
         let same = self.reference.zip(tile).is_some_and(|(old, current)| {
             (old.low - current.low).abs().max_element() <= 1e-5
@@ -91,7 +98,7 @@ impl Track {
         if !same {
             self.reference = tile;
             self.stable_since = tick;
-            let stop = tick.saturating_sub(1);
+            let stop = previous;
             if self.changes.last().is_some_and(|last| last.stop > stop)
                 && let Some(last) = Arc::make_mut(&mut self.changes).last_mut()
             {
@@ -99,26 +106,37 @@ impl Track {
             }
             return;
         }
-        if tick.saturating_sub(self.stable_since) != STABLE_TICKS {
+        if let Some(last) = self.changes.last()
+            && previous < last.stop
+            && tick >= last.stop
+            && last.stop == last.start + RESHAPE_DURATION
+        {
+            self.settled = Some((last.aspect, last.to));
+        }
+
+        if previous.saturating_sub(self.stable_since) >= STABLE_TICKS
+            || tick.saturating_sub(self.stable_since) < STABLE_TICKS
+        {
             return;
         }
 
         let tile = tile.expect("unchanged live tile");
         let aspect = tile.usable().ground_aspect();
-        let Some(previous) = self.settled_aspect else {
-            self.settled_aspect = Some(aspect);
+        let Some((settled_aspect, settled_stretch)) = self.settled else {
+            self.settled = Some((aspect, Vec2::ONE));
             return;
         };
-        if (aspect / previous - 1.0).abs() < 0.02 {
-            return;
-        }
         let from = self
             .changes
             .last()
             .map_or(Vec2::ONE, |last| last.sample(tick));
-        let to = target(tile);
+        let to = if (aspect / settled_aspect - 1.0).abs() < 0.02 {
+            settled_stretch
+        } else {
+            target(tile)
+        };
         if from.distance_squared(to) < 1e-8 {
-            self.settled_aspect = Some(aspect);
+            self.settled = Some((aspect, to));
             return;
         }
         Arc::make_mut(&mut self.changes).push(Change {
@@ -134,6 +152,49 @@ impl Track {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paused_history_does_not_spend_the_hold_or_strand_an_interrupted_reshape() {
+        let square = Tile {
+            low: Vec2::ZERO,
+            high: Vec2::ONE * 0.4,
+        };
+        let wide = Tile {
+            high: Vec2::new(0.8, 0.4),
+            ..square
+        };
+        let row = |shown: u64| {
+            if shown < 102 {
+                shown
+            } else {
+                shown.saturating_sub(299).max(101)
+            }
+        };
+        let build = |end, checkpoint| {
+            Plan::build(1, end, checkpoint, |shown, tracks| {
+                let tick = row(shown);
+                let tile = if (100..220).contains(&tick) {
+                    wide
+                } else {
+                    square
+                };
+                tracks[0].observe(tick, Some(tile), |_| Vec2::new(2.0, 1.0));
+            })
+        };
+        let initial = build(350, None);
+        let continued = build(800, Some(&initial));
+        let fresh = build(800, None);
+        assert_eq!(continued.sample(0, row(400)), Vec2::ONE);
+        let moving = continued.sample(0, row(500));
+        assert!(moving.x > 1.0 && moving.x < 2.0);
+        assert_eq!(continued.sample(0, 220), continued.sample(0, 219));
+        assert_eq!(continued.sample(0, 280), continued.sample(0, 220));
+        assert_eq!(continued.sample(0, 400), Vec2::ONE);
+        assert!(continued.replay_bytes() > initial.replay_bytes());
+        for shown in 350..800 {
+            assert_eq!(continued.sample(0, row(shown)), fresh.sample(0, row(shown)));
+        }
+    }
 
     #[test]
     fn interrupted_reshape_holds_until_the_new_tile_has_settled() {

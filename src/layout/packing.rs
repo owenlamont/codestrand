@@ -1234,12 +1234,27 @@ fn rotations(
 }
 
 impl Packing {
+    pub(crate) fn for_playback(&self) -> Self {
+        Self {
+            aspect_checkpoint: None,
+            ..self.clone()
+        }
+    }
+
     pub(crate) fn replay_bytes(&self) -> u128 {
         use crate::model::checkpoint_memory::{buffer_bytes, retained_fields};
 
-        let (nodes, rotated, birth_order, opening) = retained_fields!(self, Packing {
-            nodes, rotated, birth_order, opening;
-            gutter_scale, growth, reflows, labels, inputs, samples, exits, content_scales, center_jumps, aspects, display_aspects, aspect_checkpoint,
+        let (
+            nodes,
+            rotated,
+            birth_order,
+            opening,
+            aspects,
+            display_aspects,
+            aspect_checkpoint,
+        ) = retained_fields!(self, Packing {
+            nodes, rotated, birth_order, opening, aspects, display_aspects, aspect_checkpoint;
+            gutter_scale, growth, reflows, labels, inputs, samples, exits, content_scales, center_jumps,
             tiling, fresh_tiling,
         });
         let opening = opening.as_ref().map_or(0, |opening| {
@@ -1251,6 +1266,13 @@ impl Packing {
             + buffer_bytes::<bool>(rotated.capacity())
             + buffer_bytes::<usize>(birth_order.len() + 2)
             + opening
+            + aspects.replay_bytes()
+            + display_aspects
+                .as_ref()
+                .map_or(0, aspect::Plan::replay_bytes)
+            + aspect_checkpoint
+                .as_ref()
+                .map_or(0, aspect::Plan::replay_bytes)
     }
 
     pub(crate) fn input_bytes() -> usize {
@@ -1592,7 +1614,7 @@ impl Packing {
         presence: Option<&[f32]>,
         selected: impl Fn(usize) -> bool,
     ) -> Option<(Vec<RepositoryRegion>, Vec<Vec2>, Vec<f32>)> {
-        self.sample_rows(tick, tick, &[], presence, None, selected)
+        self.sample_rows(tick, tick, &[], presence, false, selected)
     }
 
     pub(crate) fn sample_split(
@@ -1601,9 +1623,8 @@ impl Packing {
         content: u64,
         births: &[(usize, u64)],
         repositories: Option<&[usize]>,
-        display_tick: u64,
     ) -> Option<(Vec<RepositoryRegion>, Vec<Vec2>, Vec<f32>)> {
-        self.sample_rows(tiles, content, births, None, Some(display_tick), |index| {
+        self.sample_rows(tiles, content, births, None, true, |index| {
             repositories.is_none_or(|selected| selected.contains(&index))
         })
     }
@@ -1685,7 +1706,7 @@ impl Packing {
         tick: u64,
         births: &[(usize, u64)],
         presence: Option<&[f32]>,
-        display_tick: Option<u64>,
+        presented: bool,
         selected: impl Fn(usize) -> bool,
     ) -> Option<(Vec<RepositoryRegion>, Vec<Vec2>, Vec<f32>)> {
         let tick = usize::try_from(tick)
@@ -1696,10 +1717,12 @@ impl Packing {
             .min(self.samples.len() - 1);
         let sample = &self.samples[tiles];
         let placement = self.fit_rows(tiles, tick, births, presence, None);
-        let aspect = display_tick.zip(self.display_aspects.as_ref()).unwrap_or((
-            u64::try_from(tiles).expect("bounded tile row"),
-            &self.aspects,
-        ));
+        let plan = if presented {
+            self.display_aspects.as_ref().unwrap_or(&self.aspects)
+        } else {
+            &self.aspects
+        };
+        let aspect_tick = u64::try_from(tiles).expect("bounded tile row");
         let mut regions: Vec<_> = self.inputs[tick]
             .iter()
             .zip(self.labels.iter())
@@ -1708,7 +1731,7 @@ impl Packing {
         let mut origins = Vec::with_capacity(regions.len());
         let mut scales = Vec::with_capacity(regions.len());
         for (i, r) in regions.iter_mut().enumerate() {
-            let stretch = aspect.1.sample(i, aspect.0);
+            let stretch = plan.sample(i, aspect_tick);
             let turn = |p: Vec2| (if self.rotated[i] { p.perp() } else { p }) * stretch;
             let tile = placement[i].tile.filter(|_| selected(i));
             let mut origin = if tile.is_some() {
@@ -2095,9 +2118,11 @@ impl Packing {
             let layout = self.layout_at(tiles, &births, None, Some(&mut tiling));
             for (repo, (track, tile)) in tracks.iter_mut().zip(layout.tiles).enumerate()
             {
-                track.observe(shown, tile, |tile| {
-                    self.aspect_target(repo, tile, tiles, content)
-                });
+                track.observe(
+                    u64::try_from(tiles).expect("bounded tile row"),
+                    tile,
+                    |tile| self.aspect_target(repo, tile, tiles, content),
+                );
             }
         })
     }

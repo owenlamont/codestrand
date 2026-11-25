@@ -130,11 +130,11 @@ impl File {
     pub(super) fn visible_presence(&self, dir: &Dir) -> f32 {
         visible_presence(
             self.presence,
-            self.position,
-            dir.radius(),
-            dir.position,
-            dir.scale,
-        )
+            self.local_position,
+            dir.core() + 0.4,
+            dir.local_position,
+            1.0,
+        ) * dir.scale
     }
 
     pub(super) fn name(&self) -> &str {
@@ -990,6 +990,23 @@ mod tests {
     use super::*;
 
     const DT: f32 = 1.0 / 60.0;
+
+    #[test]
+    fn a_landed_file_does_not_disappear_when_its_directory_stretches() {
+        let mut layout = Layout::empty();
+        let mut id = 0;
+        for index in 0..9 {
+            id = layout.add(&format!("tree/{index}"), 0.0, 0);
+        }
+        let file = layout.files.get_mut(&id).unwrap();
+        let dir = &layout.dirs[file.dir];
+        file.presence = 1.0;
+        file.state = Presence::Present;
+        file.local_position = file.slot_offset;
+        file.position = file.local_position * Vec2::new(2.0, 1.0);
+        assert!(file.position.length() > dir.radius());
+        assert!(file.draw_scale(dir) > 0.99);
+    }
 
     #[test]
     fn replay_file_index_charge_stays_flat_under_churn() {

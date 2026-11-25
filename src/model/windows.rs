@@ -364,7 +364,7 @@ impl Simulation {
             repository_exits: self.repository_exits.clone(),
             caption_style: self.caption_style,
             caption_plan: self.caption_plan.clone(),
-            packing: self.packing.clone(),
+            packing: self.packing.for_playback(),
             envelopes: self.envelopes.clone(),
             repository_boundary: self.repository_boundary,
             collapse_directories: self.collapse_directories,

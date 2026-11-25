@@ -1748,7 +1748,7 @@ impl Simulation {
             Self::packing_rows(&self.clock, &self.births, tick);
         let (mut regions, mut origins, mut scales) =
             self.packing
-                .sample_split(tiles, content, &births, repositories, tick)?;
+                .sample_split(tiles, content, &births, repositories)?;
         if tick == self.state.tick {
             self.layout().constrain_directory_fit(
                 &mut regions,

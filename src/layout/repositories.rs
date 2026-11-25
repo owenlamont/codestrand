@@ -309,7 +309,8 @@ impl Layout {
             let local = regions[repo].local_axes(dir.position);
             let scale = scales[repo];
             let position = local * scale + origins[repo];
-            let extent = (position - *center).abs() + Vec2::splat(dir.radius() * scale);
+            let extent = (position - *center).abs()
+                + regions[repo].stretch * (dir.radius() * scale);
             if extent.cmpgt(*half).any() {
                 *fraction = fraction.min((*half / extent).min_element() * 0.999);
             }
