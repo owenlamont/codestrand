@@ -234,6 +234,11 @@ impl Dir {
         SPACING * slot_count(self.slots.len()).sqrt()
     }
 
+    #[cfg(test)]
+    pub(super) fn local_position(&self) -> Vec2 {
+        self.local_position
+    }
+
     pub(super) fn radius(&self) -> f32 {
         (self.core() + 0.4) * self.scale
     }

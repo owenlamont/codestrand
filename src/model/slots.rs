@@ -877,6 +877,7 @@ impl State {
             {
                 let from = field_point(avatar.position);
                 let old_centre = previous.centre();
+                let gutter = super::travel::field_rect(tile);
                 let dock = if super::travel::on_network(old_centre, cells) {
                     old_centre
                 } else {
@@ -887,6 +888,7 @@ impl State {
                     [from, dock],
                     [chosen.point, place.point],
                     cells,
+                    gutter,
                     self.avatar_max_speed,
                 );
             }

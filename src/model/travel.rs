@@ -315,6 +315,7 @@ impl Route {
 pub(super) struct DockWalk {
     start: u64,
     route: Route,
+    gutter: Option<Rect>,
 }
 
 impl DockWalk {
@@ -323,9 +324,13 @@ impl DockWalk {
         [from, source]: [Vec2; 2],
         [target, seat]: [Vec2; 2],
         cells: &[Rect],
+        gutter: Rect,
         speed: f32,
     ) -> Option<Self> {
         let mut points = Router::default().route(source, target, cells).ok()?;
+        let gutter = (!gutter.is_empty()
+            && points.iter().all(|&point| on_network(point, &[gutter])))
+        .then_some(gutter);
         if points
             .first()
             .is_some_and(|point| point.distance(from) > 0.001)
@@ -339,14 +344,25 @@ impl DockWalk {
             points.push(seat);
         }
         let route = Route::new(&points, speed);
-        (route.duration > 0.0).then_some(Self { start, route })
+        (route.duration > 0.0).then_some(Self {
+            start,
+            route,
+            gutter,
+        })
     }
 
-    pub(super) fn sample(&self, tick: u64) -> Option<Vec2> {
+    pub(super) fn sample(&self, tick: u64, gutter: Option<Rect>) -> Option<Vec2> {
         let elapsed = ticks_duration(tick - self.start);
-        (elapsed < self.route.duration)
+        let point = (elapsed < self.route.duration)
             .then(|| self.route.sample(elapsed))
-            .flatten()
+            .flatten()?;
+        Some(match self.gutter.zip(gutter) {
+            Some((before, now)) if before != now => {
+                let fraction = (point - before.min) / before.size();
+                now.min + fraction * now.size()
+            }
+            _ => point,
+        })
     }
 
     pub(super) fn retained_bytes(&self) -> usize {

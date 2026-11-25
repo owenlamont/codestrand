@@ -1,4 +1,4 @@
-use super::*;
+use super::{directory_edges::DirectoryAudit, *};
 use crate::layout::packing::Tile;
 use bevy::math::{Rect, Vec3Swizzles};
 use proptest::{prelude::*, test_runner::TestCaseResult};
@@ -13,6 +13,9 @@ pub(super) enum Fault {
 #[derive(Debug, Default)]
 pub(super) struct Replay {
     pub ticks: u32,
+    pub directory_intervals: usize,
+    pub resizing_directory_intervals: usize,
+    pub reparented_files: usize,
     pub windows: u32,
     pub arrivals_at_seam: u32,
     pub moving_docks: u32,
@@ -73,6 +76,8 @@ impl ContributorFrame {
 #[derive(Default)]
 struct Audit {
     report: Replay,
+    directory_edges: DirectoryAudit,
+    file_parents: BTreeMap<u64, usize>,
     files: BTreeMap<u64, u64>,
     contributors: Vec<ContributorFrame>,
     tiles: Vec<Option<Tile>>,
@@ -200,7 +205,22 @@ impl Audit {
             self.report.peak_live_directories.max(directories);
         self.report.peak_live_items =
             self.report.peak_live_items.max(files + directories);
+        let (retained, resizing) = self.directory_edges.observe(sim, &self.tiles)?;
+        self.report.directory_intervals += retained;
+        self.report.resizing_directory_intervals += resizing;
         self.check_tiles(sim)?;
+        let file_parents = layout
+            .files()
+            .filter(|(_, file)| file.presence > 0.0)
+            .map(|(id, file)| (id, file.dir))
+            .collect::<BTreeMap<_, _>>();
+        self.report.reparented_files += file_parents
+            .iter()
+            .filter(|(id, dir)| {
+                self.file_parents.get(id).is_some_and(|old| old != *dir)
+            })
+            .count();
+        self.file_parents = file_parents;
         let held = self.check_rays(sim, seam, fault)?;
         self.check_contributors(sim, &held)?;
         self.check_circles(sim, seam)?;

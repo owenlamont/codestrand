@@ -512,11 +512,16 @@ impl Avatar {
             })
     }
 
-    fn travel_point(&mut self, planned: Option<Vec3>, tick: u64) -> Option<Vec3> {
+    fn travel_point(
+        &mut self,
+        planned: Option<Vec3>,
+        tick: u64,
+        gutter: Option<crate::layout::packing::Tile>,
+    ) -> Option<Vec3> {
         let local = self
             .dock_walk
             .as_ref()
-            .and_then(|walk| walk.sample(tick))
+            .and_then(|walk| walk.sample(tick, gutter.map(travel::field_rect)))
             .map(slots::world);
         if planned.is_some() || local.is_none() {
             self.dock_walk = None;
@@ -2690,7 +2695,8 @@ impl State {
                 }
                 join(avatar.position, point)
             });
-            let route = avatar.travel_point(planned, self.tick).or_else(|| {
+            let gutter = self.layout.repositories[avatar.repository].gutter;
+            let route = avatar.travel_point(planned, self.tick, gutter).or_else(|| {
                 let slot = avatar.slot.as_ref()?;
                 (repository != avatar.repository
                     && avatar.presence > 0.0

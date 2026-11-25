@@ -1,6 +1,7 @@
 use super::*;
 use crate::timeline::{FileChange, Identity};
 
+mod directory_edges;
 mod generated;
 mod replay;
 
@@ -373,4 +374,61 @@ fn visible_travellers_do_not_hold_away_from_their_seat() {
         }
     }
     assert!(walked);
+}
+#[test]
+fn crowded_tree_moves_and_reparents_a_file_while_tiles_resize() {
+    use crate::timeline::Kind;
+
+    let paths = (0..8).flat_map(|branch| {
+        [
+            format!("branch-{branch}/main.rs"),
+            format!("branch-{branch}/parse/format/check.rs"),
+            format!("branch-{branch}/tests/check.rs"),
+        ]
+    });
+    let rename = namespaced_event(
+        0,
+        15,
+        Identity::new("Ada", "ada@example.test"),
+        vec![FileChange {
+            path: "branch-1/parse/moved/check.rs".into(),
+            kind: Kind::Moved {
+                from: "branch-0/parse/format/check.rs".into(),
+            },
+            ..Default::default()
+        }],
+    );
+    let events = vec![
+        write(0, 0, paths),
+        write(1, 1, ["neighbor/main.rs".into()]),
+        write(
+            1,
+            14,
+            (0..55).map(|file| format!("neighbor/growth/{file}.rs")),
+        ),
+        rename,
+        write(
+            0,
+            16,
+            (0..120).map(|file| format!("branch-2/parse/format/{file}.rs")),
+        ),
+        write(0, 29, ["after.rs".into()]),
+    ];
+    let labels = ["Crowded".into(), "Neighbor".into()];
+    let report = replay::replay(
+        events,
+        &labels,
+        &Options {
+            seconds_per_day: 1.0,
+            max_idle_seconds: 15.0,
+            ..Options::default()
+        },
+        3_600,
+        replay::Fault::None,
+    )
+    .unwrap();
+    assert!(report.peak_live_directories > 30, "{report:?}");
+    assert_eq!(report.reparented_files, 1, "{report:?}");
+    assert!(report.directory_intervals > 0, "{report:?}");
+    assert!(report.resizing_directory_intervals > 0, "{report:?}");
 }

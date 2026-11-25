@@ -1035,6 +1035,7 @@ struct Placement {
     gutter: Option<Tile>,
     origin: Vec2,
     scale: f32,
+    center: Vec2,
 }
 
 fn gutter_cells(
@@ -1116,6 +1117,7 @@ pub(crate) struct Packing {
     samples: Arc<[Sample]>,
     rotated: Vec<bool>,
     content_scales: Arc<[f32]>,
+    center_jumps: Arc<[(usize, Vec2)]>,
     exits: Arc<[Option<crate::model::RepositoryExit>]>,
     tiling: TilingCache,
     /// Tiles every sample from scratch; tests compare against it.
@@ -1232,7 +1234,7 @@ impl Packing {
 
         let (nodes, rotated, birth_order, opening) = retained_fields!(self, Packing {
             nodes, rotated, birth_order, opening;
-            gutter_scale, growth, reflows, labels, inputs, samples, exits, content_scales,
+            gutter_scale, growth, reflows, labels, inputs, samples, exits, content_scales, center_jumps,
             tiling, fresh_tiling,
         });
         let opening = opening.as_ref().map_or(0, |opening| {
@@ -1539,10 +1541,12 @@ impl Packing {
             samples: samples.into(),
             rotated,
             content_scales: Arc::default(),
+            center_jumps: Arc::default(),
             exits,
             tiling: TilingCache::default(),
             fresh_tiling: false,
         };
+        packing.center_jumps = packing.plan_center_jumps();
         packing.content_scales = packing.plan_content_scales();
         Ok(packing)
     }
@@ -1698,9 +1702,17 @@ impl Packing {
             } else {
                 0.0
             };
-            let (low, high) = (turn(r.low), turn(r.high));
-            r.low = low.min(high) * scale + origin;
-            r.high = low.max(high) * scale + origin;
+            let low = turn(r.low);
+            let high = turn(r.high);
+            if self.center_jumps.is_empty() {
+                r.low = low.min(high) * scale + origin;
+                r.high = low.max(high) * scale + origin;
+            } else {
+                let center = placement[i].center;
+                let radius = (low - center).abs().max((high - center).abs());
+                r.low = (center - radius) * scale + origin;
+                r.high = (center + radius) * scale + origin;
+            }
             r.height *= scale;
             r.live &= tile.is_some();
             r.tile = tile;
@@ -2012,16 +2024,16 @@ impl Packing {
             .map(|(i, r)| {
                 let shape = r.shape(self.rotated[i]);
                 let tile = layout.tiles[i];
+                let center = self.content_center(tick, &shape);
                 let (origin, scale) = tile.map_or((Vec2::ZERO, 0.0), |tile| {
                     let mut scale = self.content_scales[tile_tick * repositories + i];
                     if tile_tick != tick
                         || !births.is_empty()
                         || presence.is_some_and(|mask| mask.iter().any(|&p| p < 1.0))
                     {
-                        scale = scale.min(self.fit_scale(tile, &shape, r.height));
+                        scale =
+                            scale.min(self.fit_scale(tile, &shape, r.height, center));
                     }
-                    let (low, high) = outline::bounds(&shape);
-                    let center = (low + high) * 0.5;
                     let origin = framing::field_to_world(tile.low.midpoint(tile.high))
                         - center * scale;
                     (origin, scale)
@@ -2031,17 +2043,61 @@ impl Packing {
                     gutter: layout.gutters[i],
                     origin,
                     scale,
+                    center,
                 }
             })
             .collect()
     }
 
-    fn fit_scale(&self, tile: Tile, shape: &[Vec2], height: f32) -> f32 {
-        fit::anchored_scale(
+    fn plan_center_jumps(&self) -> Arc<[(usize, Vec2)]> {
+        // Keep the fit used by shared-gutter travel planning for multi-repository playback.
+        if self.rotated.len() != 1 {
+            return Arc::default();
+        }
+        self.inputs
+            .windows(2)
+            .enumerate()
+            .filter_map(|(index, rows)| {
+                let before = &rows[0][0];
+                let after = &rows[1][0];
+                let delta =
+                    after.low.midpoint(after.high) - before.low.midpoint(before.high);
+                let delta = if self.rotated[0] { delta.perp() } else { delta };
+                (before.live && after.live && delta.length_squared() > 0.25)
+                    .then_some((index + 1, delta))
+            })
+            .collect()
+    }
+
+    fn content_center(&self, tick: usize, shape: &[Vec2]) -> Vec2 {
+        const TRANSITION: usize = 30;
+        let (low, high) = outline::bounds(shape);
+        let mut center = low.midpoint(high);
+        let jumps = &self.center_jumps;
+        let first = jumps.partition_point(|&(knot, _)| knot + TRANSITION <= tick);
+        for &(knot, delta) in &jumps[first..] {
+            let start = knot.saturating_sub(TRANSITION);
+            if tick < start {
+                break;
+            }
+            let span = u16::try_from(knot + TRANSITION - start)
+                .expect("centre transition fits u16");
+            let elapsed =
+                u16::try_from(tick - start).expect("transition contains tick");
+            let t = f32::from(elapsed) / f32::from(span);
+            let eased = t * t * (3.0 - 2.0 * t);
+            center += delta * (eased - f32::from(u8::from(tick >= knot)));
+        }
+        center
+    }
+
+    fn fit_scale(&self, tile: Tile, shape: &[Vec2], height: f32, center: Vec2) -> f32 {
+        fit::anchored_at(
             tile.usable(),
             shape,
             height / self.overview_growth(),
             Vec2::splat(0.5),
+            center,
         )
         .1
     }
@@ -2065,8 +2121,14 @@ impl Packing {
                 });
                 areas.push(live.map_or(0.0, Tile::area));
                 scales.push(tile.map_or(1.0, |tile| {
-                    self.fit_scale(tile, &input.shape(self.rotated[i]), input.height)
-                        .min(32.0)
+                    let shape = input.shape(self.rotated[i]);
+                    self.fit_scale(
+                        tile,
+                        &shape,
+                        input.height,
+                        self.content_center(tick, &shape),
+                    )
+                    .min(32.0)
                 }));
             }
         }
