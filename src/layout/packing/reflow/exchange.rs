@@ -44,9 +44,20 @@ impl Exchange {
     pub(super) fn plan(
         from: &Layout,
         to: &Layout,
-        mut repositories: [usize; 2],
+        repositories: [usize; 2],
         field: Tile,
     ) -> Option<Self> {
+        let (mut route, phases) = Self::geometry(from, to, repositories, field)?;
+        route.allocate_time(from, to, phases)?;
+        Some(route)
+    }
+
+    fn geometry(
+        from: &Layout,
+        to: &Layout,
+        mut repositories: [usize; 2],
+        field: Tile,
+    ) -> Option<(Self, usize)> {
         let [a, b] = repositories;
         let (mut a, mut b) = (Footprint::at(from, a)?, Footprint::at(from, b)?);
         let axis = side_by_side(a.gutter, b.gutter).or_else(|| {
@@ -98,8 +109,7 @@ impl Exchange {
             point.tile.low = point.tile.low.max(field.low);
             point.tile.high = point.tile.high.min(field.high);
         }
-        route.allocate_time(from, to, phases)?;
-        Some(route)
+        Some((route, phases))
     }
 
     fn allocate_time(
@@ -111,9 +121,7 @@ impl Exchange {
         for points in &self.waypoints[..phases - 1] {
             for (&repo, point) in self.repositories.iter().zip(points) {
                 let (start, end) = (from.tiles[repo]?, to.tiles[repo]?);
-                if point.tile.pixels().min_element() < MIN_SIDE_PX
-                    || point.tile.area() < 0.49 * start.area().min(end.area())
-                {
+                if !has_room(point.tile, start, end) {
                     return None;
                 }
             }
@@ -122,18 +130,7 @@ impl Exchange {
         let mut before = from.clone();
         for phase in 1..=phases {
             let after = self.layout(from, to, phase, phases);
-            if !compatible(&before.gutters, &after.gutters)
-                || !connected(&before, &after, true)
-            {
-                return None;
-            }
-            let travel = edge_travel(&before, &after);
-            self.durations[phase - 1] = (1..=budget).find(|&ticks| {
-                travel
-                    <= MAX_EDGE_STEP_PX
-                        * crate::model::count(ticks)
-                        * held::REFLOW_LINEAR_FRACTION
-            })?;
+            self.durations[phase - 1] = step_ticks(&before, &after, budget)?;
             before = after;
         }
         let extra = budget.checked_sub(self.durations.iter().sum())?;
@@ -187,7 +184,156 @@ impl Exchange {
     }
 }
 
-fn edge_travel(from: &Layout, to: &Layout) -> f32 {
+const CHAIN_STEPS: usize = 8;
+
+#[derive(Clone, Debug)]
+pub(super) struct Chain {
+    repositories: [usize; 3],
+    waypoints: [[Footprint; 3]; CHAIN_STEPS - 1],
+    durations: [usize; CHAIN_STEPS],
+}
+
+impl Chain {
+    pub(super) fn plan(
+        from: &Layout,
+        to: &Layout,
+        repositories: [usize; 3],
+        field: Tile,
+        budget: usize,
+    ) -> Option<Self> {
+        let [traveller, first, second] = repositories;
+        let mut middle = from.clone();
+        middle.tiles.swap(traveller, first);
+        middle.gutters.swap(traveller, first);
+        let (a, first_phases) =
+            Exchange::geometry(from, &middle, [traveller, first], field)?;
+        let (b, second_phases) =
+            Exchange::geometry(&middle, to, [traveller, second], field)?;
+        if first_phases != PHASES || second_phases != PHASES {
+            return None;
+        }
+        let poses = [
+            a.layout(from, &middle, 1, PHASES),
+            a.layout(from, &middle, 2, PHASES),
+            a.layout(from, &middle, 3, PHASES),
+            b.layout(&middle, to, 1, PHASES),
+            b.layout(&middle, to, 2, PHASES),
+            b.layout(&middle, to, 3, PHASES),
+            b.layout(&middle, to, 4, PHASES),
+        ];
+        if poses[2].tiles[traveller] != poses[3].tiles[traveller]
+            || poses[2].gutters[traveller] != poses[3].gutters[traveller]
+        {
+            return None;
+        }
+        let capture = |pose: &Layout| {
+            repositories
+                .map(|repo| Footprint::at(pose, repo).expect("three visible tiles"))
+        };
+        let waypoints = poses.each_ref().map(capture);
+        for points in &waypoints {
+            for (&repo, place) in repositories.iter().zip(points) {
+                let (start, end) = (from.tiles[repo]?, to.tiles[repo]?);
+                if !has_room(place.tile, start, end) {
+                    return None;
+                }
+            }
+        }
+        let mut durations = [0; CHAIN_STEPS];
+        let mut remaining = budget;
+        let mut previous = from;
+        for (index, next) in poses.iter().chain(std::iter::once(to)).enumerate() {
+            let ticks = step_ticks(previous, next, remaining)?;
+            remaining -= ticks;
+            durations[index] = ticks;
+            previous = next;
+        }
+        let duration = budget - remaining;
+        let extra = held::reflow_ticks().saturating_sub(duration);
+        if extra > remaining {
+            return None;
+        }
+        for (index, ticks) in durations.iter_mut().enumerate() {
+            *ticks += extra / CHAIN_STEPS + usize::from(index < extra % CHAIN_STEPS);
+        }
+        Some(Self {
+            repositories,
+            waypoints,
+            durations,
+        })
+    }
+
+    #[cfg(test)]
+    pub(super) fn assert_compressed_handoff(
+        &self,
+        from: &Layout,
+        to: &Layout,
+        repositories: [usize; 3],
+    ) {
+        assert_eq!(self.repositories, repositories);
+        let [traveller, _, _] = repositories;
+        let before = self.layout(from, to, 3).tiles[traveller].unwrap();
+        let after = self.layout(from, to, 4).tiles[traveller].unwrap();
+        assert_eq!(before, after);
+        assert!(before.area() < 0.6 * from.tiles[traveller].unwrap().area());
+    }
+
+    pub(super) fn duration(&self) -> usize {
+        self.durations.iter().sum()
+    }
+
+    fn layout(&self, from: &Layout, to: &Layout, index: usize) -> Layout {
+        if index == CHAIN_STEPS {
+            return to.clone();
+        }
+        let mut layout = from.clone();
+        if let Some(index) = index.checked_sub(1) {
+            for (&repo, pose) in self.repositories.iter().zip(&self.waypoints[index]) {
+                layout.tiles[repo] = Some(pose.tile);
+                layout.gutters[repo] = Some(pose.gutter);
+            }
+        }
+        layout
+    }
+
+    pub(super) fn sample(
+        &self,
+        from: &Layout,
+        to: &Layout,
+        mut elapsed: usize,
+    ) -> Layout {
+        for (phase, &duration) in self.durations.iter().enumerate() {
+            if elapsed < duration {
+                return self.layout(from, to, phase).blend(
+                    &self.layout(from, to, phase + 1),
+                    held::progress(elapsed, duration),
+                );
+            }
+            elapsed -= duration;
+        }
+        to.clone()
+    }
+}
+
+fn has_room(tile: Tile, start: Tile, end: Tile) -> bool {
+    tile.pixels().min_element() >= MIN_SIDE_PX
+        && tile.area() >= 0.49 * start.area().min(end.area())
+}
+
+fn step_ticks(from: &Layout, to: &Layout, budget: usize) -> Option<usize> {
+    if !compatible(&from.gutters, &to.gutters) || !connected(from, to, true) {
+        return None;
+    }
+    let travel = edge_travel(from, to);
+    (1..=budget).find(|&ticks| {
+        travel
+            <= MAX_EDGE_STEP_PX
+                * crate::model::count(ticks)
+                * held::REFLOW_LINEAR_FRACTION
+    })
+}
+
+pub(super) fn edge_travel(from: &Layout, to: &Layout) -> f32 {
     let pixels = framing::VIEWPORT * 0.5;
     from.tiles
         .iter()

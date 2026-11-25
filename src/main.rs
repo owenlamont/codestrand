@@ -263,6 +263,10 @@ struct Source {
     /// Visible spacing between repository tiles in 1280×720 reference pixels (0–20).
     #[arg(long, default_value_t = 4.0, value_parser = gutter_pixels)]
     gutter: f32,
+
+    /// How strongly to favour stable tile positions over more even density (0 to 2).
+    #[arg(long, default_value_t = 1.0, value_parser = tile_stability)]
+    tile_stability: f32,
     /// File heat half-life in canonical playback seconds.
     #[arg(long, default_value_t = 3.0, value_parser = positive_seconds)]
     heat_half_life: f32,
@@ -529,6 +533,7 @@ impl Source {
                 / model::framing::WORLD_UNITS_PER_REFERENCE_PIXEL,
             avatar_size: self.avatar_scale,
             gutter: self.gutter,
+            tile_stability: self.tile_stability,
             fragment_speed: self.fragment_speed,
             progress: progress.clone(),
             trace: self.trace.clone(),
@@ -1032,6 +1037,17 @@ fn dispatch(cli: Cli, launched: Instant) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn tile_stability(value: &str) -> Result<f32, String> {
+    let stability = value
+        .parse()
+        .map_err(|_| "tile stability must be a number")?;
+    if (0.0..=2.0).contains(&stability) {
+        Ok(stability)
+    } else {
+        Err("tile stability must be between 0 and 2".into())
+    }
+}
+
 fn gutter_pixels(value: &str) -> Result<f32, String> {
     let pixels: f32 = value.parse().map_err(|_| "gutter must be a number")?;
     if pixels.is_finite() && (0.0..=20.0).contains(&pixels) {
@@ -1333,6 +1349,16 @@ mod tests {
                 "export progress must return while later windows are still planned",
             );
         worker.join().unwrap();
+    }
+
+    #[test]
+    fn tile_stability_accepts_inclusive_limits_and_rejects_invalid_values() {
+        for value in ["0", "1.25", "2"] {
+            assert!(super::tile_stability(value).is_ok());
+        }
+        for value in ["-0.01", "2.01", "NaN", "inf", "text"] {
+            assert!(super::tile_stability(value).is_err());
+        }
     }
 
     #[test]

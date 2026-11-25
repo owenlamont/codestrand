@@ -845,6 +845,31 @@ fn collapse_missing(
     }
 }
 
+fn reflow_window(
+    tick: usize,
+    presence: f32,
+    birth: usize,
+    opening: usize,
+    exit: Option<crate::model::RepositoryExit>,
+) -> usize {
+    let now = u64::try_from(tick).expect("bounded packing tick");
+    if presence >= 1.0 && tick > birth {
+        exit.map_or(usize::MAX, |exit| {
+            usize::try_from(exit.start.saturating_sub(now + 1)).unwrap_or(usize::MAX)
+        })
+    } else if presence != 0.0 {
+        0
+    } else if exit.is_some_and(|exit| now >= exit.end) {
+        usize::MAX
+    } else {
+        opening.saturating_sub(tick)
+    }
+}
+
+fn narrow_tile_cost(tile: Tile) -> f32 {
+    (1.0 - tile.ground_aspect()).max(0.0)
+}
+
 fn insertion_cost(
     placement: &[Option<Tile>],
     weights: &[f32],
@@ -876,7 +901,11 @@ fn insertion_cost(
                 .iter()
                 .zip(history)
                 .filter_map(|(&tile, &weight)| {
-                    tile.map(|tile| (tile.area() / used - weight / history_total).abs())
+                    tile.map(|tile| {
+                        let share = tile.area() / used;
+                        (share - weight / history_total).abs()
+                            + 0.025 * share * narrow_tile_cost(tile)
+                    })
                 })
                 .sum()
         });
@@ -1256,7 +1285,7 @@ impl Packing {
         for row in regions {
             inputs.push(row.clone());
         }
-        Self::from_inputs(inputs, Arc::default(), gutter_scale, 0)
+        Self::from_inputs(inputs, Arc::default(), gutter_scale, 1.0, 0)
     }
 
     /// Inputs, samples and tree with floats printed exactly.
@@ -1276,6 +1305,7 @@ impl Packing {
         inputs: Inputs,
         exits: Arc<[Option<crate::model::RepositoryExit>]>,
         gutter_scale: f32,
+        stability: f32,
         threads: usize,
     ) -> anyhow::Result<Self> {
         let Inputs {
@@ -1384,15 +1414,27 @@ impl Packing {
                     .collect();
                 let finish = tick + held::reflow_ticks();
                 let end = u64::try_from(finish).expect("bounded reflow");
-                let stable = shown.iter().enumerate().all(|(i, &p)| {
-                    let exit = exits.get(i).and_then(|exit| *exit);
-                    (p >= 1.0
-                        && tick > births[i]
-                        && exit.is_none_or(|exit| end < exit.start))
-                        || (p == 0.0
-                            && (finish <= windows[i].0
-                                || exit.is_some_and(|exit| now >= exit.end)))
-                });
+                let lifecycle_window = shown
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &p)| {
+                        reflow_window(
+                            tick,
+                            p,
+                            births[i],
+                            windows[i].0,
+                            exits.get(i).copied().flatten(),
+                        )
+                    })
+                    .min()
+                    .unwrap_or(0);
+                let stable = lifecycle_window >= held::reflow_ticks();
+                let available = lifecycle_window.min(regions.len() - 1 - tick);
+                let policy = reflow::Policy {
+                    stability,
+                    available,
+                    forecast: &items[tick + available.min(reflow::MAX_MOTION_TICKS)],
+                };
                 let future = held::target_tick(tick).min(items.len() - 1);
                 let targets: Vec<_> = births
                     .iter()
@@ -1436,10 +1478,13 @@ impl Packing {
                 if let Some(target) = held.target_at_start(tick) {
                     let change = (stable && finish < regions.len())
                         .then(|| {
-                            reflow::plan(tick, tree, &weights, target, &shown, space)
+                            reflow::plan(
+                                tick, tree, &weights, target, &shown, space, policy,
+                            )
                         })
                         .flatten()
                         .unwrap_or_else(|| reflow::Change::weights(tick, tree));
+                    held.reserve_reflow(tick, change.duration());
                     reflows.push(change);
                     retry_allocation = true;
                 } else if stable
@@ -1447,12 +1492,13 @@ impl Packing {
                     && retry_allocation
                     && held.ready(tick)
                 {
-                    let change =
-                        reflow::plan(tick, tree, &weights, &weights, &shown, space)
-                            .filter(|change| change.nodes != tree);
+                    let change = reflow::plan(
+                        tick, tree, &weights, &weights, &shown, space, policy,
+                    )
+                    .filter(|change| change.nodes != tree);
                     retry_allocation = change.is_some();
                     if let Some(change) = change {
-                        held.reserve_reflow(tick);
+                        held.reserve_reflow(tick, change.duration());
                         reflows.push(change);
                     }
                 }
@@ -1553,7 +1599,7 @@ impl Packing {
             .chain(self.reflows.iter().map(|change| {
                 let start = u64::try_from(change.tick).expect("bounded reflow");
                 let duration =
-                    u64::try_from(held::reflow_ticks()).expect("bounded reflow");
+                    u64::try_from(change.duration()).expect("bounded reflow");
                 (start, start + duration)
             }))
     }
@@ -1562,7 +1608,7 @@ impl Packing {
         let tick = usize::try_from(tick).expect("bounded reflow tick");
         self.reflows[..self.reflows.partition_point(|change| change.tick <= tick)]
             .last()
-            .is_some_and(|change| tick - change.tick < held::reflow_ticks())
+            .is_some_and(|change| tick - change.tick < change.duration())
     }
 
     pub(crate) fn opening_end(&self) -> Option<u64> {
@@ -2146,7 +2192,7 @@ mod tests {
             inputs.push(row.clone());
         }
         let exits = crate::model::exits_from_starts(&[Some(60), None]);
-        let packing = Packing::from_inputs(inputs, exits.into(), 4.0, 1).unwrap();
+        let packing = Packing::from_inputs(inputs, exits.into(), 4.0, 1.0, 1).unwrap();
         for tick in [60, 180, 300] {
             let (regions, _, scales) = packing.sample(tick).unwrap();
             let input = &packing.inputs[usize::try_from(tick).unwrap()][1];
@@ -2433,7 +2479,7 @@ mod tests {
         for row in rows {
             inputs.push(row);
         }
-        let packing = Packing::from_inputs(inputs, exits.into(), 0.0, 1).unwrap();
+        let packing = Packing::from_inputs(inputs, exits.into(), 0.0, 1.0, 1).unwrap();
         let mut previous: Option<(f32, f32)> = None;
         for tick in 0..520 {
             let (regions, _, scales) = packing.sample(tick).unwrap();
@@ -2806,7 +2852,7 @@ mod tests {
         }
         let other = shared_ending.then_some(60);
         let exits = crate::model::exits_from_starts(&[Some(60), other, other]);
-        Packing::from_inputs(inputs, exits.into(), 4.0, 1).unwrap()
+        Packing::from_inputs(inputs, exits.into(), 4.0, 1.0, 1).unwrap()
     }
 
     #[test]
@@ -2816,7 +2862,7 @@ mod tests {
             inputs.push(row.into_iter().take(2).collect());
         }
         let exits = crate::model::exits_from_starts(&[Some(1350), None]);
-        let packing = Packing::from_inputs(inputs, exits.into(), 4.0, 1).unwrap();
+        let packing = Packing::from_inputs(inputs, exits.into(), 4.0, 1.0, 1).unwrap();
         let tiles = |tick| {
             let regions = packing.sample(tick).unwrap().0;
             [regions[0].tile, regions[1].tile]

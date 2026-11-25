@@ -585,7 +585,19 @@ repository holds over its lifetime. Between arrivals and exits, a reflow can cha
 the split tree to relieve sustained density differences. Adjacent tiles can briefly
 shrink and leave extra space as they turn or exchange positions. The move must keep the
 tiles disjoint and the gutters connected, and fit within the reflow's motion budget.
+One tile can pass two neighbours in a single reflow. It stays compressed between the
+exchanges while the first neighbour recovers and the second makes room. The planner
+checks the same destination rectangles against the expected counts a few seconds later.
+When a large tile shrinks in place, its neighbours follow the shared cuts and keep the
+normal gutter spacing.
 Settled splits clamp to a ground-aspect range of 1:3.5 to 3.5:1, inclusive.
+When allocations are comparable, wider tiles leave more room for their titles.
+
+`--tile-stability` controls how strongly the planner favours keeping tiles in place.
+The default is `1` and the range is `0`–`2`, inclusive. At `0`, candidate moves
+carry no extra cost for changing the arrangement. At `2`, a move needs a larger
+density improvement to earn its place. The same clearance and speed limits apply
+throughout the range.
 The opening shows every repository still active from before the selected range.
 If none are active, the first repository has a lead-in tile.
 Later tiles grow over 1.5 seconds. Growth can overlap when several repositories

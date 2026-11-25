@@ -140,8 +140,8 @@ impl Weights {
         tick >= self.next
     }
 
-    pub(super) fn reserve_reflow(&mut self, tick: usize) {
-        self.next = tick + reflow_ticks();
+    pub(super) fn reserve_reflow(&mut self, tick: usize, duration: usize) {
+        self.next = self.next.max(tick + duration);
     }
 
     fn drifted(&self, targets: &[f32], presence: &[f32]) -> bool {

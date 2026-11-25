@@ -162,6 +162,7 @@ pub(super) struct Options {
     pub avatar_max_speed: f32,
     pub avatar_size: f32,
     pub gutter: f32,
+    pub tile_stability: f32,
     /// Diff fragment speed relative to the default.
     pub fragment_speed: f32,
     pub progress: Progress,
@@ -273,6 +274,7 @@ impl Default for Options {
             avatar_max_speed: 480.0,
             avatar_size: 2.0,
             gutter: 4.0,
+            tile_stability: 1.0,
             fragment_speed: 1.0,
             progress: Progress::default(),
             trace: Trace::default(),
@@ -1432,6 +1434,7 @@ impl Simulation {
             samples,
             self.repository_exits.clone(),
             self.state.gutter,
+            options.tile_stability,
             threads,
         )?;
         self.state = SharedState(self.initial.clone());
