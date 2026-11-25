@@ -143,12 +143,13 @@ impl FileClearance {
             }
             let radius = 0.27 * presence;
             let own = layout.dir(file.dir);
-            let outside = file.position.distance(own.position) + radius - own.radius();
+            let outside = own.offset_without_stretch(file.position).length() + radius
+                - own.radius();
             result.outside_own_ticks += u64::from(outside > 0.0001);
             result.worst_outside_depth = result.worst_outside_depth.max(outside);
             for (_, dir) in layout.dirs().filter(|(id, _)| *id != file.dir) {
-                let depth =
-                    dir.radius() + radius - file.position.distance(dir.position);
+                let depth = dir.radius() + radius
+                    - dir.offset_without_stretch(file.position).length();
                 result.foreign_pair_ticks += u64::from(depth > 0.0001);
                 result.worst_foreign_depth = result.worst_foreign_depth.max(depth);
             }

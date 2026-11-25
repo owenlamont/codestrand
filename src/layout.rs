@@ -130,11 +130,11 @@ impl File {
     pub(super) fn visible_presence(&self, dir: &Dir) -> f32 {
         visible_presence(
             self.presence,
-            self.local_position,
-            dir.core() + 0.4,
-            dir.local_position,
-            1.0,
-        ) * dir.scale
+            dir.offset_without_stretch(self.position),
+            dir.radius(),
+            Vec2::ZERO,
+            dir.scale,
+        )
     }
 
     pub(super) fn name(&self) -> &str {
@@ -181,6 +181,7 @@ impl DirectoryArrival {
 #[derive(Clone, Debug)]
 pub(super) struct Dir {
     local_position: Vec2,
+    stretch: Vec2,
     pub(super) scale: f32,
     pub(super) repository: usize,
     pub path: String,
@@ -200,7 +201,7 @@ pub(super) struct Dir {
 impl Dir {
     fn replay_bytes(&self) -> u128 {
         let (path, slots) = retained_fields!(self, Self {
-            path, slots; local_position, scale, repository, parent, depth, position, files,
+            path, slots; local_position, scale, stretch, repository, parent, depth, position, files,
             children, live, touch_age, reserve, arrival, has_landed_file,
         });
         path.capacity() as u128 + buffer_bytes::<Option<u64>>(slots.capacity())
@@ -210,6 +211,7 @@ impl Dir {
         Self {
             local_position: Vec2::ZERO,
             scale: 1.0,
+            stretch: Vec2::ONE,
             repository,
             path,
             parent,
@@ -243,6 +245,10 @@ impl Dir {
     #[cfg(test)]
     pub(super) fn local_position(&self) -> Vec2 {
         self.local_position
+    }
+
+    pub(super) fn offset_without_stretch(&self, point: Vec2) -> Vec2 {
+        (point - self.position) / self.stretch
     }
 
     pub(super) fn radius(&self) -> f32 {
@@ -762,6 +768,7 @@ impl Layout {
             if placed {
                 dir.position = dir.local_position;
                 dir.scale = 1.0;
+                dir.stretch = Vec2::ONE;
             }
             dir.touch_age += dt;
         }
@@ -999,11 +1006,12 @@ mod tests {
             id = layout.add(&format!("tree/{index}"), 0.0, 0);
         }
         let file = layout.files.get_mut(&id).unwrap();
-        let dir = &layout.dirs[file.dir];
+        let dir = &mut layout.dirs[file.dir];
         file.presence = 1.0;
         file.state = Presence::Present;
         file.local_position = file.slot_offset;
-        file.position = file.local_position * Vec2::new(2.0, 1.0);
+        dir.stretch = Vec2::new(2.0, 1.0);
+        file.position = file.local_position * dir.stretch;
         assert!(file.position.length() > dir.radius());
         assert!(file.draw_scale(dir) > 0.99);
     }

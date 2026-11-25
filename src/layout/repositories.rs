@@ -277,6 +277,7 @@ impl Layout {
         for dir in &mut self.dirs {
             dir.position = dir.local_position;
             dir.scale = 1.0;
+            dir.stretch = Vec2::ONE;
         }
         for file in self.files.values_mut() {
             file.position = file.local_position;
@@ -345,6 +346,7 @@ impl Layout {
         for dir in &mut self.dirs {
             dir.local_position = dir.position;
             dir.scale = scales[dir.repository];
+            dir.stretch = regions[dir.repository].stretch;
             let position = regions[dir.repository].local_axes(dir.position);
             dir.position = position * dir.scale + offsets[dir.repository];
         }
