@@ -6,6 +6,7 @@ use proptest::{
     prelude::*,
     test_runner::{Config, RngSeed, TestError, TestRunner},
 };
+use std::{fmt::Write, ops::RangeInclusive, time::Instant};
 
 const CI_TICK_LIMIT: u32 = 3_600;
 
@@ -78,6 +79,87 @@ enum Skew {
     ChangingRank,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct TreeShape {
+    branches: u8,
+    max_depth: u8,
+    suffix_offset: u8,
+}
+
+impl TreeShape {
+    fn path(self, file: u16) -> String {
+        const SUFFIXES: &[&str] = &[
+            "", ".rs", ".py", ".toml", ".json", ".yaml", ".md", ".sh", ".svg", ".png",
+            ".bin", ".tar.gz", ".TS",
+        ];
+        let file = usize::from(file);
+        let offset = usize::from(self.suffix_offset);
+        let depth = (file + offset) % (usize::from(self.max_depth) + 1);
+        let branch = file % usize::from(self.branches);
+        let mut path = String::new();
+        for level in 0..depth {
+            write!(path, "level-{level}-{branch}/").unwrap();
+        }
+        let suffix = SUFFIXES[(file + offset) % SUFFIXES.len()];
+        write!(path, "file-{file}{suffix}").unwrap();
+        path
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PlaybackVariation {
+    contributors_per_repo: u8,
+    seconds_per_day: f32,
+    max_idle_seconds: f32,
+    avatar_max_speed: f32,
+    avatar_size: f32,
+    gutter: f32,
+    fragment_speed: f32,
+    bot_travel: BotTravel,
+    uncapped_walk: bool,
+}
+
+impl PlaybackVariation {
+    fn apply(self, options: &mut Options, histories_cross_tiles: bool) {
+        options.seconds_per_day = self.seconds_per_day;
+        options.max_idle_seconds = self.max_idle_seconds;
+        options.avatar_max_speed = self.avatar_max_speed;
+        options.avatar_size = self.avatar_size;
+        options.gutter = self.gutter;
+        options.fragment_speed = self.fragment_speed;
+        options.bot_travel = self.bot_travel;
+        if self.uncapped_walk && !histories_cross_tiles {
+            options.travel_cap = TravelCap::None;
+        }
+    }
+
+    fn vary_contributors(self, events: &mut [Event], shared: bool) {
+        for (index, event) in events.iter_mut().enumerate() {
+            let sequence = i64::try_from(index).unwrap();
+            event.seconds = (sequence + sequence / 7 * 3) * 86_400;
+            let count = usize::from(self.contributors_per_repo);
+            let local = |seat| contributor(event.repository * 16 + seat % count + 1);
+            event.author = if shared && index % 7 == 0 {
+                contributor(0)
+            } else {
+                local(index)
+            };
+            event.co_authors.clear();
+            if index % 3 == 1 {
+                event.co_authors.push(local(index + 1));
+            }
+        }
+    }
+}
+
+fn contributor(id: usize) -> Identity {
+    let suffix = if id % 11 == 10 { "[bot]" } else { "" };
+    Identity::new(
+        &format!("Contributor {id}{suffix}"),
+        &format!("contributor-{id}@example.test"),
+    )
+}
+
 #[derive(Debug)]
 struct History {
     repositories: u8,
@@ -90,9 +172,48 @@ struct History {
 
 impl History {
     fn replay(&self, tick_limit: u32) -> Result<Replay, TestCaseError> {
+        self.replay_variant(tick_limit, None)
+    }
+
+    fn replay_variant(
+        &self,
+        tick_limit: u32,
+        variation: Option<(TreeShape, PlaybackVariation)>,
+    ) -> Result<Replay, TestCaseError> {
         let repositories = usize::from(self.repositories);
         let labels: Vec<_> = (0..repositories).map(|id| format!("Repo {id}")).collect();
         let active = self.repositories - self.archive.min(self.repositories - 2);
+        let tree = variation.map(|(tree, _)| tree);
+        let mut events = self.events(active, tree);
+        let mut options = Options {
+            repository_ends: vec![None; repositories],
+            repository_archived: (0..self.repositories)
+                .map(|repo| repo >= active)
+                .collect(),
+            seconds_per_day: 0.25,
+            max_idle_seconds: 0.25,
+            travel_window_seconds: Some(if tree.is_some() { 8.0 } else { 3.5 }),
+            ..Options::default()
+        };
+        if let Some((_, playback)) = variation {
+            playback.apply(&mut options, self.shared_contributor);
+            playback.vary_contributors(&mut events, self.shared_contributor);
+        }
+        replay(events, &labels, &options, tick_limit, Fault::None)
+    }
+
+    fn events(&self, active: u8, tree: Option<TreeShape>) -> Vec<Event> {
+        let source_path = |file| {
+            tree.map_or_else(
+                || format!("wide/{}/deep/tree/{file}.rs", file % 4),
+                |shape| shape.path(file),
+            )
+        };
+        let moved_path = if tree.is_some() {
+            "relocated/retained.txt"
+        } else {
+            "moved.rs"
+        };
         let mut events = Vec::new();
         for repo in 0..self.repositories {
             let count = match (self.skew, repo) {
@@ -104,12 +225,9 @@ impl History {
                 repo,
                 false,
                 std::iter::once(change("anchor.rs", Kind::Added))
-                    .chain((0..count).map(|file| {
-                        change(
-                            &format!("wide/{}/deep/tree/{file}.rs", file % 4),
-                            Kind::Added,
-                        )
-                    }))
+                    .chain(
+                        (0..count).map(|file| change(&source_path(file), Kind::Added)),
+                    )
                     .collect(),
             );
         }
@@ -119,9 +237,9 @@ impl History {
             1,
             self.shared_contributor,
             vec![change(
-                "moved.rs",
+                moved_path,
                 Kind::Moved {
-                    from: "wide/0/deep/tree/0.rs".into(),
+                    from: source_path(0),
                 },
             )],
         );
@@ -134,39 +252,69 @@ impl History {
             1,
             self.shared_contributor,
             (0..burst)
-                .map(|file| change(&format!("burst/{file}.rs"), Kind::Added))
+                .map(|file| {
+                    let path = tree
+                        .map_or_else(|| format!("{file}.rs"), |shape| shape.path(file));
+                    change(&format!("burst/{path}"), Kind::Added)
+                })
                 .collect(),
         );
-        for &repo in &self.writes {
-            append(
-                &mut events,
-                repo % active,
-                self.shared_contributor,
-                vec![change("anchor.rs", Kind::Modified)],
+        let mut transient = vec![Vec::new(); usize::from(active)];
+        for (index, &repo) in self.writes.iter().enumerate() {
+            let repo = if tree.is_some() && index % 3 != 2 {
+                u8::try_from((index / 12) % usize::from(active.min(3))).unwrap()
+            } else {
+                repo % active
+            };
+            let write = tree.map_or_else(
+                || change("anchor.rs", Kind::Modified),
+                |shape| {
+                    self.tree_write(index, shape, &mut transient[usize::from(repo)])
+                },
             );
+            append(&mut events, repo, self.shared_contributor, vec![write]);
         }
         append(
             &mut events,
             1,
             false,
-            vec![change("moved.rs", Kind::Deleted)],
+            vec![change(moved_path, Kind::Deleted)],
         );
-        replay(
-            events,
-            &labels,
-            &Options {
-                repository_ends: vec![None; repositories],
-                repository_archived: (0..self.repositories)
-                    .map(|repo| repo >= active)
-                    .collect(),
-                seconds_per_day: 0.25,
-                max_idle_seconds: 0.25,
-                travel_window_seconds: Some(3.5),
-                ..Options::default()
-            },
-            tick_limit,
-            Fault::None,
-        )
+        events
+    }
+
+    fn tree_write(
+        &self,
+        index: usize,
+        tree: TreeShape,
+        transient: &mut Vec<String>,
+    ) -> FileChange {
+        let file = u16::try_from(index).unwrap();
+        match index % 4 {
+            0 => {
+                let path = format!("growth/{}", tree.path(file));
+                transient.push(path.clone());
+                return change(&path, Kind::Added);
+            }
+            2 => {
+                if let Some(existing) = transient.last_mut() {
+                    let path = format!("relocated/{}", tree.path(file));
+                    let from = std::mem::replace(existing, path.clone());
+                    return change(&path, Kind::Moved { from });
+                }
+            }
+            3 => {
+                if let Some(path) = transient.pop() {
+                    return change(&path, Kind::Deleted);
+                }
+            }
+            _ => {}
+        }
+        if self.files_per_repo > 1 {
+            let retained = 1 + file % (self.files_per_repo - 1);
+            return change(&tree.path(retained), Kind::Modified);
+        }
+        change("anchor.rs", Kind::Modified)
     }
 }
 
@@ -198,18 +346,24 @@ fn append(events: &mut Vec<Event>, repo: u8, shared: bool, changes: Vec<FileChan
     events.push(event);
 }
 
-fn histories() -> impl Strategy<Value = History> {
+fn histories(
+    repositories: RangeInclusive<u8>,
+    files: RangeInclusive<u16>,
+    archives: RangeInclusive<u8>,
+    writes: RangeInclusive<usize>,
+) -> impl Strategy<Value = History> {
+    let last_repository = *repositories.end();
     (
-        2..=5_u8,
-        1..=8_u16,
+        repositories,
+        files,
         prop_oneof![
             Just(Skew::Balanced),
             Just(Skew::Dominant),
             Just(Skew::ChangingRank)
         ],
-        0..=2_u8,
+        archives,
         any::<bool>(),
-        prop::collection::vec(0..5_u8, 6..=12),
+        prop::collection::vec(0..last_repository, writes),
     )
         .prop_map(
             |(
@@ -232,24 +386,118 @@ fn histories() -> impl Strategy<Value = History> {
         )
 }
 
-#[test]
-fn short_histories_preserve_playback_invariants() {
+fn property_config(default_cases: u32) -> Config {
     let defaults = Config::default();
+    let cases = if std::env::var_os("PROPTEST_CASES").is_some() {
+        defaults.cases
+    } else {
+        default_cases
+    };
     let seed = match defaults.rng_seed {
         RngSeed::Random => RngSeed::Fixed(234),
         seed @ RngSeed::Fixed(_) => seed,
     };
-    TestRunner::new(Config {
-        cases: 8,
+    Config {
+        cases,
         max_shrink_iters: 64,
         failure_persistence: None,
         rng_seed: seed,
         ..defaults
-    })
-    .run(&histories(), |history| {
-        history.replay(CI_TICK_LIMIT).map(|_| ())
-    })
-    .unwrap_or_else(|error| panic!("playback seed {seed:?}: {error}"));
+    }
+}
+
+fn playback_variations() -> impl Strategy<Value = PlaybackVariation> {
+    (
+        2..=12_u8,
+        prop::sample::select(vec![0.2, 0.25, 0.35]),
+        prop::sample::select(vec![0.25, 0.5, 0.75]),
+        prop::sample::select(vec![360.0, 480.0, 720.0]),
+        prop::sample::select(vec![1.0, 2.0, 2.5]),
+        prop::sample::select(vec![0.0, 4.0, 12.0, 20.0]),
+        prop::sample::select(vec![0.75, 1.0, 1.5]),
+        prop::sample::select(vec![BotTravel::Fade, BotTravel::Walk]),
+        any::<bool>(),
+    )
+        .prop_map(
+            |(
+                contributors_per_repo,
+                seconds_per_day,
+                max_idle_seconds,
+                avatar_max_speed,
+                avatar_size,
+                gutter,
+                fragment_speed,
+                bot_travel,
+                uncapped_walk,
+            )| {
+                PlaybackVariation {
+                    contributors_per_repo,
+                    seconds_per_day,
+                    max_idle_seconds,
+                    avatar_max_speed,
+                    avatar_size,
+                    gutter,
+                    fragment_speed,
+                    bot_travel,
+                    uncapped_walk,
+                }
+            },
+        )
+}
+
+#[test]
+fn short_histories_preserve_playback_invariants() {
+    let config = property_config(8);
+    let seed = config.rng_seed;
+    println!(
+        "Checking {} generated histories with seed {seed:?}",
+        config.cases
+    );
+    TestRunner::new(config)
+        .run(&histories(2..=5, 1..=8, 0..=2, 6..=12), |history| {
+            history.replay(CI_TICK_LIMIT).map(|_| ())
+        })
+        .unwrap_or_else(|error| panic!("playback seed {seed:?}: {error}"));
+}
+
+#[test]
+#[ignore = "opt-in generated playback with larger layouts"]
+fn extended_histories_preserve_playback_invariants() {
+    let mut config = property_config(8);
+    config.max_shrink_time = 90_000;
+    let seed = config.rng_seed;
+    let trees = (1..=16_u8, 0..=6_u8, 0..13_u8).prop_map(
+        |(branches, max_depth, suffix_offset)| TreeShape {
+            branches,
+            max_depth,
+            suffix_offset,
+        },
+    );
+    println!(
+        "Checking {} extended histories with seed {seed:?}",
+        config.cases
+    );
+    TestRunner::new(config)
+        .run(&(histories(8..=40, 1..=40, 0..=8, 30..=160), trees, playback_variations()), |(history, tree, playback)| {
+            let started = Instant::now();
+            println!(
+                "Starting {} repos, {} base files, {:?} skew, {} archives, {} commits, {} branches, depth {}",
+                history.repositories, history.files_per_repo, history.skew,
+                history.archive, usize::from(history.repositories) + history.writes.len() + 3,
+                tree.branches, tree.max_depth,
+            );
+            println!("Playback settings {playback:?}, shared contributors {}", history.shared_contributor);
+            let report = history.replay_variant(12_000, Some((tree, playback)))?;
+            println!(
+                "Completed with {} peak files, {} peak dirs, {} ticks, {:.2?}",
+                report.peak_live_files, report.peak_live_directories, report.ticks, started.elapsed(),
+            );
+            println!("{} visible contributors at peak, {} on one tile, {} passing contacts, {} ticks of parked overlap",
+                report.peak_visible_contributors, report.peak_contributors_on_tile,
+                report.passing_contacts, report.longest_parked_contact);
+            Ok(())
+        })
+        .unwrap_or_else(|error| panic!("extended playback seed {seed:?}: {error}"));
 }
 
 #[test]

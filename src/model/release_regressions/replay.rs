@@ -22,6 +22,10 @@ pub(super) struct Replay {
     pub passing_contacts: u64,
     pub longest_parked_contact: u32,
     pub peak_live_items: usize,
+    pub peak_live_files: usize,
+    pub peak_live_directories: usize,
+    pub peak_visible_contributors: usize,
+    pub peak_contributors_on_tile: usize,
     pub max_tile_step_px: f32,
     pub max_carried_step: f32,
     pub final_gap: f32,
@@ -185,13 +189,16 @@ impl Audit {
             self.applied = sim.state.next_event;
         }
         let layout = sim.layout();
-        self.report.peak_live_items = self.report.peak_live_items.max(
-            layout
-                .files()
-                .filter(|(_, file)| file.state != crate::layout::Presence::Leaving)
-                .count()
-                + layout.dirs().count(),
-        );
+        let files = layout
+            .files()
+            .filter(|(_, file)| file.state != crate::layout::Presence::Leaving)
+            .count();
+        let directories = layout.dirs().count();
+        self.report.peak_live_files = self.report.peak_live_files.max(files);
+        self.report.peak_live_directories =
+            self.report.peak_live_directories.max(directories);
+        self.report.peak_live_items =
+            self.report.peak_live_items.max(files + directories);
         self.check_tiles(sim)?;
         let held = self.check_rays(sim, seam, fault)?;
         self.check_contributors(sim, &held)?;
@@ -469,6 +476,22 @@ impl Audit {
     }
 
     fn measure_contacts(&mut self, sim: &Simulation) {
+        let mut contributors = vec![0; self.tiles.len()];
+        for avatar in sim
+            .avatars()
+            .iter()
+            .filter(|avatar| avatar.presence > 0.001)
+        {
+            contributors[avatar.repository] += 1;
+        }
+        self.report.peak_visible_contributors = self
+            .report
+            .peak_visible_contributors
+            .max(contributors.iter().sum());
+        self.report.peak_contributors_on_tile = self
+            .report
+            .peak_contributors_on_tile
+            .max(contributors.into_iter().max().unwrap_or(0));
         let mut contacts = BTreeMap::new();
         for (a, b) in occlusion::avatar_contacts_for_test(sim) {
             let parked = |author: usize| {
