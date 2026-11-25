@@ -5,10 +5,11 @@ use serde::Serialize;
 
 use super::{Simulation, framing};
 use crate::layout::{Layout, packing::Tile};
+mod density;
 mod gaps;
 
 const EMPTY_RECTANGLE_WORK: usize = 1_000_000;
-const DEFINITIONS: &str = "Tile and content areas use fixed world coordinates expressed in reference-field units. Coverage and empty fractions normalize the grown field back to the reference viewport. Glass tiles are disjoint world rectangles represented in this field, inside a 24 reference-pixel margin plus the caption reservation below, separated by shared gutters. Largest empty rectangle is the exact maximum axis-aligned rectangle outside their union, including the margin, or null when the work budget is reached. Content is the world-XZ AABB of current directory discs and file positions padded by their model footprint size, converted with the fixed affine field scale; not projected ground-plane area, glyph ink or opaque pixel occupancy. Content fill divides content-envelope area by tile area; overall fill is area weighted. The first repository owns the empty lead-in tile. Weights are live file and directory counts, held until their shares drift and then eased over two seconds; empty active repositories weigh one until archived. Files and directories count live files not leaving and live directories. Samples include every canonical 1/60 second. Content AABBs are clipped to their own tiles; actual footprints use convex outlines. Content largest-empty rectangles use fully covered cells on a 160x90 grid inside the usable tile viewport, excluding the caption reservation, with one grid cell of boundary uncertainty.";
+const DEFINITIONS: &str = "Tile and content areas use fixed world coordinates expressed in reference-field units. Coverage and empty fractions normalize the grown field back to the reference viewport. Glass tiles are disjoint world rectangles represented in this field, inside a 24 reference-pixel margin plus the caption reservation below, separated by shared gutters. Largest empty rectangle is the exact maximum axis-aligned rectangle outside their union, including the margin, or null when the work budget is reached. Content is the world-XZ AABB of current directory discs and file positions padded by their model footprint size, converted with the fixed affine field scale; not projected ground-plane area, glyph ink or opaque pixel occupancy. Content fill divides content-envelope area by tile area; overall fill is area weighted. The first repository owns the empty lead-in tile. Weights are live file and directory counts, held until their shares drift and then eased over two seconds; empty active repositories weigh one until archived. Files and directories count live files not leaving and live directories. Density uses live directories including roots and files not leaving, including queued arrivals. Its reference is total live items per total active world-space tile area. Samples include every canonical 1/60 second. Content AABBs are clipped to their own tiles; actual footprints use convex outlines. Content largest-empty rectangles use fully covered cells on a 160x90 grid inside the usable tile viewport, excluding the caption reservation, with one grid cell of boundary uncertainty.";
 
 fn largest_empty(tiles: &[Tile]) -> Option<f32> {
     let count = tiles.len().max(1);
@@ -42,6 +43,8 @@ fn largest_empty(tiles: &[Tile]) -> Option<f32> {
 
 #[derive(Serialize)]
 struct Repository {
+    index: usize,
+    active: bool,
     label: String,
     tile_low: [f32; 2],
     tile_high: [f32; 2],
@@ -50,6 +53,7 @@ struct Repository {
     files: usize,
     directories: usize,
     tile_area: f32,
+    density: Option<density::Sample>,
     content_area: f32,
     content_fill: f32,
     content_low: [f32; 2],
@@ -66,6 +70,7 @@ struct Repository {
 
 #[derive(Serialize)]
 pub(crate) struct Metrics {
+    density: Option<f64>,
     pub coverage: f32,
     pub blank_fraction: f32,
     pub largest_empty_rectangle: Option<f32>,
@@ -101,6 +106,18 @@ fn framing_metrics(
                 || p.cmpgt(usable.high + Vec2::splat(1e-5)).any()
         });
     (usable_fill, cropped)
+}
+
+fn clip_content(low: Vec2, high: Vec2, tile: Tile) -> Vec<Vec2> {
+    let mut polygon: Vec<_> = crate::layout::outline::rectangle(low, high)
+        .into_iter()
+        .map(framing::world_to_field)
+        .collect();
+    for axis in [Vec2::X, Vec2::Y] {
+        polygon = crate::layout::outline::clip(&polygon, axis, axis.dot(tile.high));
+        polygon = crate::layout::outline::clip(&polygon, -axis, -axis.dot(tile.low));
+    }
+    polygon
 }
 
 fn measure(layout: &Layout, growth: f32) -> Metrics {
@@ -148,16 +165,7 @@ fn measure(layout: &Layout, growth: f32) -> Metrics {
             high = high.max(point + Vec2::splat(radius));
         }
         let content_area = if low.is_finite() {
-            let mut polygon: Vec<_> = crate::layout::outline::rectangle(low, high)
-                .into_iter()
-                .map(framing::world_to_field)
-                .collect();
-            for axis in [Vec2::X, Vec2::Y] {
-                polygon =
-                    crate::layout::outline::clip(&polygon, axis, axis.dot(tile.high));
-                polygon =
-                    crate::layout::outline::clip(&polygon, -axis, -axis.dot(tile.low));
-            }
+            let polygon = clip_content(low, high, tile);
             let area = crate::layout::outline::area(&polygon) * 0.25;
             polygons.push(polygon.into_iter().map(normalize).collect());
             area
@@ -173,6 +181,9 @@ fn measure(layout: &Layout, growth: f32) -> Metrics {
             high: normalize(tile.high),
         });
         repositories.push(Repository {
+            index,
+            active: region.live,
+            density: None,
             label: region.label.clone(),
             tile_low: tile.low.to_array(),
             tile_high: tile.high.to_array(),
@@ -194,7 +205,9 @@ fn measure(layout: &Layout, growth: f32) -> Metrics {
             cropped,
         });
     }
+    let density = density::measure(&mut repositories);
     Metrics {
+        density,
         coverage,
         blank_fraction: 1.0 - coverage,
         largest_empty_rectangle: largest_empty(&tiles),
@@ -222,6 +235,7 @@ pub(crate) fn run(
     eprintln!("treemap_single_sample_seconds={elapsed:.9}");
     let mut moving_beams = super::slots::diagnostics::MovingBeams::default();
     let mut occlusion = super::occlusion::Audit::default();
+    let mut density = density::Audit::default();
     let mut frame = 0;
     loop {
         simulation.prepare_frame(frame, 60, true)?;
@@ -232,11 +246,15 @@ pub(crate) fn run(
         simulation.advance_to(frame, 60);
         moving_beams.observe(simulation);
         occlusion.observe(simulation);
+        let metrics =
+            measure(simulation.layout(), simulation.packing.overview_growth());
+        let in_transition = density::in_transition(simulation);
+        density.observe(frame, in_transition, &metrics.repositories);
         serde_json::to_writer(
             &mut *writer,
             &serde_json::json!({
                 "frame": frame, "seconds": super::tick_time(u64::from(frame)).lossy_secs_f32(),
-                "commit": simulation.commit(), "metrics": measure(simulation.layout(), simulation.packing.overview_growth())
+                "commit": simulation.commit(), "tile_transition": in_transition, "metrics": metrics
             }),
         )?;
         writeln!(writer)?;
@@ -247,7 +265,7 @@ pub(crate) fn run(
     }
     serde_json::to_writer(
         &mut *writer,
-        &serde_json::json!({"occlusion": occlusion, "moving_beams": moving_beams, "avatar_slots": super::slots::report(&simulation.state), "travel": simulation.travel.report()}),
+        &serde_json::json!({"density": density.report, "occlusion": occlusion, "moving_beams": moving_beams, "avatar_slots": super::slots::report(&simulation.state), "travel": simulation.travel.report()}),
     )?;
     writeln!(writer)?;
     Ok(())

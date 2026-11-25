@@ -7,15 +7,15 @@ use crate::model::{TICK_RATE, count};
 struct Policy {
     /// Field share, as total variation over present tiles, on the wrong tiles.
     drift: f32,
-    /// Ratio between one tile's live and held share, so small tiles also follow.
-    ratio: f32,
     /// Ticks one reflow eases over.
     reflow: u32,
 }
 
+const RAMP_FRACTION: f32 = 0.125;
+pub(super) const REFLOW_LINEAR_FRACTION: f32 = 1.0 - RAMP_FRACTION;
+
 const POLICY: Policy = Policy {
     drift: 0.05,
-    ratio: 1.5,
     reflow: 2 * TICK_RATE,
 };
 
@@ -110,11 +110,7 @@ impl Weights {
             && tick >= self.next
             && (settled || (overdue && clear_of_archives))
         {
-            self.from = self.at(tick);
-            self.to = future.iter().map(|&count| count.max(1.0)).collect();
-            self.start = tick;
-            self.next = tick + span(self.policy.reflow);
-            self.due = None;
+            self.retarget(tick, future);
         }
         self.at(tick)
     }
@@ -132,6 +128,22 @@ impl Weights {
         (tick != 0 && tick == self.start).then_some(&self.to)
     }
 
+    pub(super) fn retarget(&mut self, tick: usize, future: &[f32]) {
+        self.from = self.at(tick);
+        self.to = future.iter().map(|&count| count.max(1.0)).collect();
+        self.start = tick;
+        self.next = tick + span(self.policy.reflow);
+        self.due = None;
+    }
+
+    pub(super) fn ready(&self, tick: usize) -> bool {
+        tick >= self.next
+    }
+
+    pub(super) fn reserve_reflow(&mut self, tick: usize, duration: usize) {
+        self.next = self.next.max(tick + duration);
+    }
+
     fn drifted(&self, targets: &[f32], presence: &[f32]) -> bool {
         let total = |weights: &[f32]| -> f32 {
             weights.iter().zip(presence).map(|(w, p)| w * p).sum()
@@ -142,7 +154,7 @@ impl Weights {
             if p > 0.0 {
                 let (a, b) = (target / live, to / held);
                 variation += 0.5 * p * (a - b).abs();
-                if a.max(b) > self.policy.ratio * a.min(b) {
+                if (a - b).abs() > super::DENSITY_TOLERANCE * b {
                     return true;
                 }
             }
@@ -169,7 +181,7 @@ pub(super) fn reflow_ease(elapsed: usize) -> f32 {
 }
 
 pub(super) fn progress(elapsed: usize, duration: usize) -> f32 {
-    ease(elapsed, duration, 0.125)
+    ease(elapsed, duration, RAMP_FRACTION)
 }
 
 pub(super) fn birth_ease(elapsed: usize, duration: usize) -> f32 {
@@ -240,7 +252,7 @@ mod tests {
     }
 
     #[test]
-    fn a_small_tile_growing_past_the_ratio_reflows_below_the_drift() {
+    fn a_small_tile_outside_density_tolerance_reflows_below_the_drift() {
         let policy = Policy {
             drift: 0.5,
             ..POLICY
