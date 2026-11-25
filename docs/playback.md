@@ -330,8 +330,9 @@ Different content shapes can leave space inside a uniformly fitted tile.
 
 In treemap diagnostics, `largest_empty_rectangle` measures the largest axis-aligned gap
 outside the tiles, including the margin. The value is `null` when the rectangle search
-reaches its work budget. Density diagnostics compare each active tile with the live item
-count per unit of world-space tile area across the collection. The summary reports peaks
+reaches its work budget. Density diagnostics compare each nonempty active tile with
+the live item count per unit of world-space tile area across the collection.
+The summary reports peaks
 during and between transitions, plus the longest settled breach of the 25% target.
 Live directories include roots. File counts include queued arrivals and exclude files
 leaving the layout.

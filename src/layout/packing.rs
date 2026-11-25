@@ -1344,6 +1344,7 @@ impl Packing {
         let mut reflows = Vec::<reflow::Change>::new();
         let mut was_stable = false;
         let mut retry_allocation = true;
+        let mut next_density_probe = 0;
         let mut samples: Vec<_> = regions
             .iter()
             .enumerate()
@@ -1386,7 +1387,7 @@ impl Packing {
                 let stable = shown.iter().enumerate().all(|(i, &p)| {
                     let exit = exits.get(i).and_then(|exit| *exit);
                     (p >= 1.0
-                        && tick >= births[i]
+                        && tick > births[i]
                         && exit.is_none_or(|exit| end < exit.start))
                         || (p == 0.0
                             && (finish <= windows[i].0
@@ -1415,6 +1416,23 @@ impl Packing {
                 let tree = reflows
                     .last()
                     .map_or(nodes.as_slice(), |event| &event.nodes);
+                if stable
+                    && finish < regions.len()
+                    && held.ready(tick)
+                    && tick >= next_density_probe
+                {
+                    next_density_probe = finish;
+                    if reflow::can_reweight(
+                        tree,
+                        &weights,
+                        &targets,
+                        &items[future],
+                        &shown,
+                        space,
+                    ) {
+                        held.retarget(tick, &items[future]);
+                    }
+                }
                 if let Some(target) = held.target_at_start(tick) {
                     let change = (stable && finish < regions.len())
                         .then(|| {
@@ -1883,14 +1901,21 @@ impl Packing {
                     .clamp(0.0, 1.0)
             })
             .collect();
-        let reflow = self.reflows
-            [..self.reflows.partition_point(|r| r.tick <= tile_tick)]
-            .last();
+        let changes =
+            &self.reflows[..self.reflows.partition_point(|r| r.tick <= tile_tick)];
+        let reflow = changes.last();
         reflow
             .filter(|change| change.matches_presence(&presence))
             .and_then(|change| change.sample(tile_tick))
             .unwrap_or_else(|| {
-                let tree = reflow.map_or((0, self.nodes.as_slice()), |c| {
+                // A pending birth may override the history row while the tile clock waits.
+                let current =
+                    if reflow.is_some_and(|change| change.in_transition(tile_tick)) {
+                        changes[..changes.len() - 1].last()
+                    } else {
+                        reflow
+                    };
+                let tree = current.map_or((0, self.nodes.as_slice()), |c| {
                     (c.tick, c.nodes.as_slice())
                 });
                 let now = u64::try_from(tile_tick).expect("bounded packing tick");

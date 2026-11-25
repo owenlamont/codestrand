@@ -44,6 +44,10 @@ impl Change {
         }
     }
 
+    pub fn in_transition(&self, tick: usize) -> bool {
+        self.transition.is_some() && tick - self.tick < held::reflow_ticks()
+    }
+
     pub fn matches_presence(&self, presence: &[f32]) -> bool {
         let Some((from, _)) = &self.transition else {
             return false;
@@ -352,7 +356,9 @@ impl Density {
         for (&tile, &items) in tiles.iter().zip(weights) {
             if let Some(tile) = tile {
                 let (share, due) = (tile.area() / area, items / weight);
-                worst = worst.max(density_error(share, due));
+                if items > 0.0 {
+                    worst = worst.max(density_error(share, due));
+                }
                 variation += (share - due).abs() * 0.5;
             }
         }
@@ -360,10 +366,38 @@ impl Density {
     }
 
     fn improves(self, best: Self, baseline: Self) -> bool {
-        self.variation <= baseline.variation + 0.005
+        self.worst <= best.worst
+            && self.variation <= baseline.variation + 0.005
             && self.worst + 4.0 * self.variation + 0.02
                 < best.worst + 4.0 * best.variation
     }
+}
+
+pub(super) fn can_reweight(
+    nodes: &[Node],
+    weights: &[f32],
+    live: &[f32],
+    future: &[f32],
+    presence: &[f32],
+    space: Space,
+) -> bool {
+    if !live
+        .iter()
+        .zip(presence)
+        .any(|(&items, &present)| items > 0.0 && present > 0.0)
+    {
+        return false;
+    }
+    let Some(current) = tiles(nodes, weights, presence, space) else {
+        return false;
+    };
+    let baseline = Density::new(&current, live);
+    if baseline.worst <= super::DENSITY_TOLERANCE {
+        return false;
+    }
+    let future: Vec<_> = future.iter().map(|&items| items.max(1.0)).collect();
+    tiles(nodes, &future, presence, space)
+        .is_some_and(|after| Density::new(&after, live).improves(baseline, baseline))
 }
 
 fn totals(tiles: &[Option<Tile>], weights: &[f32]) -> (f32, f32) {
@@ -513,6 +547,19 @@ mod tests {
                 gutters: regions.iter().map(|r| r.gutter).collect(),
             }
         };
+        let birth = [1.0, 0.75, 1.0, 1.0];
+        let masked_tiles = |packing: &Packing| {
+            packing
+                .sample_with_presence(12, Some(&birth))
+                .unwrap()
+                .0
+                .into_iter()
+                .map(|region| region.tile)
+                .collect::<Vec<_>>()
+        };
+        let mut source_tree = packing.clone();
+        source_tree.reflows = std::sync::Arc::default();
+        assert_eq!(masked_tiles(&packing), masked_tiles(&source_tree));
         let middle = sample(mid);
         let mut previous = sample(11).tiles;
         assert_eq!(previous, from.tiles);
@@ -537,6 +584,30 @@ mod tests {
         let replay = sample(mid);
         assert_eq!(middle.tiles, replay.tiles);
         assert_eq!(middle.gutters, replay.gutters);
+    }
+
+    #[test]
+    fn measured_area_can_require_reweighting_before_held_counts_drift() {
+        let nodes = [
+            Node::Split {
+                axis: 0,
+                first: 1,
+                second: 2,
+            },
+            Node::Repository(0),
+            Node::Split {
+                axis: 0,
+                first: 3,
+                second: 4,
+            },
+            Node::Repository(1),
+            Node::Repository(2),
+        ];
+        let held = [120.0, 730.0, 150.0];
+        let live = [120.0, 694.0, 186.0];
+        let space = Space::new(4.0, 1.0);
+        assert!(can_reweight(&nodes, &held, &live, &live, &[1.0; 3], space));
+        assert!(!can_reweight(&nodes, &live, &live, &live, &[1.0; 3], space));
     }
 
     #[test]

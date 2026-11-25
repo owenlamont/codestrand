@@ -110,11 +110,7 @@ impl Weights {
             && tick >= self.next
             && (settled || (overdue && clear_of_archives))
         {
-            self.from = self.at(tick);
-            self.to = future.iter().map(|&count| count.max(1.0)).collect();
-            self.start = tick;
-            self.next = tick + span(self.policy.reflow);
-            self.due = None;
+            self.retarget(tick, future);
         }
         self.at(tick)
     }
@@ -130,6 +126,14 @@ impl Weights {
 
     pub(super) fn target_at_start(&self, tick: usize) -> Option<&[f32]> {
         (tick != 0 && tick == self.start).then_some(&self.to)
+    }
+
+    pub(super) fn retarget(&mut self, tick: usize, future: &[f32]) {
+        self.from = self.at(tick);
+        self.to = future.iter().map(|&count| count.max(1.0)).collect();
+        self.start = tick;
+        self.next = tick + span(self.policy.reflow);
+        self.due = None;
     }
 
     pub(super) fn ready(&self, tick: usize) -> bool {

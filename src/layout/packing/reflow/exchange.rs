@@ -250,7 +250,7 @@ mod tests {
 
     #[test]
     fn an_exchange_can_pass_two_neighbours_with_connected_gutters() {
-        let start = row(0.25);
+        let start = row(0.5);
         let field = Tile {
             low: Vec2::splat(1.0 / 128.0),
             ..FIELD

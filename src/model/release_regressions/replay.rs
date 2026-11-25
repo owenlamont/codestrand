@@ -27,6 +27,7 @@ pub(super) struct Replay {
     pub peak_visible_contributors: usize,
     pub peak_contributors_per_repository: usize,
     pub max_tile_step_px: f32,
+    pub max_tile_step_at: Option<(usize, u64, u64)>,
     pub max_carried_step: f32,
     pub final_gap: f32,
     pub last_service_tile_tick: u64,
@@ -526,10 +527,12 @@ impl Audit {
                 let step = (before.low - tile.low)
                     .abs()
                     .max((before.high - tile.high).abs());
-                self.report.max_tile_step_px = self
-                    .report
-                    .max_tile_step_px
-                    .max((step * framing::VIEWPORT * 0.5).max_element());
+                let step_px = (step * framing::VIEWPORT * 0.5).max_element();
+                if step_px > self.report.max_tile_step_px {
+                    self.report.max_tile_step_px = step_px;
+                    self.report.max_tile_step_at =
+                        Some((a, tick, sim.clock.rows(tick).0));
+                }
             }
             for (b, other) in tiles.iter().enumerate().skip(a + 1) {
                 let Some(other) = *other else { continue };
