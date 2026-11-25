@@ -2159,6 +2159,7 @@ mod tests {
             (701, None),
             (701, Some(&hidden[..])),
             (702, Some(&hidden[..])),
+            (1598, None),
             (1599, None),
             (1300, None),
         ];
