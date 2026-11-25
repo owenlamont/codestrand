@@ -87,6 +87,7 @@ impl Track {
         &mut self,
         tick: u64,
         tile: Option<Tile>,
+        fit_initial: bool,
         target: impl FnOnce(Tile) -> Vec2,
     ) {
         let previous = std::mem::replace(&mut self.previous_tick, tick);
@@ -126,12 +127,13 @@ impl Track {
             .changes
             .last()
             .map_or(Vec2::ONE, |last| last.sample(tick));
-        let to = match self.settled {
-            Some((settled_aspect, settled_stretch))
+        let to = match (self.settled, fit_initial) {
+            (Some((settled_aspect, settled_stretch)), _)
                 if (aspect / settled_aspect - 1.0).abs() < 0.02 =>
             {
                 settled_stretch
             }
+            (None, false) => Vec2::ONE,
             _ => target(tile),
         };
         if from.distance_squared(to) < 1e-8 {
@@ -168,7 +170,7 @@ mod tests {
         };
         let stretch = Vec2::new(2.0, 1.0);
         let plan = Plan::build(1, 180, None, |tick, tracks| {
-            tracks[0].observe(tick, Some(tile), |_| stretch);
+            tracks[0].observe(tick, Some(tile), true, |_| stretch);
         });
         assert_eq!(plan.sample(0, 60), Vec2::ONE);
         assert!(plan.sample(0, 120).x > 1.0);
@@ -200,7 +202,7 @@ mod tests {
                 } else {
                     square
                 };
-                tracks[0].observe(tick, Some(tile), wide_target);
+                tracks[0].observe(tick, Some(tile), true, wide_target);
             })
         };
         let initial = build(350, None);
@@ -240,7 +242,7 @@ mod tests {
             } else {
                 translated
             };
-            tracks[0].observe(tick, Some(tile), wide_target);
+            tracks[0].observe(tick, Some(tile), true, wide_target);
         });
         assert_eq!(plan.sample(0, 160), Vec2::ONE);
         assert!(plan.sample(0, 190).x > 1.0);

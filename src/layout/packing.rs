@@ -2116,11 +2116,13 @@ impl Packing {
             let tiles = usize::try_from(tiles).unwrap_or(usize::MAX).min(max);
             let content = usize::try_from(content).unwrap_or(usize::MAX).min(max);
             let layout = self.layout_at(tiles, &births, None, Some(&mut tiling));
+            let shared_field = layout.tiles.iter().flatten().nth(1).is_some();
             for (repo, (track, tile)) in tracks.iter_mut().zip(layout.tiles).enumerate()
             {
                 track.observe(
                     u64::try_from(tiles).expect("bounded tile row"),
                     tile,
+                    shared_field,
                     |tile| self.aspect_target(repo, tile, tiles, content),
                 );
             }
