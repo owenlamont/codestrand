@@ -242,7 +242,7 @@ fn short_histories_preserve_playback_invariants() {
     TestRunner::new(Config {
         cases: 8,
         max_shrink_iters: 64,
-        source_file: Some(file!()),
+        failure_persistence: None,
         rng_seed: seed,
         ..defaults
     })
@@ -250,6 +250,21 @@ fn short_histories_preserve_playback_invariants() {
         history.replay(CI_TICK_LIMIT).map(|_| ())
     })
     .unwrap_or_else(|error| panic!("playback seed {seed:?}: {error}"));
+}
+
+#[test]
+fn parked_avatars_follow_moving_berths_during_archive_reflow() {
+    let report = History {
+        repositories: 4,
+        files_per_repo: 8,
+        skew: Skew::Balanced,
+        archive: 1,
+        shared_contributor: false,
+        writes: vec![1, 1, 0, 1, 1, 1],
+    }
+    .replay(CI_TICK_LIMIT)
+    .unwrap();
+    assert!(report.max_carried_step > 0.0);
 }
 
 #[test]
