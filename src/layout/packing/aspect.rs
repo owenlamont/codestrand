@@ -122,18 +122,17 @@ impl Track {
 
         let tile = tile.expect("unchanged live tile");
         let aspect = tile.usable().ground_aspect();
-        let Some((settled_aspect, settled_stretch)) = self.settled else {
-            self.settled = Some((aspect, Vec2::ONE));
-            return;
-        };
         let from = self
             .changes
             .last()
             .map_or(Vec2::ONE, |last| last.sample(tick));
-        let to = if (aspect / settled_aspect - 1.0).abs() < 0.02 {
-            settled_stretch
-        } else {
-            target(tile)
+        let to = match self.settled {
+            Some((settled_aspect, settled_stretch))
+                if (aspect / settled_aspect - 1.0).abs() < 0.02 =>
+            {
+                settled_stretch
+            }
+            _ => target(tile),
         };
         if from.distance_squared(to) < 1e-8 {
             self.settled = Some((aspect, to));
@@ -152,6 +151,29 @@ impl Track {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn wide_target(tile: Tile) -> Vec2 {
+        if tile.high.x > 0.6 {
+            Vec2::new(2.0, 1.0)
+        } else {
+            Vec2::ONE
+        }
+    }
+
+    #[test]
+    fn the_first_fit_waits_for_the_initial_tile_to_settle() {
+        let tile = Tile {
+            low: Vec2::ZERO,
+            high: Vec2::new(0.8, 0.4),
+        };
+        let stretch = Vec2::new(2.0, 1.0);
+        let plan = Plan::build(1, 180, None, |tick, tracks| {
+            tracks[0].observe(tick, Some(tile), |_| stretch);
+        });
+        assert_eq!(plan.sample(0, 60), Vec2::ONE);
+        assert!(plan.sample(0, 120).x > 1.0);
+        assert_eq!(plan.sample(0, 180), stretch);
+    }
 
     #[test]
     fn paused_history_does_not_spend_the_hold_or_strand_an_interrupted_reshape() {
@@ -178,7 +200,7 @@ mod tests {
                 } else {
                     square
                 };
-                tracks[0].observe(tick, Some(tile), |_| Vec2::new(2.0, 1.0));
+                tracks[0].observe(tick, Some(tile), wide_target);
             })
         };
         let initial = build(350, None);
@@ -218,7 +240,7 @@ mod tests {
             } else {
                 translated
             };
-            tracks[0].observe(tick, Some(tile), |_| Vec2::new(2.0, 1.0));
+            tracks[0].observe(tick, Some(tile), wide_target);
         });
         assert_eq!(plan.sample(0, 160), Vec2::ONE);
         assert!(plan.sample(0, 190).x > 1.0);
