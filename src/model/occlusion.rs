@@ -308,6 +308,19 @@ fn seat_order(
     order
 }
 
+fn foreign_tile_contains(
+    regions: &[crate::layout::RepositoryRegion],
+    repository: usize,
+    point: Vec2,
+) -> bool {
+    regions.iter().enumerate().any(|(index, region)| {
+        index != repository
+            && region
+                .tile
+                .is_some_and(|tile| travel::field_rect(tile).contains(point))
+    })
+}
+
 pub(super) fn clear_seat_transitions(
     state: &mut State,
     plan: &travel::Plan,
@@ -379,9 +392,19 @@ pub(super) fn clear_seat_transitions(
             })
         {
             let from = previous[index].map_or(target, Vec3::xz);
+            let arrival_repository = (previous[index].is_none()
+                && now <= avatar.arrivals_land)
+                .then_some(avatar.repository);
             point =
                 clear_position(from, target, step, &obstacles, radius_at, |point| {
                     bounds.contains(point)
+                        && arrival_repository.is_none_or(|ours| {
+                            !foreign_tile_contains(
+                                &state.layout.repositories,
+                                ours,
+                                slots::field_point(world(point)),
+                            )
+                        })
                 });
         }
         avatar.position = world(point);
@@ -619,33 +642,10 @@ mod tests {
 
     #[test]
     fn a_fading_in_seat_leaves_room_for_the_visible_avatar() {
-        let mut sim = Simulation::new(
-            vec![timeline::synthetic().remove(0)],
-            &Options::default(),
-            &Theme::neon(),
-            &Mappings::default(),
-        );
-        sim.advance_to(60, 60);
+        let mut sim = crowded_first_seat();
         let state = &mut *sim.state;
-        let base = state.geometry.avatar_radius
-            * state.scale()
-            * state.avatar_scale
-            * state.avatar_size;
-        let incumbent = &mut state.avatars[0];
-        let position = Vec3::Y * super::super::MIN_AVATAR_HEIGHT;
-        incumbent.position = position;
-        incumbent.group = None;
-        incumbent.transmitting = true;
-        incumbent.presence = 1.0;
-        incumbent.lifecycle_scale = 1.0;
-        incumbent.projection_scale = slots::projection_scale(position);
-
-        let mut newcomer = incumbent.clone();
-        newcomer.transmitting = false;
-        newcomer.presence = 1.0 / 24.0;
-        newcomer.position += Vec3::X * (1.5 * base);
-        newcomer.projection_scale = slots::projection_scale(newcomer.position);
-        state.avatars.push(newcomer);
+        let base = seating_base(state);
+        let position = state.avatars[0].position;
         clear_seat_transitions(
             state,
             &travel::Plan::default(),
@@ -662,5 +662,63 @@ mod tests {
             incumbent.position.distance(newcomer.position)
                 >= disc_radius(incumbent, base, 1.0) + disc_radius(newcomer, base, 1.0)
         );
+    }
+
+    fn crowded_first_seat() -> Simulation {
+        let mut sim = Simulation::new(
+            vec![timeline::synthetic().remove(0)],
+            &Options::default(),
+            &Theme::neon(),
+            &Mappings::default(),
+        );
+        sim.advance_to(60, 60);
+        let state = &mut *sim.state;
+        let base = seating_base(state);
+        let incumbent = &mut state.avatars[0];
+        let position = Vec3::Y * super::super::MIN_AVATAR_HEIGHT;
+        incumbent.position = position;
+        incumbent.group = None;
+        incumbent.transmitting = true;
+        incumbent.presence = 1.0;
+        incumbent.lifecycle_scale = 1.0;
+        incumbent.projection_scale = slots::projection_scale(position);
+
+        let mut newcomer = incumbent.clone();
+        newcomer.transmitting = false;
+        newcomer.presence = 1.0 / 24.0;
+        newcomer.position += Vec3::X * (1.5 * base);
+        newcomer.projection_scale = slots::projection_scale(newcomer.position);
+        state.avatars.push(newcomer);
+        sim
+    }
+
+    #[test]
+    fn an_arriving_author_keeps_a_local_ray_when_the_seat_is_crowded() {
+        let mut sim = crowded_first_seat();
+        let now = sim.seconds();
+        let state = &mut *sim.state;
+        let position = state.avatars[0].position;
+        let newcomer = &mut state.avatars[1];
+        newcomer.arrivals_land = now + super::super::ARRIVAL_SECONDS;
+        let edge = framing::world_to_field((newcomer.position + Vec3::X * 0.01).xz()).x;
+        state
+            .layout
+            .repositories
+            .push(crate::layout::RepositoryRegion {
+                tile: Some(crate::layout::packing::Tile {
+                    low: Vec2::new(edge, -1.0),
+                    high: Vec2::ONE,
+                }),
+                ..state.layout.repositories[0].clone()
+            });
+        clear_seat_transitions(
+            state,
+            &travel::Plan::default(),
+            &[Some(position), None],
+            0.5,
+        );
+
+        assert!(sim.ray_path_clear(0, sim.avatars()[1].position, Vec3::ZERO));
+        assert_eq!(sim.avatars()[0].position, position);
     }
 }
