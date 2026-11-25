@@ -244,29 +244,33 @@ impl Schedule {
                 closing.push((start, end));
             }
         }
-        self.motion_protections = closing
-            .into_iter()
-            .filter_map(|(start, end)| {
-                let commit = self
-                    .services
-                    .partition_point(|service| service.tick < start);
-                let first = self.services.get(commit)?.tick;
-                let tile_time = tick_time(end);
-                // The pause advances the tile clock for pending commits too. Stop
-                // at the first service whose repository would already be archiving.
-                let end = self.services[commit..]
-                    .iter()
-                    .zip(&events[commit..])
-                    .take_while(|(service, _)| service.tick < end)
-                    .find(|(_, event)| {
-                        repository_ends
-                            .get(event.repository)
-                            .is_some_and(|&archive| archive <= tile_time)
-                    })
-                    .map_or(end, |(service, _)| service.tick);
-                (first < end).then_some((commit, end))
-            })
-            .collect();
+        self.motion_protections.clear();
+        for (start, end) in closing {
+            let first = self
+                .services
+                .partition_point(|service| service.tick < start);
+            let last = self.services.partition_point(|service| service.tick < end);
+            let tile_time = tick_time(end);
+            let mut pending = first;
+            for (commit, event) in events.iter().enumerate().take(last).skip(first) {
+                if repository_ends
+                    .get(event.repository)
+                    .is_none_or(|&archive| archive > tile_time)
+                {
+                    continue;
+                }
+                // Serve a write before its own archive, then protect the
+                // remaining motion from writes to repositories that can wait.
+                if pending < commit {
+                    self.motion_protections
+                        .push((pending, self.services[commit].tick));
+                }
+                pending = commit + 1;
+            }
+            if pending < last {
+                self.motion_protections.push((pending, end));
+            }
+        }
     }
 
     pub(super) fn with_travel(

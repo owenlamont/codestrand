@@ -305,6 +305,11 @@ fn overlapping_archive_reflows_leave_later_services_a_live_tile() {
     )
     .unwrap();
     assert!(report.windows > 0);
+    assert!(
+        report.last_archive_tick > 0
+            && report.last_service_tile_tick >= report.last_archive_tick,
+        "the surviving repository wrote during a close: {report:?}"
+    );
 }
 
 #[test]

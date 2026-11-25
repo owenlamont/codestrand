@@ -25,6 +25,8 @@ pub(super) struct Replay {
     pub max_tile_step_px: f32,
     pub max_carried_step: f32,
     pub final_gap: f32,
+    pub last_service_tile_tick: u64,
+    pub last_archive_tick: u64,
     pub planner_wait: Duration,
 }
 
@@ -72,6 +74,7 @@ struct Audit {
     contacts: BTreeMap<(usize, usize), u32>,
     rings: BTreeMap<usize, f32>,
     arrivals: usize,
+    applied: usize,
 }
 
 pub(super) fn replay(
@@ -96,7 +99,14 @@ pub(super) fn replay(
     audit.report.planner_wait = started.elapsed();
     for tick in 0..=tick_limit {
         let window = sim.initial.tick;
+        let mut ending_arrivals = None;
         if !sim.frame_ready(tick, FPS) {
+            // The preceding packet already planned its boundary tick. Playback
+            // normally draws that tick from the incoming checkpoint instead.
+            let mut ending = sim.clone();
+            ending.stream = None;
+            ending.advance_to(tick, FPS);
+            ending_arrivals = Some(arrival_revisions(&ending));
             let waiting = Instant::now();
             sim.prepare_frame(tick, FPS, true).map_err(|error| {
                 TestCaseError::fail(format!("tick {tick}: {error:#}"))
@@ -106,6 +116,14 @@ pub(super) fn replay(
         let seam = sim.initial.tick != window;
         audit.report.windows += u32::from(seam);
         sim.advance_to(tick, FPS);
+        if let Some(ending) = ending_arrivals {
+            prop_assert_eq!(
+                arrival_revisions(&sim),
+                ending,
+                "tick {}: the incoming packet changed the pending arrivals",
+                tick
+            );
+        }
         audit.observe(&sim, seam, fault)?;
         if sim.planning_complete() && u64::from(tick) == sim.end_tick() {
             prop_assert_eq!(
@@ -127,12 +145,24 @@ pub(super) fn replay(
                     archived
                 );
             }
+            audit.report.last_archive_tick = lifecycle::exit_end(&sim.repository_exits);
             return Ok(audit.report);
         }
     }
     Err(TestCaseError::fail(format!(
         "playback exceeded {tick_limit} ticks"
     )))
+}
+
+fn arrival_revisions(sim: &Simulation) -> BTreeMap<Target, u64> {
+    sim.layout()
+        .arriving_files()
+        .map(|(id, file)| (Target::File(id), file.arrival_revision))
+        .chain(sim.layout().dirs().filter_map(|(id, dir)| {
+            dir.arrival
+                .map(|arrival| (Target::Dir(id), arrival.revision))
+        }))
+        .collect()
 }
 
 impl Audit {
@@ -150,6 +180,10 @@ impl Audit {
             "tick {}: playback deviated from the scheduled commit prefix",
             tick
         );
+        if sim.state.next_event > self.applied {
+            self.report.last_service_tile_tick = sim.clock.rows(tick).0;
+            self.applied = sim.state.next_event;
+        }
         let layout = sim.layout();
         self.report.peak_live_items = self.report.peak_live_items.max(
             layout
