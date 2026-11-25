@@ -120,9 +120,14 @@ pub(super) fn plan(
                 let to = Layout::new(&trial, to, space);
                 let direct = compatible(&from.gutters, &to.gutters)
                     && connected(&from, &to, false);
-                let exchange = pair
-                    .filter(|_| !direct)
-                    .and_then(|pair| exchange::Exchange::plan(&from, &to, pair));
+                let exchange = pair.filter(|_| !direct).and_then(|pair| {
+                    exchange::Exchange::plan(
+                        &from,
+                        &to,
+                        pair,
+                        space.field(super::framing::MARGIN),
+                    )
+                });
                 if direct || exchange.is_some() {
                     best = cost;
                     chosen = (trial, to, exchange.map(Box::new));

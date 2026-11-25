@@ -45,6 +45,7 @@ impl Exchange {
         from: &Layout,
         to: &Layout,
         mut repositories: [usize; 2],
+        field: Tile,
     ) -> Option<Self> {
         let [a, b] = repositories;
         let (mut a, mut b) = (Footprint::at(from, a)?, Footprint::at(from, b)?);
@@ -93,6 +94,10 @@ impl Exchange {
             ],
             durations: [0; PHASES],
         };
+        for point in route.waypoints[..phases - 1].iter_mut().flatten() {
+            point.tile.low = point.tile.low.max(field.low);
+            point.tile.high = point.tile.high.min(field.high);
+        }
         route.allocate_time(from, to, phases)?;
         Some(route)
     }
@@ -209,6 +214,11 @@ pub(super) fn side_by_side(a: Tile, b: Tile) -> Option<usize> {
 mod tests {
     use super::*;
 
+    const FIELD: Tile = Tile {
+        low: Vec2::ZERO,
+        high: Vec2::ONE,
+    };
+
     fn row(height: f32) -> Layout {
         let gutters: Vec<_> = (0..3_u8)
             .map(|i| {
@@ -241,11 +251,15 @@ mod tests {
     #[test]
     fn an_exchange_can_pass_two_neighbours_with_connected_gutters() {
         let start = row(0.25);
+        let field = Tile {
+            low: Vec2::splat(1.0 / 128.0),
+            ..FIELD
+        };
         let first = swapped(&start, [0, 1]);
         let last = swapped(&first, [0, 2]);
         assert!(!compatible(&start.tiles, &first.tiles));
         for (from, to, pair) in [(&start, &first, [0, 1]), (&first, &last, [0, 2])] {
-            let path = Exchange::plan(from, to, pair).unwrap();
+            let path = Exchange::plan(from, to, pair, field).unwrap();
             let mut before = from.clone();
             for tick in 0..=held::reflow_ticks() {
                 let after = if tick == held::reflow_ticks() {
@@ -254,6 +268,10 @@ mod tests {
                     path.sample(from, to, tick)
                 };
                 assert!(compatible(&before.tiles, &after.tiles), "tick {tick}");
+                for tile in after.tiles.iter().flatten() {
+                    assert!(tile.low.cmpge(field.low).all());
+                    assert!(tile.high.cmple(field.high).all());
+                }
                 assert!(edge_travel(&before, &after) <= MAX_EDGE_STEP_PX + 1e-4);
                 crate::model::assert_gutter_routes(
                     after.gutters.iter().flatten().copied(),
@@ -268,8 +286,8 @@ mod tests {
     fn an_exchange_rejects_a_corridor_with_no_room_to_pass() {
         let start = row(0.0625);
         let end = swapped(&start, [0, 1]);
-        assert!(Exchange::plan(&start, &end, [0, 1]).is_none());
+        assert!(Exchange::plan(&start, &end, [0, 1], FIELD).is_none());
         let non_adjacent = swapped(&start, [0, 2]);
-        assert!(Exchange::plan(&start, &non_adjacent, [0, 2]).is_none());
+        assert!(Exchange::plan(&start, &non_adjacent, [0, 2], FIELD).is_none());
     }
 }
