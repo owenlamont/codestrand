@@ -2122,7 +2122,8 @@ impl Packing {
                 track.observe(
                     u64::try_from(tiles).expect("bounded tile row"),
                     tile,
-                    shared_field,
+                    // A newly arrived repository can grow abruptly after its first idle gap.
+                    shared_field && self.inputs[0][repo].live,
                     |tile| self.aspect_target(repo, tile, tiles, content),
                 );
             }
