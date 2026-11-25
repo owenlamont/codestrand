@@ -25,7 +25,7 @@ pub(super) struct Replay {
     pub peak_live_files: usize,
     pub peak_live_directories: usize,
     pub peak_visible_contributors: usize,
-    pub peak_contributors_on_tile: usize,
+    pub peak_contributors_per_repository: usize,
     pub max_tile_step_px: f32,
     pub max_carried_step: f32,
     pub final_gap: f32,
@@ -488,9 +488,9 @@ impl Audit {
             .report
             .peak_visible_contributors
             .max(contributors.iter().sum());
-        self.report.peak_contributors_on_tile = self
+        self.report.peak_contributors_per_repository = self
             .report
-            .peak_contributors_on_tile
+            .peak_contributors_per_repository
             .max(contributors.into_iter().max().unwrap_or(0));
         let mut contacts = BTreeMap::new();
         for (a, b) in occlusion::avatar_contacts_for_test(sim) {

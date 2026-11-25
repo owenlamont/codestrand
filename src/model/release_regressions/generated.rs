@@ -117,10 +117,11 @@ struct PlaybackVariation {
     fragment_speed: f32,
     bot_travel: BotTravel,
     uncapped_walk: bool,
+    shared_bot: bool,
 }
 
 impl PlaybackVariation {
-    fn apply(self, options: &mut Options, histories_cross_tiles: bool) {
+    fn apply(self, options: &mut Options) {
         options.seconds_per_day = self.seconds_per_day;
         options.max_idle_seconds = self.max_idle_seconds;
         options.avatar_max_speed = self.avatar_max_speed;
@@ -128,7 +129,7 @@ impl PlaybackVariation {
         options.gutter = self.gutter;
         options.fragment_speed = self.fragment_speed;
         options.bot_travel = self.bot_travel;
-        if self.uncapped_walk && !histories_cross_tiles {
+        if self.uncapped_walk {
             options.travel_cap = TravelCap::None;
         }
     }
@@ -140,7 +141,11 @@ impl PlaybackVariation {
             let count = usize::from(self.contributors_per_repo);
             let local = |seat| contributor(event.repository * 16 + seat % count + 1);
             event.author = if shared && index % 7 == 0 {
-                contributor(0)
+                if self.shared_bot {
+                    Identity::new("Shared contributor[bot]", "shared-bot@example.test")
+                } else {
+                    contributor(0)
+                }
             } else {
                 local(index)
             };
@@ -196,7 +201,7 @@ impl History {
             ..Options::default()
         };
         if let Some((_, playback)) = variation {
-            playback.apply(&mut options, self.shared_contributor);
+            playback.apply(&mut options);
             playback.vary_contributors(&mut events, self.shared_contributor);
         }
         replay(events, &labels, &options, tick_limit, Fault::None)
@@ -399,7 +404,7 @@ fn property_config(default_cases: u32) -> Config {
     };
     Config {
         cases,
-        max_shrink_iters: 64,
+        max_shrink_iters: defaults.max_shrink_iters.min(64),
         failure_persistence: None,
         rng_seed: seed,
         ..defaults
@@ -412,10 +417,11 @@ fn playback_variations() -> impl Strategy<Value = PlaybackVariation> {
         prop::sample::select(vec![0.2, 0.25, 0.35]),
         prop::sample::select(vec![0.25, 0.5, 0.75]),
         prop::sample::select(vec![360.0, 480.0, 720.0]),
-        prop::sample::select(vec![1.0, 2.0, 2.5]),
+        prop::sample::select(vec![1.0, 2.0, 0.5]),
         prop::sample::select(vec![0.0, 4.0, 12.0, 20.0]),
         prop::sample::select(vec![0.75, 1.0, 1.5]),
         prop::sample::select(vec![BotTravel::Fade, BotTravel::Walk]),
+        any::<bool>(),
         any::<bool>(),
     )
         .prop_map(
@@ -429,6 +435,7 @@ fn playback_variations() -> impl Strategy<Value = PlaybackVariation> {
                 fragment_speed,
                 bot_travel,
                 uncapped_walk,
+                shared_bot,
             )| {
                 PlaybackVariation {
                     contributors_per_repo,
@@ -440,6 +447,7 @@ fn playback_variations() -> impl Strategy<Value = PlaybackVariation> {
                     fragment_speed,
                     bot_travel,
                     uncapped_walk,
+                    shared_bot,
                 }
             },
         )
@@ -464,7 +472,9 @@ fn short_histories_preserve_playback_invariants() {
 #[ignore = "opt-in generated playback with larger layouts"]
 fn extended_histories_preserve_playback_invariants() {
     let mut config = property_config(8);
-    config.max_shrink_time = 90_000;
+    if std::env::var_os("PROPTEST_MAX_SHRINK_TIME").is_none() {
+        config.max_shrink_time = 90_000;
+    }
     let seed = config.rng_seed;
     let trees = (1..=16_u8, 0..=6_u8, 0..13_u8).prop_map(
         |(branches, max_depth, suffix_offset)| TreeShape {
@@ -492,8 +502,8 @@ fn extended_histories_preserve_playback_invariants() {
                 "Completed with {} peak files, {} peak dirs, {} ticks, {:.2?}",
                 report.peak_live_files, report.peak_live_directories, report.ticks, started.elapsed(),
             );
-            println!("{} visible contributors at peak, {} on one tile, {} passing contacts, {} ticks of parked overlap",
-                report.peak_visible_contributors, report.peak_contributors_on_tile,
+            println!("{} visible contributors at peak, {} assigned to one repository, {} passing contacts, {} ticks of parked overlap",
+                report.peak_visible_contributors, report.peak_contributors_per_repository,
                 report.passing_contacts, report.longest_parked_contact);
             Ok(())
         })
