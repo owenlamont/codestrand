@@ -143,16 +143,11 @@ impl FileClearance {
             }
             let radius = 0.27 * presence;
             let own = layout.dir(file.dir);
-            if own.offset_without_stretch(file.position).length() + radius
-                > own.radius() + 0.0001
-            {
-                let outside = footprint_distance(
-                    file.position - own.position,
-                    own.footprint_radii(),
-                ) + radius;
-                result.outside_own_ticks += u64::from(outside > 0.0001);
-                result.worst_outside_depth = result.worst_outside_depth.max(outside);
-            }
+            let outside =
+                footprint_distance(file.position - own.position, own.footprint_radii())
+                    + radius;
+            result.outside_own_ticks += u64::from(outside > 0.0001);
+            result.worst_outside_depth = result.worst_outside_depth.max(outside);
             for (_, dir) in layout.dirs().filter(|(id, _)| *id != file.dir) {
                 let offset = file.position - dir.position;
                 let radii = dir.footprint_radii();
@@ -411,6 +406,8 @@ mod tests {
         assert!((space - 0.13).abs() < 1e-5);
         let vertical = footprint_distance(Vec2::new(0.0, 4.92), Vec2::new(2.26, 4.52));
         assert!((vertical - 0.4).abs() < 1e-5);
+        let near_boundary = footprint_distance(Vec2::new(4.52015, 0.0), radii);
+        assert!((near_boundary - 0.00015).abs() < 1e-6);
 
         let radii = Vec2::new(2.0, 1.0);
         let major = footprint_distance(Vec2::X, radii);
