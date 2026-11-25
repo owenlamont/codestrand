@@ -491,6 +491,23 @@ fn discs_overlap(centre: Vec2, radius: f32, other: Vec2, other_radius: f32) -> b
     centre.distance(other) + 0.01 < radius + other_radius
 }
 
+#[cfg(test)]
+pub(super) fn avatar_contacts_for_test(sim: &Simulation) -> Vec<(usize, usize)> {
+    let discs = visible_discs(sim);
+    discs
+        .iter()
+        .enumerate()
+        .flat_map(|(index, &(author, centre, radius))| {
+            discs[index + 1..].iter().filter_map(
+                move |&(other, point, other_radius)| {
+                    discs_overlap(centre, radius, point, other_radius)
+                        .then_some((author, other))
+                },
+            )
+        })
+        .collect()
+}
+
 pub(in crate::model) fn walk_contacts(
     sim: &Simulation,
     walkers: &[(usize, usize)],

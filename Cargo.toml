@@ -73,6 +73,7 @@ fontique = { version = "0.11", default-features = false, features = ["fontconfig
 
 [dev-dependencies]
 fontique = { version = "0.11", default-features = false }
+proptest = { version = "=1.12.0", default-features = false, features = ["std"] }
 
 [profile.dev]
 debug = 0

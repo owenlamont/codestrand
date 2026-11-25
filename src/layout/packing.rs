@@ -1009,9 +1009,11 @@ fn gutter_cells(
         }
     }
     let mut result = vec![None; placement.len()];
-    divide(nodes, 0, space.field(16.0), placement, &mut result);
+    divide(nodes, 0, space.field(GUTTER_MARGIN), placement, &mut result);
     result
 }
+
+const GUTTER_MARGIN: f32 = 16.0;
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Packing {
@@ -1726,6 +1728,11 @@ impl Packing {
 
     pub(crate) fn field(&self) -> Tile {
         self.space().field(0.0)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn gutter_field(&self) -> Tile {
+        self.space().field(GUTTER_MARGIN)
     }
 
     /// Samples tiled and samples that reused the previous polygons, since the last call.

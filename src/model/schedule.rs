@@ -228,6 +228,8 @@ impl Schedule {
     pub(super) fn protect_tile_motion(
         &mut self,
         intervals: impl Iterator<Item = (u64, u64)>,
+        events: &[Event],
+        repository_ends: &[Time],
     ) {
         let mut intervals: Vec<_> =
             intervals.filter(|&(start, end)| start < end).collect();
@@ -248,7 +250,21 @@ impl Schedule {
                 let commit = self
                     .services
                     .partition_point(|service| service.tick < start);
-                (self.services.get(commit)?.tick < end).then_some((commit, end))
+                let first = self.services.get(commit)?.tick;
+                let tile_time = tick_time(end);
+                // The pause advances the tile clock for pending commits too. Stop
+                // at the first service whose repository would already be archiving.
+                let end = self.services[commit..]
+                    .iter()
+                    .zip(&events[commit..])
+                    .take_while(|(service, _)| service.tick < end)
+                    .find(|(_, event)| {
+                        repository_ends
+                            .get(event.repository)
+                            .is_some_and(|&archive| archive <= tile_time)
+                    })
+                    .map_or(end, |(service, _)| service.tick);
+                (first < end).then_some((commit, end))
             })
             .collect();
     }
@@ -575,7 +591,11 @@ mod tests {
         events.truncate(2);
         let mut history = Schedule::new(&events, 1.0, 1.0);
         let write = history.commit_ticks().nth(1).unwrap();
-        history.protect_tile_motion(std::iter::once((write, write + 120)));
+        history.protect_tile_motion(
+            std::iter::once((write, write + 120)),
+            &events,
+            &[],
+        );
         let presentation =
             history.with_travel(2, |index| if index == 1 { 24 } else { 0 });
         let service = presentation.commit_ticks().nth(1).unwrap();

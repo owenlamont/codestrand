@@ -1327,9 +1327,11 @@ impl Simulation {
                 .schedule
                 .protect_opening_rays(&simulation.events, end);
         }
-        simulation
-            .schedule
-            .protect_tile_motion(simulation.packing.motion_intervals());
+        simulation.schedule.protect_tile_motion(
+            simulation.packing.motion_intervals(),
+            &simulation.events,
+            &simulation.repository_ends,
+        );
         if options.travel_window_seconds.is_none() {
             simulation.plan_avatar_envelopes(snapshots);
         }
