@@ -1,6 +1,9 @@
 use super::{Node, Space, Tile, gutter_cells, held, insert, tiles};
 
+mod exchange;
+
 const MAX_LOCAL_SPLITS: usize = 8;
+const MOVING_GUTTER_PX: f32 = 4.0;
 const MAX_REBUILD_TILES: usize = 8;
 
 #[derive(Clone, Debug)]
@@ -8,6 +11,7 @@ pub(super) struct Change {
     pub tick: usize,
     pub nodes: Vec<Node>,
     transition: Option<(Layout, Layout)>,
+    exchange: Option<Box<exchange::Exchange>>,
 }
 
 #[derive(Clone, Debug)]
@@ -26,11 +30,17 @@ impl Layout {
 }
 
 impl Change {
+    pub fn retained_bytes() -> u128 {
+        (std::mem::size_of::<Self>() + std::mem::size_of::<exchange::Exchange>())
+            as u128
+    }
+
     pub fn weights(tick: usize, nodes: &[Node]) -> Self {
         Self {
             tick,
             nodes: nodes.to_vec(),
             transition: None,
+            exchange: None,
         }
     }
 
@@ -49,7 +59,15 @@ impl Change {
         if elapsed >= held::reflow_ticks() {
             return None;
         }
-        let fraction = held::reflow_ease(elapsed);
+        Some(self.exchange.as_ref().map_or_else(
+            || from.blend(to, held::reflow_ease(elapsed)),
+            |exchange| exchange.sample(from, to, elapsed),
+        ))
+    }
+}
+
+impl Layout {
+    fn blend(&self, to: &Self, fraction: f32) -> Self {
         let blend = |from: &[Option<Tile>], to: &[Option<Tile>]| {
             from.iter()
                 .zip(to)
@@ -61,10 +79,10 @@ impl Change {
                 })
                 .collect()
         };
-        Some(Layout {
-            tiles: blend(&from.tiles, &to.tiles),
-            gutters: blend(&from.gutters, &to.gutters),
-        })
+        Self {
+            tiles: blend(&self.tiles, &to.tiles),
+            gutters: blend(&self.gutters, &to.gutters),
+        }
     }
 }
 
@@ -83,33 +101,37 @@ pub(super) fn plan(
     let from = tiles(nodes, weights, presence, space)?;
     let from = Layout::new(nodes, from, space);
     let unchanged = Layout::new(nodes, tiles(nodes, target, presence, space)?, space);
-    let mut best = mismatch(&unchanged.tiles, target);
-    if best <= 0.005 || presence.iter().filter(|&&p| p > 0.0).count() < 3 {
+    let baseline = Density::new(&unchanged.tiles, target);
+    let mut best = baseline;
+    if best.worst <= super::DENSITY_TOLERANCE {
         return Some(Change {
             tick,
             nodes: nodes.to_vec(),
             transition: Some((from, unchanged)),
+            exchange: None,
         });
     }
-    let mut chosen = Some((nodes.to_vec(), unchanged));
-    let mut consider = |trial: Vec<Node>| {
+    let splits = affected_splits(nodes, &unchanged.tiles, target);
+    let mut chosen = (nodes.to_vec(), unchanged, None);
+    let mut consider = |trial: Vec<Node>, pair: Option<[usize; 2]>| {
         if let Some(to) = tiles(&trial, target, presence, space) {
-            let cost = mismatch(&to, target);
-            if cost + 0.005 < best {
+            let cost = Density::new(&to, target);
+            if cost.improves(best, baseline) {
                 let to = Layout::new(&trial, to, space);
-                if compatible(&from.gutters, &to.gutters) && connected(&from, &to) {
+                let direct = compatible(&from.gutters, &to.gutters)
+                    && connected(&from, &to, false);
+                let exchange = pair
+                    .filter(|_| !direct)
+                    .and_then(|pair| exchange::Exchange::plan(&from, &to, pair));
+                if direct || exchange.is_some() {
                     best = cost;
-                    chosen = Some((trial, to));
+                    chosen = (trial, to, exchange.map(Box::new));
                 }
             }
         }
     };
-    for (index, node) in nodes
-        .iter()
-        .enumerate()
-        .filter(|(_, node)| matches!(node, Node::Split { .. }))
-        .take(MAX_LOCAL_SPLITS)
-    {
+    for &index in &splits {
+        let node = &nodes[index];
         let Node::Split {
             axis,
             first,
@@ -124,7 +146,15 @@ pub(super) fn plan(
             first,
             second,
         };
-        consider(trial);
+        let pair = match (&nodes[first], &nodes[second]) {
+            (Node::Repository(a), Node::Repository(b))
+                if space.gap >= MOVING_GUTTER_PX =>
+            {
+                Some([*a, *b])
+            }
+            _ => None,
+        };
+        consider(trial, pair);
         if let (
             Node::Split {
                 axis: a,
@@ -156,7 +186,7 @@ pub(super) fn plan(
                 first: *bottom_left,
                 second: *bottom_right,
             };
-            consider(trial);
+            consider(trial, None);
         }
         for (child, other, first_child) in
             [(first, second, true), (second, first, false)]
@@ -188,7 +218,7 @@ pub(super) fn plan(
                 first: inner_first,
                 second: inner_second,
             };
-            consider(trial);
+            consider(trial, None);
         }
     }
     let mut order: Vec<_> = (0..target.len()).collect();
@@ -200,33 +230,92 @@ pub(super) fn plan(
         && presence.iter().all(|&p| p > 0.0)
         && order.into_iter().all(|i| {
             inserted[i] = target[i];
-            insert(&mut trial, i, &inserted, &aspects, space, 1)
+            insert(&mut trial, i, &inserted, &aspects, None, space, 1)
         })
     {
-        consider(trial);
+        consider(trial, None);
     }
-    let (nodes, to) = chosen?;
+    if space.gap >= MOVING_GUTTER_PX {
+        for (a, b, repositories) in
+            exchange_candidates(nodes, &splits, &from.gutters, target)
+        {
+            let mut trial = nodes.to_vec();
+            trial.swap(a, b);
+            consider(trial, Some(repositories));
+        }
+    }
+    let (nodes, to, exchange) = chosen;
     Some(Change {
         tick,
         nodes,
         transition: Some((from, to)),
+        exchange,
     })
 }
 
-fn connected(from: &Layout, to: &Layout) -> bool {
+fn exchange_candidates(
+    nodes: &[Node],
+    splits: &[usize],
+    gutters: &[Option<Tile>],
+    target: &[f32],
+) -> Vec<(usize, usize, [usize; 2])> {
+    let leaves: Vec<_> = nodes
+        .iter()
+        .enumerate()
+        .filter_map(|(node, leaf)| {
+            if let Node::Repository(repo) = *leaf {
+                gutters[repo].map(|cell| (node, repo, cell))
+            } else {
+                None
+            }
+        })
+        .collect();
+    let mut candidates = Vec::new();
+    let affected = splits.iter().flat_map(|&index| match nodes[index] {
+        Node::Split { first, second, .. } => [first, second],
+        Node::Repository(_) => unreachable!("ranked split"),
+    });
+    for a in affected {
+        let Node::Repository(repo) = nodes[a] else {
+            continue;
+        };
+        let Some(cell) = gutters[repo] else { continue };
+        for &(b, other, neighbour) in &leaves {
+            if target[repo].max(target[other]) > 1.25 * target[repo].min(target[other])
+                && (exchange::side_by_side(cell, neighbour).is_some()
+                    || exchange::side_by_side(neighbour, cell).is_some())
+                && !candidates
+                    .iter()
+                    .any(|&(first, second, _)| first == b && second == a)
+            {
+                candidates.push((a, b, [repo, other]));
+                if candidates.len() == MAX_LOCAL_SPLITS {
+                    return candidates;
+                }
+            }
+        }
+    }
+    candidates
+}
+
+fn connected(from: &Layout, to: &Layout, allow_corners: bool) -> bool {
     let cells: Vec<_> = from
         .gutters
         .iter()
         .zip(&to.gutters)
         .filter_map(|(&a, &b)| a.zip(b))
         .collect();
+    if cells.is_empty() {
+        return false;
+    }
     let mut reached = vec![false; cells.len()];
     reached[0] = true;
     let mut pending = vec![0];
     let shares_edge = |a: Tile, b: Tile, axis: usize| {
         let cross = 1 - axis;
+        let overlap = a.high[cross].min(b.high[cross]) - a.low[cross].max(b.low[cross]);
         (a.high[axis] - b.low[axis]).abs() <= f32::EPSILON
-            && a.high[cross].min(b.high[cross]) > a.low[cross].max(b.low[cross])
+            && (overlap > 0.0 || (allow_corners && overlap >= 0.0))
     };
     while let Some(i) = pending.pop() {
         let (a, end_a) = cells[i];
@@ -245,21 +334,90 @@ fn connected(from: &Layout, to: &Layout) -> bool {
     reached.into_iter().all(|seen| seen)
 }
 
-fn mismatch(tiles: &[Option<Tile>], weights: &[f32]) -> f32 {
-    let total_area: f32 = tiles.iter().flatten().map(|tile| tile.area()).sum();
-    let total_weight: f32 = tiles
-        .iter()
-        .zip(weights)
-        .filter_map(|(tile, &weight)| tile.map(|_| weight))
-        .sum();
+#[derive(Clone, Copy)]
+struct Density {
+    worst: f32,
+    variation: f32,
+}
+
+impl Density {
+    fn new(tiles: &[Option<Tile>], weights: &[f32]) -> Self {
+        let (area, weight) = totals(tiles, weights);
+        let (mut worst, mut variation) = (0.0_f32, 0.0);
+        for (&tile, &items) in tiles.iter().zip(weights) {
+            if let Some(tile) = tile {
+                let (share, due) = (tile.area() / area, items / weight);
+                worst = worst.max(density_error(share, due));
+                variation += (share - due).abs() * 0.5;
+            }
+        }
+        Self { worst, variation }
+    }
+
+    fn improves(self, best: Self, baseline: Self) -> bool {
+        self.variation <= baseline.variation + 0.005
+            && self.worst + 4.0 * self.variation + 0.02
+                < best.worst + 4.0 * best.variation
+    }
+}
+
+fn totals(tiles: &[Option<Tile>], weights: &[f32]) -> (f32, f32) {
     tiles
         .iter()
         .zip(weights)
-        .filter_map(|(tile, &weight)| {
-            tile.map(|tile| (tile.area() / total_area - weight / total_weight).abs())
+        .fold((0.0, 0.0), |sum, (&tile, &weight)| {
+            tile.map_or(sum, |tile| (sum.0 + tile.area(), sum.1 + weight))
         })
-        .sum::<f32>()
-        * 0.5
+}
+
+fn density_error(share: f32, due: f32) -> f32 {
+    (due / share.max(f32::MIN_POSITIVE) - 1.0).abs()
+}
+
+fn affected_splits(
+    nodes: &[Node],
+    tiles: &[Option<Tile>],
+    weights: &[f32],
+) -> Vec<usize> {
+    fn rank(
+        nodes: &[Node],
+        errors: &[f32],
+        index: usize,
+        depth: usize,
+        splits: &mut Vec<(usize, f32, usize)>,
+    ) -> f32 {
+        match nodes[index] {
+            Node::Repository(repository) => errors[repository],
+            Node::Split { first, second, .. } => {
+                let a = rank(nodes, errors, first, depth + 1, splits);
+                let b = rank(nodes, errors, second, depth + 1, splits);
+                let worst = a.max(b);
+                splits.push((index, worst, depth));
+                worst
+            }
+        }
+    }
+
+    let (area, weight) = totals(tiles, weights);
+    let errors: Vec<_> = tiles
+        .iter()
+        .zip(weights)
+        .map(|(&tile, &items)| {
+            tile.map_or(0.0, |tile| {
+                density_error(tile.area() / area, items / weight)
+            })
+        })
+        .collect();
+    let mut splits = Vec::new();
+    rank(nodes, &errors, 0, 0, &mut splits);
+    splits.sort_unstable_by(|a, b| {
+        b.1.total_cmp(&a.1).then(b.2.cmp(&a.2)).then(a.0.cmp(&b.0))
+    });
+    splits
+        .into_iter()
+        .take(MAX_LOCAL_SPLITS)
+        .map(|(index, ..)| index)
+        .collect()
 }
 
 fn compatible(from: &[Option<Tile>], to: &[Option<Tile>]) -> bool {
@@ -313,7 +471,10 @@ mod tests {
         assert!(matches!(change.nodes[0], Node::Split { axis: 1, .. }));
         let unchanged = tiles(&nodes, &target, &presence, space).unwrap();
         let (from, to) = change.transition.as_ref().unwrap();
-        assert!(mismatch(&to.tiles, &target) < mismatch(&unchanged, &target));
+        assert!(
+            Density::new(&to.tiles, &target).worst
+                < Density::new(&unchanged, &target).worst
+        );
         let end = 12 + held::reflow_ticks();
         let mid = 12 + held::reflow_ticks() / 2;
         let content = Input {
@@ -374,6 +535,32 @@ mod tests {
     }
 
     #[test]
+    fn a_settled_density_error_can_turn_an_adjacent_pair() {
+        let split = |axis, first, second| Node::Split {
+            axis,
+            first,
+            second,
+        };
+        let nodes = [
+            split(0, 1, 2),
+            Node::Repository(3),
+            split(1, 3, 4),
+            split(1, 5, 6),
+            Node::Repository(2),
+            Node::Repository(0),
+            Node::Repository(1),
+        ];
+        let counts = [25.0, 75.0, 56.0, 180.0];
+        let space = Space::new(4.0, 1.0);
+        let change = plan(12, &nodes, &counts, &counts, &[1.0; 4], space).unwrap();
+        let (before, after) = change.transition.as_ref().unwrap();
+        let error = |layout: &Layout| Density::new(&layout.tiles, &counts).worst;
+        assert!(error(before) > super::super::DENSITY_TOLERANCE);
+        assert!(error(after) < super::super::DENSITY_TOLERANCE);
+        assert!(change.exchange.is_some());
+    }
+
+    #[test]
     fn a_reflow_preserves_shared_gutter_edges_as_the_cut_moves() {
         let layout = |cut| {
             let cells = vec![
@@ -393,12 +580,13 @@ mod tests {
         };
         let from = layout(0.25);
         let to = layout(0.75);
-        assert!(connected(&from, &to));
+        assert!(connected(&from, &to, false));
         assert!(compatible(&from.gutters, &to.gutters));
         let change = Change {
             tick: 12,
             nodes: Vec::new(),
             transition: Some((from, to)),
+            exchange: None,
         };
         let midpoint = change.sample(12 + held::reflow_ticks() / 2).unwrap();
         assert_eq!(midpoint.gutters[0].unwrap().high.x, 0.5);
