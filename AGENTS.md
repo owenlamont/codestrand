@@ -37,7 +37,8 @@ cargo run --locked -- --help
 
 Rust 1.99.1 is pinned with rustfmt and Clippy. Hook commands are shared with CI;
 Cargo configuration and toolchain changes must trigger the Rust checks too.
-Markdown prose wraps at 88 characters. CPU tests run without a GPU.
+Markdown prose wraps at 88 characters. CPU tests run without a GPU. Renderer changes
+need a local export and visual inspection.
 
 For changes that affect playback visuals, export matched before-and-after frames or
 clips with the same inputs and viewing settings. The agent and Owen both inspect the
