@@ -228,6 +228,8 @@ impl Schedule {
     pub(super) fn protect_tile_motion(
         &mut self,
         intervals: impl Iterator<Item = (u64, u64)>,
+        events: &[Event],
+        repository_ends: &[Time],
     ) {
         let mut intervals: Vec<_> =
             intervals.filter(|&(start, end)| start < end).collect();
@@ -242,15 +244,33 @@ impl Schedule {
                 closing.push((start, end));
             }
         }
-        self.motion_protections = closing
-            .into_iter()
-            .filter_map(|(start, end)| {
-                let commit = self
-                    .services
-                    .partition_point(|service| service.tick < start);
-                (self.services.get(commit)?.tick < end).then_some((commit, end))
-            })
-            .collect();
+        self.motion_protections.clear();
+        for (start, end) in closing {
+            let first = self
+                .services
+                .partition_point(|service| service.tick < start);
+            let last = self.services.partition_point(|service| service.tick < end);
+            let tile_time = tick_time(end);
+            let mut pending = first;
+            for (commit, event) in events.iter().enumerate().take(last).skip(first) {
+                if repository_ends
+                    .get(event.repository)
+                    .is_none_or(|&archive| archive > tile_time)
+                {
+                    continue;
+                }
+                // Serve a write before its own archive, then protect the
+                // remaining motion from writes to repositories that can wait.
+                if pending < commit {
+                    self.motion_protections
+                        .push((pending, self.services[commit].tick));
+                }
+                pending = commit + 1;
+            }
+            if pending < last {
+                self.motion_protections.push((pending, end));
+            }
+        }
     }
 
     pub(super) fn with_travel(
@@ -575,7 +595,11 @@ mod tests {
         events.truncate(2);
         let mut history = Schedule::new(&events, 1.0, 1.0);
         let write = history.commit_ticks().nth(1).unwrap();
-        history.protect_tile_motion(std::iter::once((write, write + 120)));
+        history.protect_tile_motion(
+            std::iter::once((write, write + 120)),
+            &events,
+            &[],
+        );
         let presentation =
             history.with_travel(2, |index| if index == 1 { 24 } else { 0 });
         let service = presentation.commit_ticks().nth(1).unwrap();

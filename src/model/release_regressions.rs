@@ -1,13 +1,22 @@
 use super::*;
 use crate::timeline::{FileChange, Identity};
 
+mod generated;
+mod replay;
+
 fn write(
     repository: usize,
     day: i64,
     paths: impl IntoIterator<Item = String>,
 ) -> Event {
-    let mut events = [Event::at(
-        day * 86_400,
+    let author = Identity::new(
+        ["Ada", "Grace"][repository],
+        ["ada@example.test", "grace@example.test"][repository],
+    );
+    namespaced_event(
+        repository,
+        day,
+        author,
         paths
             .into_iter()
             .map(|path| FileChange {
@@ -16,13 +25,19 @@ fn write(
                 ..Default::default()
             })
             .collect(),
-    )];
-    events[0].author = Identity::new(
-        ["Ada", "Grace"][repository],
-        ["ada@example.test", "grace@example.test"][repository],
-    );
-    crate::repositories::namespace(&mut events, repository);
-    let [event] = events;
+    )
+}
+
+fn namespaced_event(
+    repository: usize,
+    day: i64,
+    author: Identity,
+    changes: Vec<FileChange>,
+) -> Event {
+    let mut event = Event::at(day * 86_400, changes);
+    event.author = author;
+    event.commit = format!("day-{day}-repo-{repository}");
+    crate::repositories::namespace(std::slice::from_mut(&mut event), repository);
     event
 }
 
