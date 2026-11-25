@@ -143,13 +143,23 @@ impl FileClearance {
             }
             let radius = 0.27 * presence;
             let own = layout.dir(file.dir);
-            let outside = own.offset_without_stretch(file.position).length() + radius
-                - own.radius();
-            result.outside_own_ticks += u64::from(outside > 0.0001);
-            result.worst_outside_depth = result.worst_outside_depth.max(outside);
+            if own.offset_without_stretch(file.position).length() + radius
+                > own.radius() + 0.0001
+            {
+                let outside = footprint_distance(
+                    file.position - own.position,
+                    own.footprint_radii(),
+                ) + radius;
+                result.outside_own_ticks += u64::from(outside > 0.0001);
+                result.worst_outside_depth = result.worst_outside_depth.max(outside);
+            }
             for (_, dir) in layout.dirs().filter(|(id, _)| *id != file.dir) {
-                let depth = dir.radius() + radius
-                    - dir.offset_without_stretch(file.position).length();
+                let offset = file.position - dir.position;
+                let radii = dir.footprint_radii();
+                if offset.abs().cmpge(radii + radius).any() {
+                    continue;
+                }
+                let depth = radius - footprint_distance(offset, radii);
                 result.foreign_pair_ticks += u64::from(depth > 0.0001);
                 result.worst_foreign_depth = result.worst_foreign_depth.max(depth);
             }
@@ -339,9 +349,75 @@ pub(crate) fn run(
     Ok(())
 }
 
+fn footprint_distance(offset: Vec2, radii: Vec2) -> f32 {
+    use bevy::math::DVec2;
+
+    if radii.x.to_bits() == radii.y.to_bits() {
+        return offset.length() - radii.x;
+    }
+
+    let mut point = offset.abs().as_dvec2();
+    let mut axes = radii.as_dvec2();
+    if axes.x < axes.y {
+        point = DVec2::new(point.y, point.x);
+        axes = DVec2::new(axes.y, axes.x);
+    }
+    let squared = axes * axes;
+    let difference = squared.x - squared.y;
+    let inside = (point / axes).length_squared() < 1.0;
+
+    // The closest point lies in the same quadrant. On the major axis it can
+    // either be the tip or have a nonzero minor coordinate.
+    let closest = if point.y == 0.0 {
+        let u = (axes.x * point.x / difference).min(1.0);
+        axes * DVec2::new(u, (1.0 - u * u).sqrt())
+    } else {
+        // Bisect the monotone ellipse constraint on its positive multiplier.
+        let product = axes * point;
+        let bias = DVec2::new(difference, 0.0);
+        let mut low = product.y;
+        let mut high = product.length();
+        let axis_ratio = product.x / difference;
+        if axis_ratio < 1.0 {
+            high = high.min(product.y / (1.0 - axis_ratio * axis_ratio).sqrt());
+        }
+        for _ in 0..36 {
+            let middle = low.midpoint(high);
+            if (product / (bias + middle)).length_squared() > 1.0 {
+                low = middle;
+            } else {
+                high = middle;
+            }
+        }
+        squared * point / (bias + low.midpoint(high))
+    };
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "distance uses world precision"
+    )]
+    let distance = (closest - point).length() as f32;
+    if inside { -distance } else { distance }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clearance_uses_world_distance_to_a_stretched_footprint() {
+        let radii = Vec2::new(4.52, 2.26);
+        let glyph_radius = 0.27;
+        let space = footprint_distance(Vec2::new(4.92, 0.0), radii) - glyph_radius;
+        assert!((space - 0.13).abs() < 1e-5);
+        let vertical = footprint_distance(Vec2::new(0.0, 4.92), Vec2::new(2.26, 4.52));
+        assert!((vertical - 0.4).abs() < 1e-5);
+
+        let radii = Vec2::new(2.0, 1.0);
+        let major = footprint_distance(Vec2::X, radii);
+        assert!((major + (2.0_f32 / 3.0).sqrt()).abs() < 1e-5);
+        let boundary = footprint_distance(Vec2::new(1.2, 0.8), radii);
+        assert!(boundary.abs() < 1e-5);
+    }
 
     #[test]
     fn clearance_detects_cross_tree_transit_and_matches_visible_scaling() {
@@ -558,7 +634,7 @@ fn definitions(writer: &mut impl Write) -> anyhow::Result<()> {
     write_record(
         &mut *writer,
         &serde_json::json!({"definitions": DEFINITIONS,
-            "file_clearance_definitions": "Raw file_clearance uses lifecycle presence > 0 and radius 0.27 * presence. visible_file_clearance uses the rendered boundary-limited presence, excluding hidden transit. Foreign pair-ticks count each file/live-foreign-directory strict disc intersection; outside-own ticks count each file whose disc exceeds its own directory disc. Penetrations <= 0.0001 world units are excluded. Worst depths are world units.",
+            "file_clearance_definitions": "Raw file_clearance uses lifecycle presence > 0 and radius 0.27 * presence. visible_file_clearance uses the rendered boundary-limited presence, excluding hidden transit. Foreign pair-ticks count each file/live-foreign-directory strict intersection with the directory footprint. Outside-own ticks count files whose disc exceeds their own directory footprint. A stretched footprint is an ellipse. Penetrations <= 0.0001 world units are excluded. Worst depths are world units.",
             "speed_definitions": "Nearest-rank p95/p99/max over retained-ID per-tick speeds, including stationary observations, separately for files and live directories. World units per playback second (tick distance times 60). Birth/reactivation placement excluded. Fast distance sums the full tick distance when speed strictly exceeds 6 world units/s: 0.1 units per 60 Hz tick, approximately 19% of a full-size file's 0.54-unit diameter per tick. Threshold is world-space, independent of camera zoom."}),
     )?;
     Ok(())

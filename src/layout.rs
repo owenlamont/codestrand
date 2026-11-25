@@ -247,6 +247,10 @@ impl Dir {
         self.local_position
     }
 
+    pub(super) fn footprint_radii(&self) -> Vec2 {
+        self.stretch * self.radius()
+    }
+
     pub(super) fn offset_without_stretch(&self, point: Vec2) -> Vec2 {
         (point - self.position) / self.stretch
     }
