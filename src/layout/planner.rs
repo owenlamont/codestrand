@@ -171,12 +171,25 @@ fn interpolator(time: Time, step: f32, length: usize) -> impl Fn(&[Vec2]) -> Vec
         (index + 2).min(length - 1),
     ];
     move |row| {
+        let position = row[controls[0]];
+        if controls.iter().all(|&index| row[index] == position) {
+            return position;
+        }
         controls
             .into_iter()
             .zip(weights)
             .map(|(index, weight)| row[index] * (weight / 6.0))
             .sum()
     }
+}
+
+#[cfg(test)]
+#[test]
+fn identical_spline_controls_keep_large_coordinates_exactly() {
+    let position = Vec2::new(4_194_304.0, 2_097_143_611_392.0);
+    let row = [position; 4];
+    let at = interpolator(Time::seconds(2.0 / 60.0), 0.25, row.len());
+    assert_eq!(at(&row), position);
 }
 
 fn occupancy(

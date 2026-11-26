@@ -1891,6 +1891,8 @@ impl Simulation {
             for avatar in &mut state.avatars {
                 avatar.transmitting = false;
             }
+        } else {
+            state.hold_casting_ring_members(now);
         }
         let active = state
             .avatars
@@ -1958,6 +1960,7 @@ impl Simulation {
             self.record_arrival_activity(&mut active);
         }
         for (index, avatar) in self.state.avatars.iter().enumerate() {
+            grouped[index] |= avatar.casting_ring.is_some();
             if active[index] {
                 for arrival in &avatar.ring_arrivals {
                     grouped[arrival.lead] = true;
@@ -1966,7 +1969,7 @@ impl Simulation {
         }
         if grouped.contains(&true) {
             let mut rims = vec![None; grouped.len()];
-            for (lead, centre, rim, _) in self.groups() {
+            for (lead, centre, rim, _) in self.group_rings() {
                 if grouped[lead] {
                     rims[lead] = Some((centre, rim * rim));
                 }
@@ -2169,6 +2172,25 @@ impl Simulation {
 
     /// Each visible group ring's author, centre, world radius and opacity.
     pub(super) fn groups(&self) -> Vec<(usize, Vec3, f32, f32)> {
+        self.group_rings()
+            .into_iter()
+            .filter(|&(lead, centre, rim, _)| {
+                let mut members =
+                    self.state
+                        .avatars
+                        .iter()
+                        .enumerate()
+                        .filter(|&(index, avatar)| {
+                            avatar.display_presence() > 0.0
+                                && avatar.position.distance_squared(centre) <= rim * rim
+                                && self.state.in_party(index, lead)
+                        });
+                members.nth(1).is_some()
+            })
+            .collect()
+    }
+
+    fn group_rings(&self) -> Vec<(usize, Vec3, f32, f32)> {
         let now = self.seconds();
         let mut solo = vec![false; self.state.avatars.len()];
         for pulse in &self.state.pulses {
@@ -2645,6 +2667,29 @@ impl State {
                     radius,
                 )
                 && !travel.travelling(author, self.tick);
+        }
+    }
+
+    fn hold_casting_ring_members(&mut self, now: Time) {
+        for index in 0..self.avatars.len() {
+            let avatar = &self.avatars[index];
+            let Some(group) = avatar.group.filter(|group| group.lead != index) else {
+                continue;
+            };
+            let Some(ring) = self.avatars[group.lead].casting_ring else {
+                continue;
+            };
+            if avatar.expires <= now
+                && avatar.presence > 0.0
+                && !avatar.travelling
+                && avatar.repository == ring.repository
+                && avatar
+                    .slot
+                    .as_ref()
+                    .is_some_and(|slot| slot.dock == ring.dock)
+            {
+                self.avatars[index].expires = now + tick_seconds();
+            }
         }
     }
 
@@ -4141,6 +4186,80 @@ mod tests {
         state.avatars[1].position += Vec3::X * (radius * 3.0);
         state.update_rings(tick_seconds());
         assert!(state.avatars[0].ring_presence < 1.0);
+    }
+
+    #[test]
+    fn a_coauthor_finishes_casting_before_joining_another_group() {
+        let pair = crate::timeline::Identity::new("Pair", "pair@example.invalid");
+        let next_partner =
+            crate::timeline::Identity::new("Third", "third@example.invalid");
+        let mut events = crate::timeline::synthetic();
+        events.truncate(2);
+        events[0].co_authors = vec![pair.clone()];
+        events[1].seconds = events[0].seconds + 1;
+        events[1].author = pair;
+        events[1].co_authors = vec![next_partner];
+        let mut simulation = Simulation::new(
+            events,
+            &Options::default(),
+            &Theme::neon(),
+            &Mappings::default(),
+        );
+        let mut first_cast = false;
+        for frame in 0..simulation.frames(60).unwrap() {
+            simulation.advance_to(frame, 60);
+            if simulation
+                .state
+                .avatars
+                .first()
+                .is_some_and(|avatar| avatar.casting_ring.is_some())
+            {
+                first_cast = true;
+                assert_eq!(simulation.state.next_event, 1);
+                assert!(simulation.groups().iter().any(|&(lead, ..)| lead == 0));
+            }
+        }
+        assert!(first_cast);
+        assert_eq!(simulation.state.next_event, 2);
+    }
+
+    #[test]
+    fn a_casting_circle_keeps_its_expired_partner_visible() {
+        let mut event = crate::timeline::synthetic().remove(0);
+        event.co_authors.push(crate::timeline::Identity::new(
+            "Pair",
+            "pair@example.invalid",
+        ));
+        let mut simulation = Simulation::new(
+            vec![event],
+            &Options::default(),
+            &Theme::neon(),
+            &Mappings::default(),
+        );
+        for _ in 0..180 {
+            if simulation
+                .state
+                .avatars
+                .first()
+                .is_some_and(|avatar| avatar.casting_ring.is_some())
+                && simulation.state.avatars[1].display_presence() > 0.0
+            {
+                let now = simulation.seconds();
+                let member = &mut simulation.state.avatars[1];
+                member.expires = now;
+                member.dismissed = true;
+                simulation.state.pulses.front_mut().unwrap().end = now + 1.0;
+                for _ in 0..45 {
+                    simulation.tick();
+                    assert!(simulation.state.avatars[0].casting_ring.is_some());
+                    assert!(simulation.state.avatars[1].display_presence() > 0.0);
+                    assert_eq!(simulation.groups().len(), 1);
+                }
+                return;
+            }
+            simulation.tick();
+        }
+        panic!("the pair never formed a visible casting circle");
     }
 
     #[test]

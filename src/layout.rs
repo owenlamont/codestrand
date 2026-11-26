@@ -98,11 +98,14 @@ impl File {
     }
 
     pub(super) fn draw_scale(&self, dir: &Dir) -> f32 {
-        match self.state {
+        let size = match self.state {
             Presence::Present => self.visible_presence(dir),
-            Presence::Arriving => dir.scale * (0.15 + 0.85 * self.presence),
+            Presence::Arriving => return dir.scale * (0.15 + 0.85 * self.presence),
             Presence::Leaving | Presence::Recovering => dir.scale,
-        }
+        };
+        let room = (dir.radius() - dir.offset_without_stretch(self.position).length())
+            .max(0.0);
+        size.min(room / 0.39)
     }
 
     fn restore(&mut self, author: usize, revision: u64) {
@@ -128,13 +131,19 @@ impl File {
     }
 
     pub(super) fn visible_presence(&self, dir: &Dir) -> f32 {
-        visible_presence(
+        let offset = dir.offset_without_stretch(self.position);
+        let scale = visible_presence(
             self.presence,
-            dir.offset_without_stretch(self.position),
+            offset,
             dir.radius(),
             Vec2::ZERO,
             dir.scale,
-        )
+        );
+        if self.state != Presence::Present {
+            return scale;
+        }
+        let room = (dir.radius() - offset.length()).max(0.0);
+        scale.max((scale * 1.25).min(room / 0.39))
     }
 
     pub(super) fn name(&self) -> &str {
