@@ -400,7 +400,7 @@ mod tests {
 
     fn representative_glyph_widths(
         simulation: &Simulation,
-        files_per_repo: usize,
+        files_per_repo: &[usize],
     ) -> Vec<f32> {
         use crate::layout::Presence;
 
@@ -430,8 +430,9 @@ mod tests {
         }
         sizes
             .into_iter()
-            .map(|mut repo| {
-                assert_eq!(repo.len(), files_per_repo);
+            .zip(files_per_repo)
+            .map(|(mut repo, &files)| {
+                assert_eq!(repo.len(), files);
                 repo.sort_unstable_by(f32::total_cmp);
                 repo[repo.len() / 2]
             })
@@ -477,6 +478,48 @@ mod tests {
         events
     }
 
+    fn glyph_settling_simulation(
+        settled: [usize; 4],
+        initial: [usize; 4],
+        steady_edits: bool,
+    ) -> Simulation {
+        let names: Vec<_> = (0..4).map(|repo| format!("Repository {repo}")).collect();
+        let histories = settled
+            .into_iter()
+            .zip(initial)
+            .enumerate()
+            .map(|(repo, (files, initial))| {
+                glyph_settling_history(repo, files, initial, steady_edits)
+            })
+            .collect();
+        Simulation::with_repositories(
+            crate::repositories::merge(histories),
+            &crate::model::Options {
+                seconds_per_day: 1.0,
+                max_idle_seconds: 20.0,
+                ..Default::default()
+            },
+            &crate::theme::Theme::neon(),
+            &crate::contributors::Mappings::default(),
+            &names,
+        )
+    }
+
+    #[test]
+    fn glyphs_recover_after_a_large_deletion_in_a_settled_tile() {
+        let counts = [300, 30, 30, 30];
+        let mut simulation =
+            glyph_settling_simulation(counts, [300, 300, 30, 30], false);
+        let last = simulation.frames(60).unwrap();
+        simulation.advance_to(last, 60);
+        let widths = representative_glyph_widths(&simulation, &counts);
+        let neighbours = widths[2].midpoint(widths[3]);
+        assert!(
+            (0.75 * neighbours..=1.25 * neighbours).contains(&widths[1]),
+            "projected file glyph widths after the deletion: {widths:?}"
+        );
+    }
+
     proptest::proptest! {
         #![proptest_config(proptest::test_runner::Config::with_cases(16))]
 
@@ -488,28 +531,14 @@ mod tests {
             steady_edits in proptest::bool::ANY,
         ) {
             let files = 4 * files_per_group;
-            let names: Vec<_> = (0..4).map(|repo| format!("Repository {repo}")).collect();
-            let histories = (0..4)
-                .map(|repo| {
-                    let initial = if repo == deleted_from { files * multiplier } else { files };
-                    glyph_settling_history(repo, files, initial, steady_edits)
-                })
-                .collect();
-            let mut simulation = Simulation::with_repositories(
-                crate::repositories::merge(histories),
-                &crate::model::Options {
-                    seconds_per_day: 1.0,
-                    max_idle_seconds: 20.0,
-                    ..Default::default()
-                },
-                &crate::theme::Theme::neon(),
-                &crate::contributors::Mappings::default(),
-                &names,
-            );
+            let counts = [files; 4];
+            let mut initial = counts;
+            initial[deleted_from] *= multiplier;
+            let mut simulation = glyph_settling_simulation(counts, initial, steady_edits);
             let last = simulation.frames(60).unwrap();
             for frame in last - 120..=last {
                 simulation.advance_to(frame, 60);
-                let widths = representative_glyph_widths(&simulation, files);
+                let widths = representative_glyph_widths(&simulation, &counts);
                 let mean = widths.iter().sum::<f32>() / crate::model::count(widths.len());
                 proptest::prop_assert!(widths.iter().all(|&width| {
                     width >= 8.0 && (0.75 * mean..=1.25 * mean).contains(&width)

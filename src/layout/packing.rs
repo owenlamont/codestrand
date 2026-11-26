@@ -2272,7 +2272,8 @@ impl Packing {
         let permitted = |from, to, scale: f32| {
             let (a, b) = (areas[from], areas[to]);
             (a > 0.0 && b > 0.0).then(|| {
-                if b > a + 1e-6 {
+                // Reuse space freed by a deletion during forward playback.
+                if b > a + 1e-6 || (to > from && b + 1e-6 >= a) {
                     (scale * 0.005).clamp(0.002, 0.02)
                 } else {
                     0.0
