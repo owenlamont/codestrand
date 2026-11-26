@@ -76,6 +76,7 @@ impl Plan {
 #[derive(Clone, Debug, Default)]
 pub(super) struct Track {
     reference: Option<Tile>,
+    previous_tile: Option<Tile>,
     stable_since: u64,
     previous_tick: u64,
     settled: Option<(f32, Vec2)>,
@@ -91,12 +92,16 @@ impl Track {
         target: impl FnOnce(Tile) -> Vec2,
     ) {
         let previous = std::mem::replace(&mut self.previous_tick, tick);
+        let previous_tile = std::mem::replace(&mut self.previous_tile, tile);
 
-        let same = self.reference.zip(tile).is_some_and(|(old, current)| {
-            (old.low - current.low).abs().max_element() <= 1e-5
-                && (old.high - current.high).abs().max_element() <= 1e-5
-        });
-        if !same {
+        let matches = |before: Option<Tile>| {
+            before.zip(tile).is_some_and(|(old, current)| {
+                (old.low - current.low).abs().max_element() <= 1e-5
+                    && (old.high - current.high).abs().max_element() <= 1e-5
+            })
+        };
+        // Check both drift since settling began and movement since the last sample.
+        if !matches(self.reference) || !matches(previous_tile) {
             self.reference = tile;
             self.stable_since = tick;
             let stop = previous;
@@ -160,6 +165,25 @@ mod tests {
         } else {
             Vec2::ONE
         }
+    }
+
+    #[test]
+    fn a_step_across_the_stability_tolerance_stops_a_reshape() {
+        let tile = Tile {
+            low: Vec2::ZERO,
+            high: Vec2::new(0.8, 0.4),
+        };
+        let plan = Plan::build(1, 102, None, |tick, tracks| {
+            let low = match tick {
+                100 => tile.low + Vec2::X * 6e-6,
+                101.. => tile.low - Vec2::X * 6e-6,
+                _ => tile.low,
+            };
+            tracks[0].observe(tick, Some(Tile { low, ..tile }), true, wide_target);
+        });
+        assert!(plan.sample(0, 100).x > 1.0);
+        assert_eq!(plan.sample(0, 100), plan.sample(0, 101));
+        assert_eq!(plan.sample(0, 101), plan.sample(0, 102));
     }
 
     #[test]
