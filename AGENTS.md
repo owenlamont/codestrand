@@ -41,9 +41,10 @@ Markdown prose wraps at 88 characters. CPU tests run without a GPU. Renderer cha
 need a local export and visual inspection.
 
 For changes that affect playback visuals, export matched before-and-after frames or
-clips with the same inputs and viewing settings. The agent and Owen both inspect the
-rendered raster output at its intended viewing size before deciding whether the
-change improves the visualisation. Bring any difference in judgement to the review.
+clips with the same inputs and viewing settings. Contributors and reviewers should
+inspect the renders at their intended viewing size. Agents with vision should
+compare the renders and share their observations. Discuss differences in visual
+judgement during review.
 
 ## Who Codestrand is for, as far as known
 
