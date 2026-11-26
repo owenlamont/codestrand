@@ -401,6 +401,13 @@ struct CastingRing {
     dock: slots::Dock,
     offset: Vec3,
     radius: f32,
+    seats: [Option<(usize, Vec3)>; crate::timeline::MAX_CO_AUTHORS + 1],
+}
+
+impl CastingRing {
+    fn centre(&self, gutter: crate::layout::packing::Tile) -> Vec3 {
+        slots::world(self.dock.on_network(gutter)) + self.offset
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -2622,7 +2629,12 @@ impl State {
         regions: &[crate::layout::RepositoryRegion],
         travel: &travel::Plan,
     ) {
-        for (index, avatar) in self.avatars.iter_mut().enumerate() {
+        for index in 0..self.avatars.len() {
+            let carried_seat =
+                self.casting_ring_seat(index).and_then(|(ring, offset)| {
+                    Some(ring.centre(regions[ring.repository].gutter?) + offset)
+                });
+            let avatar = &mut self.avatars[index];
             let before = self.layout.repositories[avatar.repository].gutter;
             let after = regions[avatar.repository].gutter;
             let Some((before, after)) = before.zip(after) else {
@@ -2631,8 +2643,8 @@ impl State {
             if before.low == after.low && before.high == after.high
                 || avatar.presence <= 0.0
                 || avatar.travelling
-                || avatar.dock_walk.is_some()
-                || avatar.settle.is_some()
+                || carried_seat.is_none()
+                    && (avatar.dock_walk.is_some() || avatar.settle.is_some())
                 || travel.travelling(index, self.tick)
             {
                 continue;
@@ -2641,12 +2653,15 @@ impl State {
                 continue;
             };
             if avatar.transmitting
+                || carried_seat.is_some()
                 || avatar.position.distance_squared(slot.world()) < 1e-8
             {
                 let from = slot.dock.on_network(before);
                 let to = slot.dock.on_network(after);
                 let delta = to - from;
-                avatar.position += slots::world(to) - slots::world(from);
+                avatar.position = carried_seat.unwrap_or_else(|| {
+                    avatar.position + (slots::world(to) - slots::world(from))
+                });
                 slot.point += delta;
             }
         }
@@ -2672,25 +2687,33 @@ impl State {
 
     fn hold_casting_ring_members(&mut self, now: Time) {
         for index in 0..self.avatars.len() {
-            let avatar = &self.avatars[index];
-            let Some(group) = avatar.group.filter(|group| group.lead != index) else {
-                continue;
-            };
-            let Some(ring) = self.avatars[group.lead].casting_ring else {
-                continue;
-            };
-            if avatar.expires <= now
-                && avatar.presence > 0.0
-                && !avatar.travelling
-                && avatar.repository == ring.repository
-                && avatar
-                    .slot
-                    .as_ref()
-                    .is_some_and(|slot| slot.dock == ring.dock)
+            if self.avatars[index].expires <= now
+                && self.casting_ring_seat(index).is_some()
             {
                 self.avatars[index].expires = now + tick_seconds();
             }
         }
+    }
+
+    fn casting_ring_seat(&self, index: usize) -> Option<(&CastingRing, Vec3)> {
+        let avatar = &self.avatars[index];
+        let group = avatar.group?;
+        let ring = self.avatars[group.lead].casting_ring.as_ref()?;
+        let &(_, offset) = ring
+            .seats
+            .iter()
+            .flatten()
+            .find(|&&(member, _)| member == index)?;
+        (avatar.presence > 0.0
+            && !avatar.travelling
+            && avatar.repository == ring.repository)
+            .then_some((ring, offset))
+    }
+
+    fn casting_seat_position(&self, index: usize, plan: &travel::Plan) -> Option<Vec3> {
+        let (ring, offset) = self.casting_ring_seat(index)?;
+        let gutter = self.layout.repositories[ring.repository].gutter?;
+        (!plan.travelling(index, self.tick)).then(|| ring.centre(gutter) + offset)
     }
 
     fn ring_shifts(&self) -> Vec<Vec3> {
@@ -2728,9 +2751,12 @@ impl State {
         let previous = (visuals && self.avatars.len() > 1)
             .then(|| self.visible_avatar_positions());
         let mut network = None;
-        for (index, avatar) in self.avatars.iter_mut().enumerate() {
+        for (index, ring_shift) in ring_shifts.into_iter().enumerate() {
+            let casting_seat = self.casting_seat_position(index, plan);
+            let avatar = &mut self.avatars[index];
             avatar.activity *= (-dt / 3.0).exp();
-            if avatar.transmitting {
+            if avatar.transmitting || casting_seat.is_some() {
+                avatar.position = casting_seat.unwrap_or(avatar.position);
                 avatar.hold_for_rays();
                 avatar.update_presence(now, dt, 1.0);
                 continue;
@@ -2784,7 +2810,7 @@ impl State {
             let (target, offset) =
                 avatar.seat_target(|| plan.approaching_departure(index, self.tick));
             let from = avatar.position;
-            let seat = target + ring_shifts[index];
+            let seat = target + ring_shift;
             avatar.walk(seat, offset, route, now, reach, max_step);
             if avatar.position.distance(seat) <= reach {
                 avatar.slot_origin = None;
@@ -2938,8 +2964,14 @@ impl State {
         let avatar = &self.avatars[lead];
         let dock = avatar.slot.as_ref()?.dock;
         if let Some(ring) = avatar.casting_ring {
-            return (ring.repository == repository && ring.dock == dock)
-                .then_some(lead);
+            return (ring.repository == repository
+                && ring.dock == dock
+                && ring
+                    .seats
+                    .iter()
+                    .flatten()
+                    .any(|&(member, _)| member == author))
+            .then_some(lead);
         }
         if avatar.ring_presence < 1.0
             || avatar.travelling
@@ -2953,11 +2985,31 @@ impl State {
         let (centre, radius) = self.visible_ring(lead)?;
         let gutter = self.layout.repositories[repository].gutter?;
         let offset = centre - slots::world(dock.on_network(gutter));
+        let mut seats = [None; crate::timeline::MAX_CO_AUTHORS + 1];
+        let mut available_seats = seats.iter_mut();
+        for (member, avatar) in self.avatars.iter().enumerate() {
+            if avatar.group.is_some_and(|group| group.lead == lead)
+                && self.in_party(member, lead)
+                && avatar.presence > 0.0
+                && !avatar.travelling
+                && avatar.position.distance_squared(centre) <= radius * radius
+                && let Some(seat) = available_seats.next()
+            {
+                *seat = Some((member, avatar.position - centre));
+            }
+        }
+        if seats.iter().flatten().count() < 2
+            || !seats.iter().flatten().any(|&(member, _)| member == lead)
+            || !seats.iter().flatten().any(|&(member, _)| member == author)
+        {
+            return None;
+        }
         self.avatars[lead].casting_ring = Some(CastingRing {
             repository,
             dock,
             offset,
             radius,
+            seats,
         });
         Some(lead)
     }
@@ -3461,10 +3513,7 @@ impl State {
         let author = &self.avatars[lead];
         if let Some(ring) = author.casting_ring {
             let gutter = self.layout.repositories[ring.repository].gutter?;
-            return Some((
-                slots::world(ring.dock.on_network(gutter)) + ring.offset,
-                ring.radius,
-            ));
+            return Some((ring.centre(gutter), ring.radius));
         }
         (author.ring_presence * author.presence > 0.0)
             .then(|| self.ring_geometry(lead, author.ring_capacity))
@@ -4135,6 +4184,9 @@ mod tests {
                 let now = sim.seconds();
                 let state = &mut *sim.state;
                 state.avatars[0].casting_ring = None;
+                state.avatars[1].travelling = true;
+                assert!(state.lock_source_ring(0, 0, now).is_none());
+                state.avatars[1].travelling = false;
                 state.pulses[0].source = Some(super::RaySource::Avatar);
                 assert!(state.lock_source_ring(0, 0, now).is_none());
                 assert_eq!(sim.groups().as_slice(), &[]);
@@ -4260,6 +4312,57 @@ mod tests {
             simulation.tick();
         }
         panic!("the pair never formed a visible casting circle");
+    }
+
+    #[test]
+    fn a_casting_circle_carries_its_partner_without_reseating() {
+        let mut event = crate::timeline::synthetic().remove(0);
+        event.co_authors.push(crate::timeline::Identity::new(
+            "Pair",
+            "pair@example.invalid",
+        ));
+        let mut simulation = Simulation::new(
+            vec![event],
+            &Options::default(),
+            &Theme::neon(),
+            &Mappings::default(),
+        );
+        for frame in 0..simulation.frames(60).unwrap() {
+            simulation.advance_to(frame, 60);
+            let state = &mut *simulation.state;
+            let Some(ring) =
+                state.avatars.first().and_then(|avatar| avatar.casting_ring)
+            else {
+                continue;
+            };
+            let (centre, _) = state.visible_ring(0).unwrap();
+            let partner = &mut state.avatars[1];
+            partner.slot.as_mut().unwrap().point += Vec2::X * 0.5;
+            assert!(!partner.transmitting);
+            let offset = partner.position - centre;
+            let now = tick_time(state.tick);
+            let owner_offset = state.avatars[0].position - centre;
+            state.avatars[0].transmitting = false;
+            state.avatars[0].expires = now;
+            state.hold_casting_ring_members(now);
+            assert!(state.avatars[0].expires > now);
+            let mut regions = state.layout.repositories.clone();
+            let gutter = regions[ring.repository].gutter.as_mut().unwrap();
+            gutter.low += Vec2::new(0.15, 0.0);
+            gutter.high += Vec2::new(0.15, 0.07);
+            let plan = travel::Plan::default();
+            state.carry_docked_avatars(&regions, &plan);
+            state.layout.repositories = regions;
+            let (centre, _) = state.visible_ring(0).unwrap();
+            assert!(state.avatars[1].position.distance(centre + offset) < 1e-5);
+            state.place_slots_planned(&simulation.envelopes, now, &plan);
+            assert_eq!(state.avatars[0].slot.as_ref().unwrap().dock, ring.dock);
+            state.advance_avatars(now, tick_seconds(), &plan, true);
+            assert!(state.avatars[1].position.distance(centre + offset) < 1e-5);
+            assert!(state.avatars[0].position.distance(centre + owner_offset) < 1e-5);
+            return;
+        }
+        panic!("the pair never started casting");
     }
 
     #[test]
