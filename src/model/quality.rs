@@ -398,6 +398,126 @@ fn footprint_distance(offset: Vec2, radii: Vec2) -> f32 {
 mod tests {
     use super::*;
 
+    fn representative_glyph_widths(
+        simulation: &Simulation,
+        files_per_repo: usize,
+    ) -> Vec<f32> {
+        use crate::layout::Presence;
+
+        let layout = simulation.layout();
+        let (focus, distance) = simulation.view();
+        let eye = focus + view_direction() * distance;
+        let glyph = simulation.theme().glyph_transform();
+        let corners = [
+            Vec3::new(-0.5, -0.5, 0.0),
+            Vec3::new(0.5, -0.5, 0.0),
+            Vec3::new(-0.5, 0.5, 0.0),
+            Vec3::new(0.5, 0.5, 0.0),
+        ]
+        .map(|corner| glyph.transform_point(corner));
+        let mut sizes = vec![Vec::new(); layout.repositories.len()];
+        for (id, file) in layout
+            .files()
+            .filter(|(_, file)| file.state == Presence::Present)
+        {
+            let directory = layout.dir(file.dir);
+            let (position, _, alpha) = simulation.file_effect(id, file);
+            assert!(alpha >= 1.0, "the glyph has not settled");
+            let scale = file.draw_scale(directory);
+            let points = corners.map(|corner| position + scale * corner);
+            sizes[directory.repository]
+                .push(projected_extent(eye, focus, &points).x * 960.0);
+        }
+        sizes
+            .into_iter()
+            .map(|mut repo| {
+                assert_eq!(repo.len(), files_per_repo);
+                repo.sort_unstable_by(f32::total_cmp);
+                repo[repo.len() / 2]
+            })
+            .collect()
+    }
+
+    fn glyph_settling_history(
+        repository: usize,
+        files: usize,
+        initial_files: usize,
+        steady_edits: bool,
+    ) -> Vec<crate::timeline::Event> {
+        use crate::timeline::{Event, FileChange, Identity, Kind};
+
+        let event = |day: i64, kind: Kind, range: std::ops::Range<usize>| Event {
+            repository,
+            author: Identity::new(
+                &format!("Author {repository}"),
+                &format!("author-{repository}@example.invalid"),
+            ),
+            co_authors: Vec::new(),
+            commit: format!("repo-{repository}-day-{day}"),
+            contributor: None,
+            co_contributors: Vec::new(),
+            seconds: day * 86_400,
+            changes: range
+                .map(|file| FileChange {
+                    path: format!("group-{}/file-{file}.rs", file % 4),
+                    kind: kind.clone(),
+                    ..Default::default()
+                })
+                .collect(),
+        };
+        let mut events = vec![event(0, Kind::Added, 0..initial_files)];
+        if initial_files > files {
+            events.push(event(8, Kind::Deleted, files..initial_files));
+            if steady_edits {
+                events.extend((10..20).map(|day| event(day, Kind::Modified, 0..1)));
+            }
+            events.push(event(20, Kind::Modified, 0..1));
+        }
+        crate::repositories::namespace(&mut events, repository);
+        events
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config::with_cases(16))]
+
+        #[test]
+        fn comparable_repositories_settle_to_comparable_file_glyph_sizes(
+            files_per_group in 6_usize..=10,
+            deleted_from in 0_usize..4,
+            multiplier in 2_usize..=3,
+            steady_edits in proptest::bool::ANY,
+        ) {
+            let files = 4 * files_per_group;
+            let names: Vec<_> = (0..4).map(|repo| format!("Repository {repo}")).collect();
+            let histories = (0..4)
+                .map(|repo| {
+                    let initial = if repo == deleted_from { files * multiplier } else { files };
+                    glyph_settling_history(repo, files, initial, steady_edits)
+                })
+                .collect();
+            let mut simulation = Simulation::with_repositories(
+                crate::repositories::merge(histories),
+                &crate::model::Options {
+                    seconds_per_day: 1.0,
+                    max_idle_seconds: 20.0,
+                    ..Default::default()
+                },
+                &crate::theme::Theme::neon(),
+                &crate::contributors::Mappings::default(),
+                &names,
+            );
+            let last = simulation.frames(60).unwrap();
+            for frame in last - 120..=last {
+                simulation.advance_to(frame, 60);
+                let widths = representative_glyph_widths(&simulation, files);
+                let mean = widths.iter().sum::<f32>() / crate::model::count(widths.len());
+                proptest::prop_assert!(widths.iter().all(|&width| {
+                    width >= 8.0 && (0.75 * mean..=1.25 * mean).contains(&width)
+                }), "file glyph widths at frame {}: {:?}", frame, widths);
+            }
+        }
+    }
+
     #[test]
     fn clearance_uses_world_distance_to_a_stretched_footprint() {
         let radii = Vec2::new(4.52, 2.26);
