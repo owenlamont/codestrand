@@ -319,8 +319,8 @@ fn review_directory_bounds_include_visible_sides() {
     let (index, dir) = sim.layout().dirs().find(|(_, d)| d.depth > 0).unwrap();
     let center = ground(dir.position) - Vec3::Y * 0.05;
     let rotation = Quat::from_rotation_x(-26.0_f32.to_radians());
-    let eye = center + Vec3::new(0.0, 1.25, 1.98) * dir.scale;
-    assert!(eye.y >= crate::camera::EYE_FLOOR);
+    let offset_scale = dir.scale.max((crate::camera::EYE_FLOOR - center.y) / 1.25);
+    let eye = center + Vec3::new(0.0, 1.25, 1.98) * offset_scale;
     let camera = Transform::from_translation(eye).with_rotation(rotation);
     let view = names::View {
         clip_from_world: bevy::math::proj::perspective_infinite_reverse(

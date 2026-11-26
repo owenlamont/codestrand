@@ -1,0 +1,280 @@
+use std::sync::Arc;
+
+use bevy::math::Vec2;
+
+use super::Tile;
+
+const STABLE_TICKS: u64 = 60;
+const RESHAPE_TICKS: u16 = 120;
+const RESHAPE_DURATION: u64 = RESHAPE_TICKS as u64;
+
+#[derive(Clone, Debug)]
+struct Change {
+    start: u64,
+    stop: u64,
+    from: Vec2,
+    to: Vec2,
+    aspect: f32,
+}
+
+impl Change {
+    fn sample(&self, tick: u64) -> Vec2 {
+        let elapsed = tick.min(self.stop).saturating_sub(self.start);
+        let t = f32::from(u16::try_from(elapsed).expect("bounded reshape"))
+            / f32::from(RESHAPE_TICKS);
+        self.from.lerp(self.to, t * t * (3.0 - 2.0 * t))
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub(super) struct Plan {
+    tick: u64,
+    tracks: Arc<[Track]>,
+}
+
+impl Plan {
+    pub(super) fn build(
+        repositories: usize,
+        end: u64,
+        checkpoint: Option<&Self>,
+        mut frame: impl FnMut(u64, &mut [Track]),
+    ) -> Self {
+        let start = checkpoint.map_or(0, |plan| plan.tick + 1);
+        let mut tracks = checkpoint.map_or_else(
+            || vec![Track::default(); repositories],
+            |plan| plan.tracks.to_vec(),
+        );
+        for tick in start..=end {
+            frame(tick, &mut tracks);
+        }
+        Self {
+            tick: end.max(start.saturating_sub(1)),
+            tracks: tracks.into(),
+        }
+    }
+
+    pub(super) fn replay_bytes(&self) -> u128 {
+        use crate::model::checkpoint_memory::buffer_bytes;
+
+        buffer_bytes::<Track>(self.tracks.len() + 2)
+            + self
+                .tracks
+                .iter()
+                .map(|track| buffer_bytes::<Change>(track.changes.capacity() + 2))
+                .sum::<u128>()
+    }
+
+    pub(super) fn sample(&self, repository: usize, tick: u64) -> Vec2 {
+        self.tracks.get(repository).map_or(Vec2::ONE, |track| {
+            let next = track.changes.partition_point(|change| change.start <= tick);
+            next.checked_sub(1)
+                .map_or(Vec2::ONE, |last| track.changes[last].sample(tick))
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub(super) struct Track {
+    reference: Option<Tile>,
+    previous_tile: Option<Tile>,
+    stable_since: u64,
+    previous_tick: u64,
+    settled: Option<(f32, Vec2)>,
+    changes: Arc<Vec<Change>>,
+}
+
+impl Track {
+    pub(super) fn observe(
+        &mut self,
+        tick: u64,
+        tile: Option<Tile>,
+        fit_initial: bool,
+        target: impl FnOnce(Tile) -> Vec2,
+    ) {
+        let previous = std::mem::replace(&mut self.previous_tick, tick);
+        let previous_tile = std::mem::replace(&mut self.previous_tile, tile);
+
+        let matches = |before: Option<Tile>| {
+            before.zip(tile).is_some_and(|(old, current)| {
+                (old.low - current.low).abs().max_element() <= 1e-5
+                    && (old.high - current.high).abs().max_element() <= 1e-5
+            })
+        };
+        // Check both drift since settling began and movement since the last sample.
+        if !matches(self.reference) || !matches(previous_tile) {
+            self.reference = tile;
+            self.stable_since = tick;
+            let stop = previous;
+            if self.changes.last().is_some_and(|last| last.stop > stop)
+                && let Some(last) = Arc::make_mut(&mut self.changes).last_mut()
+            {
+                last.stop = stop;
+            }
+            return;
+        }
+        if let Some(last) = self.changes.last()
+            && previous < last.stop
+            && tick >= last.stop
+            && last.stop == last.start + RESHAPE_DURATION
+        {
+            self.settled = Some((last.aspect, last.to));
+        }
+
+        if previous.saturating_sub(self.stable_since) >= STABLE_TICKS
+            || tick.saturating_sub(self.stable_since) < STABLE_TICKS
+        {
+            return;
+        }
+
+        let tile = tile.expect("unchanged live tile");
+        let aspect = tile.usable().ground_aspect();
+        let from = self
+            .changes
+            .last()
+            .map_or(Vec2::ONE, |last| last.sample(tick));
+        let to = match (self.settled, fit_initial) {
+            (Some((settled_aspect, settled_stretch)), _)
+                if (aspect / settled_aspect - 1.0).abs() < 0.02 =>
+            {
+                settled_stretch
+            }
+            (None, false) => Vec2::ONE,
+            _ => target(tile),
+        };
+        if from.distance_squared(to) < 1e-8 {
+            self.settled = Some((aspect, to));
+            return;
+        }
+        Arc::make_mut(&mut self.changes).push(Change {
+            start: tick,
+            stop: tick + RESHAPE_DURATION,
+            from,
+            to,
+            aspect,
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn wide_target(tile: Tile) -> Vec2 {
+        if tile.high.x > 0.6 {
+            Vec2::new(2.0, 1.0)
+        } else {
+            Vec2::ONE
+        }
+    }
+
+    #[test]
+    fn a_step_across_the_stability_tolerance_stops_a_reshape() {
+        let tile = Tile {
+            low: Vec2::ZERO,
+            high: Vec2::new(0.8, 0.4),
+        };
+        let plan = Plan::build(1, 102, None, |tick, tracks| {
+            let low = match tick {
+                100 => tile.low + Vec2::X * 6e-6,
+                101.. => tile.low - Vec2::X * 6e-6,
+                _ => tile.low,
+            };
+            tracks[0].observe(tick, Some(Tile { low, ..tile }), true, wide_target);
+        });
+        assert!(plan.sample(0, 100).x > 1.0);
+        assert_eq!(plan.sample(0, 100), plan.sample(0, 101));
+        assert_eq!(plan.sample(0, 101), plan.sample(0, 102));
+    }
+
+    #[test]
+    fn the_first_fit_waits_for_the_initial_tile_to_settle() {
+        let tile = Tile {
+            low: Vec2::ZERO,
+            high: Vec2::new(0.8, 0.4),
+        };
+        let stretch = Vec2::new(2.0, 1.0);
+        let plan = Plan::build(1, 180, None, |tick, tracks| {
+            tracks[0].observe(tick, Some(tile), true, |_| stretch);
+        });
+        assert_eq!(plan.sample(0, 60), Vec2::ONE);
+        assert!(plan.sample(0, 120).x > 1.0);
+        assert_eq!(plan.sample(0, 180), stretch);
+    }
+
+    #[test]
+    fn paused_history_does_not_spend_the_hold_or_strand_an_interrupted_reshape() {
+        let square = Tile {
+            low: Vec2::ZERO,
+            high: Vec2::ONE * 0.4,
+        };
+        let wide = Tile {
+            high: Vec2::new(0.8, 0.4),
+            ..square
+        };
+        let row = |shown: u64| {
+            if shown < 102 {
+                shown
+            } else {
+                shown.saturating_sub(299).max(101)
+            }
+        };
+        let build = |end, checkpoint| {
+            Plan::build(1, end, checkpoint, |shown, tracks| {
+                let tick = row(shown);
+                let tile = if (100..220).contains(&tick) {
+                    wide
+                } else {
+                    square
+                };
+                tracks[0].observe(tick, Some(tile), true, wide_target);
+            })
+        };
+        let initial = build(350, None);
+        let continued = build(800, Some(&initial));
+        let fresh = build(800, None);
+        assert_eq!(continued.sample(0, row(400)), Vec2::ONE);
+        let moving = continued.sample(0, row(500));
+        assert!(moving.x > 1.0 && moving.x < 2.0);
+        assert_eq!(continued.sample(0, 220), continued.sample(0, 219));
+        assert_eq!(continued.sample(0, 280), continued.sample(0, 220));
+        assert_eq!(continued.sample(0, 400), Vec2::ONE);
+        assert!(continued.replay_bytes() > initial.replay_bytes());
+        for shown in 350..800 {
+            assert_eq!(continued.sample(0, row(shown)), fresh.sample(0, row(shown)));
+        }
+    }
+
+    #[test]
+    fn interrupted_reshape_holds_until_the_new_tile_has_settled() {
+        let square = Tile {
+            low: Vec2::ZERO,
+            high: Vec2::ONE * 0.4,
+        };
+        let wide = Tile {
+            high: Vec2::new(0.8, 0.4),
+            ..square
+        };
+        let translated = Tile {
+            low: wide.low + Vec2::Y * 0.1,
+            high: wide.high + Vec2::Y * 0.1,
+        };
+        let plan = Plan::build(1, 450, None, |tick, tracks| {
+            let tile = if tick < 100 {
+                square
+            } else if tick < 220 {
+                wide
+            } else {
+                translated
+            };
+            tracks[0].observe(tick, Some(tile), true, wide_target);
+        });
+        assert_eq!(plan.sample(0, 160), Vec2::ONE);
+        assert!(plan.sample(0, 190).x > 1.0);
+        let held = plan.sample(0, 219);
+        assert!(held.x < 2.0);
+        assert_eq!(plan.sample(0, 220), held);
+        assert_eq!(plan.sample(0, 280), held);
+        assert!(plan.sample(0, 300).x > held.x);
+        assert_eq!(plan.sample(0, 400), Vec2::new(2.0, 1.0));
+    }
+}

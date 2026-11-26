@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use super::{LEAD_IN, TAIL, TICK_RATE, Time, tick_seconds, tick_time};
+use crate::contributors::Key;
 use crate::timeline::Event;
 
 pub(crate) const BIRTH_TICKS: u64 = 90;
@@ -146,10 +147,18 @@ impl Schedule {
             |index| seen.insert(selected[index].repository) && !(opening && index == 0),
         );
         let mut transmitters = std::collections::HashMap::new();
+        let mut ring_members = std::collections::HashMap::new();
         let mut latest_arrival = None;
+        let ring_settle = options
+            .fragment_pace()
+            .pulse_end(Time::ZERO)
+            .ticks(true)
+            .saturating_sub(arrival_ticks() + super::travel::FADE_TICKS)
+            + 2;
         for (index, event) in selected.iter().enumerate() {
             let mut hold = latest_arrival
                 .filter(|&earlier| schedule.birth_starts_after(index, earlier));
+            let ring_hold = ring_predecessor(selected, index, &mut ring_members);
             for contributor in event.participants() {
                 if let Some((repository, earlier)) =
                     transmitters.get(&contributor.key).copied()
@@ -172,6 +181,9 @@ impl Schedule {
                     0
                 };
                 schedule.ray_holds.push((index, earlier, settle));
+            }
+            if let Some(earlier) = ring_hold {
+                schedule.ray_holds.push((index, earlier, ring_settle));
             }
         }
         schedule
@@ -526,6 +538,63 @@ impl Schedule {
     }
 }
 
+fn ring_predecessor(
+    events: &[Event],
+    index: usize,
+    members: &mut std::collections::HashMap<Key, (usize, usize)>,
+) -> Option<usize> {
+    let event = &events[index];
+    let mut candidates: Vec<_> = event
+        .participants()
+        .filter_map(|member| members.get(&member.key).copied())
+        .collect();
+    candidates.sort_unstable();
+    candidates.dedup();
+    let mut hold = None;
+    for (formation, last) in candidates {
+        let previous = &events[formation];
+        let same_seats = previous.repository == event.repository
+            && event.participants().all(|person| {
+                previous
+                    .participants()
+                    .any(|member| member.key == person.key)
+            });
+        let changes_group = previous.co_contributors.len() == 1
+            && event
+                .contributor
+                .as_ref()
+                .is_some_and(|author| previous.co_contributors[0].key == author.key)
+            && previous.contributor.as_ref().is_some_and(|lead| {
+                event.participants().all(|member| member.key != lead.key)
+            });
+        let same_repository = previous.repository == event.repository;
+        if same_repository && !same_seats && !changes_group {
+            continue;
+        }
+        if same_repository && !same_seats {
+            hold = hold.max(Some(last));
+        }
+        for member in previous.participants() {
+            if members
+                .get(&member.key)
+                .is_some_and(|&(id, _)| id == formation)
+            {
+                if same_seats {
+                    members.insert(member.key.clone(), (formation, index));
+                } else {
+                    members.remove(&member.key);
+                }
+            }
+        }
+    }
+    if !event.co_authors.is_empty() {
+        for member in event.participants() {
+            members.entry(member.key.clone()).or_insert((index, index));
+        }
+    }
+    hold
+}
+
 pub(super) fn first_tick(start: Time) -> u64 {
     let mut low = 0;
     let mut high = u64::from(u32::MAX) * u64::from(TICK_RATE);
@@ -546,6 +615,33 @@ pub(super) fn first_tick(start: Time) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_retained_coauthor_keeps_the_original_rings_latest_cast() {
+        use crate::timeline::Identity;
+
+        let first = Identity::new("First", "first@example.invalid");
+        let partner = Identity::new("Partner", "partner@example.invalid");
+        let other = Identity::new("Other", "other@example.invalid");
+        let newcomer = Identity::new("New", "new@example.invalid");
+        let mut events = crate::timeline::synthetic();
+        events.truncate(4);
+        events[0].author = first.clone();
+        events[0].co_authors = vec![partner.clone()];
+        events[1].author = other;
+        events[1].co_authors = vec![partner.clone()];
+        events[2].author = first;
+        events[2].co_authors.clear();
+        events[3].author = partner;
+        events[3].co_authors = vec![newcomer];
+        crate::contributors::Mappings::default().apply(&mut events);
+
+        let mut members = std::collections::HashMap::new();
+        for index in 0..3 {
+            assert_eq!(ring_predecessor(&events, index, &mut members), None);
+        }
+        assert_eq!(ring_predecessor(&events, 3, &mut members), Some(2));
+    }
 
     #[test]
     fn a_dense_opening_shares_one_growth_interval() {

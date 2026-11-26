@@ -286,6 +286,7 @@ fn seat_order(
     state: &State,
     plan: &travel::Plan,
     previous: &[Option<Vec3>],
+    pinned: &[bool],
 ) -> Vec<(usize, bool)> {
     let mut order: Vec<_> = state
         .avatars
@@ -298,7 +299,7 @@ fn seat_order(
         .collect();
     order.sort_by_key(|&(index, parked)| {
         (
-            !state.avatars[index].transmitting,
+            !pinned[index],
             previous[index].is_none(),
             !parked,
             state.avatars[index].dock_since,
@@ -321,6 +322,19 @@ fn foreign_tile_contains(
     })
 }
 
+fn pinned_seats(state: &State, plan: &travel::Plan) -> Vec<bool> {
+    state
+        .avatars
+        .iter()
+        .enumerate()
+        .map(|(index, avatar)| {
+            avatar.transmitting
+                || state.casting_ring_seat(index).is_some()
+                    && !plan.travelling(index, state.tick)
+        })
+        .collect()
+}
+
 pub(super) fn clear_seat_transitions(
     state: &mut State,
     plan: &travel::Plan,
@@ -328,9 +342,10 @@ pub(super) fn clear_seat_transitions(
     max_step: f32,
 ) {
     let base = seating_base(state);
+    let pinned = pinned_seats(state, plan);
     let mut scales = state.member_scales();
     for (index, avatar) in state.avatars.iter().enumerate() {
-        if avatar.transmitting || avatar.dismissed {
+        if pinned[index] || avatar.dismissed {
             continue;
         }
         if let Some((centre, rim)) = state.ring_of(index)
@@ -343,14 +358,14 @@ pub(super) fn clear_seat_transitions(
     let birth_step = max_step
         + 2.0 * state.avatar_radius() * framing::WORLD_UNITS_PER_REFERENCE_PIXEL;
     let bounds = seat_bounds(state);
-    let order = seat_order(state, plan, previous);
+    let order = seat_order(state, plan, previous, &pinned);
     let mut placed: Vec<Disc> = Vec::with_capacity(order.len());
     let mut obstacles = Vec::with_capacity(order.len());
     let old_seats = previous_seats(state, previous, &scales, base);
     let now = super::tick_time(state.tick);
     for (rank, &(index, parked_here)) in order.iter().enumerate() {
         let avatar = &mut state.avatars[index];
-        let target = if !avatar.transmitting
+        let target = if !pinned[index]
             && !avatar.travelling
             && avatar
                 .slot
@@ -386,7 +401,7 @@ pub(super) fn clear_seat_transitions(
             }));
         }
         let mut point = target;
-        if !avatar.transmitting
+        if !pinned[index]
             && obstacles.iter().any(|disc| {
                 target.distance(disc.centre) < radius + disc.radius + SEAT_CLEARANCE
             })
@@ -422,6 +437,7 @@ pub(super) fn clear_seat_transitions(
         bounds,
         &order,
         &mut placed,
+        &pinned,
     );
 }
 
@@ -432,11 +448,12 @@ fn clear_remaining_parked_contacts(
     bounds: Rect,
     order: &[(usize, bool)],
     placed: &mut [Disc],
+    pinned: &[bool],
 ) {
     let mut obstacles = Vec::new();
     for (rank, &(index, parked)) in order.iter().enumerate() {
         let avatar = &state.avatars[index];
-        let can_yield = (parked || avatar.travelling) && !avatar.transmitting;
+        let can_yield = (parked || avatar.travelling) && !pinned[index];
         let Some(from) = previous[index].filter(|_| can_yield) else {
             continue;
         };

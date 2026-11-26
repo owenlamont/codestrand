@@ -19,6 +19,7 @@ pub(super) struct Policy<'a> {
 enum Motion {
     Exchange(Box<exchange::Exchange>),
     Chain(Box<exchange::Chain>),
+    ColumnTransfer(Box<exchange::ColumnTransfer>),
 }
 
 #[derive(Clone, Debug)]
@@ -46,14 +47,16 @@ impl Layout {
 
 impl Change {
     pub fn retained_bytes() -> u128 {
-        (std::mem::size_of::<Self>() + std::mem::size_of::<exchange::Chain>()) as u128
+        let route = std::mem::size_of::<exchange::Chain>()
+            .max(std::mem::size_of::<exchange::ColumnTransfer>());
+        (std::mem::size_of::<Self>() + route) as u128
     }
 
     pub fn duration(&self) -> usize {
-        if let Some(Motion::Chain(chain)) = &self.exchange {
-            chain.duration()
-        } else {
-            held::reflow_ticks()
+        match &self.exchange {
+            Some(Motion::Chain(chain)) => chain.duration(),
+            Some(Motion::ColumnTransfer(route)) => route.duration(),
+            _ => held::reflow_ticks(),
         }
     }
 
@@ -88,6 +91,7 @@ impl Change {
         Some(match &self.exchange {
             Some(Motion::Exchange(exchange)) => exchange.sample(from, to, elapsed),
             Some(Motion::Chain(chain)) => chain.sample(from, to, elapsed),
+            Some(Motion::ColumnTransfer(route)) => route.sample(from, to, elapsed),
             None => from.blend(to, held::reflow_ease(elapsed)),
         })
     }
@@ -328,6 +332,43 @@ pub(super) fn plan(
             chosen = chain;
         }
     }
+    if best.worst > super::DENSITY_TOLERANCE
+        && space.gap >= MOVING_GUTTER_PX
+        && policy.available >= held::reflow_ticks()
+    {
+        let forecast_baseline = Density::new(&chosen.1.tiles, policy.forecast);
+        let mut best_forecast = forecast_baseline;
+        for candidate in restack_candidates(nodes, &splits) {
+            let mut trial = nodes.to_vec();
+            for (index, node) in candidate.splits {
+                trial[index] = node;
+            }
+            let Some(allocation) = tiles(&trial, target, presence, space) else {
+                continue;
+            };
+            let cost = Density::new(&allocation, target);
+            let forecast = Density::new(&allocation, policy.forecast);
+            let to = Layout::new(&trial, allocation, space);
+            let motion = movement_cost(&from, &to, policy.stability, 2.0);
+            if !cost.improves_with_motion(best, baseline, [motion, best_motion])
+                || !forecast.improves(best_forecast, forecast_baseline)
+            {
+                continue;
+            }
+            if let Some(route) = exchange::ColumnTransfer::plan(
+                &from,
+                &to,
+                candidate.route,
+                space.field(super::framing::MARGIN),
+                policy.available.min(MAX_MOTION_TICKS),
+            ) {
+                best = cost;
+                best_motion = motion;
+                best_forecast = forecast;
+                chosen = (trial, to, Some(Motion::ColumnTransfer(Box::new(route))));
+            }
+        }
+    }
     let (nodes, to, exchange) = chosen;
     Some(Change {
         tick,
@@ -340,6 +381,93 @@ pub(super) fn plan(
 fn movement_cost(from: &Layout, to: &Layout, stability: f32, hops: f32) -> f32 {
     let relative = exchange::edge_travel(from, to) / super::framing::VIEWPORT.x;
     stability * (0.02 * hops + 0.06 * relative)
+}
+
+struct RestackTrial {
+    splits: [(usize, Node); 3],
+    route: exchange::Restack,
+}
+
+fn restack_candidates(nodes: &[Node], splits: &[usize]) -> Vec<RestackTrial> {
+    let mut candidates = Vec::new();
+    for &index in splits {
+        let Node::Split {
+            axis,
+            first,
+            second,
+        } = nodes[index]
+        else {
+            continue;
+        };
+        let across = 1 - axis;
+        let leaves = |row: usize| {
+            let Node::Split {
+                axis,
+                first,
+                second,
+            } = nodes[row]
+            else {
+                return None;
+            };
+            let (Node::Repository(a), Node::Repository(b)) =
+                (&nodes[first], &nodes[second])
+            else {
+                return None;
+            };
+            (axis == across).then_some([(first, *a), (second, *b)])
+        };
+        let (Some(first_row), Some(second_row)) = (leaves(first), leaves(second))
+        else {
+            continue;
+        };
+        let rows = [first_row, second_row];
+        for (moving_row, near) in rows.iter().enumerate() {
+            let far = rows[1 - moving_row];
+            for (staying_side, &(staying, stays)) in far.iter().enumerate() {
+                let [
+                    (moving, moves),
+                    (opposing_far, far_repository),
+                    (opposing_near, near_repository),
+                ] = [
+                    near[staying_side],
+                    far[1 - staying_side],
+                    near[1 - staying_side],
+                ];
+                let repositories = [stays, moves, far_repository, near_repository];
+                let split = |axis, first, second| Node::Split {
+                    axis,
+                    first,
+                    second,
+                };
+                let root = if staying_side == 0 {
+                    split(across, staying, first)
+                } else {
+                    split(across, first, staying)
+                };
+                let [outer, inner] = if moving_row == 0 {
+                    [
+                        split(axis, moving, second),
+                        split(axis, opposing_near, opposing_far),
+                    ]
+                } else {
+                    [
+                        split(axis, opposing_far, second),
+                        split(axis, opposing_near, moving),
+                    ]
+                };
+                candidates.push(RestackTrial {
+                    splits: [(index, root), (first, outer), (second, inner)],
+                    route: exchange::Restack {
+                        repositories,
+                        across_axis: across,
+                        starts_on_low_side: staying_side == 0,
+                        enters_at_low_end: moving_row == 0,
+                    },
+                });
+            }
+        }
+    }
+    candidates
 }
 
 fn chain_candidates(
@@ -637,9 +765,210 @@ fn compatible(from: &[Option<Tile>], to: &[Option<Tile>]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{Input, Packing, Sample, outline};
+    use super::super::{Input, Inputs, Packing, Sample, outline};
     use super::*;
+    use crate::layout::RepositoryRegion;
     use bevy::math::Vec2;
+
+    fn repositories_after_deletion() -> Packing {
+        let mut inputs = Inputs::new(600);
+        for tick in 0..600 {
+            let changed: u16 = if tick < 180 { 130 } else { 68 };
+            let specs = [
+                (124, 10.0, 3.0),
+                (57, 1.0, 8.0),
+                (13, 6.0, 1.0),
+                (122, 9.0, 12.0),
+                (47, 12.0, 12.0),
+                (changed, 3.0, 6.0),
+                (73, 5.0, 8.0),
+                (136, 3.0, 9.0),
+                (126, 7.0, 12.0),
+                (122, 3.0, 2.0),
+            ];
+            inputs.push(
+                specs
+                    .into_iter()
+                    .enumerate()
+                    .map(|(repo, (items, x, y))| {
+                        let items = f32::from(items);
+                        let extent = Vec2::new(x, y) * items.sqrt();
+                        RepositoryRegion {
+                            label: format!("Repo {repo}"),
+                            low: -extent,
+                            high: extent,
+                            outline: outline::rectangle(-extent, extent),
+                            items,
+                            live: true,
+                            tile: None,
+                            gutter: None,
+                            height: 0.105,
+                            rotated: false,
+                            stretch: Vec2::ONE,
+                        }
+                    })
+                    .collect(),
+            );
+        }
+        Packing::from_inputs(inputs, std::sync::Arc::default(), 8.0, 1.0, 1).unwrap()
+    }
+
+    #[test]
+    fn playback_exchanges_neighbours_after_a_sustained_deletion() {
+        let packing = repositories_after_deletion();
+        let change = packing
+            .reflows
+            .iter()
+            .find(|change| {
+                change.tick >= 180
+                    && matches!(change.exchange, Some(Motion::Exchange(_)))
+            })
+            .expect("the sampled repository history should schedule an exchange");
+        let tiles_at = |tick| {
+            let (regions, _, _) = packing.sample(tick).unwrap();
+            regions
+                .into_iter()
+                .map(|region| region.tile)
+                .collect::<Vec<_>>()
+        };
+        let begin = u64::try_from(change.tick).unwrap();
+        let end = begin + u64::try_from(change.duration()).unwrap();
+        let before = tiles_at(begin);
+        let after = tiles_at(end);
+        let counts = [
+            124.0, 57.0, 13.0, 122.0, 47.0, 68.0, 73.0, 136.0, 126.0, 122.0,
+        ];
+        assert!(
+            Density::new(&after, &counts).worst < Density::new(&before, &counts).worst
+        );
+        assert!((0..before.len()).any(|a| (0..before.len()).any(|b| {
+            let (before_a, before_b) = (before[a].unwrap(), before[b].unwrap());
+            let (after_a, after_b) = (after[a].unwrap(), after[b].unwrap());
+            (before_a.high.cmple(before_b.low) & after_b.high.cmple(after_a.low)).any()
+        })));
+        for tick in begin..=end {
+            let tiles = tiles_at(tick);
+            for (a, first) in tiles.iter().enumerate() {
+                let first = first.unwrap();
+                for second in &tiles[a + 1..] {
+                    let second = second.unwrap();
+                    let overlap =
+                        first.high.min(second.high) - first.low.max(second.low);
+                    assert!(overlap.min_element() <= 1e-5, "overlap at tick {tick}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_shrinking_tile_joins_the_other_column_within_the_motion_budget() {
+        use Node::Repository;
+
+        let split = |axis, first, second| Node::Split {
+            axis,
+            first,
+            second,
+        };
+        let stacked_pairs = [
+            split(0, 1, 4),
+            split(1, 2, 3),
+            Repository(0),
+            Repository(1),
+            split(1, 5, 6),
+            Repository(2),
+            Repository(3),
+        ];
+        let three_on_right = [
+            split(0, 1, 2),
+            Repository(0),
+            split(1, 3, 4),
+            Repository(1),
+            split(1, 5, 6),
+            Repository(2),
+            Repository(3),
+        ];
+        let initial = [300.0, 300.0, 30.0, 30.0];
+        let target = [300.0, 30.0, 30.0, 30.0];
+        let presence = [1.0; 4];
+        let space = Space::new(8.0, 1.0);
+        let density = |nodes: &[Node]| {
+            let bounds = tiles(nodes, &target, &presence, space).unwrap();
+            Density::new(&bounds, &target).worst
+        };
+        assert!(density(&stacked_pairs) > 0.8);
+        assert!(density(&three_on_right) < 0.03);
+
+        let first = plan(
+            180,
+            &stacked_pairs,
+            &initial,
+            &target,
+            &presence,
+            space,
+            ordinary(&target),
+        )
+        .unwrap();
+        assert!(density(&first.nodes) < density(&stacked_pairs));
+
+        let retry = |available, forecast| {
+            plan(
+                first.tick + first.duration(),
+                &first.nodes,
+                &target,
+                &target,
+                &presence,
+                space,
+                Policy {
+                    stability: 1.0,
+                    available,
+                    forecast,
+                },
+            )
+            .unwrap()
+        };
+        let transfer = retry(MAX_MOTION_TICKS, &target);
+        assert!(matches!(transfer.exchange, Some(Motion::ColumnTransfer(_))));
+        assert!(density(&transfer.nodes) < 0.03);
+        assert!(transfer.duration() <= MAX_MOTION_TICKS);
+
+        let too_short = retry(transfer.duration() - 1, &target);
+        assert!(too_short.duration() < transfer.duration());
+        assert!(density(&too_short.nodes) > super::super::DENSITY_TOLERANCE);
+        let reversed = retry(MAX_MOTION_TICKS, &initial);
+        assert!(density(&reversed.nodes) > super::super::DENSITY_TOLERANCE);
+
+        assert_safe_transfer(&transfer, space);
+    }
+
+    fn assert_safe_transfer(transfer: &Change, space: Space) {
+        let (from, to) = transfer.transition.as_ref().unwrap();
+        let field = space.field(super::super::framing::MARGIN);
+        let gutter_field = space.field(super::super::GUTTER_MARGIN);
+        let mut previous = from.clone();
+        for elapsed in 1..=transfer.duration() {
+            let next = transfer
+                .sample(transfer.tick + elapsed)
+                .unwrap_or_else(|| to.clone());
+            assert!(compatible(&previous.gutters, &next.gutters));
+            assert!(connected(&previous, &next, true));
+            assert!(exchange::edge_travel(&previous, &next) <= 8.001);
+            for (&tile, &gutter) in next.tiles.iter().zip(&next.gutters) {
+                let (tile, gutter) = (tile.unwrap(), gutter.unwrap());
+                assert!(tile.low.cmpge(gutter.low).all());
+                assert!(tile.high.cmple(gutter.high).all());
+                assert!(tile.low.cmpge(field.low - Vec2::splat(1e-5)).all());
+                assert!(tile.high.cmple(field.high + Vec2::splat(1e-5)).all());
+                assert!(gutter.low.cmpge(gutter_field.low - Vec2::splat(1e-5)).all());
+                assert!(
+                    gutter
+                        .high
+                        .cmple(gutter_field.high + Vec2::splat(1e-5))
+                        .all()
+                );
+            }
+            previous = next;
+        }
+    }
 
     fn ordinary(target: &[f32]) -> Policy<'_> {
         Policy {

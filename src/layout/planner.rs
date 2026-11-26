@@ -9,6 +9,8 @@ use crate::{
     timeline::{Event, Kind},
 };
 
+mod tree;
+
 const SAMPLE_TICKS: usize = 15;
 const GAP: f32 = 0.08;
 pub(super) const RELEASE_RADIUS: f32 = 0.05;
@@ -21,16 +23,6 @@ pub(super) struct Plan {
     origin: Time,
     step: f32,
     seconds: f64,
-}
-
-#[derive(Clone, Copy, Debug)]
-enum Region {
-    Directory(usize),
-    Split {
-        left: usize,
-        right: usize,
-        axis: usize,
-    },
 }
 
 impl Plan {
@@ -65,19 +57,13 @@ impl Plan {
             }
         }
         let (required, step) = occupancy(layout, events, starts, skip, progress);
-        let peak: Vec<_> = required
-            .iter()
-            .map(|row| row.iter().copied().fold(0.0, f32::max))
-            .collect();
-        let mut regions = Vec::new();
-        let mut sizes = Vec::new();
         let mut children = vec![Vec::new(); layout.dir_count()];
         for (index, dir) in layout.dirs.iter().enumerate() {
             if let Some(parent) = dir.parent {
                 children[parent].push(index);
             }
         }
-        let root = subtree(&children, 0, &peak, &mut regions, &mut sizes);
+        let tree = tree::Tree::new(&children, &required);
         let mut windows = vec![8_usize; required[0].len()];
         let mut pass = 1;
         let mut samples = loop {
@@ -101,7 +87,7 @@ impl Plan {
                         spread(&spread(&maximum(row, 2), &windows), &windows)
                     })
                     .collect();
-                pack(&regions, root, &reserved, |done, total| {
+                tree.pack(&reserved, |done, total| {
                     report(1, done, total);
                 })
             };
@@ -185,12 +171,25 @@ fn interpolator(time: Time, step: f32, length: usize) -> impl Fn(&[Vec2]) -> Vec
         (index + 2).min(length - 1),
     ];
     move |row| {
+        let position = row[controls[0]];
+        if controls.iter().all(|&index| row[index] == position) {
+            return position;
+        }
         controls
             .into_iter()
             .zip(weights)
             .map(|(index, weight)| row[index] * (weight / 6.0))
             .sum()
     }
+}
+
+#[cfg(test)]
+#[test]
+fn identical_spline_controls_keep_large_coordinates_exactly() {
+    let position = Vec2::new(4_194_304.0, 2_097_143_611_392.0);
+    let row = [position; 4];
+    let at = interpolator(Time::seconds(2.0 / 60.0), 0.25, row.len());
+    assert_eq!(at(&row), position);
 }
 
 fn occupancy(
@@ -472,118 +471,6 @@ fn anchor_motion(
             row[sample] -= shift;
         }
     }
-}
-
-fn subtree(
-    children: &[Vec<usize>],
-    dir: usize,
-    peak: &[f32],
-    regions: &mut Vec<Region>,
-    sizes: &mut Vec<Vec2>,
-) -> usize {
-    let own = regions.len();
-    regions.push(Region::Directory(dir));
-    sizes.push(Vec2::splat(2.0 * peak[dir] + GAP));
-    let mut entries = vec![own];
-    for &child in &children[dir] {
-        entries.push(subtree(children, child, peak, regions, sizes));
-    }
-    combine(&entries, regions, sizes)
-}
-
-fn combine(
-    entries: &[usize],
-    regions: &mut Vec<Region>,
-    sizes: &mut Vec<Vec2>,
-) -> usize {
-    if entries.len() == 1 {
-        return entries[0];
-    }
-    let total: f32 = entries
-        .iter()
-        .map(|&entry| sizes[entry].element_product())
-        .sum();
-    let mut accumulated = 0.0;
-    let mut middle = 1;
-    let mut imbalance = f32::INFINITY;
-    for (offset, &entry) in entries[..entries.len() - 1].iter().enumerate() {
-        accumulated += sizes[entry].element_product();
-        let difference = (total * 0.5 - accumulated).abs();
-        if difference < imbalance {
-            imbalance = difference;
-            middle = offset + 1;
-        }
-    }
-    let left = combine(&entries[..middle], regions, sizes);
-    let right = combine(&entries[middle..], regions, sizes);
-    let a = sizes[left];
-    let b = sizes[right];
-    let horizontal = Vec2::new(a.x + b.x, a.y.max(b.y));
-    let vertical = Vec2::new(a.x.max(b.x), a.y + b.y);
-    let aspect = |size: Vec2| (size.x / size.y).ln().abs();
-    let axis = usize::from(aspect(vertical) < aspect(horizontal));
-    let index = regions.len();
-    regions.push(Region::Split { left, right, axis });
-    sizes.push(if axis == 0 { horizontal } else { vertical });
-    index
-}
-
-fn pack(
-    regions: &[Region],
-    root: usize,
-    reserved: &[Vec<f32>],
-    report: impl Fn(usize, usize),
-) -> Vec<Vec<Vec2>> {
-    let (samples, residual) = pack_with_residual(regions, root, reserved, report);
-    assert!(residual < 0.001, "region separation residual: {residual}");
-    samples
-}
-
-fn pack_with_residual(
-    regions: &[Region],
-    root: usize,
-    reserved: &[Vec<f32>],
-    report: impl Fn(usize, usize),
-) -> (Vec<Vec<Vec2>>, f32) {
-    let samples = reserved[0].len();
-    let mut result = vec![vec![Vec2::ZERO; samples]; reserved.len()];
-    let mut sizes = vec![Vec2::ZERO; regions.len()];
-    let mut offsets = vec![Vec2::ZERO; regions.len()];
-    let mut residual = 0.0_f32;
-    for sample in 0..samples {
-        report(sample, samples);
-        for (index, region) in regions.iter().enumerate() {
-            sizes[index] = match *region {
-                Region::Directory(dir) => Vec2::splat(reserved[dir][sample] * 2.0),
-                Region::Split { left, right, axis } => {
-                    let mut size = sizes[left].max(sizes[right]);
-                    size[axis] = sizes[left][axis] + sizes[right][axis] + GAP;
-                    size
-                }
-            };
-        }
-        offsets[root] = Vec2::ZERO;
-        for (index, region) in regions.iter().enumerate().rev() {
-            match *region {
-                Region::Directory(dir) => result[dir][sample] = offsets[index],
-                Region::Split { left, right, axis } => {
-                    offsets[left] = offsets[index];
-                    offsets[right] = offsets[index];
-                    offsets[left][axis] -= sizes[right][axis].midpoint(GAP);
-                    offsets[right][axis] += sizes[left][axis].midpoint(GAP);
-                    let gap = offsets[right][axis]
-                        - offsets[left][axis]
-                        - sizes[left][axis].midpoint(sizes[right][axis]);
-                    residual = residual.max(GAP - gap);
-                }
-            }
-        }
-        let anchor = result[0][sample];
-        for row in &mut result {
-            row[sample] -= anchor;
-        }
-    }
-    (result, residual)
 }
 
 impl Layout {
@@ -938,25 +825,6 @@ mod tests {
     }
 
     #[test]
-    fn subtree_packing_reports_its_separation_residual() {
-        let regions = [
-            Region::Directory(0),
-            Region::Directory(1),
-            Region::Split {
-                left: 0,
-                right: 1,
-                axis: 0,
-            },
-        ];
-        let (_, residual) = pack_with_residual(
-            &regions,
-            2,
-            &[vec![100.0, 0.0], vec![0.0, 100.0]],
-            |_, _| {},
-        );
-        assert!(residual < 0.001);
-    }
-    #[test]
     fn global_sibling_order_never_changes_even_when_later_paths_sort_first() {
         let events = burst();
         let layout = Layout::planned(&events);
@@ -1084,55 +952,6 @@ mod tests {
                 })
                 .collect();
             assert_eq!(maximum(&values, window), expected);
-        }
-    }
-
-    #[test]
-    fn packing_releases_capacity_and_preserves_split_gaps() {
-        let regions = [
-            Region::Directory(0),
-            Region::Directory(1),
-            Region::Split {
-                left: 0,
-                right: 1,
-                axis: 0,
-            },
-        ];
-        let samples = pack(&regions, 2, &[vec![4.0, 1.0], vec![1.0, 1.0]], |_, _| {});
-        assert!((samples[1][0].length() - 5.0 - GAP).abs() < 0.0001);
-        assert!((samples[1][1].length() - 2.0 - GAP).abs() < 0.0001);
-    }
-
-    #[test]
-    fn subtree_separation_survives_interpolation_during_opposing_growth() {
-        let radii = [vec![4.0, 0.4], vec![0.4, 3.0], vec![2.0, 1.0]];
-        let regions = [
-            Region::Directory(0),
-            Region::Directory(1),
-            Region::Split {
-                left: 0,
-                right: 1,
-                axis: 0,
-            },
-            Region::Directory(2),
-            Region::Split {
-                left: 2,
-                right: 3,
-                axis: 1,
-            },
-        ];
-        let positions = pack(&regions, 4, &radii, |_, _| {});
-        for fraction in [0.0, 0.25, 0.5, 0.75, 1.0] {
-            let position =
-                |index: usize| positions[index][0].lerp(positions[index][1], fraction);
-            let radius = |index: usize| {
-                radii[index][0] * (1.0 - fraction) + radii[index][1] * fraction
-            };
-            for a in 0..3 {
-                for b in a + 1..3 {
-                    assert!(position(a).distance(position(b)) >= radius(a) + radius(b));
-                }
-            }
         }
     }
 

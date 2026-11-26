@@ -129,7 +129,7 @@ impl Snapshots {
                     .map(|&p| {
                         place_point(
                             ground(p),
-                            regions[frame.repository].rotated,
+                            &regions[frame.repository],
                             scales[frame.repository],
                             origin,
                         )

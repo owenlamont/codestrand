@@ -32,6 +32,7 @@ impl Simulation {
         self.clock = schedule::Clock::new(history.clone(), self.schedule.clone());
         self.departures = departures.iter().map(|&t| self.clock.present(t)).collect();
         self.births = self.births_for(&self.schedule);
+        self.replan_display_aspects();
     }
 
     fn finish_window(&mut self, end: Time, complete: bool) -> anyhow::Result<u64> {
@@ -65,6 +66,11 @@ impl Simulation {
             }
             self.trace.add_ticks(&mut self.tick_times);
         }
+        let clock = &self.clock;
+        let births = &self.births;
+        self.packing.checkpoint_display_aspects(boundary, |tick| {
+            Self::packing_rows(clock, births, tick)
+        });
         self.boundaries.push(self.state.0.clone());
         if self.trace.on() {
             eprintln!(
@@ -358,7 +364,7 @@ impl Simulation {
             repository_exits: self.repository_exits.clone(),
             caption_style: self.caption_style,
             caption_plan: self.caption_plan.clone(),
-            packing: self.packing.clone(),
+            packing: self.packing.for_playback(),
             envelopes: self.envelopes.clone(),
             repository_boundary: self.repository_boundary,
             collapse_directories: self.collapse_directories,

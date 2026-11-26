@@ -78,7 +78,16 @@ pub(super) fn anchored_scale(
     anchor: Vec2,
 ) -> (Vec2, f32) {
     let (low, high) = outline::bounds(points);
-    let centre = (low + high) * 0.5;
+    anchored_at(tile, points, height, anchor, low.midpoint(high))
+}
+
+pub(super) fn anchored_at(
+    tile: Tile,
+    points: &[Vec2],
+    height: f32,
+    anchor: Vec2,
+    centre: Vec2,
+) -> (Vec2, f32) {
     let local: Vec<_> = points.iter().map(|p| *p - centre).collect();
     let origin = framing::field_to_world(tile.low + (tile.high - tile.low) * anchor);
     let scale = planes(tile, &local, height)

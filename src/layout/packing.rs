@@ -5,6 +5,7 @@ use bevy::math::{FloatExt, Vec2};
 use super::{RepositoryRegion, outline};
 use crate::model::{BIRTH_TICKS, caption, framing};
 
+mod aspect;
 mod fit;
 mod held;
 mod reflow;
@@ -1035,6 +1036,7 @@ struct Placement {
     gutter: Option<Tile>,
     origin: Vec2,
     scale: f32,
+    center: Vec2,
 }
 
 fn gutter_cells(
@@ -1116,6 +1118,10 @@ pub(crate) struct Packing {
     samples: Arc<[Sample]>,
     rotated: Vec<bool>,
     content_scales: Arc<[f32]>,
+    center_jumps: Arc<[(usize, Vec2)]>,
+    aspects: aspect::Plan,
+    display_aspects: Option<aspect::Plan>,
+    aspect_checkpoint: Option<aspect::Plan>,
     exits: Arc<[Option<crate::model::RepositoryExit>]>,
     tiling: TilingCache,
     /// Tiles every sample from scratch; tests compare against it.
@@ -1194,6 +1200,7 @@ impl Input {
             tile: None,
             gutter: None,
             rotated: false,
+            stretch: Vec2::ONE,
         }
     }
 }
@@ -1227,12 +1234,27 @@ fn rotations(
 }
 
 impl Packing {
+    pub(crate) fn for_playback(&self) -> Self {
+        Self {
+            aspect_checkpoint: None,
+            ..self.clone()
+        }
+    }
+
     pub(crate) fn replay_bytes(&self) -> u128 {
         use crate::model::checkpoint_memory::{buffer_bytes, retained_fields};
 
-        let (nodes, rotated, birth_order, opening) = retained_fields!(self, Packing {
-            nodes, rotated, birth_order, opening;
-            gutter_scale, growth, reflows, labels, inputs, samples, exits, content_scales,
+        let (
+            nodes,
+            rotated,
+            birth_order,
+            opening,
+            aspects,
+            display_aspects,
+            aspect_checkpoint,
+        ) = retained_fields!(self, Packing {
+            nodes, rotated, birth_order, opening, aspects, display_aspects, aspect_checkpoint;
+            gutter_scale, growth, reflows, labels, inputs, samples, exits, content_scales, center_jumps,
             tiling, fresh_tiling,
         });
         let opening = opening.as_ref().map_or(0, |opening| {
@@ -1244,6 +1266,13 @@ impl Packing {
             + buffer_bytes::<bool>(rotated.capacity())
             + buffer_bytes::<usize>(birth_order.len() + 2)
             + opening
+            + aspects.replay_bytes()
+            + display_aspects
+                .as_ref()
+                .map_or(0, aspect::Plan::replay_bytes)
+            + aspect_checkpoint
+                .as_ref()
+                .map_or(0, aspect::Plan::replay_bytes)
     }
 
     pub(crate) fn input_bytes() -> usize {
@@ -1526,7 +1555,6 @@ impl Packing {
                         .is_none_or(|change| change.tick > opening.end)
                 });
         let rotated = rotations(&nodes, &regions, &samples, space);
-        drop(items);
         let mut packing = Self {
             gutter_scale,
             growth: space.growth,
@@ -1539,11 +1567,21 @@ impl Packing {
             samples: samples.into(),
             rotated,
             content_scales: Arc::default(),
+            center_jumps: Arc::default(),
+            aspects: aspect::Plan::default(),
+            display_aspects: None,
+            aspect_checkpoint: None,
             exits,
             tiling: TilingCache::default(),
             fresh_tiling: false,
         };
+        packing.center_jumps = packing.plan_center_jumps(&items);
         packing.content_scales = packing.plan_content_scales();
+        packing.aspects = packing.build_aspects(
+            u64::try_from(packing.inputs.len() - 1).expect("bounded packing rows"),
+            None,
+            |tick| (tick, tick, Vec::new()),
+        );
         Ok(packing)
     }
 
@@ -1576,7 +1614,7 @@ impl Packing {
         presence: Option<&[f32]>,
         selected: impl Fn(usize) -> bool,
     ) -> Option<(Vec<RepositoryRegion>, Vec<Vec2>, Vec<f32>)> {
-        self.sample_rows(tick, tick, &[], presence, selected)
+        self.sample_rows(tick, tick, &[], presence, false, selected)
     }
 
     pub(crate) fn sample_split(
@@ -1586,7 +1624,7 @@ impl Packing {
         births: &[(usize, u64)],
         repositories: Option<&[usize]>,
     ) -> Option<(Vec<RepositoryRegion>, Vec<Vec2>, Vec<f32>)> {
-        self.sample_rows(tiles, content, births, None, |index| {
+        self.sample_rows(tiles, content, births, None, true, |index| {
             repositories.is_none_or(|selected| selected.contains(&index))
         })
     }
@@ -1668,6 +1706,7 @@ impl Packing {
         tick: u64,
         births: &[(usize, u64)],
         presence: Option<&[f32]>,
+        presented: bool,
         selected: impl Fn(usize) -> bool,
     ) -> Option<(Vec<RepositoryRegion>, Vec<Vec2>, Vec<f32>)> {
         let tick = usize::try_from(tick)
@@ -1678,6 +1717,12 @@ impl Packing {
             .min(self.samples.len() - 1);
         let sample = &self.samples[tiles];
         let placement = self.fit_rows(tiles, tick, births, presence, None);
+        let plan = if presented {
+            self.display_aspects.as_ref().unwrap_or(&self.aspects)
+        } else {
+            &self.aspects
+        };
+        let aspect_tick = u64::try_from(tiles).expect("bounded tile row");
         let mut regions: Vec<_> = self.inputs[tick]
             .iter()
             .zip(self.labels.iter())
@@ -1686,21 +1731,38 @@ impl Packing {
         let mut origins = Vec::with_capacity(regions.len());
         let mut scales = Vec::with_capacity(regions.len());
         for (i, r) in regions.iter_mut().enumerate() {
-            let turn = |p: Vec2| if self.rotated[i] { p.perp() } else { p };
+            let stretch = plan.sample(i, aspect_tick);
+            let turn = |p: Vec2| (if self.rotated[i] { p.perp() } else { p }) * stretch;
             let tile = placement[i].tile.filter(|_| selected(i));
-            let origin = if tile.is_some() {
+            let mut origin = if tile.is_some() {
                 placement[i].origin
             } else {
                 Vec2::ZERO
             };
-            let scale = if tile.is_some() {
+            let mut scale = if tile.is_some() {
                 placement[i].scale
             } else {
                 0.0
             };
-            let (low, high) = (turn(r.low), turn(r.high));
-            r.low = low.min(high) * scale + origin;
-            r.high = low.max(high) * scale + origin;
+            let center = placement[i].center * stretch;
+            if stretch != Vec2::ONE
+                && let Some(tile) = tile
+            {
+                let shape: Vec<_> = r.outline.iter().copied().map(turn).collect();
+                scale = scale.min(self.fit_scale(tile, &shape, r.height, center));
+                origin = framing::field_to_world(tile.low.midpoint(tile.high))
+                    - center * scale;
+            }
+            let low = turn(r.low);
+            let high = turn(r.high);
+            if self.center_jumps.is_empty() {
+                r.low = low.min(high) * scale + origin;
+                r.high = low.max(high) * scale + origin;
+            } else {
+                let radius = (low - center).abs().max((high - center).abs());
+                r.low = (center - radius) * scale + origin;
+                r.high = (center + radius) * scale + origin;
+            }
             r.height *= scale;
             r.live &= tile.is_some();
             r.tile = tile;
@@ -1718,6 +1780,7 @@ impl Packing {
                         .unwrap_or(1.0)
                         .clamp(0.0, 1.0));
             r.rotated = self.rotated[i];
+            r.stretch = stretch;
             for point in &mut r.outline {
                 *point = turn(*point) * scale + origin;
             }
@@ -2012,16 +2075,16 @@ impl Packing {
             .map(|(i, r)| {
                 let shape = r.shape(self.rotated[i]);
                 let tile = layout.tiles[i];
+                let center = self.content_center(tick, &shape);
                 let (origin, scale) = tile.map_or((Vec2::ZERO, 0.0), |tile| {
                     let mut scale = self.content_scales[tile_tick * repositories + i];
                     if tile_tick != tick
                         || !births.is_empty()
                         || presence.is_some_and(|mask| mask.iter().any(|&p| p < 1.0))
                     {
-                        scale = scale.min(self.fit_scale(tile, &shape, r.height));
+                        scale =
+                            scale.min(self.fit_scale(tile, &shape, r.height, center));
                     }
-                    let (low, high) = outline::bounds(&shape);
-                    let center = (low + high) * 0.5;
                     let origin = framing::field_to_world(tile.low.midpoint(tile.high))
                         - center * scale;
                     (origin, scale)
@@ -2031,17 +2094,146 @@ impl Packing {
                     gutter: layout.gutters[i],
                     origin,
                     scale,
+                    center,
                 }
             })
             .collect()
     }
 
-    fn fit_scale(&self, tile: Tile, shape: &[Vec2], height: f32) -> f32 {
-        fit::anchored_scale(
+    fn build_aspects(
+        &self,
+        end: u64,
+        checkpoint: Option<&aspect::Plan>,
+        mut rows: impl FnMut(u64) -> (u64, u64, Vec<(usize, u64)>),
+    ) -> aspect::Plan {
+        if self.rotated.len() < 2 || self.inputs.is_empty() {
+            return aspect::Plan::default();
+        }
+        let mut tiling = Tiling::default();
+        aspect::Plan::build(self.rotated.len(), end, checkpoint, |shown, tracks| {
+            let (tiles, content, births) = rows(shown);
+            let max = self.inputs.len() - 1;
+            let tiles = usize::try_from(tiles).unwrap_or(usize::MAX).min(max);
+            let content = usize::try_from(content).unwrap_or(usize::MAX).min(max);
+            let layout = self.layout_at(tiles, &births, None, Some(&mut tiling));
+            let shared_field = layout.tiles.iter().flatten().nth(1).is_some();
+            for (repo, (track, tile)) in tracks.iter_mut().zip(layout.tiles).enumerate()
+            {
+                track.observe(
+                    u64::try_from(tiles).expect("bounded tile row"),
+                    tile,
+                    // A newly arrived repository can grow abruptly after its first idle gap.
+                    shared_field && self.inputs[0][repo].live,
+                    |tile| self.aspect_target(repo, tile, tiles, content),
+                );
+            }
+        })
+    }
+
+    pub(crate) fn replan_display_aspects(
+        &mut self,
+        end: u64,
+        rows: impl FnMut(u64) -> (u64, u64, Vec<(usize, u64)>),
+    ) {
+        self.display_aspects =
+            Some(self.build_aspects(end, self.aspect_checkpoint.as_ref(), rows));
+    }
+
+    pub(crate) fn checkpoint_display_aspects(
+        &mut self,
+        boundary: u64,
+        rows: impl FnMut(u64) -> (u64, u64, Vec<(usize, u64)>),
+    ) {
+        self.aspect_checkpoint =
+            Some(self.build_aspects(boundary, self.aspect_checkpoint.as_ref(), rows));
+    }
+
+    fn aspect_target(
+        &self,
+        repo: usize,
+        tile: Tile,
+        tiles: usize,
+        content: usize,
+    ) -> Vec2 {
+        let input = &self.inputs[content][repo];
+        let shape = input.shape(self.rotated[repo]);
+        let (low, high) = outline::bounds(&shape);
+        let (tile_low, tile_high) = outline::bounds(&tile.usable().ground());
+        let room = (tile_high - tile_low) / (high - low).max(Vec2::splat(1e-5));
+        let desired = (room / room.min_element()).clamp(Vec2::ONE, Vec2::splat(4.0));
+        let center = self.content_center(content, &shape);
+        let scale = self.content_scales[tiles * self.rotated.len() + repo]
+            .min(self.fit_scale(tile, &shape, input.height, center));
+        let mut expanded = shape.to_vec();
+        let mut fits = 0.0_f32;
+        let mut fails = 1.0;
+        for _ in 0..10 {
+            let mix = fits.midpoint(fails);
+            let stretch = Vec2::ONE.lerp(desired, mix);
+            for (point, &original) in expanded.iter_mut().zip(shape.iter()) {
+                *point = original * stretch;
+            }
+            if self.fit_scale(tile, &expanded, input.height, center * stretch) >= scale
+            {
+                fits = mix;
+            } else {
+                fails = mix;
+            }
+        }
+        Vec2::ONE.lerp(desired, fits)
+    }
+    fn plan_center_jumps(&self, items: &[Vec<f32>]) -> Arc<[(usize, Vec2)]> {
+        // Keep the fit used by shared-gutter travel planning for multi-repository playback.
+        if self.rotated.len() != 1 {
+            return Arc::default();
+        }
+        self.inputs
+            .windows(2)
+            .enumerate()
+            .filter_map(|(index, rows)| {
+                let before = &rows[0][0];
+                let after = &rows[1][0];
+                let delta =
+                    after.low.midpoint(after.high) - before.low.midpoint(before.high);
+                let delta = if self.rotated[0] { delta.perp() } else { delta };
+                (before.live
+                    && after.live
+                    && items[index][0] > 1.0
+                    && delta.length_squared() > 0.25)
+                    .then_some((index + 1, delta))
+            })
+            .collect()
+    }
+
+    fn content_center(&self, tick: usize, shape: &[Vec2]) -> Vec2 {
+        const TRANSITION: usize = 30;
+        let (low, high) = outline::bounds(shape);
+        let mut center = low.midpoint(high);
+        let jumps = &self.center_jumps;
+        let first = jumps.partition_point(|&(knot, _)| knot + TRANSITION <= tick);
+        for &(knot, delta) in &jumps[first..] {
+            let start = knot.saturating_sub(TRANSITION);
+            if tick < start {
+                break;
+            }
+            let span = u16::try_from(knot + TRANSITION - start)
+                .expect("centre transition fits u16");
+            let elapsed =
+                u16::try_from(tick - start).expect("transition contains tick");
+            let t = f32::from(elapsed) / f32::from(span);
+            let eased = t * t * (3.0 - 2.0 * t);
+            center += delta * (eased - f32::from(u8::from(tick >= knot)));
+        }
+        center
+    }
+
+    fn fit_scale(&self, tile: Tile, shape: &[Vec2], height: f32, center: Vec2) -> f32 {
+        fit::anchored_at(
             tile.usable(),
             shape,
             height / self.overview_growth(),
             Vec2::splat(0.5),
+            center,
         )
         .1
     }
@@ -2065,8 +2257,14 @@ impl Packing {
                 });
                 areas.push(live.map_or(0.0, Tile::area));
                 scales.push(tile.map_or(1.0, |tile| {
-                    self.fit_scale(tile, &input.shape(self.rotated[i]), input.height)
-                        .min(32.0)
+                    let shape = input.shape(self.rotated[i]);
+                    self.fit_scale(
+                        tile,
+                        &shape,
+                        input.height,
+                        self.content_center(tick, &shape),
+                    )
+                    .min(32.0)
                 }));
             }
         }
@@ -2074,7 +2272,8 @@ impl Packing {
         let permitted = |from, to, scale: f32| {
             let (a, b) = (areas[from], areas[to]);
             (a > 0.0 && b > 0.0).then(|| {
-                if b > a + 1e-6 {
+                // Reuse space freed by a deletion during forward playback.
+                if b > a + 1e-6 || (to > from && b + 1e-6 >= a) {
                     (scale * 0.005).clamp(0.002, 0.02)
                 } else {
                     0.0
@@ -2135,6 +2334,7 @@ mod tests {
                 outline: outline::rectangle(-Vec2::ONE, Vec2::ONE),
                 height: 0.105,
                 rotated: false,
+                stretch: Vec2::ONE,
             })
             .collect()
     }
@@ -2362,6 +2562,7 @@ mod tests {
                             outline: outline::rectangle(-size, size),
                             height: 0.105,
                             rotated: false,
+                            stretch: Vec2::ONE,
                         }
                     })
                     .collect()

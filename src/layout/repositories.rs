@@ -126,6 +126,7 @@ impl RegionSample {
                     outline,
                     height: geometry.file_max.y,
                     rotated: false,
+                    stretch: Vec2::ONE,
                 }
             })
             .collect()
@@ -198,6 +199,7 @@ impl Layout {
             outline: Vec::new(),
             height: 0.0,
             rotated: false,
+            stretch: Vec2::ONE,
         };
         self.repositories.push(region);
         let base = self.dirs.len();
@@ -275,12 +277,64 @@ impl Layout {
         for dir in &mut self.dirs {
             dir.position = dir.local_position;
             dir.scale = 1.0;
+            dir.stretch = Vec2::ONE;
         }
         for file in self.files.values_mut() {
             file.position = file.local_position;
         }
         self.placed = false;
     }
+    pub(crate) fn constrain_directory_fit(
+        &self,
+        regions: &mut [RepositoryRegion],
+        origins: &mut [Vec2],
+        scales: &mut [f32],
+    ) {
+        if self.placed {
+            return;
+        }
+        let mut limits: Vec<_> = regions
+            .iter()
+            .map(|region| {
+                region.tile.map(|tile| {
+                    let (low, high) = super::outline::bounds(&tile.usable().ground());
+                    (low.midpoint(high), (high - low) * 0.5, 1.0_f32)
+                })
+            })
+            .collect();
+        for (_, dir) in self.dirs() {
+            let repo = dir.repository;
+            let Some((center, half, fraction)) = &mut limits[repo] else {
+                continue;
+            };
+            let local = regions[repo].local_axes(dir.position);
+            let scale = scales[repo];
+            let position = local * scale + origins[repo];
+            let extent = (position - *center).abs()
+                + regions[repo].stretch * (dir.radius() * scale);
+            if extent.cmpgt(*half).any() {
+                *fraction = fraction.min((*half / extent).min_element() * 0.999);
+            }
+        }
+        for (repo, limit) in limits.into_iter().enumerate() {
+            let Some((center, _, fraction)) =
+                limit.filter(|(_, _, fraction)| *fraction < 1.0)
+            else {
+                continue;
+            };
+            let scale = |point| center + (point - center) * fraction;
+            let region = &mut regions[repo];
+            origins[repo] = scale(origins[repo]);
+            scales[repo] *= fraction;
+            region.low = scale(region.low);
+            region.high = scale(region.high);
+            region.height *= fraction;
+            for point in &mut region.outline {
+                *point = scale(*point);
+            }
+        }
+    }
+
     pub(crate) fn place_regions(
         &mut self,
         regions: Vec<RepositoryRegion>,
@@ -292,22 +346,15 @@ impl Layout {
         for dir in &mut self.dirs {
             dir.local_position = dir.position;
             dir.scale = scales[dir.repository];
-            let position = if regions[dir.repository].rotated {
-                dir.position.perp()
-            } else {
-                dir.position
-            };
+            dir.stretch = regions[dir.repository].stretch;
+            let position = regions[dir.repository].local_axes(dir.position);
             dir.position = position * dir.scale + offsets[dir.repository];
         }
         if files != super::FileMotion::Hold {
             for file in self.files.values_mut() {
                 file.local_position = file.position;
                 let dir = &self.dirs[file.dir];
-                let position = if regions[dir.repository].rotated {
-                    file.position.perp()
-                } else {
-                    file.position
-                };
+                let position = regions[dir.repository].local_axes(file.position);
                 file.position = position * dir.scale + offsets[dir.repository];
             }
         }

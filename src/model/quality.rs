@@ -143,12 +143,18 @@ impl FileClearance {
             }
             let radius = 0.27 * presence;
             let own = layout.dir(file.dir);
-            let outside = file.position.distance(own.position) + radius - own.radius();
+            let outside =
+                footprint_distance(file.position - own.position, own.footprint_radii())
+                    + radius;
             result.outside_own_ticks += u64::from(outside > 0.0001);
             result.worst_outside_depth = result.worst_outside_depth.max(outside);
             for (_, dir) in layout.dirs().filter(|(id, _)| *id != file.dir) {
-                let depth =
-                    dir.radius() + radius - file.position.distance(dir.position);
+                let offset = file.position - dir.position;
+                let radii = dir.footprint_radii();
+                if offset.abs().cmpge(radii + radius).any() {
+                    continue;
+                }
+                let depth = radius - footprint_distance(offset, radii);
                 result.foreign_pair_ticks += u64::from(depth > 0.0001);
                 result.worst_foreign_depth = result.worst_foreign_depth.max(depth);
             }
@@ -338,9 +344,226 @@ pub(crate) fn run(
     Ok(())
 }
 
+fn footprint_distance(offset: Vec2, radii: Vec2) -> f32 {
+    use bevy::math::DVec2;
+
+    if radii.x.to_bits() == radii.y.to_bits() {
+        return offset.length() - radii.x;
+    }
+
+    let mut point = offset.abs().as_dvec2();
+    let mut axes = radii.as_dvec2();
+    if axes.x < axes.y {
+        point = DVec2::new(point.y, point.x);
+        axes = DVec2::new(axes.y, axes.x);
+    }
+    let squared = axes * axes;
+    let difference = squared.x - squared.y;
+    let inside = (point / axes).length_squared() < 1.0;
+
+    // The closest point lies in the same quadrant. On the major axis it can
+    // either be the tip or have a nonzero minor coordinate.
+    let closest = if point.y == 0.0 {
+        let u = (axes.x * point.x / difference).min(1.0);
+        axes * DVec2::new(u, (1.0 - u * u).sqrt())
+    } else {
+        // Bisect the monotone ellipse constraint on its positive multiplier.
+        let product = axes * point;
+        let bias = DVec2::new(difference, 0.0);
+        let mut low = product.y;
+        let mut high = product.length();
+        let axis_ratio = product.x / difference;
+        if axis_ratio < 1.0 {
+            high = high.min(product.y / (1.0 - axis_ratio * axis_ratio).sqrt());
+        }
+        for _ in 0..36 {
+            let middle = low.midpoint(high);
+            if (product / (bias + middle)).length_squared() > 1.0 {
+                low = middle;
+            } else {
+                high = middle;
+            }
+        }
+        squared * point / (bias + low.midpoint(high))
+    };
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "distance uses world precision"
+    )]
+    let distance = (closest - point).length() as f32;
+    if inside { -distance } else { distance }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn representative_glyph_widths(
+        simulation: &Simulation,
+        files_per_repo: &[usize],
+    ) -> Vec<f32> {
+        use crate::layout::Presence;
+
+        let layout = simulation.layout();
+        let (focus, distance) = simulation.view();
+        let eye = focus + view_direction() * distance;
+        let glyph = simulation.theme().glyph_transform();
+        let corners = [
+            Vec3::new(-0.5, -0.5, 0.0),
+            Vec3::new(0.5, -0.5, 0.0),
+            Vec3::new(-0.5, 0.5, 0.0),
+            Vec3::new(0.5, 0.5, 0.0),
+        ]
+        .map(|corner| glyph.transform_point(corner));
+        let mut sizes = vec![Vec::new(); layout.repositories.len()];
+        for (id, file) in layout
+            .files()
+            .filter(|(_, file)| file.state == Presence::Present)
+        {
+            let directory = layout.dir(file.dir);
+            let (position, _, alpha) = simulation.file_effect(id, file);
+            assert!(alpha >= 1.0, "the glyph has not settled");
+            let scale = file.draw_scale(directory);
+            let points = corners.map(|corner| position + scale * corner);
+            sizes[directory.repository]
+                .push(projected_extent(eye, focus, &points).x * 960.0);
+        }
+        sizes
+            .into_iter()
+            .zip(files_per_repo)
+            .map(|(mut repo, &files)| {
+                assert_eq!(repo.len(), files);
+                repo.sort_unstable_by(f32::total_cmp);
+                repo[repo.len() / 2]
+            })
+            .collect()
+    }
+
+    fn glyph_settling_history(
+        repository: usize,
+        files: usize,
+        initial_files: usize,
+        steady_edits: bool,
+    ) -> Vec<crate::timeline::Event> {
+        use crate::timeline::{Event, FileChange, Identity, Kind};
+
+        let event = |day: i64, kind: Kind, range: std::ops::Range<usize>| Event {
+            repository,
+            author: Identity::new(
+                &format!("Author {repository}"),
+                &format!("author-{repository}@example.invalid"),
+            ),
+            co_authors: Vec::new(),
+            commit: format!("repo-{repository}-day-{day}"),
+            contributor: None,
+            co_contributors: Vec::new(),
+            seconds: day * 86_400,
+            changes: range
+                .map(|file| FileChange {
+                    path: format!("group-{}/file-{file}.rs", file % 4),
+                    kind: kind.clone(),
+                    ..Default::default()
+                })
+                .collect(),
+        };
+        let mut events = vec![event(0, Kind::Added, 0..initial_files)];
+        if initial_files > files {
+            events.push(event(8, Kind::Deleted, files..initial_files));
+            if steady_edits {
+                events.extend((10..20).map(|day| event(day, Kind::Modified, 0..1)));
+            }
+            events.push(event(20, Kind::Modified, 0..1));
+        }
+        crate::repositories::namespace(&mut events, repository);
+        events
+    }
+
+    fn glyph_settling_simulation(
+        settled: [usize; 4],
+        initial: [usize; 4],
+        steady_edits: bool,
+    ) -> Simulation {
+        let names: Vec<_> = (0..4).map(|repo| format!("Repository {repo}")).collect();
+        let histories = settled
+            .into_iter()
+            .zip(initial)
+            .enumerate()
+            .map(|(repo, (files, initial))| {
+                glyph_settling_history(repo, files, initial, steady_edits)
+            })
+            .collect();
+        Simulation::with_repositories(
+            crate::repositories::merge(histories),
+            &crate::model::Options {
+                seconds_per_day: 1.0,
+                max_idle_seconds: 20.0,
+                ..Default::default()
+            },
+            &crate::theme::Theme::neon(),
+            &crate::contributors::Mappings::default(),
+            &names,
+        )
+    }
+
+    #[test]
+    fn glyphs_recover_after_a_large_deletion_in_a_settled_tile() {
+        let counts = [300, 30, 30, 30];
+        let mut simulation =
+            glyph_settling_simulation(counts, [300, 300, 30, 30], false);
+        let last = simulation.frames(60).unwrap();
+        simulation.advance_to(last, 60);
+        let widths = representative_glyph_widths(&simulation, &counts);
+        let neighbours = widths[2].midpoint(widths[3]);
+        assert!(
+            (0.75 * neighbours..=1.25 * neighbours).contains(&widths[1]),
+            "projected file glyph widths after the deletion: {widths:?}"
+        );
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config::with_cases(16))]
+
+        #[test]
+        fn comparable_repositories_settle_to_comparable_file_glyph_sizes(
+            files_per_group in 6_usize..=10,
+            deleted_from in 0_usize..4,
+            multiplier in 2_usize..=3,
+            steady_edits in proptest::bool::ANY,
+        ) {
+            let files = 4 * files_per_group;
+            let counts = [files; 4];
+            let mut initial = counts;
+            initial[deleted_from] *= multiplier;
+            let mut simulation = glyph_settling_simulation(counts, initial, steady_edits);
+            let last = simulation.frames(60).unwrap();
+            for frame in last - 120..=last {
+                simulation.advance_to(frame, 60);
+                let widths = representative_glyph_widths(&simulation, &counts);
+                let mean = widths.iter().sum::<f32>() / crate::model::count(widths.len());
+                proptest::prop_assert!(widths.iter().all(|&width| {
+                    width >= 8.0 && (0.75 * mean..=1.25 * mean).contains(&width)
+                }), "file glyph widths at frame {}: {:?}", frame, widths);
+            }
+        }
+    }
+
+    #[test]
+    fn clearance_uses_world_distance_to_a_stretched_footprint() {
+        let radii = Vec2::new(4.52, 2.26);
+        let glyph_radius = 0.27;
+        let space = footprint_distance(Vec2::new(4.92, 0.0), radii) - glyph_radius;
+        assert!((space - 0.13).abs() < 1e-5);
+        let vertical = footprint_distance(Vec2::new(0.0, 4.92), Vec2::new(2.26, 4.52));
+        assert!((vertical - 0.4).abs() < 1e-5);
+        let near_boundary = footprint_distance(Vec2::new(4.52015, 0.0), radii);
+        assert!((near_boundary - 0.00015).abs() < 1e-6);
+
+        let radii = Vec2::new(2.0, 1.0);
+        let major = footprint_distance(Vec2::X, radii);
+        assert!((major + (2.0_f32 / 3.0).sqrt()).abs() < 1e-5);
+        let boundary = footprint_distance(Vec2::new(1.2, 0.8), radii);
+        assert!(boundary.abs() < 1e-5);
+    }
 
     #[test]
     fn clearance_detects_cross_tree_transit_and_matches_visible_scaling() {
@@ -557,7 +780,7 @@ fn definitions(writer: &mut impl Write) -> anyhow::Result<()> {
     write_record(
         &mut *writer,
         &serde_json::json!({"definitions": DEFINITIONS,
-            "file_clearance_definitions": "Raw file_clearance uses lifecycle presence > 0 and radius 0.27 * presence. visible_file_clearance uses the rendered boundary-limited presence, excluding hidden transit. Foreign pair-ticks count each file/live-foreign-directory strict disc intersection; outside-own ticks count each file whose disc exceeds its own directory disc. Penetrations <= 0.0001 world units are excluded. Worst depths are world units.",
+            "file_clearance_definitions": "Raw file_clearance uses lifecycle presence > 0 and radius 0.27 * presence. visible_file_clearance uses the rendered boundary-limited presence, excluding hidden transit. Foreign pair-ticks count each file/live-foreign-directory strict intersection with the directory footprint. Outside-own ticks count files whose disc exceeds their own directory footprint. A stretched footprint is an ellipse. Penetrations <= 0.0001 world units are excluded. Worst depths are world units.",
             "speed_definitions": "Nearest-rank p95/p99/max over retained-ID per-tick speeds, including stationary observations, separately for files and live directories. World units per playback second (tick distance times 60). Birth/reactivation placement excluded. Fast distance sums the full tick distance when speed strictly exceeds 6 world units/s: 0.1 units per 60 Hz tick, approximately 19% of a full-size file's 0.54-unit diameter per tick. Threshold is world-space, independent of camera zoom."}),
     )?;
     Ok(())

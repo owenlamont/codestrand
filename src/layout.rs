@@ -25,14 +25,20 @@ pub(super) struct RepositoryRegion {
     pub outline: Vec<Vec2>,
     pub height: f32,
     pub rotated: bool,
+    pub stretch: Vec2,
 }
 
 impl RepositoryRegion {
     fn replay_bytes(&self) -> u128 {
         let (label, outline) = retained_fields!(self, Self {
-            label, outline; low, high, live, items, tile, gutter, height, rotated,
+            label, outline; low, high, live, items, tile, gutter, height, rotated, stretch,
         });
         label.capacity() as u128 + buffer_bytes::<Vec2>(outline.capacity())
+    }
+
+    pub(crate) fn local_axes(&self, point: Vec2) -> Vec2 {
+        let point = if self.rotated { point.perp() } else { point };
+        point * self.stretch
     }
 
     pub(super) fn corners(&self) -> [Vec2; 4] {
@@ -92,11 +98,14 @@ impl File {
     }
 
     pub(super) fn draw_scale(&self, dir: &Dir) -> f32 {
-        match self.state {
+        let size = match self.state {
             Presence::Present => self.visible_presence(dir),
-            Presence::Arriving => dir.scale * (0.15 + 0.85 * self.presence),
+            Presence::Arriving => return dir.scale * (0.15 + 0.85 * self.presence),
             Presence::Leaving | Presence::Recovering => dir.scale,
-        }
+        };
+        let room = (dir.radius() - dir.offset_without_stretch(self.position).length())
+            .max(0.0);
+        size.min(room / 0.39)
     }
 
     fn restore(&mut self, author: usize, revision: u64) {
@@ -122,13 +131,19 @@ impl File {
     }
 
     pub(super) fn visible_presence(&self, dir: &Dir) -> f32 {
-        visible_presence(
+        let offset = dir.offset_without_stretch(self.position);
+        let scale = visible_presence(
             self.presence,
-            self.position,
+            offset,
             dir.radius(),
-            dir.position,
+            Vec2::ZERO,
             dir.scale,
-        )
+        );
+        if self.state != Presence::Present {
+            return scale;
+        }
+        let room = (dir.radius() - offset.length()).max(0.0);
+        scale.max((scale * 1.25).min(room / 0.39))
     }
 
     pub(super) fn name(&self) -> &str {
@@ -175,6 +190,7 @@ impl DirectoryArrival {
 #[derive(Clone, Debug)]
 pub(super) struct Dir {
     local_position: Vec2,
+    stretch: Vec2,
     pub(super) scale: f32,
     pub(super) repository: usize,
     pub path: String,
@@ -194,7 +210,7 @@ pub(super) struct Dir {
 impl Dir {
     fn replay_bytes(&self) -> u128 {
         let (path, slots) = retained_fields!(self, Self {
-            path, slots; local_position, scale, repository, parent, depth, position, files,
+            path, slots; local_position, scale, stretch, repository, parent, depth, position, files,
             children, live, touch_age, reserve, arrival, has_landed_file,
         });
         path.capacity() as u128 + buffer_bytes::<Option<u64>>(slots.capacity())
@@ -204,6 +220,7 @@ impl Dir {
         Self {
             local_position: Vec2::ZERO,
             scale: 1.0,
+            stretch: Vec2::ONE,
             repository,
             path,
             parent,
@@ -232,6 +249,19 @@ impl Dir {
 
     fn core(&self) -> f32 {
         SPACING * slot_count(self.slots.len()).sqrt()
+    }
+
+    #[cfg(test)]
+    pub(super) fn local_position(&self) -> Vec2 {
+        self.local_position
+    }
+
+    pub(super) fn footprint_radii(&self) -> Vec2 {
+        self.stretch * self.radius()
+    }
+
+    pub(super) fn offset_without_stretch(&self, point: Vec2) -> Vec2 {
+        (point - self.position) / self.stretch
     }
 
     pub(super) fn radius(&self) -> f32 {
@@ -751,6 +781,7 @@ impl Layout {
             if placed {
                 dir.position = dir.local_position;
                 dir.scale = 1.0;
+                dir.stretch = Vec2::ONE;
             }
             dir.touch_age += dt;
         }
@@ -979,6 +1010,24 @@ mod tests {
     use super::*;
 
     const DT: f32 = 1.0 / 60.0;
+
+    #[test]
+    fn a_landed_file_does_not_disappear_when_its_directory_stretches() {
+        let mut layout = Layout::empty();
+        let mut id = 0;
+        for index in 0..9 {
+            id = layout.add(&format!("tree/{index}"), 0.0, 0);
+        }
+        let file = layout.files.get_mut(&id).unwrap();
+        let dir = &mut layout.dirs[file.dir];
+        file.presence = 1.0;
+        file.state = Presence::Present;
+        file.local_position = file.slot_offset;
+        dir.stretch = Vec2::new(2.0, 1.0);
+        file.position = file.local_position * dir.stretch;
+        assert!(file.position.length() > dir.radius());
+        assert!(file.draw_scale(dir) > 0.99);
+    }
 
     #[test]
     fn replay_file_index_charge_stays_flat_under_churn() {

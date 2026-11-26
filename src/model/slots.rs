@@ -359,10 +359,13 @@ fn short_name(name: &str, scale: f32, width: f32) -> String {
     text
 }
 
-fn place_point(point: Vec3, rotated: bool, scale: f32, origin: Vec2) -> Vec3 {
-    let local = Vec2::new(point.x, point.z);
-    let local = if rotated { local.perp() } else { local };
-    ground(local * scale + origin)
+fn place_point(
+    point: Vec3,
+    region: &crate::layout::RepositoryRegion,
+    scale: f32,
+    origin: Vec2,
+) -> Vec3 {
+    ground(region.local_axes(Vec2::new(point.x, point.z)) * scale + origin)
 }
 impl Simulation {
     fn plan_ray_runs(&mut self) {
@@ -436,7 +439,7 @@ impl Simulation {
                 let transform = |point| {
                     place_point(
                         point,
-                        regions[pulse.repository].rotated,
+                        &regions[pulse.repository],
                         scales[pulse.repository],
                         origin,
                     )
@@ -877,6 +880,7 @@ impl State {
             {
                 let from = field_point(avatar.position);
                 let old_centre = previous.centre();
+                let gutter = super::travel::field_rect(tile);
                 let dock = if super::travel::on_network(old_centre, cells) {
                     old_centre
                 } else {
@@ -887,6 +891,7 @@ impl State {
                     [from, dock],
                     [chosen.point, place.point],
                     cells,
+                    gutter,
                     self.avatar_max_speed,
                 );
             }

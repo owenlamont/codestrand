@@ -239,23 +239,7 @@ impl Chain {
                 }
             }
         }
-        let mut durations = [0; CHAIN_STEPS];
-        let mut remaining = budget;
-        let mut previous = from;
-        for (index, next) in poses.iter().chain(std::iter::once(to)).enumerate() {
-            let ticks = step_ticks(previous, next, remaining)?;
-            remaining -= ticks;
-            durations[index] = ticks;
-            previous = next;
-        }
-        let duration = budget - remaining;
-        let extra = held::reflow_ticks().saturating_sub(duration);
-        if extra > remaining {
-            return None;
-        }
-        for (index, ticks) in durations.iter_mut().enumerate() {
-            *ticks += extra / CHAIN_STEPS + usize::from(index < extra % CHAIN_STEPS);
-        }
+        let durations = time_stages(from, &poses, to, budget)?;
         Some(Self {
             repositories,
             waypoints,
@@ -313,6 +297,176 @@ impl Chain {
         }
         to.clone()
     }
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct Restack {
+    pub repositories: [usize; 4],
+    pub across_axis: usize,
+    pub starts_on_low_side: bool,
+    pub enters_at_low_end: bool,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct ColumnTransfer {
+    repositories: [usize; 4],
+    waypoints: [[Footprint; 4]; 3],
+    durations: [usize; 4],
+}
+
+impl Restack {
+    fn waypoints(self, from: &Layout, to: &Layout) -> Option<[[Footprint; 4]; 3]> {
+        let [staying, moving, _, _] = self.repositories;
+        let across = self.across_axis;
+        let along = 1 - across;
+        let large = to.gutters[staying]?;
+        let destination = to.gutters[moving]?;
+        let width = (large.high[across] - large.low[across])
+            .min(destination.high[across] - destination.low[across]);
+        let mut lane = destination;
+        let mut large_open = large;
+        // The moving cell narrows beside the common cut before sliding down the lane.
+        if self.starts_on_low_side {
+            lane.high[across] = large.high[across];
+            lane.low[across] = lane.high[across] - width;
+        } else {
+            lane.low[across] = large.low[across];
+            lane.high[across] = lane.low[across] + width;
+        }
+        if self.enters_at_low_end {
+            large_open.low[along] = destination.high[along];
+        } else {
+            large_open.high[along] = destination.low[along];
+        }
+
+        let mut aligned = [Footprint::at(to, staying)?; 4];
+        let mut open = aligned;
+        for (index, &repository) in self.repositories.iter().enumerate() {
+            let end = Footprint::at(to, repository)?;
+            let mut alignment = from.gutters[repository]?;
+            alignment.low[across] = end.gutter.low[across];
+            alignment.high[across] = end.gutter.high[across];
+            let opening = match index {
+                0 => large_open,
+                1 => {
+                    alignment.low[across] = lane.low[across];
+                    alignment.high[across] = lane.high[across];
+                    lane
+                }
+                _ => end.gutter,
+            };
+            aligned[index] = resized_inset(end, alignment);
+            open[index] = resized_inset(end, opening);
+        }
+        let mut crossed = open;
+        crossed[1] = Footprint::at(to, moving)?;
+        Some([aligned, open, crossed])
+    }
+}
+
+fn resized_inset(end: Footprint, gutter: Tile) -> Footprint {
+    Footprint {
+        gutter,
+        tile: Tile {
+            low: gutter.low + (end.tile.low - end.gutter.low),
+            high: gutter.high + (end.tile.high - end.gutter.high),
+        },
+    }
+}
+
+impl ColumnTransfer {
+    pub(super) fn plan(
+        from: &Layout,
+        to: &Layout,
+        restack: Restack,
+        field: Tile,
+        budget: usize,
+    ) -> Option<Self> {
+        let mut route = Self {
+            repositories: restack.repositories,
+            waypoints: restack.waypoints(from, to)?,
+            durations: [0; 4],
+        };
+        for points in &mut route.waypoints {
+            for (&repository, point) in route.repositories.iter().zip(points) {
+                point.tile.low = point.tile.low.max(field.low);
+                point.tile.high = point.tile.high.min(field.high);
+                if !has_room(point.tile, from.tiles[repository]?, to.tiles[repository]?)
+                {
+                    return None;
+                }
+            }
+        }
+
+        let poses = [1, 2, 3].map(|index| route.layout(from, to, index));
+        route.durations = time_stages(from, &poses, to, budget)?;
+        Some(route)
+    }
+
+    pub(super) fn duration(&self) -> usize {
+        self.durations.iter().sum()
+    }
+
+    fn layout(&self, from: &Layout, to: &Layout, index: usize) -> Layout {
+        if index > self.waypoints.len() {
+            return to.clone();
+        }
+        let mut layout = from.clone();
+        if let Some(index) = index.checked_sub(1) {
+            for (&repository, point) in
+                self.repositories.iter().zip(self.waypoints[index])
+            {
+                layout.tiles[repository] = Some(point.tile);
+                layout.gutters[repository] = Some(point.gutter);
+            }
+        }
+        layout
+    }
+
+    pub(super) fn sample(
+        &self,
+        from: &Layout,
+        to: &Layout,
+        mut elapsed: usize,
+    ) -> Layout {
+        for (phase, &ticks) in self.durations.iter().enumerate() {
+            if elapsed < ticks {
+                return self.layout(from, to, phase).blend(
+                    &self.layout(from, to, phase + 1),
+                    held::progress(elapsed, ticks),
+                );
+            }
+            elapsed -= ticks;
+        }
+        to.clone()
+    }
+}
+
+fn time_stages<'a, const COUNT: usize>(
+    mut previous: &'a Layout,
+    poses: &'a [Layout],
+    destination: &'a Layout,
+    budget: usize,
+) -> Option<[usize; COUNT]> {
+    let mut durations = [0; COUNT];
+    let mut remaining = budget;
+    for (next, duration) in poses
+        .iter()
+        .chain(std::iter::once(destination))
+        .zip(&mut durations)
+    {
+        *duration = step_ticks(previous, next, remaining)?;
+        remaining -= *duration;
+        previous = next;
+    }
+    let extra = held::reflow_ticks().saturating_sub(budget - remaining);
+    if extra > remaining {
+        return None;
+    }
+    for (index, ticks) in durations.iter_mut().enumerate() {
+        *ticks += extra / COUNT + usize::from(index < extra % COUNT);
+    }
+    Some(durations)
 }
 
 fn has_room(tile: Tile, start: Tile, end: Tile) -> bool {
