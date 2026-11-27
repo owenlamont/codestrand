@@ -545,6 +545,68 @@ fn archive_and_rank_change_under_sustained_writes() {
 }
 
 #[test]
+fn a_generated_late_birth_and_overlapping_exits_use_flat_cells() {
+    TestRunner::new(property_config(8))
+        .run(&(1..=4_u8, any::<bool>()), |(files, shared)| {
+            let author = |repo: usize| {
+                let id = if shared { 0 } else { repo };
+                Identity::new(&format!("Author {id}"), &format!("a{id}@example.test"))
+            };
+            let mut events = Vec::new();
+            for (repo, day) in [(0, 0), (1, 1), (2, 6), (3, 9)] {
+                let changes = (0..files)
+                    .map(|file| change(&format!("dir/{file}.rs"), Kind::Added))
+                    .collect();
+                events.push(namespaced_event(repo, day, author(repo), changes));
+            }
+            for day in 10..=30 {
+                let repo = usize::try_from(day % 2).unwrap();
+                events.push(namespaced_event(
+                    repo,
+                    day,
+                    author(repo),
+                    vec![change(&format!("live/{day}.rs"), Kind::Added)],
+                ));
+            }
+            let labels = ["One", "Two", "Third", "Fourth"].map(str::to_owned);
+            let report = replay(
+                events,
+                &labels,
+                &Options {
+                    start: 2,
+                    seconds_per_day: 0.5,
+                    max_idle_seconds: 1.5,
+                    travel_window_seconds: Some(0.75),
+                    repository_ends: vec![
+                        None,
+                        None,
+                        Some(12 * 86_400),
+                        Some(16 * 86_400),
+                    ],
+                    repository_archived: vec![false, false, true, true],
+                    ..Options::default()
+                },
+                CI_TICK_LIMIT,
+                Fault::None,
+            )?;
+            prop_assert_eq!(
+                report.flat_lifecycles,
+                (2, 2),
+                "replay fell back to slicing: {:?}",
+                report
+            );
+            prop_assert!(report.overlapping_exits && report.arrivals_at_seam > 0);
+            prop_assert!(
+                report.max_tile_step_px <= 8.001 && report.final_gap <= 1e-5,
+                "{:?}",
+                report
+            );
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
 fn overlapping_archive_reflows_leave_later_services_a_live_tile() {
     let events = [0, 3, 6, 7]
         .into_iter()

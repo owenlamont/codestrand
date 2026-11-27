@@ -862,7 +862,10 @@ mod tests {
         assert_eq!(report.calls(&[Phase::TravelPadding]), 1);
         assert_eq!(report.calls(&[Phase::Pass]), passes);
         assert_eq!(report.calls(&[Phase::Pass, Phase::PlanTravel]), passes);
-        assert!(report.counter(&[], Counter::Tilings) > 0);
+        assert!(
+            report.counter(&[Phase::Build, Phase::PlanRepositories], Counter::Tilings)
+                > 0
+        );
     }
 
     #[test]

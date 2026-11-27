@@ -1,3 +1,5 @@
+mod birth;
+pub(super) mod lifecycle;
 use super::{Node, Space, Tile, gutter_cells, held, insert, tiles};
 
 mod exchange;

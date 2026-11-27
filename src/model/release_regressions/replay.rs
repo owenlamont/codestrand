@@ -35,6 +35,8 @@ pub(super) struct Replay {
     pub final_gap: f32,
     pub last_service_tile_tick: u64,
     pub last_archive_tick: u64,
+    pub flat_lifecycles: (usize, usize),
+    pub overlapping_exits: bool,
     pub planner_wait: Duration,
 }
 
@@ -95,7 +97,6 @@ pub(super) fn replay(
     fault: Fault,
 ) -> Result<Replay, TestCaseError> {
     const FPS: u16 = 60;
-    let commits = events.len();
     let started = Instant::now();
     let mut sim = Simulation::try_with_repositories(
         events,
@@ -105,6 +106,7 @@ pub(super) fn replay(
         labels,
     )
     .map_err(|error| TestCaseError::fail(format!("initial planning: {error:#}")))?;
+    let commits = sim.events.len();
     let mut audit = Audit::default();
     audit.report.planner_wait = started.elapsed();
     for tick in 0..=tick_limit {
@@ -156,6 +158,12 @@ pub(super) fn replay(
                 );
             }
             audit.report.last_archive_tick = lifecycle::exit_end(&sim.repository_exits);
+            audit.report.flat_lifecycles = sim.packing.flat_lifecycle_counts();
+            let mut exits: Vec<_> =
+                sim.repository_exits.iter().flatten().copied().collect();
+            exits.sort_unstable_by_key(|exit| exit.start);
+            audit.report.overlapping_exits =
+                exits.windows(2).any(|pair| pair[1].start < pair[0].end);
             return Ok(audit.report);
         }
     }

@@ -256,6 +256,31 @@ fn glyph_fit<'a>(
     }
 }
 
+pub(super) fn plan_shift(
+    packing: &Packing,
+    current: &Layout,
+    tick: usize,
+    ticks: usize,
+) -> Option<Layout> {
+    let active: Vec<_> = current
+        .tiles
+        .iter()
+        .enumerate()
+        .filter_map(|(repo, tile)| tile.map(|_| repo))
+        .collect();
+    if active.len() < 2 {
+        return None;
+    }
+    let fit = glyph_fit(packing, tick, &active);
+    let gutter_cost = shared_gutters(current).max(1.0);
+    let weights = &packing.samples[tick].weights;
+    best_slide(current, packing.space(), ticks, Some(weights), |layout| {
+        fit(layout).0
+            - 0.05 * shared_gutters(layout) / gutter_cost
+            - 0.4 * super::Density::new(&layout.tiles, weights).score()
+    })
+}
+
 pub(in crate::layout::packing) fn plan(
     packing: &Packing,
     original: &Layout,
@@ -381,7 +406,8 @@ impl FlatLayout {
             let score = |layout: &Layout| {
                 fit(layout).0 - 0.05 * shared_gutters(layout) / original_gutters
             };
-            let candidate = best_slide(previous, packing.space(), end - start, score);
+            let candidate =
+                best_slide(previous, packing.space(), end - start, None, score);
             let after = candidate.as_ref().unwrap_or(previous);
             let baseline = packing.layout_at(end, &[], None, None);
             if score(after) + 0.005 < score(&baseline)

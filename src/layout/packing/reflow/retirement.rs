@@ -8,7 +8,7 @@ const EPSILON: f32 = 1e-6;
 pub(in crate::layout::packing) struct Retirement {
     from: Layout,
     to: Layout,
-    departing: usize,
+    departing: Box<[usize]>,
 }
 
 impl Retirement {
@@ -20,7 +20,7 @@ impl Retirement {
         glyph_size: impl Fn(usize, Tile) -> f32,
     ) -> Option<Self> {
         let field = space.field(framing::MARGIN);
-        let gutters = space.field(super::super::GUTTER_MARGIN);
+        let gutters = gutter_bounds(&from)?;
         let retiring = from.gutters.get(departing).copied().flatten()?;
         if !fills_field(&from, gutters) || !contained(&from) {
             return None;
@@ -43,7 +43,7 @@ impl Retirement {
             let high = Group::find(&from, departing, axis, false);
             for part in 0..=8_u8 {
                 let share = f32::from(part) / 8.0;
-                let Some((to, donors)) = Self::close(
+                let Some((mut to, donors)) = Self::close(
                     &from,
                     departing,
                     field,
@@ -54,13 +54,16 @@ impl Retirement {
                 ) else {
                     continue;
                 };
+                expand_last_tile(&mut to, departing, field, space.gap);
                 let travel = exchange::edge_travel(&from, &to);
                 if travel
                     > exchange::MAX_EDGE_STEP_PX
                         * held::REFLOW_LINEAR_FRACTION
                         * count(ticks)
                     || !to.tiles.iter().enumerate().all(|(repo, &tile)| {
-                        repo == departing || tile.is_none_or(settled)
+                        repo == departing
+                            || tile == from.tiles[repo]
+                            || tile.is_none_or(settled)
                     })
                     || !fills_field(&to, gutters)
                     || !contained(&to)
@@ -104,8 +107,58 @@ impl Retirement {
         Some(Self {
             from,
             to: best?,
-            departing,
+            departing: [departing].into(),
         })
+    }
+
+    pub(super) fn together(
+        from: &Layout,
+        departing: &[usize],
+        space: Space,
+        ticks: usize,
+        glyph_size: impl Fn(usize, Tile) -> f32,
+    ) -> Option<Self> {
+        let gutters = gutter_bounds(from)?;
+        let max_travel =
+            exchange::MAX_EDGE_STEP_PX * held::REFLOW_LINEAR_FRACTION * count(ticks);
+        let assemble = |order: &mut dyn Iterator<Item = &usize>| {
+            let mut remaining = from.clone();
+            let mut ghosts = Vec::with_capacity(departing.len());
+            for &repository in order {
+                let next =
+                    Self::plan(remaining, repository, space, ticks, &glyph_size)?;
+                ghosts.push((
+                    repository,
+                    next.to.tiles[repository],
+                    next.to.gutters[repository],
+                ));
+                remaining = next.sample(0.0);
+            }
+            if !connected(from, &remaining, false) {
+                return None;
+            }
+            for (repo, tile, cell) in ghosts {
+                remaining.tiles[repo] = tile;
+                remaining.gutters[repo] = cell;
+            }
+            (exchange::edge_travel(from, &remaining) <= max_travel
+                && fills_field(&remaining, gutters)
+                && contained(&remaining)
+                && compatible(&from.tiles, &remaining.tiles)
+                && compatible(&from.gutters, &remaining.gutters))
+            .then_some(Self {
+                from: from.clone(),
+                to: remaining,
+                departing: departing.into(),
+            })
+        };
+        assemble(&mut departing.iter())
+            .or_else(|| assemble(&mut departing.iter().rev()))
+    }
+
+    #[cfg(test)]
+    pub(super) fn count(&self) -> usize {
+        self.departing.len()
     }
 
     fn close(
@@ -162,8 +215,10 @@ impl Retirement {
             self.from.blend_edges(&self.to, 1.0 - presence)
         };
         if presence <= 0.0 {
-            layout.tiles[self.departing] = None;
-            layout.gutters[self.departing] = None;
+            for &repo in &self.departing {
+                layout.tiles[repo] = None;
+                layout.gutters[repo] = None;
+            }
         }
         layout
     }
@@ -173,13 +228,23 @@ pub(super) fn best_slide(
     from: &Layout,
     space: Space,
     ticks: usize,
+    weights: Option<&[f32]>,
     score: impl Fn(&Layout) -> f32,
 ) -> Option<Layout> {
     let mut best_score = score(from) + 0.005;
     let mut best = None;
     let field = space.field(framing::MARGIN);
-    let gutters = space.field(super::super::GUTTER_MARGIN);
+    let gutters = gutter_bounds(from)?;
     let gap = Vec2::splat(space.gap) * 2.0 / framing::VIEWPORT;
+    let density = weights.and_then(|weights| {
+        let total: f32 = from
+            .gutters
+            .iter()
+            .zip(weights)
+            .filter_map(|(cell, &weight)| cell.map(|_| weight))
+            .sum();
+        (total > 0.0).then_some((weights, gutters.area() / total))
+    });
     for (repo, cell) in from.gutters.iter().enumerate() {
         if cell.is_none() {
             continue;
@@ -191,14 +256,21 @@ pub(super) fn best_slide(
             if group.members.iter().any(|member| member.repo < repo) {
                 continue;
             }
-            for distance in [-2.0, -1.0, 1.0, 2.0] {
-                let cut = group.cut + distance * gap[axis];
+            let local =
+                [-2.0, -1.0, 1.0, 2.0].map(|distance| group.cut + distance * gap[axis]);
+            let extent = gutters.high[axis] - gutters.low[axis];
+            let broad = [0.15, 0.25, 1.0 / 3.0, 0.5, 2.0 / 3.0, 0.75, 0.85]
+                .map(|fraction| gutters.low[axis] + extent * fraction);
+            let proportional = density
+                .map(|(weights, scale)| group.density_target(from, weights, scale));
+            for cut in local.into_iter().chain(broad).chain(proportional) {
                 let to = group.finish(from, None, cut, field);
-                if !to.tiles.iter().flatten().copied().all(settled)
-                    || exchange::edge_travel(from, &to)
-                        > exchange::MAX_EDGE_STEP_PX
-                            * held::REFLOW_LINEAR_FRACTION
-                            * count(ticks)
+                if !to.tiles.iter().zip(&from.tiles).all(|(&after, &before)| {
+                    after == before || after.is_none_or(settled)
+                }) || exchange::edge_travel(from, &to)
+                    > exchange::MAX_EDGE_STEP_PX
+                        * held::REFLOW_LINEAR_FRACTION
+                        * count(ticks)
                 {
                     continue;
                 }
@@ -310,6 +382,19 @@ impl Group {
         })
     }
 
+    fn density_target(&self, layout: &Layout, weights: &[f32], scale: f32) -> f32 {
+        let cross = 1 - self.axis;
+        let (numerator, denominator) =
+            self.members.iter().fold((0.0, 0.0), |(lhs, rhs), member| {
+                let cell = layout.gutters[member.repo].unwrap();
+                let slope = (cell.high[cross] - cell.low[cross])
+                    * if member.high { 0.25 } else { -0.25 };
+                let desired = weights[member.repo] * scale;
+                (lhs + slope * (desired - cell.area()), rhs + slope * slope)
+            });
+        self.cut + numerator / denominator
+    }
+
     fn finish(
         &self,
         from: &Layout,
@@ -335,6 +420,28 @@ impl Group {
     }
 }
 
+fn expand_last_tile(layout: &mut Layout, departing: usize, field: Tile, gap: f32) {
+    let mut live = layout
+        .tiles
+        .iter_mut()
+        .zip(&layout.gutters)
+        .enumerate()
+        .filter_map(|(repo, (tile, &cell))| {
+            (repo != departing)
+                .then_some(tile.as_mut().zip(cell))
+                .flatten()
+        });
+    if let Some((tile, cell)) = live.next()
+        && live.next().is_none()
+    {
+        let padding = Vec2::splat(gap) / framing::VIEWPORT;
+        *tile = Tile {
+            low: (cell.low + padding).max(field.low),
+            high: (cell.high - padding).min(field.high),
+        };
+    }
+}
+
 fn edge(tile: Tile, axis: usize, high: bool) -> f32 {
     if high {
         tile.high[axis]
@@ -357,6 +464,18 @@ pub(super) fn settled(tile: Tile) -> bool {
     tile.pixels().min_element() >= 16.0 && bounds.contains(&tile.ground_aspect())
 }
 
+pub(super) fn gutter_bounds(layout: &Layout) -> Option<Tile> {
+    layout
+        .gutters
+        .iter()
+        .flatten()
+        .copied()
+        .reduce(|bounds, cell| Tile {
+            low: bounds.low.min(cell.low),
+            high: bounds.high.max(cell.high),
+        })
+}
+
 fn fills_field(layout: &Layout, field: Tile) -> bool {
     let tolerance = Vec2::splat(EPSILON);
     let area = layout
@@ -374,7 +493,7 @@ fn fills_field(layout: &Layout, field: Tile) -> bool {
         && compatible(&layout.gutters, &layout.gutters)
 }
 
-fn contained(layout: &Layout) -> bool {
+pub(super) fn contained(layout: &Layout) -> bool {
     let tolerance = Vec2::splat(EPSILON);
     layout
         .tiles
@@ -393,6 +512,65 @@ fn contained(layout: &Layout) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn simultaneous_archives_can_give_space_to_the_same_neighbour() {
+        let space = Space::new(4.0, 1.0);
+        let field = space.field(framing::MARGIN);
+        let width = (field.high.x - field.low.x) / 3.0;
+        let edges = [
+            field.low.x,
+            field.low.x + width,
+            field.high.x - width,
+            field.high.x,
+        ];
+        let cells: Vec<_> = edges
+            .windows(2)
+            .map(|pair| {
+                Some(Tile {
+                    low: Vec2::new(pair[0], field.low.y),
+                    high: Vec2::new(pair[1], field.high.y),
+                })
+            })
+            .collect();
+        let gap = Vec2::splat(space.gap) / framing::VIEWPORT;
+        let layout = Layout {
+            tiles: cells
+                .iter()
+                .map(|cell| {
+                    cell.map(|cell| Tile {
+                        low: cell.low + gap,
+                        high: cell.high - gap,
+                    })
+                })
+                .collect(),
+            gutters: cells,
+        };
+        let archive = Retirement::together(&layout, &[0, 2], space, 240, |_, tile| {
+            tile.area().sqrt()
+        })
+        .unwrap();
+        let mut previous = layout.clone();
+        for tick in 1..=240 {
+            let current = archive.sample(1.0 - held::progress(tick, 240));
+            assert!(fills_field(&current, field));
+            assert!(contained(&current));
+            assert!(compatible(&previous.tiles, &current.tiles));
+            crate::model::assert_gutter_routes(
+                current.gutters.iter().flatten().copied(),
+            );
+            assert_eq!(current.tiles[0].is_some(), tick < 240);
+            assert_eq!(current.tiles[2].is_some(), tick < 240);
+            previous = current;
+        }
+        assert_eq!(
+            previous.tiles[1],
+            Some(Tile {
+                low: field.low + gap,
+                high: field.high - gap
+            })
+        );
+    }
 
     #[test]
     fn sliding_a_cut_can_change_neighbours_without_breaking_routes() {
@@ -423,7 +601,7 @@ mod tests {
             gutters: cells.map(Some).into(),
         };
         assert!(cells[0].high.y < cells[3].low.y);
-        let target = best_slide(&opening, space, 100, |layout| {
+        let target = best_slide(&opening, space, 100, None, |layout| {
             layout.gutters[0].unwrap().high.y
         })
         .unwrap();
