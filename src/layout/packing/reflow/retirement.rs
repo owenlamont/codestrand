@@ -135,9 +135,6 @@ impl Retirement {
                 ));
                 remaining = next.sample(0.0);
             }
-            if !connected(from, &remaining, false) {
-                return None;
-            }
             for (repo, tile, cell) in ghosts {
                 remaining.tiles[repo] = tile;
                 remaining.gutters[repo] = cell;
@@ -146,7 +143,8 @@ impl Retirement {
                 && fills_field(&remaining, gutters)
                 && contained(&remaining)
                 && compatible(&from.tiles, &remaining.tiles)
-                && compatible(&from.gutters, &remaining.gutters))
+                && compatible(&from.gutters, &remaining.gutters)
+                && archive_gutters_connected(from, &remaining, departing))
             .then_some(Self {
                 from: from.clone(),
                 to: remaining,
@@ -293,10 +291,18 @@ fn certified_closure(
     {
         return None;
     }
+    archive_gutters_connected(from, to, &[departing]).then_some(travel)
+}
+
+fn archive_gutters_connected(from: &Layout, to: &Layout, departing: &[usize]) -> bool {
+    if !connected(from, to, false) {
+        return false;
+    }
     let mut survivors = to.clone();
-    survivors.tiles[departing] = None;
-    survivors.gutters[departing] = None;
-    connected(from, &survivors, false).then_some(travel)
+    for &repository in departing {
+        survivors.gutters[repository] = None;
+    }
+    connected(&survivors, &survivors, false)
 }
 
 struct AspectBalance<'a> {
@@ -679,6 +685,46 @@ pub(super) fn contained(layout: &Layout) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dividing_archive_connects_its_neighbours_as_the_gutter_closes() {
+        let space = Space::new(4.0, 1.0);
+        let edges = [-0.75, -0.25, 0.25, 0.75];
+        let gap = Vec2::splat(space.gap) / framing::VIEWPORT;
+        let cells: Vec<_> = edges
+            .windows(2)
+            .map(|pair| Tile {
+                low: Vec2::new(pair[0], -0.5),
+                high: Vec2::new(pair[1], 0.5),
+            })
+            .collect();
+        let from = Layout {
+            tiles: cells
+                .iter()
+                .map(|cell| {
+                    Some(Tile {
+                        low: cell.low + gap,
+                        high: cell.high - gap,
+                    })
+                })
+                .collect(),
+            gutters: cells.into_iter().map(Some).collect(),
+        };
+        let mut survivors = from.clone();
+        survivors.gutters[1] = None;
+        assert!(!connected(&survivors, &survivors, false));
+        let closure =
+            Retirement::plan(from, 1, space, 240, |_, tile| tile.area().sqrt())
+                .unwrap();
+        for tick in 0..=240 {
+            let layout = closure.sample(1.0 - held::progress(tick, 240));
+            assert!(compatible(&layout.tiles, &layout.tiles));
+            crate::model::assert_gutter_routes(
+                layout.gutters.iter().flatten().copied(),
+            );
+            assert_eq!(layout.gutters[1].is_some(), tick < 240);
+        }
+    }
 
     #[test]
     fn archive_aspect_correction_can_pass_space_through_a_neighbour() {
