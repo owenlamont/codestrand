@@ -168,9 +168,12 @@ impl PreviewCamera {
 
     fn constrain_follow_pitch(&mut self, target_height: f32) {
         let clearance = EYE_FLOOR - self.focus.y.min(target_height);
+        if clearance <= -1.0 {
+            return;
+        }
         self.distance = self.distance.max(clearance);
         let radius = if clearance > 0.0 { self.distance } else { 1.0 };
-        let limit = -(clearance / radius).clamp(-1.0, 1.0).asin();
+        let limit = -(clearance / radius).asin();
         self.pitch = self.pitch.min(limit);
     }
 
