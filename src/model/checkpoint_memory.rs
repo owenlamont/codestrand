@@ -41,7 +41,7 @@ impl State {
     pub(super) fn replay_bytes(&self) -> u128 {
         let (layout, avatars, authors, pulses, slot_records, capacities) = retained_fields!(self, State {
             layout, avatars, authors, pulses, slot_records, capacities;
-            field_growth, field, region_depth, tick, next_event, focus, distance,
+            field_growth, field, tick, next_event, focus, distance,
             geometry, avatar_scale, avatar_size, avatar_max_speed, gutter, fragment_pace,
         });
         size_of_val(self) as u128

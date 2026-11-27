@@ -199,13 +199,16 @@ pub(super) fn setup(world: &mut World) {
                     cull_mode: None,
                     ..default()
                 });
-        world.spawn((
-            Title { repository, ink },
-            Mesh3d(mesh),
-            MeshMaterial3d(material),
-            Transform::default(),
-            Visibility::Hidden,
-        ));
+        super::spawn_in_field(
+            world,
+            (
+                Title { repository, ink },
+                Mesh3d(mesh),
+                MeshMaterial3d(material),
+                Transform::default(),
+                Visibility::Hidden,
+            ),
+        );
     }
     if omitted > 0 {
         warn!(
@@ -234,7 +237,8 @@ pub(super) fn sync(world: &mut World, simulation: &Simulation) {
         .ok()
         .map(|(camera, transform, projection)| super::names::View {
             clip_from_world: projection.get_clip_from_view()
-                * transform.to_matrix().inverse(),
+                * transform.to_matrix().inverse()
+                * simulation.field_space().transform().to_matrix(),
             viewport: camera
                 .physical_viewport_size()
                 .map_or(crate::model::framing::VIEWPORT, UVec2::as_vec2),

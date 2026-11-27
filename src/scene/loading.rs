@@ -422,7 +422,7 @@ fn build_scene(world: &mut World, simulation: Simulation, title: String) {
         ))
         .id();
     world.insert_resource(ClearColor(simulation.theme().clear));
-    world.insert_resource(PreviewCamera::new(simulation.view()));
+    world.insert_resource(PreviewCamera::new(simulation.world_view()));
     world.insert_resource(Playback(simulation));
     world.insert_resource(Title(title));
     world.run_schedule(Loaded);

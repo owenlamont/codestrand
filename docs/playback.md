@@ -124,12 +124,13 @@ F11 restores the previous windowed size and position. Playback continues while
 settings are open; mouse wheel input over the panel scrolls instead of zooming.
 
 The default camera looks straight down at the centre of the repository tile area.
-Repository tiles are rectangles in world coordinates. Preview stores yaw and pitch
-explicitly, with no roll. Yaw rotates about world Y; pitch rotates about the camera's
-local right axis and clamps to −90° through +90°, inclusive. The camera can look
-exactly straight down or up, and yaw still rotates the view at either pole.
+Repository tiles fit inside a fixed rectangle in world coordinates. Preview stores
+yaw and pitch explicitly, with no roll. Yaw rotates about world Y. Pitch rotates
+about the camera's local right axis and clamps to −90° through +90°, inclusive.
+The camera can look exactly straight down or up. Yaw still rotates the view at either
+pole.
 Camera up never opposes world up. The eye stays at least 1.2 world units above the plane,
-above the glass and file geometry, and can look up at contributors at height 3.2.
+above the glass and file geometry, and can look up at contributors.
 Vertical mouse motion changes pitch; horizontal motion changes yaw. Captured mouse
 aim turns about the eye in free mode. W and S move along the camera's forward and
 backward directions, including pitch. At the floor, movement into the plane slides
@@ -227,8 +228,7 @@ Paths in the TOML file resolve relative to the file. Labels default to the repos
 directory name. Repeated flags and a file can be combined; flag entries come first.
 Paths resolving to the same location are rejected as duplicate repositories. Labels for
 distinct repositories must be unique. There is no fixed repository-count limit.
-Tiles, gutters, avatars and titles have world-space sizes. The field grows to fit the
-content, and the overview camera pulls back to keep the whole field in view.
+The repository field keeps the same size in world coordinates across collections.
 Tile packing time grows steeply with repository count.
 
 `archived = true` ends a repository after the final commit in the selected revision,
@@ -282,10 +282,10 @@ select from the merged history. Single-repository playback retains first-parent
 order. Contributor mappings apply across all repositories, so a matched contributor
 uses one avatar that moves between regions.
 
-Live repositories share a field that grows with the amount of content. The overview
-camera pulls back to keep the field in view. Files, avatars and gutters keep their world
-scale as the camera pulls back. Fly in during preview to see smaller details. The top
-wordmark and bottom caption reserve their own strips in the overview.
+Live repositories share a fixed field. When the layout needs more room, tiles, files,
+gutters and contributors shrink together. The overview and fixed camera paths keep
+comparable framing across collections. Fly in during preview to see smaller details.
+The top wordmark and bottom caption reserve their own strips in the overview.
 Shared gutters separate neighbouring tiles, with no contributor band. Each tile's weight
 comes from its live file and directory count. A reflow starts when the ratio between a
 tile's held and live shares exceeds 1.5 in either direction, or when more than 5% of the
@@ -333,9 +333,9 @@ can show commits during the move. A split that would enlarge a neighbour waits f
 its earlier writes to finish. Commits retain their order. Each edge eases at both ends
 and travels at steady speed in between.
 Between reflows, tiles and shared gutters partition the field.
-`--gutter` sets spacing using the world distance represented by a pixel in the
-1280×720 reference view. The default is `4` and the range is `0`–`20`, inclusive.
-Tiles touch at `0`. Crowd scaling adjusts avatars when many are active.
+`--gutter` sets spacing in 1280×720 reference pixels. The default is `4` and the
+range is `0`–`20`, inclusive. Tiles touch at `0`. When the layout needs more
+room, tiles and gutters shrink together to fit the fixed field.
 Contributor names prefer clear space outside the file and directory layout, with a
 small margin. Names may overlap content at tile edges when space is tight.
 Different content shapes can leave space inside a uniformly fitted tile.

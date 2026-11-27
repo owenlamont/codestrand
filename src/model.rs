@@ -739,7 +739,6 @@ pub(super) struct Label {
 struct State {
     field_growth: f32,
     field: crate::layout::packing::Tile,
-    region_depth: f32,
     tick: u64,
     layout: Layout,
     avatars: Vec<Avatar>,
@@ -1090,7 +1089,7 @@ impl Simulation {
         if walk {
             simulation.travel.require_birth_routes(options.bot_travel)?;
         }
-        simulation.align_travel_arrivals(options);
+        simulation.align_travel_arrivals();
         simulation.repair_walk_departures(options, &padding);
         {
             let _phase = trace.phase(Phase::Caption);
@@ -1452,8 +1451,9 @@ impl Simulation {
         )?;
         self.state = SharedState(self.initial.clone());
         self.state.field_growth = self.packing.overview_growth();
+        self.state.avatar_max_speed =
+            options.avatar_max_speed * self.state.field_growth;
         self.state.field = self.packing.field();
-        self.state.region_depth = framing::depth_bound() * self.state.field_growth;
         if let Some((regions, offsets, scales)) = self.packing.sample(0) {
             self.state.layout.place_regions(
                 regions,
@@ -2055,9 +2055,16 @@ impl Simulation {
         self.file_ids.get(path).copied()
     }
 
-    /// Default field camera focus and distance along [`view_direction`].
-    pub(super) fn view(&self) -> (Vec3, f32) {
+    pub(super) fn planner_view(&self) -> (Vec3, f32) {
         self.state.overview()
+    }
+
+    pub(super) fn field_space(&self) -> framing::FieldSpace {
+        framing::FieldSpace::new(self.state.field_growth)
+    }
+
+    pub(super) fn world_view(&self) -> (Vec3, f32) {
+        (self.state.focus, self.state.distance)
     }
 
     pub(super) fn view_for_projection(&self, fov: f32, viewport: Vec2) -> (Vec3, f32) {
@@ -2069,6 +2076,7 @@ impl Simulation {
             focus,
             distance.max(framing::distance(
                 &self.layout().repositories,
+                self.field_space(),
                 focus,
                 fov,
                 viewport,
@@ -2081,7 +2089,7 @@ impl Simulation {
         fov: f32,
         viewport: Vec2,
     ) -> (Vec3, f32) {
-        let (focus, distance) = self.view();
+        let (focus, distance) = self.world_view();
         let ratio = ((framing::FOV * 0.5).tan() / (fov * 0.5).tan())
             .max(
                 (framing::FOV * 0.5).tan()
@@ -2091,7 +2099,7 @@ impl Simulation {
             .max(1.0);
         (
             focus,
-            distance * ratio + self.state.region_depth * (ratio - 1.0),
+            distance * ratio + framing::depth_bound() * (ratio - 1.0),
         )
     }
 
@@ -2595,7 +2603,6 @@ impl State {
         Self {
             field_growth: 1.0,
             field: crate::layout::packing::Tile::inset(0.0),
-            region_depth: 0.0,
             tick: 0,
             layout,
             avatars: Vec::new(),
@@ -3629,12 +3636,8 @@ impl State {
     }
 
     fn overview(&self) -> (Vec3, f32) {
-        let tile = crate::layout::packing::Tile::viewport();
-        let centre = framing::field_to_world(tile.low.midpoint(tile.high));
-        let focus = self.focus + ground(centre * (1.0 - self.field_growth));
-        let distance = (self.distance - framing::FIELD_HEIGHT) * self.field_growth
-            + framing::FIELD_HEIGHT;
-        (focus, distance)
+        let field = framing::FieldSpace::new(self.field_growth);
+        (field.to_planner(self.focus), self.distance / field.scale())
     }
 
     fn scale(&self) -> f32 {
@@ -4060,7 +4063,7 @@ mod tests {
         let mut paired_rays = 0;
         for frame in 0..sim.frames(60).unwrap() {
             sim.advance_to(frame, 60);
-            let (focus, distance) = sim.view();
+            let (focus, distance) = sim.planner_view();
             sim.set_ray_view(super::RayView::new(focus - normal * distance, normal));
             let circle = sim.groups().first().map(|ring| (ring.1, ring.2));
             for beam in sim
@@ -5975,7 +5978,7 @@ mod tests {
         );
         for frame in 1..frames_for(simulation.duration(), 60).unwrap() {
             simulation.advance_to(frame, 60);
-            let (focus, distance) = simulation.view();
+            let (focus, distance) = simulation.planner_view();
             let eye = focus + view_direction() * distance;
             let layout = simulation.layout();
             let geometry = simulation.theme().geometry();
@@ -6315,7 +6318,7 @@ mod tests {
 
     fn assert_clearance(sim: &Simulation) {
         nitpicks::assert_labels_and_beams(sim);
-        assert_eq!(sim.view(), (Vec3::ZERO, framing::DISTANCE));
+        assert_eq!(sim.planner_view(), (Vec3::ZERO, framing::DISTANCE));
         assert!(
             sim.avatars()
                 .iter()

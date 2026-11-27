@@ -624,7 +624,7 @@ pub(crate) mod tests {
             report.to_string(),
         )
         .unwrap();
-        diagnostic.assert_clear(sim.state.avatar_max_speed);
+        diagnostic.assert_clear(sim.state.avatar_max_speed * sim.field_space().scale());
     }
 
     #[derive(Default, serde::Serialize)]
@@ -745,7 +745,7 @@ pub(crate) mod tests {
             sim.fragments(),
             sim.labels(),
             sim.caption(),
-            sim.view()
+            sim.planner_view()
         )
     }
     #[test]
@@ -945,7 +945,7 @@ pub(crate) mod tests {
         let placement = (
             sim.seconds(),
             layout.revision(),
-            sim.state.region_depth,
+            sim.state.field_growth,
             sim.groups(),
             sim.scale(),
             sim.avatar_disc_scale(),
