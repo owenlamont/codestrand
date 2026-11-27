@@ -217,11 +217,10 @@ fn shared_gutters(layout: &Layout) -> f32 {
     cost
 }
 
-fn glyph_fit<'a>(
-    packing: &'a Packing,
+pub(in crate::layout::packing) fn glyph_scales(
+    packing: &Packing,
     tick: usize,
-    active: &'a [usize],
-) -> impl Fn(&Layout) -> (f32, f32) + 'a {
+) -> impl Fn(usize, Tile) -> f32 + '_ {
     let shapes: Vec<_> = packing.inputs[tick]
         .iter()
         .zip(&packing.rotated)
@@ -231,15 +230,22 @@ fn glyph_fit<'a>(
             (shape, center, input.height)
         })
         .collect();
+    move |repo, tile| {
+        let (shape, center, height) = &shapes[repo];
+        packing.fit_scale(tile, shape, *height, *center).max(1e-6)
+    }
+}
+
+fn glyph_fit<'a>(
+    packing: &'a Packing,
+    tick: usize,
+    active: &'a [usize],
+) -> impl Fn(&Layout) -> (f32, f32) + 'a {
+    let size = glyph_scales(packing, tick);
     move |layout: &Layout| {
         let mut sizes: Vec<_> = active
             .iter()
-            .map(|&repo| {
-                let (shape, center, height) = &shapes[repo];
-                packing
-                    .fit_scale(layout.tiles[repo].unwrap(), shape, *height, *center)
-                    .max(1e-6)
-            })
+            .map(|&repo| size(repo, layout.tiles[repo].unwrap()))
             .collect();
         sizes.sort_unstable_by(f32::total_cmp);
         let end = sizes.len() - 1;

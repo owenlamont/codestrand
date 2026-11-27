@@ -407,7 +407,11 @@ pub(super) fn place_tile_floor(world: &mut World, simulation: &Simulation) {
         },
     );
     let positions: Vec<_> = (0..simulation.layout().repositories.len())
-        .filter_map(|index| simulation.visible_repository_tile(index))
+        .filter_map(|index| {
+            let tile = simulation.visible_repository_tile(index)?;
+            let (_, alpha, _) = simulation.repository_effect(index);
+            (alpha > 0.0).then_some(tile)
+        })
         .flat_map(|tile| glass_positions(Some(tile)))
         .map(|[x, _, z]| {
             // Project the finish onto the floor along sightlines through the glass edges.
@@ -551,6 +555,80 @@ mod tests {
             .filter(|pair| pair[1][0][1] > pair[0][2][1])
             .count();
         assert_eq!(bands, 8);
+    }
+
+    #[test]
+    fn archived_tile_floor_disappears_when_glass_becomes_transparent() {
+        let histories = [0, 4 * 86_400, 8 * 86_400]
+            .into_iter()
+            .enumerate()
+            .map(|(repository, start)| {
+                let mut events = crate::timeline::synthetic();
+                for (index, event) in events.iter_mut().enumerate() {
+                    event.seconds = start + i64::try_from(index).unwrap();
+                }
+                crate::repositories::namespace(&mut events, repository);
+                events
+            })
+            .collect();
+        let mut simulation = Simulation::with_repositories(
+            crate::repositories::merge(histories),
+            &crate::model::Options {
+                seconds_per_day: 0.05,
+                max_idle_seconds: 0.1,
+                repository_archived: vec![false, true, false],
+                repository_ends: vec![None; 3],
+                ..default()
+            },
+            &crate::theme::Theme::neon(),
+            &crate::contributors::Mappings::default(),
+            &["One".into(), "Two".into(), "Three".into()],
+        );
+        simulation.repository_boundary = Boundary::Glass;
+        let mut world = World::new();
+        world.init_resource::<Assets<StandardMaterial>>();
+        world.init_resource::<Assets<Image>>();
+        world.init_resource::<Assets<Mesh>>();
+        world.spawn((
+            SceneCamera,
+            Projection::Perspective(PerspectiveProjection::default()),
+            Transform::from_xyz(0.0, 60.0, 0.0),
+        ));
+        setup(&mut world, ThemeName::Neon, Handle::default());
+        let floor = world.resource::<Environment>().tile_mesh.clone();
+        let mut saw_transparent_glass = false;
+        for frame in 0..=simulation.frames(60).unwrap() {
+            simulation.advance_to(frame, 60);
+            let (_, alpha, _) = simulation.repository_effect(1);
+            if alpha <= 0.0
+                && let Some(tile) = simulation.visible_repository_tile(1)
+            {
+                place_tile_floor(&mut world, &simulation);
+                let meshes = world.resource::<Assets<Mesh>>();
+                let Some(VertexAttributeValues::Float32x3(positions)) = meshes
+                    .get(&floor)
+                    .unwrap()
+                    .attribute(Mesh::ATTRIBUTE_POSITION)
+                else {
+                    panic!("tile floor positions are missing");
+                };
+                let remaining = simulation
+                    .layout()
+                    .repositories
+                    .iter()
+                    .filter(|region| region.tile.is_some())
+                    .count()
+                    - 1;
+                assert!(remaining > 0);
+                assert_eq!(
+                    positions.len(),
+                    remaining * glass_positions(Some(tile)).len()
+                );
+                saw_transparent_glass = true;
+                break;
+            }
+        }
+        assert!(saw_transparent_glass);
     }
 
     #[test]

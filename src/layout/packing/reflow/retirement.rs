@@ -17,6 +17,7 @@ impl Retirement {
         departing: usize,
         space: Space,
         ticks: usize,
+        glyph_size: impl Fn(usize, Tile) -> f32,
     ) -> Option<Self> {
         let field = space.field(framing::MARGIN);
         let gutters = space.field(super::super::GUTTER_MARGIN);
@@ -25,26 +26,39 @@ impl Retirement {
             return None;
         }
         let mut best = None;
+        let mut best_gain = f32::NEG_INFINITY;
+        let sizes: Vec<_> = from
+            .tiles
+            .iter()
+            .enumerate()
+            .map(|(repo, &tile)| {
+                tile.filter(|_| repo != departing)
+                    .map(|tile| glyph_size(repo, tile))
+            })
+            .collect();
         let mut least_donors = usize::MAX;
         let mut distance = f32::INFINITY;
         for axis in 0..2 {
-            for grows_high in [false, true] {
-                let Some(group) = Group::find(&from, departing, axis, grows_high)
-                else {
+            let low = Group::find(&from, departing, axis, true);
+            let high = Group::find(&from, departing, axis, false);
+            for part in 0..=8_u8 {
+                let share = f32::from(part) / 8.0;
+                let Some((to, donors)) = Self::close(
+                    &from,
+                    departing,
+                    field,
+                    retiring,
+                    axis,
+                    [&low, &high],
+                    share,
+                ) else {
                     continue;
                 };
-                let far = edge(retiring, axis, grows_high);
-                if !(field.low[axis]..=field.high[axis]).contains(&far) {
-                    continue;
-                }
-                let to = group.finish(&from, Some(departing), far, field);
                 let travel = exchange::edge_travel(&from, &to);
                 if travel
                     > exchange::MAX_EDGE_STEP_PX
                         * held::REFLOW_LINEAR_FRACTION
                         * count(ticks)
-                    || group.donors > least_donors
-                    || (group.donors == least_donors && travel >= distance)
                     || !to.tiles.iter().enumerate().all(|(repo, &tile)| {
                         repo == departing || tile.is_none_or(settled)
                     })
@@ -61,7 +75,28 @@ impl Retirement {
                 if !connected(&from, &survivors, false) {
                     continue;
                 }
-                least_donors = group.donors;
+                let gain = from
+                    .tiles
+                    .iter()
+                    .zip(&to.tiles)
+                    .enumerate()
+                    .filter_map(|(repo, (before, after))| {
+                        let size = sizes[repo]?;
+                        let after = *after.as_ref()?;
+                        (Some(after) != *before)
+                            .then(|| size.recip() - glyph_size(repo, after).recip())
+                    })
+                    .sum::<f32>();
+                if gain
+                    .total_cmp(&best_gain)
+                    .then_with(|| least_donors.cmp(&donors))
+                    .then_with(|| distance.total_cmp(&travel))
+                    .is_le()
+                {
+                    continue;
+                }
+                best_gain = gain;
+                least_donors = donors;
                 distance = travel;
                 best = Some(to);
             }
@@ -71,6 +106,50 @@ impl Retirement {
             to: best?,
             departing,
         })
+    }
+
+    fn close(
+        from: &Layout,
+        departing: usize,
+        field: Tile,
+        retiring: Tile,
+        axis: usize,
+        [low, high]: [&Option<Group>; 2],
+        share: f32,
+    ) -> Option<(Layout, usize)> {
+        let cut = if share >= 1.0 {
+            retiring.high[axis]
+        } else {
+            retiring.low[axis] + (retiring.high[axis] - retiring.low[axis]) * share
+        };
+        if !(field.low[axis]..=field.high[axis]).contains(&cut) {
+            return None;
+        }
+        match (share > 0.0, share < 1.0) {
+            (false, true) => {
+                let group = high.as_ref()?;
+                Some((
+                    group.finish(from, Some(departing), cut, field),
+                    group.donors,
+                ))
+            }
+            (true, false) => {
+                let group = low.as_ref()?;
+                Some((
+                    group.finish(from, Some(departing), cut, field),
+                    group.donors,
+                ))
+            }
+            _ => {
+                let low = low.as_ref()?;
+                let high = high.as_ref()?;
+                let intermediate = low.finish(from, Some(departing), cut, field);
+                Some((
+                    high.finish(&intermediate, Some(departing), cut, field),
+                    low.donors + high.donors,
+                ))
+            }
+        }
     }
 
     pub(in crate::layout::packing) fn sample(&self, presence: f32) -> Layout {
@@ -393,7 +472,25 @@ mod tests {
                 assert_eq!(Group::find(&before, 4, axis, high).unwrap().donors, 1);
             }
         }
-        let change = Retirement::plan(opening, 4, space, 240).unwrap();
+        let low = Group::find(&before, 4, 0, true);
+        let high = Group::find(&before, 4, 0, false);
+        let (shared, _) =
+            Retirement::close(&before, 4, glass, cells[4], 0, [&low, &high], 0.5)
+                .unwrap();
+        for repo in [0, 3] {
+            assert!(
+                shared.tiles[repo].unwrap().area() > before.tiles[repo].unwrap().area()
+            );
+        }
+        assert!(fills_field(&shared, field));
+        assert!(contained(&shared));
+        assert!(compatible(&before.tiles, &shared.tiles));
+        assert!(compatible(&before.gutters, &shared.gutters));
+
+        let change = Retirement::plan(opening, 4, space, 240, |repo, tile| {
+            tile.area().sqrt() * if repo == 0 { 0.25 } else { 1.0 }
+        })
+        .unwrap();
         assert!(!compatible(
             &before.tiles,
             &Group {
@@ -412,18 +509,13 @@ mod tests {
         ));
         let after = change.sample(0.0);
         assert!(after.tiles[4].is_none());
-        let changed = before.tiles[..4]
-            .iter()
-            .zip(&after.tiles[..4])
-            .filter(|(a, b)| a != b)
-            .count();
-        assert_eq!(changed, 2);
-        let shrunk = before.tiles[..4]
-            .iter()
-            .zip(&after.tiles[..4])
-            .filter(|(a, b)| a.unwrap().area() > b.unwrap().area())
-            .count();
-        assert_eq!(shrunk, 1);
+        assert!(after.tiles[0].unwrap().area() > before.tiles[0].unwrap().area());
+        assert!(
+            before.tiles[..4]
+                .iter()
+                .zip(&after.tiles[..4])
+                .any(|(a, b)| { a.unwrap().area() > b.unwrap().area() })
+        );
         let fixed: Vec<_> = before.tiles[..4]
             .iter()
             .zip(&after.tiles[..4])

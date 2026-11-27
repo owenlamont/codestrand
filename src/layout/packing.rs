@@ -2040,6 +2040,8 @@ impl Packing {
             return None;
         }
         let original = self.layout_at(0, &[], None, None);
+        let archive_fit =
+            retirement.map(|change| reflow::opening::glyph_scales(self, change.start));
         let replan = |layout: &reflow::Layout, change: &ScheduledRetirement| {
             let exit = self.exits[change.departing]?;
             let ticks = usize::try_from(exit.end - exit.start).ok()?;
@@ -2048,6 +2050,7 @@ impl Packing {
                 change.departing,
                 self.space(),
                 ticks,
+                archive_fit.as_ref()?,
             )?;
             Some(ScheduledRetirement {
                 start: change.start,
@@ -2108,6 +2111,7 @@ impl Packing {
             departing,
             self.space(),
             end - start,
+            reflow::opening::glyph_scales(self, start),
         )?;
         Some(ScheduledRetirement {
             start,
