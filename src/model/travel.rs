@@ -31,8 +31,10 @@ pub(super) fn field_rect(tile: crate::layout::packing::Tile) -> Rect {
     Rect::from_corners(tile.low * HALF, tile.high * HALF)
 }
 
-fn ground_position(point: Vec2) -> [f32; 2] {
-    framing::field_to_world(point / HALF).to_array()
+fn ground_position(point: Vec2, field: framing::FieldSpace) -> [f32; 2] {
+    field
+        .ground_to_world(framing::field_to_world(point / HALF))
+        .to_array()
 }
 
 pub(super) fn interior(tile: crate::layout::packing::Tile, radius: f32) -> Rect {
@@ -420,7 +422,30 @@ struct Trip {
     free: u64,
     failure: Option<&'static str>,
     cutoff: Option<u64>,
-    proof: Option<serde_json::Value>,
+    proof: Option<RouteProof>,
+}
+
+#[derive(Clone, Debug)]
+struct RouteProof {
+    epoch: u64,
+    points: Box<[Vec2]>,
+}
+
+impl RouteProof {
+    fn report(&self, field: framing::FieldSpace) -> serde_json::Value {
+        let length: f32 = self
+            .points
+            .windows(2)
+            .map(|pair| pair[0].distance(pair[1]))
+            .sum();
+        let length = length * framing::WORLD_UNITS_PER_REFERENCE_PIXEL * field.scale();
+        serde_json::json!({
+            "network_epoch": self.epoch,
+            "shortest_network_length": length,
+            "route_network_length": length,
+            "network_points": self.points.iter().map(|&point| ground_position(point, field)).collect::<Vec<_>>(),
+        })
+    }
 }
 
 fn retained_route_bytes(trips: &Vec<Trip>) -> usize {
@@ -504,11 +529,10 @@ impl Plan {
             .trips
             .iter()
             .map(|trip| {
-                let proof = trip.proof.as_ref().map_or(0, |proof| {
-                    let points = proof["network_points"].as_array().map_or(0, Vec::len);
-                    // The JSON object and each nested coordinate array have separate allocations.
-                    2048 + points * 256
-                });
+                let proof = trip
+                    .proof
+                    .as_ref()
+                    .map_or(0, |proof| size_of_val(proof.points.as_ref()));
                 (trip.route.retained_bytes() + proof + 32) as u128
             })
             .sum::<u128>();
@@ -622,11 +646,7 @@ impl Plan {
         stats["max_speed"] = serde_json::json!(
             self.stats.max_speed * framing::WORLD_UNITS_PER_REFERENCE_PIXEL
         );
-        let position = |point: Vec2| {
-            field
-                .ground_to_world(framing::field_to_world(point / HALF))
-                .to_array()
-        };
+        let position = |point| ground_position(point, field);
         let units_per_pixel = framing::WORLD_UNITS_PER_REFERENCE_PIXEL * field.scale();
         let trips: Vec<_> = self.trips.iter().map(|trip| serde_json::json!({
             "author": trip.author,
@@ -640,7 +660,7 @@ impl Plan {
             "service": tick_time(trip.arrival).lossy_secs_f32(),
             "fade": trip.fade,
             "failure": trip.failure,
-            "proof": trip.proof,
+            "proof": trip.proof.as_ref().map(|proof| proof.report(field)),
             "source": position(trip.source),
             "target": position(trip.destination),
             "visible_distance": planning::progress(trip) * units_per_pixel,

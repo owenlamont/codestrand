@@ -1,6 +1,6 @@
 use super::{
-    Capture, HALF, Pose, Rect, Route, Router, Trip, TripKind, Vec2, fade_clearance,
-    ticks_duration,
+    Capture, HALF, Pose, Rect, Route, RouteProof, Router, Trip, TripKind, Vec2,
+    fade_clearance, ticks_duration,
 };
 use crate::layout::packing::Tile;
 
@@ -293,10 +293,11 @@ fn pauses_away_from_source(track: &[Vec2], source: Vec2) -> bool {
         })
 }
 
-fn route_proof(points: &[Vec2], epoch: u64) -> serde_json::Value {
-    let length: f32 = points.windows(2).map(|p| p[0].distance(p[1])).sum();
-    let length = length * super::super::framing::WORLD_UNITS_PER_REFERENCE_PIXEL;
-    serde_json::json!({"network_epoch":epoch,"shortest_network_length":length,"route_network_length":length,"network_points":points.iter().copied().map(super::ground_position).collect::<Vec<_>>()})
+fn route_proof(points: &[Vec2], epoch: u64) -> RouteProof {
+    RouteProof {
+        epoch,
+        points: points.into(),
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1333,6 +1334,21 @@ mod tests {
         assert!(!plan.travelling(0, 90));
         assert!(plan.sample(0, 90).is_none());
     }
+    #[test]
+    fn route_proof_reports_points_and_lengths_in_world_space() {
+        use crate::model::framing::{FieldSpace, WORLD_UNITS_PER_REFERENCE_PIXEL};
+
+        let points = [Vec2::ZERO, Vec2::new(40.0, 0.0)];
+        let proof = route_proof(&points, 0).report(FieldSpace::new(2.0));
+        let endpoints: [[f32; 2]; 2] =
+            serde_json::from_value(proof["network_points"].clone()).unwrap();
+        let length = f64::from(20.0 * WORLD_UNITS_PER_REFERENCE_PIXEL);
+        assert!((f64::from(endpoints[1][0] - endpoints[0][0]) - length).abs() < 1e-5);
+        assert!(
+            (proof["route_network_length"].as_f64().unwrap() - length).abs() < 1e-5
+        );
+    }
+
     #[test]
     fn other_travellers_cannot_change_a_route_or_its_departure() {
         let mut capture = fixture();

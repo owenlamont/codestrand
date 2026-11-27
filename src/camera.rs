@@ -155,6 +155,7 @@ impl PreviewCamera {
                             field.to_world(avatar.position),
                             1.0 - (-dt / 0.3).exp(),
                         );
+                        self.constrain_follow_pitch();
                     } else {
                         self.mode = Mode::Free;
                         self.focus =
@@ -164,6 +165,14 @@ impl PreviewCamera {
                     self.move_free(input, old_eye, old_distance, dt);
                 }
             }
+        }
+    }
+
+    fn constrain_follow_pitch(&mut self) {
+        let clearance = EYE_FLOOR - self.focus.y;
+        if clearance > 0.0 {
+            self.distance = self.distance.max(clearance);
+            self.pitch = self.pitch.min(-(clearance / self.distance).asin());
         }
     }
 
@@ -1093,6 +1102,25 @@ mod tests {
             0.1,
         );
         assert_eq!(camera.mode, Mode::Free);
+    }
+
+    #[test]
+    fn follow_aims_at_a_contributor_below_the_eye_floor() {
+        let simulation = avatars();
+        let mut avatar = simulation.avatars()[0].clone();
+        avatar.position.y = 1.0;
+        let view = (Vec3::ZERO, 5.0);
+        let mut camera = PreviewCamera::new(view);
+        camera.mode = following(&avatar);
+        camera.focus = avatar.position;
+        camera.pitch = std::f32::consts::FRAC_PI_6;
+        camera.update(&Input::default(), view, &[avatar], 0.1);
+        let (eye, target) = camera.pose();
+        assert!(eye.y >= EYE_FLOOR);
+        assert!(
+            (camera.rotation() * Vec3::NEG_Z)
+                .abs_diff_eq((target - eye).normalize(), 1e-5)
+        );
     }
 
     #[test]
