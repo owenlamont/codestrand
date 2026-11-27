@@ -1,6 +1,7 @@
 use super::{Node, Space, Tile, gutter_cells, held, insert, tiles};
 
 mod exchange;
+pub(super) mod opening;
 pub(super) mod retirement;
 
 const MAX_LOCAL_SPLITS: usize = 8;
@@ -99,6 +100,21 @@ impl Change {
 }
 
 impl Layout {
+    fn blend_edges(&self, to: &Self, progress: f32) -> Self {
+        let mut layout = self.clone();
+        let blend = |rects: &mut [Option<Tile>], target: &[Option<Tile>]| {
+            for (rect, goal) in rects.iter_mut().zip(target) {
+                if let (Some(rect), Some(goal)) = (rect, goal) {
+                    rect.low += (goal.low - rect.low) * progress;
+                    rect.high += (goal.high - rect.high) * progress;
+                }
+            }
+        };
+        blend(&mut layout.tiles, &to.tiles);
+        blend(&mut layout.gutters, &to.gutters);
+        layout
+    }
+
     fn blend(&self, to: &Self, fraction: f32) -> Self {
         let blend = |from: &[Option<Tile>], to: &[Option<Tile>]| {
             from.iter()

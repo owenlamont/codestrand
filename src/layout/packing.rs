@@ -1044,6 +1044,14 @@ fn gutter_cells(
     placement: &[Option<Tile>],
     space: Space,
 ) -> Vec<Option<Tile>> {
+    gutter_cells_in(nodes, placement, space.field(GUTTER_MARGIN))
+}
+
+fn gutter_cells_in(
+    nodes: &[Node],
+    placement: &[Option<Tile>],
+    field: Tile,
+) -> Vec<Option<Tile>> {
     fn bounds(
         nodes: &[Node],
         index: usize,
@@ -1099,7 +1107,7 @@ fn gutter_cells(
         }
     }
     let mut result = vec![None; placement.len()];
-    divide(nodes, 0, space.field(GUTTER_MARGIN), placement, &mut result);
+    divide(nodes, 0, field, placement, &mut result);
     result
 }
 
@@ -1114,6 +1122,7 @@ pub(crate) struct Packing {
     opening: Option<Opening>,
     reflows: Arc<[reflow::Change]>,
     retirement: Option<Arc<ScheduledRetirement>>,
+    staggered: Option<Arc<reflow::opening::FlatLayout>>,
     labels: Arc<[String]>,
     inputs: Arc<[Vec<Input>]>,
     samples: Arc<[Sample]>,
@@ -1262,7 +1271,7 @@ impl Packing {
             aspect_checkpoint,
         ) = retained_fields!(self, Packing {
             nodes, rotated, birth_order, opening, aspects, display_aspects, aspect_checkpoint;
-            gutter_scale, growth, reflows, retirement, labels, inputs, samples, exits, content_scales, center_jumps,
+            gutter_scale, growth, reflows, retirement, staggered, labels, inputs, samples, exits, content_scales, center_jumps,
             tiling, fresh_tiling,
         });
         let opening = opening.as_ref().map_or(0, |opening| {
@@ -1301,11 +1310,13 @@ impl Packing {
 
     pub(crate) fn reflow_bytes(ticks: u128, repositories: u128) -> u128 {
         let geometry = repositories * (4 * std::mem::size_of::<Option<Tile>>()) as u128;
-        (1 + ticks / held::reflow_spacing() as u128)
+        let changes = 1 + ticks / held::reflow_spacing() as u128;
+        changes
             * (reflow::Change::retained_bytes()
                 + repositories * (2 * std::mem::size_of::<Node>()) as u128
                 + geometry)
             + geometry
+            + reflow::opening::FlatLayout::retained_bytes(repositories, changes.min(8))
             + (std::mem::size_of::<ScheduledRetirement>()
                 + 2 * std::mem::size_of::<usize>()) as u128
     }
@@ -1573,6 +1584,7 @@ impl Packing {
             opening,
             reflows: reflows.into(),
             retirement: None,
+            staggered: None,
             labels: labels.into(),
             inputs: regions.into(),
             samples: samples.into(),
@@ -1586,7 +1598,14 @@ impl Packing {
             tiling: TilingCache::default(),
             fresh_tiling: false,
         };
-        packing.retirement = packing.plan_retirement().map(Arc::new);
+        let retirement = packing.plan_retirement();
+        if let Some((opening, retirement)) = packing.plan_staggered(retirement.as_ref())
+        {
+            packing.staggered = Some(Arc::new(opening));
+            packing.retirement = retirement.map(Arc::new);
+        } else {
+            packing.retirement = retirement.map(Arc::new);
+        }
         packing.center_jumps = packing.plan_center_jumps(&items);
         packing.content_scales = packing.plan_content_scales();
         packing.aspects = packing.build_aspects(
@@ -1994,6 +2013,61 @@ impl Packing {
         }
     }
 
+    fn plan_staggered(
+        &self,
+        retirement: Option<&ScheduledRetirement>,
+    ) -> Option<(reflow::opening::FlatLayout, Option<ScheduledRetirement>)> {
+        if self.opening.is_some()
+            || self.reflows.len() > 8
+            || (retirement.is_some() && !self.reflows.is_empty())
+            || self.labels.len() < 5
+        {
+            return None;
+        }
+        let initial = &self.samples[0];
+        let end = retirement.map_or(self.samples.len() - 1, |change| change.start);
+        if initial.presence.iter().any(|&p| p > 0.0 && p < 1.0)
+            || self.samples[1..=end].iter().any(|row| {
+                initial.presence.iter().enumerate().any(|(repo, &p)| {
+                    row.presence[repo].to_bits() != p.to_bits()
+                        || (p > 0.0
+                            && retirement.is_some()
+                            && row.weights[repo].to_bits()
+                                != initial.weights[repo].to_bits())
+                })
+            })
+        {
+            return None;
+        }
+        let original = self.layout_at(0, &[], None, None);
+        let replan = |layout: &reflow::Layout, change: &ScheduledRetirement| {
+            let exit = self.exits[change.departing]?;
+            let ticks = usize::try_from(exit.end - exit.start).ok()?;
+            let motion = reflow::retirement::Retirement::plan(
+                layout.clone(),
+                change.departing,
+                self.space(),
+                ticks,
+            )?;
+            Some(ScheduledRetirement {
+                start: change.start,
+                departing: change.departing,
+                motion,
+            })
+        };
+        let opening = reflow::opening::plan(self, &original, |layout| {
+            retirement.is_none_or(|change| replan(layout, change).is_some())
+        })?;
+        let retirement = match retirement {
+            Some(change) => Some(replan(&opening, change)?),
+            None => None,
+        };
+        Some((
+            reflow::opening::FlatLayout::plan(self, opening)?,
+            retirement,
+        ))
+    }
+
     fn plan_retirement(&self) -> Option<ScheduledRetirement> {
         let (departing, exit) = self
             .exits
@@ -2057,6 +2131,12 @@ impl Packing {
             return retirement
                 .motion
                 .sample(self.samples[tile_tick].presence[retirement.departing]);
+        }
+        if let Some(staggered) = &self.staggered
+            && births.is_empty()
+            && presence.is_none()
+        {
+            return staggered.sample(tile_tick);
         }
         let opening = self.opening.as_ref().filter(|opening| {
             presence.is_none_or(|mask| mask.iter().all(|&p| p >= 1.0))
@@ -3126,7 +3206,60 @@ mod tests {
     }
 
     #[test]
-    fn completed_archive_keeps_the_flat_layout() {
+    fn playback_can_open_without_a_through_cut() {
+        let mut row = capacity_fixture();
+        row.truncate(5);
+        let shapes = [
+            (48.0, Vec2::new(30.0, 28.0)),
+            (69.0, Vec2::new(13.0, 15.0)),
+            (90.0, Vec2::new(26.0, 32.0)),
+            (111.0, Vec2::new(9.0, 19.0)),
+            (132.0, Vec2::new(22.0, 6.0)),
+        ];
+        for (region, (items, extent)) in row.iter_mut().zip(shapes) {
+            region.items = items;
+            region.low = -extent;
+            region.high = extent;
+            region.outline = outline::rectangle(-extent, extent);
+        }
+        let mut inputs = Inputs::new(10);
+        for _ in 0..10 {
+            inputs.push(row.clone());
+        }
+        let packing =
+            Packing::from_inputs(inputs, Arc::default(), 20.0, 1.0, 1).unwrap();
+        assert!(packing.staggered.is_some());
+        let cells = |tick| {
+            packing
+                .sample_split(tick, tick, &[], None)
+                .unwrap()
+                .0
+                .into_iter()
+                .map(|region| region.gutter.unwrap())
+                .collect::<Vec<_>>()
+        };
+        let opening = cells(0);
+        let field = packing.space().field(GUTTER_MARGIN);
+        for axis in 0..2 {
+            for cut in opening
+                .iter()
+                .flat_map(|tile| [tile.low[axis], tile.high[axis]])
+            {
+                if field.low[axis] < cut && cut < field.high[axis] {
+                    assert!(
+                        opening
+                            .iter()
+                            .any(|tile| tile.low[axis] < cut && cut < tile.high[axis])
+                    );
+                }
+            }
+        }
+        assert_eq!(opening, cells(9));
+        crate::model::assert_gutter_routes(opening.into_iter());
+    }
+
+    #[test]
+    fn an_exterior_archive_stays_visible_until_presence_is_zero() {
         let mut row = capacity_fixture();
         row.truncate(2);
         row[0].items = 64.0;
@@ -3139,17 +3272,14 @@ mod tests {
         let exit = exits[0].unwrap();
         let packing = Packing::from_inputs(inputs, exits.into(), 4.0, 1.0, 1).unwrap();
 
-        assert!(packing.retirement.is_some());
+        assert!(packing.retirement.is_none());
         let at = |tick| packing.sample_split(tick, tick, &[], None).unwrap().0;
-        let start = at(exit.start);
-        let middle = at(exit.start.midpoint(exit.end));
+        for tick in exit.start..exit.end {
+            assert!(at(tick)[0].tile.is_some(), "archive vanished at {tick}");
+        }
         let end = at(exit.end);
-        let later = at(exit.end + 15);
-        assert!(middle[0].tile.unwrap().area() < start[0].tile.unwrap().area());
-        assert!(middle[1].tile.unwrap().area() > start[1].tile.unwrap().area());
         assert!(end[0].tile.is_none() && end[0].gutter.is_none());
-        assert_eq!(end[1].tile, later[1].tile);
-        assert_eq!(end[1].gutter, later[1].gutter);
+        assert_eq!(end[1].tile, at(exit.end + 15)[1].tile);
     }
 
     #[test]
