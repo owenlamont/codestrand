@@ -289,6 +289,8 @@ impl MovingBeams {
     }
     fn observe_avatars(&mut self, simulation: &Simulation) {
         let state = &simulation.state;
+        let field = simulation.field_space();
+        let units_per_pixel = framing::WORLD_UNITS_PER_REFERENCE_PIXEL * field.scale();
         let radius = state.avatar_radius();
         let content = super::content_obstacles(state);
         let projected: Vec<_> = project(
@@ -327,15 +329,19 @@ impl MovingBeams {
                     self.travelling_off_network += u64::from(!joining);
                 }
             }
-            if let Some((before, position, was_moving)) =
-                self.previous.insert(author, (state.tick, point, moving))
+            let world_position = field.ground_to_world(bevy::math::Vec2::new(
+                avatar.position.x,
+                avatar.position.z,
+            ));
+            if let Some((before, position, was_moving)) = self
+                .previous
+                .insert(author, (state.tick, world_position, moving))
                 && (moving || was_moving)
                 && state.tick > before
             {
                 self.maximum_travel_speed_world_per_second =
                     self.maximum_travel_speed_world_per_second.max(
-                        point.distance(position)
-                            * framing::WORLD_UNITS_PER_REFERENCE_PIXEL
+                        world_position.distance(position)
                             / crate::model::ticks_duration(state.tick - before),
                     );
             }
@@ -379,7 +385,7 @@ impl MovingBeams {
                 self.travelling_disc_foreign_tile += 1;
                 self.travelling_disc_max_depth_world = self
                     .travelling_disc_max_depth_world
-                    .max(radius - point.distance(nearest));
+                    .max((radius - point.distance(nearest)) * units_per_pixel);
                 self.first_disc.get_or_insert_with(|| serde_json::json!({"frame":state.tick,"author":author,"commit":avatar.commit,"point":point.to_array(),"radius":radius,"foreign":index,"tile":[tile.low.to_array(),tile.high.to_array()],"travel_sample":simulation.travel.sample(author,state.tick).map(|(p,a)| (p.to_array(),a))}));
             }
         }

@@ -77,6 +77,9 @@ struct SceneCamera;
 #[derive(Component)]
 struct AvatarCamera;
 
+#[derive(Resource)]
+struct FieldRoot(Entity);
+
 #[derive(Component)]
 struct Label;
 
@@ -940,6 +943,12 @@ mod scaling_tests {
     }
 }
 
+fn setup_field(world: &mut World) {
+    let field = world.resource::<Playback>().0.field_space();
+    let root = world.spawn((field.transform(), Visibility::default())).id();
+    world.insert_resource(FieldRoot(root));
+}
+
 fn setup(world: &mut World) {
     let target = world.resource::<SceneTarget>().0.clone();
     let exporting = matches!(&target, RenderTarget::Image(_));
@@ -977,6 +986,7 @@ fn setup(world: &mut World) {
     if exporting {
         avatar_camera.insert(NoIndirectDrawing);
     }
+    setup_field(world);
     let theme = world.resource::<Playback>().0.theme().clone();
     let palette = Palette::new(world, &theme);
     repository_regions(world);
@@ -1089,18 +1099,21 @@ fn repository_regions(world: &mut World) {
         .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, glass_positions(region.tile))
         .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0, 1.0, 0.0]; 6]);
         let mesh = world.resource_mut::<Assets<Mesh>>().add(mesh);
-        world.spawn((
-            RepositoryGlass(index),
-            Mesh3d(mesh),
-            MeshMaterial3d(material),
-            Transform::IDENTITY,
-            bevy::camera::visibility::NoFrustumCulling,
-            if region.live {
-                Visibility::Visible
-            } else {
-                Visibility::Hidden
-            },
-        ));
+        spawn_in_field(
+            world,
+            (
+                RepositoryGlass(index),
+                Mesh3d(mesh),
+                MeshMaterial3d(material),
+                Transform::IDENTITY,
+                bevy::camera::visibility::NoFrustumCulling,
+                if region.live {
+                    Visibility::Visible
+                } else {
+                    Visibility::Hidden
+                },
+            ),
+        );
     }
 }
 fn heading(
@@ -1464,10 +1477,16 @@ fn preview_camera(world: &mut World, mut navigation: Local<navigation::State>) {
         let projection = camera_projection(world);
         let simulation = &world.resource::<Playback>().0;
         let view = projection.map_or_else(
-            || simulation.view(),
+            || simulation.world_view(),
             |(fov, viewport)| simulation.view_for_projection(fov, viewport),
         );
-        camera.update(&input, view, simulation.avatars(), dt);
+        camera.update_in_field(
+            &input,
+            view,
+            simulation.avatars(),
+            simulation.field_space(),
+            dt,
+        );
         let (eye, _) = camera.pose();
         let mut query = world.query_filtered::<&mut Transform, With<SceneCamera>>();
         if let Ok(mut transform) = query.single_mut(world) {
@@ -1493,9 +1512,10 @@ pub(super) fn animate(world: &mut World) {
             playback.0.advance_to(index, fps);
         }
         let camera = place_camera(world, &playback.0);
+        let eye = playback.0.field_space().to_planner(camera.translation);
         playback
             .0
-            .set_ray_view(model::RayView::new(camera.translation, *camera.forward()));
+            .set_ray_view(model::RayView::new(eye, *camera.forward()));
         world.resource_scope(|world, palette: Mut<Palette>| {
             world.resource_scope(|world, mut pools: Mut<Pools>| {
                 let simulation = &playback.0;
@@ -1522,7 +1542,7 @@ pub(super) fn animate(world: &mut World) {
 
 fn sync_lod(world: &mut World, pools: &mut Pools, simulation: &Simulation) {
     let layout = simulation.layout();
-    let (focus, distance) = simulation.view();
+    let (focus, distance) = simulation.world_view();
     let (mut eye, mut focus) = world.get_resource::<PreviewCamera>().map_or(
         (focus + model::view_direction() * distance, focus),
         PreviewCamera::pose,
@@ -1557,13 +1577,14 @@ fn sync_lod(world: &mut World, pools: &mut Pools, simulation: &Simulation) {
         simulation.seconds()
     };
     if simulation.collapse_directories {
+        let field = simulation.field_space();
         pools.lod.sample_clocks(
             layout,
             simulation.seconds(),
             seconds,
             lod::View {
-                eye,
-                focus,
+                eye: field.to_planner(eye),
+                focus: field.to_planner(focus),
                 height,
                 fov,
             },
@@ -1577,7 +1598,8 @@ fn sync_lod(world: &mut World, pools: &mut Pools, simulation: &Simulation) {
     {
         let view = names::View {
             clip_from_world: projection.get_clip_from_view()
-                * transform.to_matrix().inverse(),
+                * transform.to_matrix().inverse()
+                * simulation.field_space().transform().to_matrix(),
             viewport: reference_viewport(camera),
         };
         pools.names.sample(simulation, &view);
@@ -1850,8 +1872,9 @@ fn spawn_file(
                 .id(),
         );
     }
-    world
-        .spawn((
+    spawn_in_field(
+        world,
+        (
             Transform::default(),
             Visibility::default(),
             FileVisual {
@@ -1864,9 +1887,10 @@ fn spawn_file(
                 halo,
                 author: None,
             },
-        ))
-        .add_children(&children)
-        .id()
+        ),
+    )
+    .add_children(&children)
+    .id()
 }
 
 fn sync_directory_edges(
@@ -2166,8 +2190,9 @@ fn sync_activity(
     while pools.avatars.len() < avatars.len() {
         let index = pools.avatars.len();
         let colour = index % palette.avatars.len();
-        let entity = world
-            .spawn((
+        let entity = spawn_in_field(
+            world,
+            (
                 Mesh3d(if avatars[index].portrait.is_some() {
                     palette.avatar_discs[colour].clone()
                 } else {
@@ -2178,8 +2203,9 @@ fn sync_activity(
                 Visibility::Hidden,
                 RenderLayers::layer(AVATAR_LAYER),
                 PortraitDisc,
-            ))
-            .id();
+            ),
+        )
+        .id();
         attach_portrait(world, palette, entity, &avatars[index]);
         pools.avatars.push(entity);
     }
@@ -2255,16 +2281,18 @@ fn sync_groups(
         let material = world
             .resource_mut::<Assets<StandardMaterial>>()
             .add(StandardMaterial::default());
-        let entity = world
-            .spawn((
+        let entity = spawn_in_field(
+            world,
+            (
                 Mesh3d(palette.group_ring.clone()),
                 MeshMaterial3d(material),
                 Transform::default(),
                 Visibility::Hidden,
                 RenderLayers::layer(AVATAR_LAYER),
                 PortraitDisc,
-            ))
-            .id();
+            ),
+        )
+        .id();
         pools.groups.push(entity);
     }
     for (&entity, &(author, centre, rim, opacity)) in pools.groups.iter().zip(groups) {
@@ -2304,14 +2332,16 @@ fn sync_fragments(
             .resource_mut::<Assets<StandardMaterial>>()
             .add(simulation.theme().descending.clone());
         pool.push(
-            world
-                .spawn((
+            spawn_in_field(
+                world,
+                (
                     Mesh3d(palette.cube.clone()),
                     MeshMaterial3d(material),
                     Transform::default(),
                     Visibility::default(),
-                ))
-                .id(),
+                ),
+            )
+            .id(),
         );
     }
     for (entity, fragment) in pool.iter().zip(&fragments) {
@@ -2346,7 +2376,7 @@ fn sync_fragments(
 fn place_camera(world: &mut World, simulation: &Simulation) -> Transform {
     let exporting = world.contains_resource::<ExportResolution>();
     let (focus, distance) = camera_projection(world).map_or_else(
-        || simulation.view(),
+        || simulation.world_view(),
         |(fov, viewport)| {
             if exporting {
                 simulation.overview_for_projection(fov, viewport)
@@ -2383,6 +2413,15 @@ fn camera_projection(world: &mut World) -> Option<(f32, Vec2)> {
     })
 }
 
+fn spawn_in_field(world: &mut World, bundle: impl Bundle) -> EntityWorldMut<'_> {
+    let root = world.get_resource::<FieldRoot>().map(|root| root.0);
+    let mut entity = world.spawn(bundle);
+    if let Some(root) = root {
+        entity.insert(ChildOf(root));
+    }
+    entity
+}
+
 fn grow<'a>(
     world: &mut World,
     pool: &'a mut Vec<Entity>,
@@ -2392,14 +2431,16 @@ fn grow<'a>(
 ) -> &'a [Entity] {
     while pool.len() < needed {
         pool.push(
-            world
-                .spawn((
+            spawn_in_field(
+                world,
+                (
                     Mesh3d(mesh.clone()),
                     MeshMaterial3d(material.clone()),
                     Transform::default(),
                     Visibility::Hidden,
-                ))
-                .id(),
+                ),
+            )
+            .id(),
         );
     }
     pool
@@ -2762,13 +2803,24 @@ fn projected_panes(
         .collect()
 }
 
+fn label_camera(world: &mut World) -> Option<(Camera, GlobalTransform)> {
+    let (camera, transform) = world
+        .query_filtered::<(&Camera, &GlobalTransform), With<SceneCamera>>()
+        .single(world)
+        .ok()?;
+    let field = world.resource::<Playback>().0.field_space();
+    Some((
+        camera.clone(),
+        GlobalTransform::from(
+            field.transform().to_matrix().inverse() * transform.to_matrix(),
+        ),
+    ))
+}
+
 fn labels(world: &mut World) {
-    let mut camera_query =
-        world.query_filtered::<(&Camera, &GlobalTransform), With<SceneCamera>>();
-    let Ok((camera, transform)) = camera_query.single(world) else {
+    let Some((camera, transform)) = label_camera(world) else {
         return;
     };
-    let (camera, transform) = (camera.clone(), *transform);
     diff_samples(world, &camera, &transform);
     let playback = world.resource::<Playback>();
     let geometry = playback.0.theme();
@@ -3416,6 +3468,110 @@ mod tests {
     }
 
     #[test]
+    fn one_world_camera_frames_small_and_large_repository_fields() {
+        use bevy::camera::CameraProjection;
+
+        let tiles = |count| {
+            let mut histories = Vec::new();
+            for index in 0..count {
+                let mut initial = crate::timeline::synthetic().remove(0);
+                initial.seconds = 0;
+                initial.changes.truncate(1);
+                let mut later = initial.clone();
+                later.seconds = 86_400;
+                let mut events = vec![initial, later];
+                crate::repositories::namespace(&mut events, index);
+                histories.push(events);
+            }
+            let mut simulation = Simulation::with_repositories(
+                crate::repositories::merge(histories),
+                &model::Options {
+                    start: count,
+                    commits: 1,
+                    gutter: 20.0,
+                    ..default()
+                },
+                &Theme::neon(),
+                &crate::contributors::Mappings::default(),
+                &(0..count)
+                    .map(|index| format!("Repo {index}"))
+                    .collect::<Vec<_>>(),
+            );
+            simulation.repository_boundary = crate::repositories::Boundary::Glass;
+            assert_eq!(
+                simulation
+                    .layout()
+                    .repositories
+                    .iter()
+                    .filter(|region| region.tile.is_some())
+                    .count(),
+                count
+            );
+            assert_eq!(
+                simulation.world_view(),
+                (Vec3::ZERO, model::framing::DISTANCE)
+            );
+            let scale = simulation.field_space().scale();
+            let mut app = App::new();
+            app.add_plugins(bevy::transform::TransformPlugin);
+            let world = app.world_mut();
+            world.init_resource::<Assets<Mesh>>();
+            world.init_resource::<Assets<StandardMaterial>>();
+            world.insert_resource(Playback(simulation));
+            setup_field(world);
+            repository_regions(world);
+            app.update();
+            let world = app.world_mut();
+            let mut query = world.query::<(&Mesh3d, &GlobalTransform)>();
+            let vertices: Vec<_> = query
+                .iter(world)
+                .flat_map(|(mesh, transform)| {
+                    let mesh = world.resource::<Assets<Mesh>>().get(&mesh.0).unwrap();
+                    let bevy::mesh::VertexAttributeValues::Float32x3(vertices) =
+                        mesh.attribute(Mesh::ATTRIBUTE_POSITION).unwrap()
+                    else {
+                        panic!("glass positions");
+                    };
+                    vertices.iter().map(|point| {
+                        transform.transform_point(Vec3::from_array(*point))
+                    })
+                })
+                .collect();
+            assert_eq!(vertices.len(), count * 6);
+            (scale, vertices)
+        };
+
+        let (small_scale, small) = tiles(1);
+        let (large_scale, large) = tiles(128);
+        assert_eq!(small_scale, 1.0);
+        assert!(
+            large_scale < 1.0,
+            "large scene must grow in planner coordinates"
+        );
+        let camera =
+            Transform::from_xyz(0.0, 60.0, 0.0).looking_at(Vec3::ZERO, Vec3::NEG_Z);
+        let projection = bevy::camera::PerspectiveProjection {
+            fov: model::framing::FOV,
+            aspect_ratio: 16.0 / 9.0,
+            ..default()
+        };
+        let clip = projection.get_clip_from_view() * camera.to_matrix().inverse();
+        let project = |points: Vec<Vec3>| {
+            points.into_iter().fold(
+                (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)),
+                |(min, max), point| {
+                    let point = clip.project_point3(point);
+                    (min.min(point), max.max(point))
+                },
+            )
+        };
+        let (small_min, small_max) = project(small);
+        let (large_min, large_max) = project(large);
+        assert!(small_min.xy().abs_diff_eq(large_min.xy(), 0.002));
+        assert!(small_max.xy().abs_diff_eq(large_max.xy(), 0.002));
+    }
+
+    #[test]
     fn glass_is_spawned_only_for_the_glass_boundary() {
         use crate::repositories::Boundary;
         let mut world = World::new();
@@ -3498,7 +3654,7 @@ mod tests {
             &Theme::neon(),
             &crate::contributors::Mappings::default(),
         );
-        let camera = PreviewCamera::new(simulation.view());
+        let camera = PreviewCamera::new(simulation.world_view());
         let mut world = World::new();
         world.insert_resource(Playback(simulation));
         world.insert_resource(SceneTarget(Handle::<Image>::default().into()));
@@ -3796,7 +3952,7 @@ mod tests {
         world.init_resource::<Assets<Image>>();
         world.init_resource::<Assets<StandardMaterial>>();
         setup(&mut world);
-        let view = world.resource::<Playback>().0.view();
+        let view = world.resource::<Playback>().0.world_view();
         world.insert_resource(PreviewCamera::new(view));
         world.spawn((Window::default(), bevy::window::PrimaryWindow));
         world.init_resource::<Time<Real>>();
@@ -3905,7 +4061,7 @@ mod tests {
         world.init_resource::<Assets<Image>>();
         world.init_resource::<Assets<StandardMaterial>>();
         setup(&mut world);
-        let view = world.resource::<Playback>().0.view();
+        let view = world.resource::<Playback>().0.world_view();
         world.insert_resource(PreviewCamera::new(view));
         world.spawn((Window::default(), bevy::window::PrimaryWindow));
         world.init_resource::<Time<Real>>();
@@ -5755,7 +5911,7 @@ mod tests {
         world.insert_resource(Time::<Real>::default());
         sync_lod(&mut world, &mut pools, &simulation);
         sync_files(&mut world, &palette, &mut pools, &simulation);
-        let (focus, distance) = simulation.view();
+        let (focus, distance) = simulation.world_view();
         let mut fallback = lod::Lod::default();
         fallback.sample(
             simulation.layout(),

@@ -70,13 +70,13 @@ fn realistic_history_has_stable_framing_and_uniform_icons_at_sixty_hz() {
 }
 
 fn assert_icons(sim: &Simulation) {
-    let mut camera = crate::camera::PreviewCamera::new(sim.view());
+    let mut camera = crate::camera::PreviewCamera::new(sim.planner_view());
     camera.update(
         &crate::camera::Input {
             orbit: Vec2::ZERO,
             ..default()
         },
-        sim.view(),
+        sim.planner_view(),
         &[],
         0.1,
     );
@@ -170,7 +170,7 @@ fn local_framing_trace() {
     for frame in 0..=frames_for(sim.duration(), 60).unwrap() {
         sim.advance_to(frame, 60);
         let (regions, origins, scales) = sim.packing.sample(u64::from(frame)).unwrap();
-        let (focus, distance) = sim.view();
+        let (focus, distance) = sim.planner_view();
         let eye = focus + view_direction() * distance;
         let rows: Vec<_> = regions.iter().enumerate().filter(|(_, r)| r.live).map(|(i, r)| {
             let origin = framing::world_to_field(origins[i]) * framing::VIEWPORT * 0.5;

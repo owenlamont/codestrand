@@ -41,7 +41,7 @@ fn snapshot(sim: &Simulation) -> String {
             sim.layout().files().collect::<Vec<_>>(),
             &sim.state.avatars,
             &sim.state.pulses,
-            sim.view(),
+            sim.planner_view(),
         )
     )
 }

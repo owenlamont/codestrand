@@ -230,7 +230,7 @@ fn playback_help_describes_calendar_controls_and_rejects_old_flag() {
 }
 
 #[test]
-fn playback_docs_describe_overview_framing_and_world_sizes() {
+fn playback_docs_describe_overview_framing_and_the_fixed_world_field() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let playback = std::fs::read_to_string(root.join("docs/playback.md")).unwrap();
     let index = std::fs::read_to_string(root.join("docs/llms.txt")).unwrap();
@@ -239,8 +239,12 @@ fn playback_docs_describe_overview_framing_and_world_sizes() {
         assert!(guide.contains("static overview"));
         assert!(!guide.contains("detail scale"));
     }
-    assert!(playback.contains("world-space sizes"));
     for guide in [&playback, &full] {
+        assert!(
+            guide.contains(
+                "The repository field keeps the same size in world coordinates"
+            )
+        );
         assert!(guide.contains("every repository still active from before"));
         assert!(
             guide.contains(

@@ -1346,7 +1346,7 @@ mod tests {
             unreached_docks: std::collections::BTreeMap::new(),
             stats: Statistics::default(),
         }
-        .report();
+        .report(crate::model::framing::FieldSpace::IDENTITY);
         for pose in &mut capture.poses[1] {
             pose.point = Vec2::new(-100.0, 0.0);
         }
@@ -1363,7 +1363,7 @@ mod tests {
                 unreached_docks: std::collections::BTreeMap::new(),
                 stats: Statistics::default()
             }
-            .report()
+            .report(crate::model::framing::FieldSpace::IDENTITY)
         );
     }
     #[test]

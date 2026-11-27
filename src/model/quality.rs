@@ -173,7 +173,7 @@ impl FileClearance {
 }
 
 fn visibility(simulation: &Simulation) -> (f64, u32, Option<f64>, f64) {
-    let (focus, distance) = simulation.view();
+    let (focus, distance) = simulation.planner_view();
     let eye = focus + view_direction() * distance;
     let mut sum = 0.0;
     let mut count = 0;
@@ -405,7 +405,7 @@ mod tests {
         use crate::layout::Presence;
 
         let layout = simulation.layout();
-        let (focus, distance) = simulation.view();
+        let (focus, distance) = simulation.planner_view();
         let eye = focus + view_direction() * distance;
         let glyph = simulation.theme().glyph_transform();
         let corners = [

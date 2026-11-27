@@ -25,7 +25,8 @@ impl Simulation {
             self.advance_to(tick, 60);
             diagnostic.observe(self);
         }
-        diagnostic.assert_clear(self.state.avatar_max_speed);
+        diagnostic
+            .assert_clear(self.state.avatar_max_speed * self.field_space().scale());
     }
 
     fn update_window_clock(&mut self, history: &Schedule, departures: &[Time]) {
@@ -216,7 +217,7 @@ impl Simulation {
         if options.travel_cap == TravelCap::None {
             self.travel.require_birth_routes(options.bot_travel)?;
         }
-        self.align_travel_arrivals(options);
+        self.align_travel_arrivals();
         self.repair_walk_departures(options, padding);
         Ok(pass)
     }
@@ -625,7 +626,10 @@ mod tests {
 
     fn assert_same_playback(a: &mut Simulation, b: &mut Simulation) {
         assert_eq!(a.travel.round_state(None), b.travel.round_state(None));
-        assert_eq!(a.travel.report(), b.travel.report());
+        assert_eq!(
+            a.travel.report(a.field_space()),
+            b.travel.report(b.field_space())
+        );
         assert_eq!(a.boundaries.len(), b.boundaries.len());
         for (left, right) in a.boundaries.clone().into_iter().zip(b.boundaries.clone())
         {
@@ -1049,7 +1053,7 @@ mod tests {
             let mut frozen = Vec::new();
             for boundary in sim.boundaries.iter().take(8) {
                 let count = sim.schedule.applied(boundary.tick);
-                let trips = sim.travel.report()["trips"]
+                let trips = sim.travel.report(sim.field_space())["trips"]
                     .as_array()
                     .unwrap()
                     .iter()

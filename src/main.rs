@@ -790,7 +790,7 @@ mod single_source_tests {
             let tick = sim.scheduled_starts()[commit].ticks(true);
             sim.advance_to(u32::try_from(tick).unwrap(), 60);
             assert_eq!(
-                sim.view(),
+                sim.planner_view(),
                 (bevy::math::Vec3::ZERO, crate::model::framing::DISTANCE)
             );
             assert_eq!(crate::model::caption::Columns::new(&sim).layout().len(), 6);

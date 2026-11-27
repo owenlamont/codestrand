@@ -61,11 +61,29 @@ impl PreviewCamera {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn update(
         &mut self,
         input: &Input,
         view: (Vec3, f32),
         avatars: &[Avatar],
+        dt: f32,
+    ) {
+        self.update_in_field(
+            input,
+            view,
+            avatars,
+            model::framing::FieldSpace::IDENTITY,
+            dt,
+        );
+    }
+
+    pub(super) fn update_in_field(
+        &mut self,
+        input: &Input,
+        view: (Vec3, f32),
+        avatars: &[Avatar],
+        field: model::framing::FieldSpace,
         dt: f32,
     ) {
         let previous_eye = self.pose().0;
@@ -133,8 +151,10 @@ impl PreviewCamera {
                         .iter()
                         .find(|avatar| &avatar.key == key && avatar.presence > 0.0)
                     {
-                        self.focus =
-                            self.focus.lerp(avatar.position, 1.0 - (-dt / 0.3).exp());
+                        self.focus = self.focus.lerp(
+                            field.to_world(avatar.position),
+                            1.0 - (-dt / 0.3).exp(),
+                        );
                     } else {
                         self.mode = Mode::Free;
                         self.focus =
@@ -1085,7 +1105,7 @@ mod tests {
                 &contributors::Mappings::default(),
             );
             simulation.advance_to(start, 30);
-            let initial_view = simulation.view();
+            let initial_view = simulation.planner_view();
             let mut camera = PreviewCamera::new(initial_view);
             camera.update(
                 &Input {
@@ -1112,22 +1132,28 @@ mod tests {
                 simulation.advance_to(start + frame, 30);
                 camera.update(
                     &Input::default(),
-                    simulation.view(),
+                    simulation.planner_view(),
                     simulation.avatars(),
                     1.0 / 30.0,
                 );
             }
-            assert_eq!(simulation.view(), initial_view);
+            assert_eq!(simulation.planner_view(), initial_view);
             assert_eq!(camera.mode, Mode::Fit);
-            assert_eq!(camera.pose(), PreviewCamera::new(simulation.view()).pose());
+            assert_eq!(
+                camera.pose(),
+                PreviewCamera::new(simulation.planner_view()).pose()
+            );
             simulation.advance_to(start + 16, 30);
             camera.update(
                 &Input::default(),
-                simulation.view(),
+                simulation.planner_view(),
                 simulation.avatars(),
                 1.0 / 30.0,
             );
-            assert_eq!(camera.pose(), PreviewCamera::new(simulation.view()).pose());
+            assert_eq!(
+                camera.pose(),
+                PreviewCamera::new(simulation.planner_view()).pose()
+            );
         }
     }
 
