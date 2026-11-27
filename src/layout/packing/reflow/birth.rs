@@ -37,7 +37,8 @@ impl Birth {
             let cuts = [(0, false), (0, true), (1, false), (1, true)]
                 .into_iter()
                 .flat_map(|(axis, high)| {
-                    [0.25, 1.0 / 3.0, 0.5].map(move |fraction| (axis, high, fraction))
+                    [0.15, 0.20, 0.25, 1.0 / 3.0, 0.5]
+                        .map(move |fraction| (axis, high, fraction))
                 });
             for (axis, high, fraction) in cuts {
                 let edge = if high {

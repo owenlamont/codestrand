@@ -3282,6 +3282,9 @@ mod tests {
         for tick in 0..250 {
             row[1].live = tick >= 160;
             row[2].live = tick >= 218;
+            if tick == 240 {
+                row[2].items = 10_000.0;
+            }
             inputs.push(row.clone());
         }
         let packing =
