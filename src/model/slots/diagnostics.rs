@@ -90,7 +90,8 @@ impl MovingBeams {
         point: bevy::math::Vec2,
         content: &[(usize, Rect)],
     ) {
-        if avatar.presence > 0.0 {
+        let presence = avatar.display_presence();
+        if presence > 0.0 {
             let wordmark = crate::model::caption::frame_text_rects()[0]
                 .inflate(crate::model::caption::BUFFER);
             let right = Vec3::X;
@@ -100,7 +101,7 @@ impl MovingBeams {
                 * state.avatar_size
                 * avatar.projection_scale
                 * avatar.lifecycle_scale
-                * avatar.presence;
+                * presence;
             let edge = state
                 .screen(avatar.position + right * draw_radius)
                 .expect("visible avatar");
@@ -185,7 +186,7 @@ impl MovingBeams {
                     .avatars
                     .iter()
                     .enumerate()
-                    .filter(|(i, a)| *i != other && a.presence > 0.0)
+                    .filter(|(i, a)| *i != other && a.display_presence() > 0.0)
                     .all(|(_, a)| {
                         let p = state.screen(a.position).unwrap();
                         p.distance(p.clamp(rect.min, rect.max)) > distance + 0.001
@@ -208,7 +209,7 @@ impl MovingBeams {
     ) {
         let state = &simulation.state;
         let avatar = &state.avatars[author];
-        if avatar.presence <= 0.0 {
+        if avatar.display_presence() <= 0.0 {
             return;
         }
         let bounds = |name: &crate::model::names::Placement| {
@@ -229,7 +230,7 @@ impl MovingBeams {
                 .avatars
                 .iter()
                 .enumerate()
-                .filter(|(i, a)| *i != author && a.presence > 0.0)
+                .filter(|(i, a)| *i != author && a.display_presence() > 0.0)
             {
                 if let Some(other_name) = &other.name_visibility.placement
                     && let Some(other_body) = projected[i]
@@ -248,7 +249,7 @@ impl MovingBeams {
         }
         for (other, position) in projected.iter().enumerate().skip(author + 1) {
             self.parked_close_pairs += u64::from(
-                state.avatars[other].presence > 0.0
+                state.avatars[other].display_presence() > 0.0
                     && !simulation.travel.travelling(author, simulation.state.tick)
                     && !simulation.travel.travelling(other, simulation.state.tick)
                     && position.is_some_and(|p| p.distance(point) < 3.0 * radius),
@@ -257,16 +258,14 @@ impl MovingBeams {
     }
     fn observe_label_pairs(&mut self, state: &crate::model::State) {
         let before = self.label_label_pairs;
-        self.label_joint_exhausted_frames += u64::from(
-            state
-                .avatars
-                .iter()
-                .any(|a| a.presence > 0.0 && a.name_visibility.joint_exhausted),
-        );
+        self.label_joint_exhausted_frames +=
+            u64::from(state.avatars.iter().any(|a| {
+                a.display_presence() > 0.0 && a.name_visibility.joint_exhausted
+            }));
         let labels: Vec<_> = state
             .avatars
             .iter()
-            .filter(|a| a.presence > 0.0)
+            .filter(|a| a.display_presence() > 0.0)
             .filter_map(|a| a.name_visibility.placement.as_ref())
             .map(|name| name.bounds(state.geometry.label_height))
             .collect();
@@ -284,7 +283,7 @@ impl MovingBeams {
                 && state
                     .avatars
                     .iter()
-                    .filter(|a| a.presence > 0.0)
+                    .filter(|a| a.display_presence() > 0.0)
                     .all(|a| a.name_visibility.joint_clear),
         );
     }

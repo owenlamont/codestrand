@@ -151,11 +151,9 @@ impl PreviewCamera {
                         .iter()
                         .find(|avatar| &avatar.key == key && avatar.presence > 0.0)
                     {
-                        self.focus = self.focus.lerp(
-                            field.to_world(avatar.position),
-                            1.0 - (-dt / 0.3).exp(),
-                        );
-                        self.constrain_follow_pitch();
+                        let target = field.to_world(avatar.position);
+                        self.focus = self.focus.lerp(target, 1.0 - (-dt / 0.3).exp());
+                        self.constrain_follow_pitch(target.y);
                     } else {
                         self.mode = Mode::Free;
                         self.focus =
@@ -168,12 +166,12 @@ impl PreviewCamera {
         }
     }
 
-    fn constrain_follow_pitch(&mut self) {
-        let clearance = EYE_FLOOR - self.focus.y;
-        if clearance > 0.0 {
-            self.distance = self.distance.max(clearance);
-            self.pitch = self.pitch.min(-(clearance / self.distance).asin());
-        }
+    fn constrain_follow_pitch(&mut self, target_height: f32) {
+        let clearance = EYE_FLOOR - self.focus.y.min(target_height);
+        self.distance = self.distance.max(clearance);
+        let radius = if clearance > 0.0 { self.distance } else { 1.0 };
+        let limit = -(clearance / radius).clamp(-1.0, 1.0).asin();
+        self.pitch = self.pitch.min(limit);
     }
 
     fn move_free(&mut self, input: &Input, old_eye: Vec3, old_distance: f32, dt: f32) {
@@ -1105,22 +1103,23 @@ mod tests {
     }
 
     #[test]
-    fn follow_aims_at_a_contributor_below_the_eye_floor() {
+    fn follow_keeps_a_low_contributor_in_front_of_the_camera() {
         let simulation = avatars();
         let mut avatar = simulation.avatars()[0].clone();
         avatar.position.y = 1.0;
         let view = (Vec3::ZERO, 5.0);
-        let mut camera = PreviewCamera::new(view);
-        camera.mode = following(&avatar);
-        camera.focus = avatar.position;
-        camera.pitch = std::f32::consts::FRAC_PI_6;
-        camera.update(&Input::default(), view, &[avatar], 0.1);
-        let (eye, target) = camera.pose();
-        assert!(eye.y >= EYE_FLOOR);
-        assert!(
-            (camera.rotation() * Vec3::NEG_Z)
-                .abs_diff_eq((target - eye).normalize(), 1e-5)
-        );
+        for focus_height in [1.22, EYE_FLOOR, avatar.position.y] {
+            let mut camera = PreviewCamera::new(view);
+            camera.mode = following(&avatar);
+            camera.focus = avatar.position.with_y(focus_height);
+            camera.pitch = std::f32::consts::FRAC_PI_6;
+            camera.update(&Input::default(), view, std::slice::from_ref(&avatar), 0.01);
+            let (eye, target) = camera.pose();
+            let forward = camera.rotation() * Vec3::NEG_Z;
+            assert!(eye.y >= EYE_FLOOR);
+            assert!(forward.abs_diff_eq((target - eye).normalize(), 1e-5));
+            assert!((avatar.position - eye).dot(forward) > 4.9);
+        }
     }
 
     #[test]
