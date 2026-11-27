@@ -2008,6 +2008,13 @@ impl Packing {
     }
 
     #[cfg(test)]
+    pub(crate) fn settled_glass_error_px(&self) -> f32 {
+        self.lifecycle
+            .as_ref()
+            .map_or(0.0, |program| program.settled_glass_error_px(self.space()))
+    }
+
+    #[cfg(test)]
     pub(crate) fn gutter_field(&self) -> Tile {
         self.lifecycle.as_ref().map_or_else(
             || self.space().field(GUTTER_MARGIN),

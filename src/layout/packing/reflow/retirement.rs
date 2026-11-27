@@ -56,7 +56,7 @@ impl Retirement {
                 ) else {
                     continue;
                 };
-                expand_last_tile(&mut to, departing, field, space.gap);
+                expand_last_tile(&mut to, &from, departing);
                 if !settled_changes(&from, &to, departing) {
                     blocked_shapes.push((to, donors, 1 - axis));
                 } else if let Some(travel) =
@@ -615,6 +615,13 @@ impl Group {
         field: Tile,
     ) -> Layout {
         let mut result = from.clone();
+        let exterior = retiring.and_then(|repository| {
+            let bounds = gutter_bounds(from)?;
+            let high = [false, true]
+                .into_iter()
+                .find(|&high| (edge(bounds, self.axis, high) - cut).abs() <= EPSILON)?;
+            Some((high, edge(from.tiles[repository]?, self.axis, high)))
+        });
         for member in &self.members {
             let cell = result.gutters[member.repo].as_mut().unwrap();
             let tile = result.tiles[member.repo].as_mut().unwrap();
@@ -623,7 +630,12 @@ impl Group {
                 tile.low[self.axis] = cut;
                 tile.high[self.axis] = cut;
             } else {
-                let moved = (edge(*tile, self.axis, member.high) + cut - self.cut)
+                let moved = exterior
+                    .filter(|&(high, _)| high == member.high)
+                    .map_or_else(
+                        || edge(*tile, self.axis, member.high) + cut - self.cut,
+                        |(_, boundary)| boundary,
+                    )
                     .clamp(field.low[self.axis], field.high[self.axis]);
                 set_edge(tile, self.axis, member.high, moved);
             }
@@ -632,7 +644,7 @@ impl Group {
     }
 }
 
-fn expand_last_tile(layout: &mut Layout, departing: usize, field: Tile, gap: f32) {
+fn expand_last_tile(layout: &mut Layout, from: &Layout, departing: usize) {
     let mut live = layout
         .tiles
         .iter_mut()
@@ -646,11 +658,7 @@ fn expand_last_tile(layout: &mut Layout, departing: usize, field: Tile, gap: f32
     if let Some((tile, cell)) = live.next()
         && live.next().is_none()
     {
-        let padding = Vec2::splat(gap) / framing::VIEWPORT;
-        *tile = Tile {
-            low: (cell.low + padding).max(field.low),
-            high: (cell.high - padding).min(field.high),
-        };
+        *tile = rectangle_bounds(&from.tiles).unwrap_or(cell);
     }
 }
 
@@ -677,8 +685,11 @@ pub(super) fn settled(tile: Tile) -> bool {
 }
 
 pub(super) fn gutter_bounds(layout: &Layout) -> Option<Tile> {
-    layout
-        .gutters
+    rectangle_bounds(&layout.gutters)
+}
+
+pub(super) fn rectangle_bounds(rectangles: &[Option<Tile>]) -> Option<Tile> {
+    rectangles
         .iter()
         .flatten()
         .copied()
@@ -688,7 +699,7 @@ pub(super) fn gutter_bounds(layout: &Layout) -> Option<Tile> {
         })
 }
 
-fn fills_field(layout: &Layout, field: Tile) -> bool {
+pub(super) fn fills_field(layout: &Layout, field: Tile) -> bool {
     let tolerance = Vec2::splat(EPSILON);
     let area = layout
         .gutters
@@ -724,6 +735,58 @@ pub(super) fn contained(layout: &Layout) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exterior_archive_leaves_a_straight_visible_field_edge() {
+        let space = Space::new(4.0, 1.0);
+        let cells = [
+            Tile {
+                low: Vec2::new(-0.7, -0.6),
+                high: Vec2::ZERO,
+            },
+            Tile {
+                low: Vec2::new(-0.7, 0.0),
+                high: Vec2::new(0.0, 0.6),
+            },
+            Tile {
+                low: Vec2::new(0.0, -0.6),
+                high: Vec2::new(0.7, 0.6),
+            },
+        ];
+        let glass_bottom = -0.57;
+        let from = Layout {
+            tiles: vec![
+                Some(Tile {
+                    low: Vec2::new(-0.67, glass_bottom),
+                    high: Vec2::splat(-0.005),
+                }),
+                Some(Tile {
+                    low: Vec2::new(-0.67, 0.005),
+                    high: Vec2::new(-0.005, 0.57),
+                }),
+                Some(Tile {
+                    low: Vec2::new(0.005, glass_bottom),
+                    high: Vec2::new(0.67, 0.57),
+                }),
+            ],
+            gutters: cells.map(Some).into(),
+        };
+        let field = space.field(framing::MARGIN);
+        let high = Group::find(&from, 0, 1, false);
+        let (closed, _) =
+            Retirement::close(&from, 0, field, cells[0], 1, [&None, &high], 0.0)
+                .unwrap();
+        let bounds = gutter_bounds(&from).unwrap();
+        assert!(certified_closure(&from, &closed, 0, bounds, 400.0).is_some());
+        assert_eq!(
+            closed.tiles[1].unwrap().low.y.to_bits(),
+            glass_bottom.to_bits()
+        );
+        assert_eq!(
+            closed.tiles[1].unwrap().low.y.to_bits(),
+            closed.tiles[2].unwrap().low.y.to_bits()
+        );
+    }
 
     #[test]
     fn archive_aspect_correction_moves_the_collapsing_gutters_cross_edge() {

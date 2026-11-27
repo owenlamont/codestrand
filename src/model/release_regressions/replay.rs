@@ -33,6 +33,7 @@ pub(super) struct Replay {
     pub max_tile_step_at: Option<(usize, u64, u64)>,
     pub max_carried_step: f32,
     pub final_gap: f32,
+    pub settled_glass_error_px: f32,
     pub last_service_tile_tick: u64,
     pub last_archive_tick: u64,
     pub flat_lifecycles: (usize, usize),
@@ -159,6 +160,12 @@ pub(super) fn replay(
             }
             audit.report.last_archive_tick = lifecycle::exit_end(&sim.repository_exits);
             audit.report.flat_lifecycles = sim.packing.flat_lifecycle_counts();
+            audit.report.settled_glass_error_px = sim.packing.settled_glass_error_px();
+            prop_assert!(
+                audit.report.settled_glass_error_px <= 0.01,
+                "settled glass does not fill its field around the gutters: {:?}",
+                audit.report
+            );
             let mut exits: Vec<_> =
                 sim.repository_exits.iter().flatten().copied().collect();
             exits.sort_unstable_by_key(|exit| exit.start);

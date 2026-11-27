@@ -168,6 +168,58 @@ impl Program {
     }
 
     #[cfg(test)]
+    pub(in crate::layout::packing) fn settled_glass_error_px(
+        &self,
+        space: super::Space,
+    ) -> f32 {
+        use super::retirement::{fills_field, gutter_bounds, rectangle_bounds};
+        use bevy::math::Vec2;
+
+        let opening_cells = self.field();
+        let opening_glass = rectangle_bounds(&self.opening.tiles).unwrap();
+        let padding = Vec2::splat(space.gap) / framing::VIEWPORT;
+        let pixels = framing::VIEWPORT * 0.5;
+        std::iter::once(self.opening.clone())
+            .chain(self.phases.iter().map(|phase| phase.action.sample(1.0)))
+            .map(|layout| {
+                let Some(field) = gutter_bounds(&layout) else {
+                    return if layout.tiles.iter().any(Option::is_some) {
+                        f32::INFINITY
+                    } else {
+                        0.0
+                    };
+                };
+                if !fills_field(&layout, field) {
+                    return f32::INFINITY;
+                }
+                let visible = if field == opening_cells {
+                    opening_glass
+                } else if field == space.field(super::super::GUTTER_MARGIN) {
+                    space.field(framing::MARGIN)
+                } else {
+                    return f32::INFINITY;
+                };
+                layout
+                    .tiles
+                    .iter()
+                    .zip(&layout.gutters)
+                    .map(|(&glass, &cell)| match (glass, cell) {
+                        (Some(glass), Some(cell)) => {
+                            let expected = glass_in_cell(cell, field, visible, padding);
+                            let error = (glass.low - expected.low)
+                                .abs()
+                                .max((glass.high - expected.high).abs());
+                            (error * pixels).max_element()
+                        }
+                        (None, None) => 0.0,
+                        _ => f32::INFINITY,
+                    })
+                    .fold(0.0, f32::max)
+            })
+            .fold(0.0, f32::max)
+    }
+
+    #[cfg(test)]
     pub(in crate::layout::packing) fn counts(&self) -> (usize, usize) {
         self.phases
             .iter()
@@ -322,16 +374,36 @@ fn insert_shift(
 }
 
 fn inset_field(packing: &Packing, layout: &mut Layout) -> Option<()> {
-    let outer = super::retirement::gutter_bounds(layout)?;
-    let field = packing.space().field(framing::MARGIN);
+    use super::retirement::{gutter_bounds, rectangle_bounds};
+    use bevy::math::Vec2;
+
+    let outer = gutter_bounds(layout)?;
+    let glass = rectangle_bounds(&layout.tiles)?;
+    let space = packing.space();
+    let field = space.field(framing::MARGIN);
     let scale = ((field.high - field.low) / (outer.high - outer.low)).min_element();
     let origin = outer.low.midpoint(outer.high);
     let centre = field.low.midpoint(field.high);
-    for rect in layout.tiles.iter_mut().chain(&mut layout.gutters).flatten() {
-        rect.low = (centre + (rect.low - origin) * scale).max(field.low);
-        rect.high = (centre + (rect.high - origin) * scale).min(field.high);
+    let inset = |rect: Tile| Tile {
+        low: (centre + (rect.low - origin) * scale).max(field.low),
+        high: (centre + (rect.high - origin) * scale).min(field.high),
+    };
+    let (outer, glass) = (inset(outer), inset(glass));
+    let gap = Vec2::splat(space.gap) / framing::VIEWPORT;
+    for (tile, cell) in layout.tiles.iter_mut().zip(&mut layout.gutters) {
+        *cell = cell.map(inset);
+        *tile = cell.map(|cell| glass_in_cell(cell, outer, glass, gap));
     }
     Some(())
+}
+
+fn glass_in_cell(cell: Tile, field: Tile, glass: Tile, gap: bevy::math::Vec2) -> Tile {
+    use bevy::math::Vec2;
+
+    Tile {
+        low: Vec2::select(cell.low.cmpeq(field.low), glass.low, cell.low + gap),
+        high: Vec2::select(cell.high.cmpeq(field.high), glass.high, cell.high - gap),
+    }
 }
 
 #[cfg(test)]
