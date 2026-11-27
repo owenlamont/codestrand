@@ -9,6 +9,8 @@ const REFLOW: f32 = 4.0;
 const FADE_TICKS: u64 = 5 * TICK_RATE as u64 / 2;
 const REFLOW_TICKS: u64 = 4 * TICK_RATE as u64;
 const STAGGERED_REFLOW_TICKS: u64 = 5 * TICK_RATE as u64;
+pub(super) const MAX_BIRTH_ARCHIVE_WAIT: u64 =
+    STAGGERED_REFLOW_TICKS + super::BIRTH_TICKS;
 
 /// The first and last sample of a tile's exit on the unpadded history clock.
 #[derive(Clone, Copy, Debug)]
@@ -135,6 +137,24 @@ pub(super) fn plan(
     options: &super::Options,
     selected: std::ops::Range<usize>,
 ) -> (Vec<Time>, Vec<Time>) {
+    let endings = planned_repository_ends(events, schedule, options, selected.clone());
+    (
+        departures(
+            &events[selected],
+            schedule,
+            options.contributor_inactivity_days,
+            options.fragment_pace(),
+        ),
+        endings,
+    )
+}
+
+pub(super) fn planned_repository_ends(
+    events: &[Event],
+    schedule: &Schedule,
+    options: &super::Options,
+    selected: std::ops::Range<usize>,
+) -> Vec<Time> {
     let archived: Vec<_> = options
         .repository_archived
         .iter()
@@ -150,16 +170,7 @@ pub(super) fn plan(
         .collect();
     let complete =
         selected.end == events.len() && options.unread.after.iter().all(|&n| n == 0);
-    let events = &events[selected];
-    (
-        departures(
-            events,
-            schedule,
-            options.contributor_inactivity_days,
-            options.fragment_pace(),
-        ),
-        repository_ends(events, schedule, options, &archived, complete),
-    )
+    repository_ends(&events[selected], schedule, options, &archived, complete)
 }
 
 pub(super) fn repository_ends(

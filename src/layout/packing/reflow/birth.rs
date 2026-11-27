@@ -56,7 +56,7 @@ impl Birth {
                 if !retirement::settled(host_tile) || !retirement::settled(guest_tile) {
                     continue;
                 }
-                let ratio = guest_tile.area() / (host_tile.area() + guest_tile.area());
+                let ratio = gutter_cells[1].area() / cell.area();
                 let candidate_cost = (ratio - share).abs() + fraction * 0.1;
                 if candidate_cost >= cost {
                     continue;
