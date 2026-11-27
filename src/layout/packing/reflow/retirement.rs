@@ -3,7 +3,8 @@ use crate::model::{count, framing};
 use bevy::math::Vec2;
 
 const EPSILON: f32 = 1e-6;
-const MAX_ASPECT_CORRECTIONS: usize = 4;
+const MAX_ASPECT_CORRECTIONS: usize = 6;
+const ASPECT_SEARCH_BUDGET: usize = 256;
 
 #[derive(Clone, Debug)]
 pub(in crate::layout::packing) struct Retirement {
@@ -66,11 +67,18 @@ impl Retirement {
             }
         }
         if closures.is_empty() {
+            let mut budget = ASPECT_SEARCH_BUDGET;
             closures.extend(blocked_shapes.into_iter().filter_map(
                 |(to, donors, axis)| {
-                    let to = balance_archive_shape(&from, to, departing, axis, field)?;
-                    let travel =
-                        certified_closure(&from, &to, departing, gutters, max_travel)?;
+                    let repair = AspectBalance {
+                        from: &from,
+                        departing,
+                        axis,
+                        field,
+                        gutters,
+                        max_travel,
+                    };
+                    let (to, travel) = repair.plan(to, &mut budget)?;
                     Some((to, donors, travel))
                 },
             ));
@@ -249,53 +257,96 @@ fn certified_closure(
     connected(from, &survivors, false).then_some(travel)
 }
 
-fn balance_archive_shape(
-    from: &Layout,
-    mut to: Layout,
+struct AspectBalance<'a> {
+    from: &'a Layout,
     departing: usize,
     axis: usize,
     field: Tile,
-) -> Option<Layout> {
-    let ghost = (to.tiles[departing].take(), to.gutters[departing].take());
-    let gutters = gutter_bounds(from)?;
-    if !fills_field(&to, gutters) || !contained(&to) {
-        return None;
+    gutters: Tile,
+    max_travel: f32,
+}
+
+impl AspectBalance<'_> {
+    fn plan(&self, mut to: Layout, budget: &mut usize) -> Option<(Layout, f32)> {
+        let ghost = (
+            to.tiles[self.departing].take(),
+            to.gutters[self.departing].take(),
+        );
+        if !fills_field(&to, self.gutters) || !contained(&to) {
+            return None;
+        }
+        self.search(&to, ghost, MAX_ASPECT_CORRECTIONS, budget)
     }
-    for _ in 0..MAX_ASPECT_CORRECTIONS {
-        let Some((repository, tile)) =
-            to.tiles.iter().enumerate().find_map(|(repo, &tile)| {
+
+    fn search(
+        &self,
+        to: &Layout,
+        ghost: (Option<Tile>, Option<Tile>),
+        remaining: usize,
+        budget: &mut usize,
+    ) -> Option<(Layout, f32)> {
+        let mut violations = to
+            .tiles
+            .iter()
+            .enumerate()
+            .filter_map(|(repo, &tile)| {
                 let tile = tile?;
-                (Some(tile) != from.tiles[repo] && !settled(tile))
+                (Some(tile) != self.from.tiles[repo] && !settled(tile))
                     .then_some((repo, tile))
             })
-        else {
-            break;
-        };
+            .peekable();
+        if violations.peek().is_none() {
+            let mut to = to.clone();
+            (to.tiles[self.departing], to.gutters[self.departing]) = ghost;
+            let travel = certified_closure(
+                self.from,
+                &to,
+                self.departing,
+                self.gutters,
+                self.max_travel,
+            )?;
+            return Some((to, travel));
+        }
+        if remaining == 0 {
+            return None;
+        }
+        *budget = budget.checked_sub(1)?;
+        violations.find_map(|(repository, tile)| {
+            let distance = self.correction(tile)?;
+            [false, true].into_iter().find_map(|high| {
+                let moved = self.move_seam(to, repository, high, distance)?;
+                self.search(&moved, ghost, remaining - 1, budget)
+            })
+        })
+    }
+
+    fn correction(&self, tile: Tile) -> Option<f32> {
         let extent = tile.pixels();
-        let cross = extent[1 - axis];
+        let cross = extent[1 - self.axis];
         let min = (cross / super::super::BOUND).max(16.0) + 0.01;
         let max = cross * super::super::BOUND - 0.01;
         if min > max || cross < 16.0 {
             return None;
         }
-        let width = extent[axis];
-        let distance =
-            (width.clamp(min, max) - width) / (framing::VIEWPORT[axis] * 0.5);
-        to = [false, true].into_iter().find_map(|high| {
-            let group = Group::find(&to, repository, axis, !high)?;
-            let sign = if high { 1.0 } else { -1.0 };
-            let moved = group.finish(&to, None, group.cut + sign * distance, field);
-            (fills_field(&moved, gutters)
-                && contained(&moved)
-                && settled_changes(&to, &moved, departing))
-            .then_some(moved)
-        })?;
+        let span = extent[self.axis];
+        Some((span.clamp(min, max) - span) / (framing::VIEWPORT[self.axis] * 0.5))
     }
-    if !settled_changes(from, &to, departing) {
-        return None;
+
+    fn move_seam(
+        &self,
+        to: &Layout,
+        repository: usize,
+        high: bool,
+        distance: f32,
+    ) -> Option<Layout> {
+        let group = Group::find(to, repository, self.axis, !high)?;
+        let offset = if high { distance } else { -distance };
+        let moved = group.finish(to, None, group.cut + offset, self.field);
+        (settled(moved.tiles[repository]?)
+            && fills_field(&moved, self.gutters)
+            && contained(&moved))
+        .then_some(moved)
     }
-    (to.tiles[departing], to.gutters[departing]) = ghost;
-    Some(to)
 }
 
 pub(super) fn best_slide(
@@ -586,6 +637,68 @@ pub(super) fn contained(layout: &Layout) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn archive_aspect_correction_can_pass_space_through_a_neighbour() {
+        let space = Space::new(4.0, 1.3);
+        let pixels = framing::VIEWPORT * 0.5;
+        let gap = Vec2::splat(space.gap) / framing::VIEWPORT;
+        let cells = [
+            ([0.0, -100.0], [200.0, 100.0]),
+            ([-200.0, -100.0], [0.0, -25.0]),
+            ([-200.0, -25.0], [0.0, 100.0]),
+            ([-200.0, -220.0], [200.0, -100.0]),
+            ([-200.0, -350.0], [200.0, -220.0]),
+            ([-200.0, 100.0], [200.0, 250.0]),
+            ([-200.0, 250.0], [200.0, 375.0]),
+        ]
+        .map(|(low, high)| Tile {
+            low: Vec2::from_array(low) / pixels,
+            high: Vec2::from_array(high) / pixels,
+        });
+        let from = Layout {
+            tiles: cells
+                .map(|cell| {
+                    Some(Tile {
+                        low: cell.low + gap,
+                        high: cell.high - gap,
+                    })
+                })
+                .into(),
+            gutters: cells.map(Some).into(),
+        };
+        let departing = 0;
+        let field = space.field(framing::MARGIN);
+        let gutters = gutter_bounds(&from).unwrap();
+        let low = Group::find(&from, departing, 0, true);
+        let (unbalanced, _) = Retirement::close(
+            &from,
+            departing,
+            field,
+            cells[departing],
+            0,
+            [&low, &None],
+            1.0,
+        )
+        .unwrap();
+        assert!(!settled(unbalanced.tiles[1].unwrap()));
+        let repair = AspectBalance {
+            from: &from,
+            departing,
+            axis: 1,
+            field,
+            gutters,
+            max_travel: 400.0,
+        };
+        let mut budget = ASPECT_SEARCH_BUDGET;
+        let (closed, travel) = repair.plan(unbalanced, &mut budget).unwrap();
+        assert!(travel <= 400.0);
+        assert!(settled_changes(&from, &closed, departing));
+        assert!(
+            closed.gutters[5] != from.gutters[5]
+                || closed.gutters[3] != from.gutters[3]
+        );
+    }
 
     #[test]
     fn archive_closure_can_move_a_perpendicular_seam_to_keep_tiles_in_shape() {
