@@ -140,7 +140,7 @@ impl Retirement {
                 remaining.gutters[repo] = cell;
             }
             (exchange::edge_travel(from, &remaining) <= max_travel
-                && fills_field(&remaining, gutters)
+                && fills_sweep(from, &remaining, gutters)
                 && contained(&remaining)
                 && compatible(&from.tiles, &remaining.tiles)
                 && compatible(&from.gutters, &remaining.gutters)
@@ -160,23 +160,24 @@ impl Retirement {
         self.departing.len()
     }
 
-    pub(super) fn finish_in_field(
-        mut self,
-        space: Space,
-        ticks: usize,
-    ) -> Option<Self> {
+    pub(super) fn finish_in_field(mut self, space: Space, ticks: usize) -> Self {
+        if let Some(target) = self.full_field_target(space, ticks) {
+            self.to = target;
+        }
+        self
+    }
+
+    fn full_field_target(&self, space: Space, ticks: usize) -> Option<Layout> {
         let &[departing] = self.departing.as_ref() else {
-            return Some(self);
+            return None;
         };
         let mut survivors =
             self.to.tiles.iter().enumerate().filter_map(|(repo, tile)| {
                 (repo != departing && tile.is_some()).then_some(repo)
             });
-        let Some(survivor) = survivors.next() else {
-            return Some(self);
-        };
+        let survivor = survivors.next()?;
         if survivors.next().is_some() {
-            return Some(self);
+            return None;
         }
         let old_field = gutter_bounds(&self.from)?;
         let ghost = self.to.gutters[departing]?;
@@ -192,14 +193,15 @@ impl Retirement {
         let mut ghost = gutter_field;
         ghost.low[axis] = cut;
         ghost.high[axis] = cut;
-        self.to.gutters[departing] = Some(ghost);
-        self.to.tiles[departing] = Some(ghost);
-        self.to.gutters[survivor] = Some(gutter_field);
-        self.to.tiles[survivor] = Some(glass_field);
+        let mut target = self.to.clone();
+        target.gutters[departing] = Some(ghost);
+        target.tiles[departing] = Some(ghost);
+        target.gutters[survivor] = Some(gutter_field);
+        target.tiles[survivor] = Some(glass_field);
         let max_travel =
             exchange::MAX_EDGE_STEP_PX * held::REFLOW_LINEAR_FRACTION * count(ticks);
-        certified_closure(&self.from, &self.to, departing, gutter_field, max_travel)?;
-        Some(self)
+        certified_closure(&self.from, &target, departing, gutter_field, max_travel)?;
+        Some(target)
     }
 
     fn close(
@@ -284,7 +286,7 @@ fn certified_closure(
 ) -> Option<f32> {
     let travel = exchange::edge_travel(from, to);
     if travel > max_travel
-        || !fills_field(to, gutters)
+        || !fills_sweep(from, to, gutters)
         || !contained(to)
         || !compatible(&from.tiles, &to.tiles)
         || !compatible(&from.gutters, &to.gutters)
@@ -292,6 +294,18 @@ fn certified_closure(
         return None;
     }
     archive_gutters_connected(from, to, &[departing]).then_some(travel)
+}
+
+fn fills_sweep(from: &Layout, to: &Layout, end: Tile) -> bool {
+    let Some(start) = gutter_bounds(from) else {
+        return false;
+    };
+    // Rectangular areas are quadratic in the shared interpolation fraction.
+    let middle = Tile {
+        low: start.low.midpoint(end.low),
+        high: start.high.midpoint(end.high),
+    };
+    fills_field(to, end) && fills_field(&from.blend_edges(to, 0.5), middle)
 }
 
 fn archive_gutters_connected(from: &Layout, to: &Layout, departing: &[usize]) -> bool {
@@ -317,8 +331,8 @@ struct AspectBalance<'a> {
 impl AspectBalance<'_> {
     fn plan(&self, mut to: Layout, budget: &mut usize) -> Option<(Layout, f32)> {
         let ghost = (
-            to.tiles[self.departing].take(),
-            to.gutters[self.departing].take(),
+            to.tiles[self.departing].take()?,
+            to.gutters[self.departing].take()?,
         );
         if !fills_field(&to, self.gutters) || !contained(&to) {
             return None;
@@ -329,7 +343,7 @@ impl AspectBalance<'_> {
     fn search(
         &self,
         to: &Layout,
-        ghost: (Option<Tile>, Option<Tile>),
+        ghost: (Tile, Tile),
         remaining: usize,
         budget: &mut usize,
     ) -> Option<(Layout, f32)> {
@@ -345,7 +359,8 @@ impl AspectBalance<'_> {
             .peekable();
         if violations.peek().is_none() {
             let mut to = to.clone();
-            (to.tiles[self.departing], to.gutters[self.departing]) = ghost;
+            to.tiles[self.departing] = Some(ghost.0);
+            to.gutters[self.departing] = Some(ghost.1);
             let travel = certified_closure(
                 self.from,
                 &to,
@@ -362,7 +377,8 @@ impl AspectBalance<'_> {
         violations.find_map(|(repository, tile)| {
             let distance = self.correction(tile)?;
             [false, true].into_iter().find_map(|high| {
-                let moved = self.move_seam(to, repository, high, distance)?;
+                let (moved, ghost) =
+                    self.move_seam(to, ghost, repository, high, distance)?;
                 self.search(&moved, ghost, remaining - 1, budget)
             })
         })
@@ -383,17 +399,19 @@ impl AspectBalance<'_> {
     fn move_seam(
         &self,
         to: &Layout,
+        ghost: (Tile, Tile),
         repository: usize,
         high: bool,
         distance: f32,
-    ) -> Option<Layout> {
+    ) -> Option<(Layout, (Tile, Tile))> {
         let group = Group::find(to, repository, self.axis, !high)?;
         let offset = if high { distance } else { -distance };
-        let moved = group.finish(to, None, group.cut + offset, self.field);
+        let cut = group.cut + offset;
+        let moved = group.finish(to, None, cut, self.field);
         (settled(moved.tiles[repository]?)
             && fills_field(&moved, self.gutters)
             && contained(&moved))
-        .then_some(moved)
+        .then(|| (moved, group.move_ghost(ghost, cut)))
     }
 }
 
@@ -480,6 +498,27 @@ struct Group {
 }
 
 impl Group {
+    fn move_ghost(
+        &self,
+        (mut glass, mut cell): (Tile, Tile),
+        cut: f32,
+    ) -> (Tile, Tile) {
+        let cross = 1 - self.axis;
+        if self.members.iter().any(|member| {
+            member.low - EPSILON <= cell.low[cross]
+                && cell.high[cross] <= member.end + EPSILON
+        }) {
+            for high in [false, true] {
+                if (edge(cell, self.axis, high) - self.cut).abs() <= EPSILON {
+                    set_edge(&mut cell, self.axis, high, cut);
+                    let glass_edge = edge(glass, self.axis, high) + cut - self.cut;
+                    set_edge(&mut glass, self.axis, high, glass_edge);
+                }
+            }
+        }
+        (glass, cell)
+    }
+
     fn find(
         layout: &Layout,
         retiring: usize,
@@ -685,6 +724,69 @@ pub(super) fn contained(layout: &Layout) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn archive_aspect_correction_moves_the_collapsing_gutters_cross_edge() {
+        let space = Space::new(4.0, 1.0);
+        let pixels = framing::VIEWPORT * 0.5;
+        let gap = Vec2::splat(space.gap) / framing::VIEWPORT;
+        let cells = [
+            ([-608.3, -310.0], [448.3, 10.0]),
+            ([448.3, -310.0], [608.3, 10.0]),
+            ([-608.3, 10.0], [0.0, 310.0]),
+            ([0.0, 10.0], [608.3, 310.0]),
+        ]
+        .map(|(low, high)| Tile {
+            low: Vec2::from_array(low) / pixels,
+            high: Vec2::from_array(high) / pixels,
+        });
+        let from = Layout {
+            tiles: cells
+                .map(|cell| {
+                    Some(Tile {
+                        low: cell.low + gap,
+                        high: cell.high - gap,
+                    })
+                })
+                .into(),
+            gutters: cells.map(Some).into(),
+        };
+        let departing = 1;
+        let field = space.field(framing::MARGIN);
+        let gutters = gutter_bounds(&from).unwrap();
+        let low = Group::find(&from, departing, 0, true);
+        let (unbalanced, _) = Retirement::close(
+            &from,
+            departing,
+            field,
+            cells[departing],
+            0,
+            [&low, &None],
+            1.0,
+        )
+        .unwrap();
+        let repair = AspectBalance {
+            from: &from,
+            departing,
+            axis: 1,
+            field,
+            gutters,
+            max_travel: 400.0,
+        };
+        let mut budget = ASPECT_SEARCH_BUDGET;
+        let (closed, _) = repair.plan(unbalanced, &mut budget).unwrap();
+        assert!(closed.gutters[departing].unwrap().high.y > cells[departing].high.y);
+        let mut stale_ghost = closed.clone();
+        stale_ghost.gutters[departing].as_mut().unwrap().high.y =
+            cells[departing].high.y;
+        assert!(fills_field(&stale_ghost, gutters));
+        assert!(!fills_sweep(&from, &stale_ghost, gutters));
+        for tick in 0..=240 {
+            let layout = from.blend_edges(&closed, held::progress(tick, 240));
+            assert!(fills_field(&layout, gutters));
+            assert!(contained(&layout));
+        }
+    }
 
     #[test]
     fn dividing_archive_connects_its_neighbours_as_the_gutter_closes() {

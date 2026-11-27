@@ -52,7 +52,8 @@ impl Program {
         let preferred = opening::plan(packing, &base, |_| true);
         preferred.into_iter().chain([base]).find_map(|mut opening| {
             inset_field(packing, &mut opening)?;
-            Self::compile(packing, opening, &events)
+            Self::compile(packing, opening.clone(), &events, false)
+                .or_else(|| Self::compile(packing, opening, &events, true))
         })
     }
 
@@ -60,6 +61,7 @@ impl Program {
         packing: &Packing,
         opening: Layout,
         events: &[(usize, usize, usize, bool)],
+        share_archive_windows: bool,
     ) -> Option<Self> {
         let mut current = opening.clone();
         let budget = (MAX_OPERATIONS - events.len()).min(MAX_SHIFTS);
@@ -91,7 +93,7 @@ impl Program {
             if birth && available > start {
                 return None;
             }
-            let start = start.max(available);
+            let mut start = start.max(available);
             if start >= end {
                 return None;
             }
@@ -118,15 +120,14 @@ impl Program {
                 )?)
             } else {
                 packing.samples.get(end)?;
+                let departing;
+                (start, departing) = archive_members(
+                    &mut events,
+                    (requested, end, repository),
+                    start,
+                    share_archive_windows,
+                );
                 let fit = opening::glyph_scales(packing, start);
-                let mut departing = vec![repository];
-                while events.peek().is_some_and(
-                    |&(other_start, other_end, _, birth)| {
-                        !birth && (other_start, other_end) == (requested, end)
-                    },
-                ) {
-                    departing.push(events.next().unwrap().2);
-                }
                 let motion = if departing.len() == 1 {
                     Retirement::plan(
                         current.clone(),
@@ -145,7 +146,7 @@ impl Program {
                     )?
                 };
                 let motion = if events.peek().is_none() {
-                    motion.finish_in_field(packing.space(), end - start)?
+                    motion.finish_in_field(packing.space(), end - start)
                 } else {
                     motion
                 };
@@ -230,6 +231,29 @@ impl Program {
     }
 }
 
+fn archive_members(
+    events: &mut std::iter::Peekable<impl Iterator<Item = (usize, usize, usize, bool)>>,
+    (requested, end, repository): (usize, usize, usize),
+    mut start: usize,
+    share_windows: bool,
+) -> (usize, Vec<usize>) {
+    let mut departing = vec![repository];
+    while events
+        .peek()
+        .is_some_and(|&(other_start, other_end, _, birth)| {
+            let overlap = end.saturating_sub(start.max(other_start));
+            !birth
+                && ((other_start, other_end) == (requested, end)
+                    || (share_windows && overlap > 0 && overlap >= other_end - end))
+        })
+    {
+        let (other_start, _, other_repository, _) = events.next().unwrap();
+        start = start.max(other_start);
+        departing.push(other_repository);
+    }
+    (start, departing)
+}
+
 impl Action {
     fn sample(&self, progress: f32) -> Layout {
         match self {
@@ -308,4 +332,74 @@ fn inset_field(packing: &Packing, layout: &mut Layout) -> Option<()> {
         rect.high = (centre + (rect.high - origin) * scale).min(field.high);
     }
     Some(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::layout::{RepositoryRegion, outline, packing::Inputs};
+    use bevy::math::Vec2;
+
+    #[test]
+    fn nearly_simultaneous_archives_can_share_their_overlapping_window() {
+        let mut inputs = Inputs::new(264);
+        for _ in 0..264 {
+            inputs.push(
+                (0..3)
+                    .map(|index| RepositoryRegion {
+                        label: format!("repository {index}"),
+                        low: -Vec2::ONE,
+                        high: Vec2::ONE,
+                        live: true,
+                        items: 20.0,
+                        tile: None,
+                        gutter: None,
+                        outline: outline::rectangle(-Vec2::ONE, Vec2::ONE),
+                        height: 0.1,
+                        rotated: false,
+                        stretch: Vec2::ONE,
+                    })
+                    .collect(),
+            );
+        }
+        let packing =
+            Packing::from_inputs(inputs, vec![None; 3].into(), 4.0, 1.0, 1).unwrap();
+        let gap = Vec2::splat(4.0) / framing::VIEWPORT;
+        let edges = [-0.9, -0.3, 0.3, 0.9];
+        let cells: Vec<_> = edges
+            .windows(2)
+            .map(|pair| Tile {
+                low: Vec2::new(pair[0], -0.6),
+                high: Vec2::new(pair[1], 0.6),
+            })
+            .collect();
+        let opening = Layout {
+            tiles: cells
+                .iter()
+                .map(|cell| {
+                    Some(Tile {
+                        low: cell.low + gap,
+                        high: cell.high - gap,
+                    })
+                })
+                .collect(),
+            gutters: cells.into_iter().map(Some).collect(),
+        };
+        let events = [(20, 260, 0, false), (23, 263, 2, false)];
+        assert!(Program::compile(&packing, opening.clone(), &events, false).is_none());
+        let plan = Program::compile(&packing, opening, &events, true).unwrap();
+        assert_eq!(plan.counts(), (0, 2));
+        assert_eq!(plan.phases.len(), 1);
+        let phase = &plan.phases[0];
+        assert_eq!((phase.start, phase.end), (23, 260));
+        assert!(plan.sample(259, &[]).tiles.iter().all(Option::is_some));
+        assert_eq!(
+            plan.sample(260, &[])
+                .tiles
+                .iter()
+                .filter(|tile| tile.is_some())
+                .count(),
+            1
+        );
+    }
 }
