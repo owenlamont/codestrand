@@ -69,7 +69,7 @@ fn static_lod_change_runs_sync() {
     let mut world = fixture(&model::Options::default());
     world.resource_mut::<Playback>().0.collapse_directories = true;
     world.resource_mut::<Frame>().index = 300;
-    let view = world.resource::<Playback>().0.view();
+    let view = world.resource::<Playback>().0.world_view();
     world.insert_resource(PreviewCamera::new(view));
     world.init_resource::<Time<Real>>();
     world.insert_resource(ScriptedCamera(

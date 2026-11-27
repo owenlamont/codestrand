@@ -595,7 +595,7 @@ mod tests {
         std::fs::write(
             &output,
             serde_json::to_vec_pretty(
-                &serde_json::json!({"duration":simulation.duration().lossy_secs_f32(),"events":records,"travel":simulation.travel.report()}),
+                &serde_json::json!({"duration":simulation.duration().lossy_secs_f32(),"events":records,"travel":simulation.travel.report(simulation.field_space())}),
             )
             .unwrap(),
         )

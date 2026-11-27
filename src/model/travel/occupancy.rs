@@ -781,7 +781,7 @@ impl Simulation {
         let _phase = self.trace.phase(Phase::RefineServiceSlots);
         let mut previous = None;
         for _ in 0..8 {
-            self.align_travel_arrivals(options);
+            self.align_travel_arrivals();
             if !self.reserve_service_slots(
                 options.travel_cap != crate::model::TravelCap::None,
             ) {

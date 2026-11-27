@@ -117,8 +117,8 @@ Contributors stay above the file plane and move between repository service lanes
 `--avatar-scale` controls disc diameter relative to the original size: default `2`,
 range `0.5`–`2`, inclusive. The default doubles portraits in both single- and
 multi-repository playback; single-repository pixels therefore change too. Use
-`--avatar-scale 1` for the original small-group disc diameter. Larger fields make
-avatars appear smaller in the overview as the camera pulls back.
+`--avatar-scale 1` for the original small-group disc diameter. When tiles shrink
+to fit the fixed field, avatar discs and co-author circles shrink with them.
 Names keep a 12-pixel font on screen and stay visible with their avatars, including
 during travel and idle fade-out. They prefer clear lanes away from repository content
 and labels. An ellipsis shortens names that cannot fit in the available space.

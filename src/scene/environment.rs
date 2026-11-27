@@ -287,15 +287,17 @@ pub(super) fn setup(world: &mut World, name: ThemeName, mesh: Handle<Mesh>) {
         .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0, 1.0, 0.0]; 3])
         .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0; 2]; 3]),
     );
-    let tile_floor = world
-        .spawn((
+    let tile_floor = super::spawn_in_field(
+        world,
+        (
             Mesh3d(tile_mesh.clone()),
             MeshMaterial3d(tile_material.clone()),
             Transform::IDENTITY,
             Visibility::Hidden,
             NoFrustumCulling,
-        ))
-        .id();
+        ),
+    )
+    .id();
     world.insert_resource(Environment {
         plane,
         sun: None,
@@ -386,19 +388,24 @@ pub(super) fn place_tile_floor(world: &mut World, simulation: &Simulation) {
     let Ok((pose, Projection::Perspective(projection))) = camera.single(world) else {
         return;
     };
-    let eye = pose.translation;
+    let field = simulation.field_space();
+    let eye = field.to_planner(pose.translation);
     if !matches!(simulation.repository_boundary, Boundary::Glass)
         || eye.y <= GLASS_BOTTOM
     {
         super::set_visible(world, entity, false);
         return;
     }
-    let (focus, distance) = simulation.view();
-    let (centre, width) = world
-        .get_resource::<PreviewCamera>()
-        .map_or((focus.xz(), distance * 2.5), |camera| {
-            (camera.pose().0.xz(), projection.far * 4.0)
-        });
+    let (focus, distance) = simulation.planner_view();
+    let (centre, width) = world.get_resource::<PreviewCamera>().map_or(
+        (focus.xz(), distance * 2.5),
+        |camera| {
+            (
+                field.to_planner(camera.pose().0).xz(),
+                projection.far * 4.0 / field.scale(),
+            )
+        },
+    );
     let positions: Vec<_> = (0..simulation.layout().repositories.len())
         .filter_map(|index| simulation.visible_repository_tile(index))
         .flat_map(|tile| glass_positions(Some(tile)))

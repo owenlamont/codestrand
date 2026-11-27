@@ -312,7 +312,11 @@ fn tile_obstacles(state: &State) -> Vec<(usize, Rect)> {
     result
 }
 
-pub(super) fn content_obstacles(state: &State) -> Vec<(usize, Rect)> {
+pub(super) fn content_obstacles(
+    state: &State,
+    view: (Vec3, f32),
+) -> Vec<(usize, Rect)> {
+    let (focus, distance) = view;
     let mut result = Vec::new();
     for (index, region) in state.layout.repositories.iter().enumerate() {
         if region.tile.is_none() {
@@ -324,10 +328,9 @@ pub(super) fn content_obstacles(state: &State) -> Vec<(usize, Rect)> {
             .copied()
             .flat_map(|p| [ground(p), ground(p) + Vec3::Y * region.height])
             .collect();
-        let projected =
-            project(view_direction() * framing::DISTANCE, Vec3::ZERO, &points)
-                .flatten()
-                .map(|p| p * HALF);
+        let projected = project(focus + view_direction() * distance, focus, &points)
+            .flatten()
+            .map(|p| p * HALF);
         let (low, high) = projected.fold(
             (Vec2::splat(f32::INFINITY), Vec2::splat(f32::NEG_INFINITY)),
             |(lo, hi), p| (lo.min(p), hi.max(p)),
@@ -496,7 +499,7 @@ impl State {
         if !choosing {
             return Vec::new();
         }
-        let contents = content_obstacles(self);
+        let contents = content_obstacles(self, (Vec3::ZERO, framing::DISTANCE));
         let repository = self.avatars[index].repository;
         let tile = self.layout.repositories[repository]
             .tile
@@ -3165,7 +3168,7 @@ mod tests {
         }
         sim.advance_to(frames, 60);
         assert_eq!(first, report(&sim.state));
-        let summary = serde_json::json!({"avatar_slots":first,"moving_beams":moving,"travel":sim.travel.report(),"duration":sim.duration().lossy_secs_f32()});
+        let summary = serde_json::json!({"avatar_slots":first,"moving_beams":moving,"travel":sim.travel.report(sim.field_space()),"duration":sim.duration().lossy_secs_f32()});
         if let Ok(path) = std::env::var("CODESTRAND_SLOT_DIAGNOSTIC") {
             std::fs::write(path, serde_json::to_vec_pretty(&summary).unwrap()).unwrap();
         }

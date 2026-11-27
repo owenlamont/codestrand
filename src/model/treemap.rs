@@ -9,7 +9,7 @@ mod density;
 mod gaps;
 
 const EMPTY_RECTANGLE_WORK: usize = 1_000_000;
-const DEFINITIONS: &str = "Tile and content areas use fixed world coordinates expressed in reference-field units. Coverage and empty fractions normalize the grown field back to the reference viewport. Glass tiles are disjoint world rectangles represented in this field, inside a 24 reference-pixel margin plus the caption reservation below, separated by shared gutters. Largest empty rectangle is the exact maximum axis-aligned rectangle outside their union, including the margin, or null when the work budget is reached. Content is the world-XZ AABB of current directory discs and file positions padded by their model footprint size, converted with the fixed affine field scale; not projected ground-plane area, glyph ink or opaque pixel occupancy. Content fill divides content-envelope area by tile area; overall fill is area weighted. The first repository owns the empty lead-in tile. Weights are live file and directory counts, held until their shares drift and then eased over two seconds; empty active repositories weigh one until archived. Files and directories count live files not leaving and live directories. Density uses live directories including roots and files not leaving, including queued arrivals. Its reference is total live items per total active world-space tile area. Samples include every canonical 1/60 second. Content AABBs are clipped to their own tiles; actual footprints use convex outlines. Content largest-empty rectangles use fully covered cells on a 160x90 grid inside the usable tile viewport, excluding the caption reservation, with one grid cell of boundary uncertainty.";
+const DEFINITIONS: &str = "Tile and content areas use fixed world coordinates expressed in reference-field units. Coverage and empty fractions use the reference viewport. Glass tiles are disjoint world rectangles represented in this field, inside a 24 reference-pixel margin plus the caption reservation below, separated by shared gutters. Largest empty rectangle is the exact maximum axis-aligned rectangle outside their union, including the margin, or null when the work budget is reached. Content is the world-XZ AABB of current directory discs and file positions padded by their model footprint size, converted with the fixed affine field scale; not projected ground-plane area, glyph ink or opaque pixel occupancy. Content fill divides content-envelope area by tile area; overall fill is area weighted. The first repository owns the empty lead-in tile. Weights are live file and directory counts, held until their shares drift and then eased over two seconds; empty active repositories weigh one until archived. Files and directories count live files not leaving and live directories. Density uses live directories including roots and files not leaving, including queued arrivals. Its reference is total live items per total active world-space tile area. Samples include every canonical 1/60 second. Content AABBs are clipped to their own tiles; actual footprints use convex outlines. Content largest-empty rectangles use fully covered cells on a 160x90 grid inside the usable tile viewport, excluding the caption reservation, with one grid cell of boundary uncertainty.";
 
 fn largest_empty(tiles: &[Tile]) -> Option<f32> {
     let count = tiles.len().max(1);
@@ -81,13 +81,13 @@ pub(crate) struct Metrics {
 
 fn framing_metrics(
     region: &crate::layout::RepositoryRegion,
-    tile: Tile,
+    usable: Tile,
+    field: framing::FieldSpace,
 ) -> (f32, bool) {
-    let usable = tile.usable();
     let projected: Vec<_> = region
         .outline
         .iter()
-        .copied()
+        .map(|&point| field.ground_to_world(point))
         .map(framing::world_to_field)
         .collect();
     let usable_fill =
@@ -95,10 +95,11 @@ fn framing_metrics(
     let cropped = region
         .outline
         .iter()
-        .flat_map(|&p| {
+        .map(|&point| field.ground_to_world(point))
+        .flat_map(|p| {
             [
                 framing::world_to_field(p),
-                framing::project_field_at(p, region.height),
+                framing::project_field_at(p, region.height * field.scale()),
             ]
         })
         .any(|p| {
@@ -124,6 +125,12 @@ fn measure(layout: &Layout, growth: f32) -> Metrics {
     let viewport = Tile::viewport();
     let center = viewport.low.midpoint(viewport.high);
     let normalize = |point: Vec2| center + (point - center) / growth;
+    let normalize_tile = |tile: Tile| Tile {
+        low: normalize(tile.low),
+        high: normalize(tile.high),
+    };
+    let field = framing::FieldSpace::new(growth);
+    let area_scale = field.scale().powi(2);
     let mut repositories = Vec::new();
     let mut tiles = Vec::new();
     let mut content = 0.0;
@@ -168,18 +175,17 @@ fn measure(layout: &Layout, growth: f32) -> Metrics {
             let polygon = clip_content(low, high, tile);
             let area = crate::layout::outline::area(&polygon) * 0.25;
             polygons.push(polygon.into_iter().map(normalize).collect());
-            area
+            area * area_scale
         } else {
             0.0
         };
-        let tile_area = tile.area();
-        let (usable_fill, cropped) = framing_metrics(region, tile);
+        let tile_area = tile.area() * area_scale;
+        let (usable_fill, cropped) =
+            framing_metrics(region, normalize_tile(tile.usable()), field);
         content += content_area;
-        coverage += tile_area / growth.powi(2);
-        tiles.push(Tile {
-            low: normalize(tile.low),
-            high: normalize(tile.high),
-        });
+        coverage += tile_area;
+        let tile = normalize_tile(tile);
+        tiles.push(tile);
         repositories.push(Repository {
             index,
             active: region.live,
@@ -193,13 +199,13 @@ fn measure(layout: &Layout, growth: f32) -> Metrics {
             tile_area,
             content_area,
             content_fill: content_area / tile_area.max(1e-12),
-            content_low: low.to_array(),
-            content_high: high.to_array(),
-            reserved_low: region.low.to_array(),
-            reserved_high: region.high.to_array(),
-            current_low: current_low.to_array(),
-            current_high: current_high.to_array(),
-            scale,
+            content_low: field.ground_to_world(low).to_array(),
+            content_high: field.ground_to_world(high).to_array(),
+            reserved_low: field.ground_to_world(region.low).to_array(),
+            reserved_high: field.ground_to_world(region.high).to_array(),
+            current_low: field.ground_to_world(current_low).to_array(),
+            current_high: field.ground_to_world(current_high).to_array(),
+            scale: scale * field.scale(),
             rotated: region.rotated,
             usable_fill,
             cropped,
@@ -211,7 +217,7 @@ fn measure(layout: &Layout, growth: f32) -> Metrics {
         coverage,
         blank_fraction: 1.0 - coverage,
         largest_empty_rectangle: largest_empty(&tiles),
-        content_fill: content / (coverage * growth.powi(2)).max(1e-12),
+        content_fill: content / coverage.max(1e-12),
         repositories,
         content_largest_empty_inset: gaps::largest(&polygons),
     }
@@ -265,7 +271,7 @@ pub(crate) fn run(
     }
     serde_json::to_writer(
         &mut *writer,
-        &serde_json::json!({"density": density.report, "occlusion": occlusion, "moving_beams": moving_beams, "avatar_slots": super::slots::report(&simulation.state), "travel": simulation.travel.report()}),
+        &serde_json::json!({"density": density.report, "occlusion": occlusion, "moving_beams": moving_beams, "avatar_slots": super::slots::report(&simulation.state), "travel": simulation.travel.report(simulation.field_space())}),
     )?;
     writeln!(writer)?;
     Ok(())
@@ -375,11 +381,16 @@ mod tests {
                     );
                 }
             }
-            assert_eq!(simulation.view(), (Vec3::ZERO, framing::DISTANCE));
+            assert_eq!(simulation.planner_view(), (Vec3::ZERO, framing::DISTANCE));
             for region in regions {
                 if let Some(tile) = region.tile {
                     assert!(
-                        !framing_metrics(region, tile).1,
+                        !framing_metrics(
+                            region,
+                            tile.usable(),
+                            framing::FieldSpace::IDENTITY
+                        )
+                        .1,
                         "cropped {} at {frame}",
                         region.label
                     );

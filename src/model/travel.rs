@@ -8,7 +8,7 @@ use bevy::math::{Rect, Vec2};
 use serde::Serialize;
 
 use super::{
-    Simulation, frames_for,
+    Simulation, frames_for, framing,
     occlusion::Transmitters,
     slots, tick_time, ticks_duration,
     trace::{Counter, Phase},
@@ -31,8 +31,10 @@ pub(super) fn field_rect(tile: crate::layout::packing::Tile) -> Rect {
     Rect::from_corners(tile.low * HALF, tile.high * HALF)
 }
 
-fn ground_position(point: Vec2) -> [f32; 2] {
-    super::framing::field_to_world(point / HALF).to_array()
+fn ground_position(point: Vec2, field: framing::FieldSpace) -> [f32; 2] {
+    field
+        .ground_to_world(framing::field_to_world(point / HALF))
+        .to_array()
 }
 
 pub(super) fn interior(tile: crate::layout::packing::Tile, radius: f32) -> Rect {
@@ -420,7 +422,30 @@ struct Trip {
     free: u64,
     failure: Option<&'static str>,
     cutoff: Option<u64>,
-    proof: Option<serde_json::Value>,
+    proof: Option<RouteProof>,
+}
+
+#[derive(Clone, Debug)]
+struct RouteProof {
+    epoch: u64,
+    points: Box<[Vec2]>,
+}
+
+impl RouteProof {
+    fn report(&self, field: framing::FieldSpace) -> serde_json::Value {
+        let length: f32 = self
+            .points
+            .windows(2)
+            .map(|pair| pair[0].distance(pair[1]))
+            .sum();
+        let length = length * framing::WORLD_UNITS_PER_REFERENCE_PIXEL * field.scale();
+        serde_json::json!({
+            "network_epoch": self.epoch,
+            "shortest_network_length": length,
+            "route_network_length": length,
+            "network_points": self.points.iter().map(|&point| ground_position(point, field)).collect::<Vec<_>>(),
+        })
+    }
 }
 
 fn retained_route_bytes(trips: &Vec<Trip>) -> usize {
@@ -504,11 +529,10 @@ impl Plan {
             .trips
             .iter()
             .map(|trip| {
-                let proof = trip.proof.as_ref().map_or(0, |proof| {
-                    let points = proof["network_points"].as_array().map_or(0, Vec::len);
-                    // The JSON object and each nested coordinate array have separate allocations.
-                    2048 + points * 256
-                });
+                let proof = trip
+                    .proof
+                    .as_ref()
+                    .map_or(0, |proof| size_of_val(proof.points.as_ref()));
                 (trip.route.retained_bytes() + proof + 32) as u128
             })
             .sum::<u128>();
@@ -616,13 +640,35 @@ impl Plan {
             ..Self::default()
         }
     }
-    pub fn report(&self) -> serde_json::Value {
+    pub fn report(&self, field: framing::FieldSpace) -> serde_json::Value {
         let mut stats =
             serde_json::to_value(&self.stats).expect("serializable travel statistics");
         stats["max_speed"] = serde_json::json!(
-            self.stats.max_speed * super::framing::WORLD_UNITS_PER_REFERENCE_PIXEL
+            self.stats.max_speed * framing::WORLD_UNITS_PER_REFERENCE_PIXEL
         );
-        serde_json::json!({"coordinate_space":"world_ground","statistics":stats,"trips":self.trips.iter().map(|t| serde_json::json!({"author":t.author,"commit":t.commit,"bot":t.bot,"source_repository":t.source_repository,"destination_repository":t.destination_repository,"free":tick_time(t.free).lossy_secs_f32(),"slack":ticks_duration(t.arrival-t.free),"departure":tick_time(t.departure).lossy_secs_f32(),"service":tick_time(t.arrival).lossy_secs_f32(),"fade":t.fade,"failure":t.failure,"proof":t.proof,"source":ground_position(t.source),"target":ground_position(t.destination),"visible_distance":planning::progress(t) * super::framing::WORLD_UNITS_PER_REFERENCE_PIXEL,"travel_seconds":t.route.duration,"points":t.route.points().into_iter().map(|point| ground_position(Vec2::from_array(point))).collect::<Vec<_>>()})).collect::<Vec<_>>()})
+        let position = |point| ground_position(point, field);
+        let units_per_pixel = framing::WORLD_UNITS_PER_REFERENCE_PIXEL * field.scale();
+        let trips: Vec<_> = self.trips.iter().map(|trip| serde_json::json!({
+            "author": trip.author,
+            "commit": trip.commit,
+            "bot": trip.bot,
+            "source_repository": trip.source_repository,
+            "destination_repository": trip.destination_repository,
+            "free": tick_time(trip.free).lossy_secs_f32(),
+            "slack": ticks_duration(trip.arrival - trip.free),
+            "departure": tick_time(trip.departure).lossy_secs_f32(),
+            "service": tick_time(trip.arrival).lossy_secs_f32(),
+            "fade": trip.fade,
+            "failure": trip.failure,
+            "proof": trip.proof.as_ref().map(|proof| proof.report(field)),
+            "source": position(trip.source),
+            "target": position(trip.destination),
+            "visible_distance": planning::progress(trip) * units_per_pixel,
+            "travel_seconds": trip.route.duration,
+            "points": trip.route.points().into_iter()
+                .map(|point| position(Vec2::from_array(point))).collect::<Vec<_>>(),
+        })).collect();
+        serde_json::json!({"coordinate_space": "world_ground", "statistics": stats, "trips": trips})
     }
     pub fn sample(&self, author: usize, tick: u64) -> Option<(Vec2, f32)> {
         let trip = self.trips.iter().find(|t| t.active(author, tick))?;
@@ -895,7 +941,7 @@ impl Simulation {
         options: &super::Options,
         padding: &[(usize, u32)],
     ) {
-        let Some(blocked) = self.repair_walk_routes(options) else {
+        let Some(blocked) = self.repair_walk_routes() else {
             return;
         };
         let mut plan = self.travel.clone();
@@ -916,8 +962,8 @@ impl Simulation {
         let previous = std::mem::replace(&mut self.travel, plan);
         let captured = self.window.as_ref().map(|window| window.captured.clone());
         self.plan_travel(options, padding);
-        self.align_travel_arrivals(options);
-        let retry = self.repair_walk_routes(options).unwrap_or_default();
+        self.align_travel_arrivals();
+        let retry = self.repair_walk_routes().unwrap_or_default();
         let solved = !rejected.is_subset(&retry) && retry.is_subset(&blocked);
         if !solved || self.adjust_travel_padding(options, padding) != padding {
             self.travel = previous;
@@ -927,10 +973,7 @@ impl Simulation {
         }
     }
 
-    fn repair_walk_routes(
-        &mut self,
-        options: &super::Options,
-    ) -> Option<BTreeSet<(usize, usize)>> {
+    fn repair_walk_routes(&mut self) -> Option<BTreeSet<(usize, usize)>> {
         let mut obstacles = self.observe_walk_obstacles()?;
         for _ in 0..4 {
             let affected = obstacles.keys().collect();
@@ -943,7 +986,7 @@ impl Simulation {
                 let (epochs, changed) = planning::realign_blocked_walks(
                     &capture,
                     &mut self.travel.trips,
-                    options.avatar_max_speed,
+                    self.state.avatar_max_speed,
                 );
                 self.trace.count(Counter::RouteCandidates, epochs);
                 self.travel.stats.graph_epochs += epochs;
@@ -959,7 +1002,7 @@ impl Simulation {
         Some(obstacles.keys().collect())
     }
 
-    pub(super) fn align_travel_arrivals(&mut self, options: &super::Options) {
+    pub(super) fn align_travel_arrivals(&mut self) {
         if !self
             .travel
             .trips
@@ -974,7 +1017,7 @@ impl Simulation {
         let epochs = planning::align_arrivals(
             &capture,
             &mut self.travel.trips,
-            options.avatar_max_speed,
+            self.state.avatar_max_speed,
         );
         self.trace.count(Counter::RouteCandidates, epochs);
         self.travel.stats.graph_epochs += epochs;
@@ -990,7 +1033,7 @@ impl Simulation {
         let _phase = self.trace.phase(Phase::Routes);
         let (trips, epochs) = trips(
             capture,
-            options.avatar_max_speed,
+            self.state.avatar_max_speed,
             options.bot_travel,
             options.travel_cap == super::TravelCap::None,
         );
@@ -1264,7 +1307,7 @@ impl Simulation {
         epochs += planning::align_arrivals(
             &captured,
             trips.iter_mut().filter(align_early),
-            options.avatar_max_speed,
+            self.state.avatar_max_speed,
         );
         let mut retry = false;
         for trip in &trips {
@@ -1293,7 +1336,7 @@ impl Simulation {
         epochs += planning::align_arrivals(
             &captured,
             trips.iter_mut().filter(align_early),
-            options.avatar_max_speed,
+            self.state.avatar_max_speed,
         );
         (captured, trips, epochs)
     }
@@ -2192,7 +2235,10 @@ mod tests {
         };
         let mut a = make();
         let mut b = make();
-        assert_eq!(a.travel.report(), b.travel.report());
+        assert_eq!(
+            a.travel.report(a.field_space()),
+            b.travel.report(b.field_space())
+        );
         assert!(a.schedule.starts.windows(2).all(|s| s[0] < s[1]));
         for event in 0..a.events.len() {
             let birth = a.clock.history.padding(event);

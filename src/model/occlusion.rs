@@ -501,7 +501,7 @@ pub(crate) struct Audit {
 }
 
 fn visible_discs(sim: &Simulation) -> Vec<(usize, Vec2, f32)> {
-    let (focus, distance) = sim.view();
+    let (focus, distance) = sim.planner_view();
     let eye = focus + view_direction() * distance;
     let screen = |point| {
         project(eye, focus, &[point])

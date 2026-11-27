@@ -19,6 +19,51 @@ pub(crate) const GROUND_FACTOR: f32 = (DISTANCE - FIELD_HEIGHT) / DISTANCE;
 pub(crate) const WORLD_UNITS_PER_REFERENCE_PIXEL: f32 =
     (DISTANCE - FIELD_HEIGHT) * (std::f32::consts::SQRT_2 - 1.0) / (VIEWPORT.y * 0.5);
 
+#[derive(Clone, Copy)]
+pub(crate) struct FieldSpace {
+    scale: f32,
+    offset: Vec3,
+}
+
+impl FieldSpace {
+    #[cfg(test)]
+    pub(crate) const IDENTITY: Self = Self {
+        scale: 1.0,
+        offset: Vec3::ZERO,
+    };
+
+    pub(super) fn new(growth: f32) -> Self {
+        let field = crate::layout::packing::Tile::viewport();
+        let centre = ground(field_to_world(field.low.midpoint(field.high)));
+        let scale = growth.recip();
+        Self {
+            scale,
+            offset: centre * (1.0 - scale),
+        }
+    }
+
+    pub(crate) fn scale(self) -> f32 {
+        self.scale
+    }
+
+    pub(crate) fn to_world(self, point: Vec3) -> Vec3 {
+        point * self.scale + self.offset
+    }
+
+    pub(super) fn ground_to_world(self, point: Vec2) -> Vec2 {
+        point * self.scale + Vec2::new(self.offset.x, self.offset.z)
+    }
+
+    pub(crate) fn to_planner(self, point: Vec3) -> Vec3 {
+        (point - self.offset) / self.scale
+    }
+
+    pub(crate) fn transform(self) -> bevy::prelude::Transform {
+        bevy::prelude::Transform::from_translation(self.offset)
+            .with_scale(Vec3::splat(self.scale))
+    }
+}
+
 // One affine field scale reserves the elevated portraits' frame clearance without warping tiles.
 pub(crate) fn field_to_world(point: Vec2) -> Vec2 {
     let tangent = (FOV * 0.5).tan();
@@ -45,6 +90,7 @@ pub(crate) fn project_field_at(point: Vec2, height: f32) -> Vec2 {
 
 pub(crate) fn distance(
     regions: &[RepositoryRegion],
+    field: FieldSpace,
     focus: Vec3,
     fov: f32,
     viewport: Vec2,
@@ -57,7 +103,7 @@ pub(crate) fn distance(
     let limit = Vec2::ONE - Vec2::splat(2.0 * MARGIN) / viewport;
     let mut distance = 2.0_f32;
     let mut include = |point: Vec3, low: Vec2, high: Vec2| {
-        let offset = point - focus;
+        let offset = field.to_world(point) - focus;
         let depth = offset.dot(forward);
         distance = distance.max(0.5 - depth);
         for (coordinate, slope, low, high) in [
@@ -181,12 +227,16 @@ mod tests {
             &Mappings::default(),
             &(0..count).map(|i| format!("repo-{i}")).collect::<Vec<_>>(),
         );
-        let mut previous = simulation.view().1;
-        let fixed_focus = simulation.view().0;
+        let mut previous = simulation.planner_view().1;
+        let fixed_focus = simulation.planner_view().0;
         for frame in 0..frames_for(simulation.duration(), 60).unwrap() {
             simulation.advance_to(frame, 60);
-            assert_eq!(simulation.view().0, fixed_focus, "camera pan at {frame}");
-            let distance = simulation.view().1;
+            assert_eq!(
+                simulation.planner_view().0,
+                fixed_focus,
+                "camera pan at {frame}"
+            );
+            let distance = simulation.planner_view().1;
             assert!(distance >= previous - 0.0001, "inward zoom at {frame}");
             assert!(
                 distance <= previous * 1.03,
@@ -213,15 +263,20 @@ mod tests {
                     projection.get_clip_from_view() * transform.to_matrix().inverse();
                 for region in simulation.layout().repositories.iter().filter(|r| r.live)
                 {
-                    assert_region_in_view(region, clip, viewport, frame);
+                    assert_region_in_view(
+                        region,
+                        clip * simulation.field_space().transform().to_matrix(),
+                        viewport,
+                        frame,
+                    );
                 }
             }
         }
         assert_eq!(simulation.commit(), simulation.total());
         simulation.advance_to(frames_for(simulation.duration(), 60).unwrap() + 60, 60);
-        assert_eq!(simulation.view().0, fixed_focus);
+        assert_eq!(simulation.planner_view().0, fixed_focus);
         simulation.advance_to(0, 60);
-        assert_eq!(simulation.view().0, fixed_focus);
+        assert_eq!(simulation.planner_view().0, fixed_focus);
         simulation.advance_to(frames_for(simulation.duration(), 60).unwrap(), 60);
         assert_eq!(
             simulation

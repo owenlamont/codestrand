@@ -1,7 +1,7 @@
 use serde::Serialize;
 
 use super::{HALF, Simulation, Target, framing, project, segment, view_direction};
-use bevy::math::{Rect, Vec3};
+use bevy::math::{Rect, Vec2, Vec3};
 
 #[derive(Default, Serialize)]
 pub(crate) struct MovingBeams {
@@ -33,6 +33,8 @@ pub(crate) struct MovingBeams {
     travelling_centre_interior: u64,
     travelling_off_network: u64,
     maximum_travel_speed_world_per_second: f32,
+    maximum_travel_speed_tick: Option<u64>,
+    maximum_travel_speed_author: Option<usize>,
     first_disc: Option<serde_json::Value>,
     first_overlap: Option<serde_json::Value>,
     observed_beams: u64,
@@ -45,7 +47,7 @@ pub(crate) struct MovingBeams {
     visible_avatar_frames: u64,
     visible_name_frames: u64,
     #[serde(skip)]
-    previous: std::collections::BTreeMap<usize, (u64, bevy::math::Vec2, bool)>,
+    previous: std::collections::BTreeMap<usize, (u64, Vec2)>,
 }
 
 impl MovingBeams {
@@ -86,10 +88,10 @@ impl MovingBeams {
         state: &crate::model::State,
         avatar: &crate::model::Avatar,
         point: bevy::math::Vec2,
-        radius: f32,
         content: &[(usize, Rect)],
     ) {
-        if avatar.presence > 0.0 {
+        let presence = avatar.display_presence();
+        if presence > 0.0 {
             let wordmark = crate::model::caption::frame_text_rects()[0]
                 .inflate(crate::model::caption::BUFFER);
             let right = Vec3::X;
@@ -99,11 +101,12 @@ impl MovingBeams {
                 * state.avatar_size
                 * avatar.projection_scale
                 * avatar.lifecycle_scale
-                * avatar.presence;
+                * presence;
             let edge = state
                 .screen(avatar.position + right * draw_radius)
                 .expect("visible avatar");
-            let avatar_overlap = (edge - point).length()
+            let radius = edge.distance(point);
+            let avatar_overlap = radius
                 > point.distance(point.clamp(wordmark.min, wordmark.max)) + 0.001;
             self.wordmark_avatar_observations += u64::from(avatar_overlap);
             if avatar_overlap && self.first_wordmark_overlap.is_none() {
@@ -169,7 +172,7 @@ impl MovingBeams {
             state.geometry.label_height,
         )
         .size();
-        let distance = state.avatar_radius() + 4.0 / 3.0;
+        let distance = state.name_radius() + 4.0 / 3.0;
         let possible = (0..32_u8).any(|attachment| {
             let rect = super::labels::tangent_rect(
                 body,
@@ -183,7 +186,7 @@ impl MovingBeams {
                     .avatars
                     .iter()
                     .enumerate()
-                    .filter(|(i, a)| *i != other && a.presence > 0.0)
+                    .filter(|(i, a)| *i != other && a.display_presence() > 0.0)
                     .all(|(_, a)| {
                         let p = state.screen(a.position).unwrap();
                         p.distance(p.clamp(rect.min, rect.max)) > distance + 0.001
@@ -206,7 +209,7 @@ impl MovingBeams {
     ) {
         let state = &simulation.state;
         let avatar = &state.avatars[author];
-        if avatar.presence <= 0.0 {
+        if avatar.display_presence() <= 0.0 {
             return;
         }
         let bounds = |name: &crate::model::names::Placement| {
@@ -227,9 +230,10 @@ impl MovingBeams {
                 .avatars
                 .iter()
                 .enumerate()
-                .filter(|(i, a)| *i != author && a.presence > 0.0)
+                .filter(|(i, a)| *i != author && a.display_presence() > 0.0)
             {
                 if let Some(other_name) = &other.name_visibility.placement
+                    && let Some(other_body) = projected[i]
                     && distance(bounds(other_name)) <= gap + 0.0001
                 {
                     self.label_nearest_violations += 1;
@@ -237,35 +241,31 @@ impl MovingBeams {
                         simulation.travel.travelling(author, simulation.state.tick)
                             || simulation.travel.travelling(i, simulation.state.tick);
                     self.label_parked_violations += u64::from(!moving);
-                    let other_body = projected[i].unwrap() * HALF;
                     self.classify_label_violation(state, i, other_body, point, moving);
-                    self.record_label_violation(serde_json::json!({"tick":state.tick,"author":author,"other":i,"moving":moving,"distance":projected[i].map(|p| (p * HALF).distance(point))}));
+                    self.record_label_violation(serde_json::json!({"tick":state.tick,"author":author,"other":i,"moving":moving,"distance":other_body.distance(point)}));
                     break;
                 }
             }
         }
         for (other, position) in projected.iter().enumerate().skip(author + 1) {
             self.parked_close_pairs += u64::from(
-                state.avatars[other].presence > 0.0
+                state.avatars[other].display_presence() > 0.0
                     && !simulation.travel.travelling(author, simulation.state.tick)
                     && !simulation.travel.travelling(other, simulation.state.tick)
-                    && position
-                        .is_some_and(|p| (p * HALF).distance(point) < 3.0 * radius),
+                    && position.is_some_and(|p| p.distance(point) < 3.0 * radius),
             );
         }
     }
     fn observe_label_pairs(&mut self, state: &crate::model::State) {
         let before = self.label_label_pairs;
-        self.label_joint_exhausted_frames += u64::from(
-            state
-                .avatars
-                .iter()
-                .any(|a| a.presence > 0.0 && a.name_visibility.joint_exhausted),
-        );
+        self.label_joint_exhausted_frames +=
+            u64::from(state.avatars.iter().any(|a| {
+                a.display_presence() > 0.0 && a.name_visibility.joint_exhausted
+            }));
         let labels: Vec<_> = state
             .avatars
             .iter()
-            .filter(|a| a.presence > 0.0)
+            .filter(|a| a.display_presence() > 0.0)
             .filter_map(|a| a.name_visibility.placement.as_ref())
             .map(|name| name.bounds(state.geometry.label_height))
             .collect();
@@ -283,30 +283,75 @@ impl MovingBeams {
                 && state
                     .avatars
                     .iter()
-                    .filter(|a| a.presence > 0.0)
+                    .filter(|a| a.display_presence() > 0.0)
                     .all(|a| a.name_visibility.joint_clear),
         );
     }
+    fn observe_speed(&mut self, author: usize, tick: u64, position: Option<Vec2>) {
+        let Some(position) = position else {
+            self.previous.remove(&author);
+            return;
+        };
+        if let Some((before, previous)) = self.previous.insert(author, (tick, position))
+            && tick > before
+        {
+            let speed = position.distance(previous)
+                / crate::model::ticks_duration(tick - before);
+            if speed > self.maximum_travel_speed_world_per_second {
+                self.maximum_travel_speed_world_per_second = speed;
+                self.maximum_travel_speed_tick = Some(tick);
+                self.maximum_travel_speed_author = Some(author);
+            }
+        }
+    }
+
+    fn observe_overview(&mut self, simulation: &Simulation) {
+        let state = &simulation.state;
+        let content = super::content_obstacles(state, state.overview());
+        let radius = state.name_radius();
+        let screen: Vec<_> = state
+            .avatars
+            .iter()
+            .map(|avatar| state.screen(avatar.position))
+            .collect();
+        for (author, avatar) in state.avatars.iter().enumerate() {
+            if let Some(point) = screen[author] {
+                self.observe_labels(simulation, author, point, radius, &screen);
+                self.observe_content(state, avatar, point, &content);
+            }
+        }
+    }
+
     fn observe_avatars(&mut self, simulation: &Simulation) {
         let state = &simulation.state;
+        let field = simulation.field_space();
+        let units_per_pixel = framing::WORLD_UNITS_PER_REFERENCE_PIXEL * field.scale();
         let radius = state.avatar_radius();
-        let content = super::content_obstacles(state);
-        let projected: Vec<_> = project(
+        let planner: Vec<_> = project(
             view_direction() * framing::DISTANCE,
             Vec3::ZERO,
             &state.avatars.iter().map(|a| a.position).collect::<Vec<_>>(),
         )
         .collect();
         for (author, avatar) in state.avatars.iter().enumerate() {
-            let Some(point) = projected[author].map(|p| p * HALF) else {
-                continue;
-            };
-            self.observe_labels(simulation, author, point, radius, &projected);
-            self.observe_content(state, avatar, point, radius, &content);
             let moving = avatar.presence > 0.0
                 && simulation.travel.travelling(author, state.tick);
+            let walking = moving && simulation.travel.walking(author, state.tick);
+            self.observe_speed(
+                author,
+                state.tick,
+                (walking && avatar.display_presence() > 0.0).then(|| {
+                    field.ground_to_world(Vec2::new(
+                        avatar.position.x,
+                        avatar.position.z,
+                    ))
+                }),
+            );
+            let Some(point) = planner[author].map(|p| p * HALF) else {
+                continue;
+            };
             self.travelling_avatar_frames += u64::from(moving);
-            if moving && simulation.travel.walking(author, state.tick) {
+            if walking {
                 let cells = super::super::travel::network(
                     state.layout.repositories.iter().filter_map(|r| r.gutter),
                 );
@@ -327,19 +372,7 @@ impl MovingBeams {
                     self.travelling_off_network += u64::from(!joining);
                 }
             }
-            if let Some((before, position, was_moving)) =
-                self.previous.insert(author, (state.tick, point, moving))
-                && (moving || was_moving)
-                && state.tick > before
-            {
-                self.maximum_travel_speed_world_per_second =
-                    self.maximum_travel_speed_world_per_second.max(
-                        point.distance(position)
-                            * framing::WORLD_UNITS_PER_REFERENCE_PIXEL
-                            / crate::model::ticks_duration(state.tick - before),
-                    );
-            }
-            for (other, position) in projected.iter().enumerate().skip(author + 1) {
+            for (other, position) in planner.iter().enumerate().skip(author + 1) {
                 if avatar.presence > 0.0
                     && state.avatars[other].presence > 0.0
                     && position
@@ -356,7 +389,7 @@ impl MovingBeams {
         for (author, avatar) in state.avatars.iter().enumerate().filter(|(i, a)| {
             a.presence > 0.0 && simulation.travel.travelling(*i, state.tick)
         }) {
-            let Some(point) = projected[author].map(|p| p * HALF) else {
+            let Some(point) = planner[author].map(|p| p * HALF) else {
                 continue;
             };
             for (index, tile) in state
@@ -379,7 +412,7 @@ impl MovingBeams {
                 self.travelling_disc_foreign_tile += 1;
                 self.travelling_disc_max_depth_world = self
                     .travelling_disc_max_depth_world
-                    .max(radius - point.distance(nearest));
+                    .max((radius - point.distance(nearest)) * units_per_pixel);
                 self.first_disc.get_or_insert_with(|| serde_json::json!({"frame":state.tick,"author":author,"commit":avatar.commit,"point":point.to_array(),"radius":radius,"foreign":index,"tile":[tile.low.to_array(),tile.high.to_array()],"travel_sample":simulation.travel.sample(author,state.tick).map(|(p,a)| (p.to_array(),a))}));
             }
         }
@@ -387,6 +420,8 @@ impl MovingBeams {
 
     pub(crate) fn observe(&mut self, simulation: &Simulation) {
         let state = &simulation.state;
+        let field = simulation.field_space();
+        self.observe_overview(simulation);
         self.observe_avatars(simulation);
         self.observe_label_pairs(state);
         for (pulse, target) in state
@@ -452,8 +487,40 @@ impl MovingBeams {
                 self.origin_inside_foreign += u64::from(
                     from.cmpgt(bounds.min).all() && from.cmplt(bounds.max).all(),
                 );
-                self.first.get_or_insert_with(|| serde_json::json!({"frame":state.tick,"seconds":simulation.seconds().lossy_secs_f32(),"commit":simulation.commit(),"target_repository":own,"crossed_repository":index,"from":from.to_array(),"to":to.to_array(),"coordinate_space":"world_ground","target_tile":state.layout.repositories[own].tile.map(|t| t.ground().map(|p| p.to_array())),"tile_low":bounds.min.to_array(),"tile_high":bounds.max.to_array()}));
+                self.first.get_or_insert_with(|| {
+                    let point = |p| field.ground_to_world(p).to_array();
+                    serde_json::json!({
+                        "frame": state.tick,
+                        "seconds": simulation.seconds().lossy_secs_f32(),
+                        "commit": simulation.commit(),
+                        "target_repository": own,
+                        "crossed_repository": index,
+                        "from": point(from),
+                        "to": point(to),
+                        "coordinate_space": "world_ground",
+                        "target_tile": state.layout.repositories[own].tile.map(|tile| tile.ground().map(point)),
+                        "tile_low": point(bounds.min),
+                        "tile_high": point(bounds.max),
+                    })
+                });
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn walking_speed_excludes_the_jump_between_walks() {
+        let mut audit = MovingBeams::default();
+        audit.observe_speed(3, 10, Some(Vec2::ZERO));
+        audit.observe_speed(3, 11, Some(Vec2::new(0.5, 0.0)));
+        audit.observe_speed(3, 12, None);
+        audit.observe_speed(3, 13, Some(Vec2::new(32.0, 0.0)));
+        assert!((audit.maximum_travel_speed_world_per_second - 30.0).abs() < 1e-5);
+        assert_eq!(audit.maximum_travel_speed_tick, Some(11));
+        assert_eq!(audit.maximum_travel_speed_author, Some(3));
     }
 }

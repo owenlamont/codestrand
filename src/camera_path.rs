@@ -374,8 +374,14 @@ impl Anchor {
                     dir.position.y,
                 ))
             }
-            None => self.point.map(Vec3::from_array),
+            None => {
+                return self.point.map(|point| {
+                    Vec3::from_array(point) + Vec3::from_array(self.offset)
+                });
+            }
         };
-        point.map(|point| point + Vec3::from_array(self.offset))
+        point.map(|point| {
+            simulation.field_space().to_world(point) + Vec3::from_array(self.offset)
+        })
     }
 }
