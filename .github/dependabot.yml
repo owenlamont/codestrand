@@ -25,3 +25,6 @@ updates:
       # The direct fontique only enables fontconfig-dlopen on Bevy's copy, so it follows Bevy.
       - dependency-name: fontique
         versions: ['>=0.12']
+      # Parley shares Bevy's font stack, so update both together.
+      - dependency-name: parley
+        versions: ['>=0.12']
