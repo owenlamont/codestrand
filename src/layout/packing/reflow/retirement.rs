@@ -3,6 +3,7 @@ use crate::model::{count, framing};
 use bevy::math::Vec2;
 
 const EPSILON: f32 = 1e-6;
+const MAX_ASPECT_CORRECTIONS: usize = 4;
 
 #[derive(Clone, Debug)]
 pub(in crate::layout::packing) struct Retirement {
@@ -25,8 +26,8 @@ impl Retirement {
         if !fills_field(&from, gutters) || !contained(&from) {
             return None;
         }
-        let mut best = None;
-        let mut best_gain = f32::NEG_INFINITY;
+        let mut closures = Vec::new();
+        let mut blocked_shapes = Vec::new();
         let sizes: Vec<_> = from
             .tiles
             .iter()
@@ -36,8 +37,8 @@ impl Retirement {
                     .map(|tile| glyph_size(repo, tile))
             })
             .collect();
-        let mut least_donors = usize::MAX;
-        let mut distance = f32::INFINITY;
+        let max_travel =
+            exchange::MAX_EDGE_STEP_PX * held::REFLOW_LINEAR_FRACTION * count(ticks);
         for axis in 0..2 {
             let low = Group::find(&from, departing, axis, true);
             let high = Group::find(&from, departing, axis, false);
@@ -55,29 +56,28 @@ impl Retirement {
                     continue;
                 };
                 expand_last_tile(&mut to, departing, field, space.gap);
-                let travel = exchange::edge_travel(&from, &to);
-                if travel
-                    > exchange::MAX_EDGE_STEP_PX
-                        * held::REFLOW_LINEAR_FRACTION
-                        * count(ticks)
-                    || !to.tiles.iter().enumerate().all(|(repo, &tile)| {
-                        repo == departing
-                            || tile == from.tiles[repo]
-                            || tile.is_none_or(settled)
-                    })
-                    || !fills_field(&to, gutters)
-                    || !contained(&to)
-                    || !compatible(&from.tiles, &to.tiles)
-                    || !compatible(&from.gutters, &to.gutters)
+                if !settled_changes(&from, &to, departing) {
+                    blocked_shapes.push((to, donors, 1 - axis));
+                } else if let Some(travel) =
+                    certified_closure(&from, &to, departing, gutters, max_travel)
                 {
-                    continue;
+                    closures.push((to, donors, travel));
                 }
-                let mut survivors = to.clone();
-                survivors.tiles[departing] = None;
-                survivors.gutters[departing] = None;
-                if !connected(&from, &survivors, false) {
-                    continue;
-                }
+            }
+        }
+        if closures.is_empty() {
+            closures.extend(blocked_shapes.into_iter().filter_map(
+                |(to, donors, axis)| {
+                    let to = balance_archive_shape(&from, to, departing, axis, field)?;
+                    let travel =
+                        certified_closure(&from, &to, departing, gutters, max_travel)?;
+                    Some((to, donors, travel))
+                },
+            ));
+        }
+        let (to, ..) = closures
+            .into_iter()
+            .map(|(to, donors, travel)| {
                 let gain = from
                     .tiles
                     .iter()
@@ -90,23 +90,16 @@ impl Retirement {
                             .then(|| size.recip() - glyph_size(repo, after).recip())
                     })
                     .sum::<f32>();
-                if gain
-                    .total_cmp(&best_gain)
-                    .then_with(|| least_donors.cmp(&donors))
-                    .then_with(|| distance.total_cmp(&travel))
-                    .is_le()
-                {
-                    continue;
-                }
-                best_gain = gain;
-                least_donors = donors;
-                distance = travel;
-                best = Some(to);
-            }
-        }
+                (to, gain, donors, travel)
+            })
+            .min_by(|a, b| {
+                b.1.total_cmp(&a.1)
+                    .then_with(|| a.2.cmp(&b.2))
+                    .then_with(|| a.3.total_cmp(&b.3))
+            })?;
         Some(Self {
             from,
-            to: best?,
+            to,
             departing: [departing].into(),
         })
     }
@@ -222,6 +215,87 @@ impl Retirement {
         }
         layout
     }
+}
+
+fn settled_changes(from: &Layout, to: &Layout, departing: usize) -> bool {
+    to.tiles
+        .iter()
+        .zip(&from.tiles)
+        .enumerate()
+        .all(|(repo, (&after, &before))| {
+            repo == departing || after == before || after.is_none_or(settled)
+        })
+}
+
+fn certified_closure(
+    from: &Layout,
+    to: &Layout,
+    departing: usize,
+    gutters: Tile,
+    max_travel: f32,
+) -> Option<f32> {
+    let travel = exchange::edge_travel(from, to);
+    if travel > max_travel
+        || !fills_field(to, gutters)
+        || !contained(to)
+        || !compatible(&from.tiles, &to.tiles)
+        || !compatible(&from.gutters, &to.gutters)
+    {
+        return None;
+    }
+    let mut survivors = to.clone();
+    survivors.tiles[departing] = None;
+    survivors.gutters[departing] = None;
+    connected(from, &survivors, false).then_some(travel)
+}
+
+fn balance_archive_shape(
+    from: &Layout,
+    mut to: Layout,
+    departing: usize,
+    axis: usize,
+    field: Tile,
+) -> Option<Layout> {
+    let ghost = (to.tiles[departing].take(), to.gutters[departing].take());
+    let gutters = gutter_bounds(from)?;
+    if !fills_field(&to, gutters) || !contained(&to) {
+        return None;
+    }
+    for _ in 0..MAX_ASPECT_CORRECTIONS {
+        let Some((repository, tile)) =
+            to.tiles.iter().enumerate().find_map(|(repo, &tile)| {
+                let tile = tile?;
+                (Some(tile) != from.tiles[repo] && !settled(tile))
+                    .then_some((repo, tile))
+            })
+        else {
+            break;
+        };
+        let extent = tile.pixels();
+        let cross = extent[1 - axis];
+        let min = (cross / super::super::BOUND).max(16.0) + 0.01;
+        let max = cross * super::super::BOUND - 0.01;
+        if min > max || cross < 16.0 {
+            return None;
+        }
+        let width = extent[axis];
+        let distance =
+            (width.clamp(min, max) - width) / (framing::VIEWPORT[axis] * 0.5);
+        to = [false, true].into_iter().find_map(|high| {
+            let group = Group::find(&to, repository, axis, !high)?;
+            let sign = if high { 1.0 } else { -1.0 };
+            let moved = group.finish(&to, None, group.cut + sign * distance, field);
+            (fills_field(&moved, gutters)
+                && contained(&moved)
+                && settled_changes(&to, &moved, departing))
+            .then_some(moved)
+        })?;
+    }
+    if !settled_changes(from, &to, departing) {
+        return None;
+    }
+    (to.tiles[departing], to.gutters[departing]) = ghost;
+    Some(to)
 }
 
 pub(super) fn best_slide(
@@ -512,6 +586,63 @@ pub(super) fn contained(layout: &Layout) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn archive_closure_can_move_a_perpendicular_seam_to_keep_tiles_in_shape() {
+        let space = Space::new(4.0, 1.0);
+        let pixels = framing::VIEWPORT * 0.5;
+        let cell = |low, high| Tile {
+            low: Vec2::from_array(low) / pixels,
+            high: Vec2::from_array(high) / pixels,
+        };
+        let cells = [
+            cell([-200.0, -250.0], [200.0, -50.0]),
+            cell([-200.0, -50.0], [-100.0, 250.0]),
+            cell([-100.0, -50.0], [200.0, 250.0]),
+        ];
+        let [archived, left, right] = cells;
+        let gap = Vec2::splat(space.gap) / framing::VIEWPORT;
+        let layout = Layout {
+            tiles: cells
+                .map(|cell| {
+                    Some(Tile {
+                        low: cell.low + gap,
+                        high: cell.high - gap,
+                    })
+                })
+                .into(),
+            gutters: cells.map(Some).into(),
+        };
+        assert!(layout.tiles.iter().flatten().copied().all(settled));
+        let closure = Retirement::plan(layout.clone(), 0, space, 240, |_, tile| {
+            tile.area().sqrt()
+        })
+        .unwrap();
+        let field = gutter_bounds(&layout).unwrap();
+        let mut previous = layout;
+        for tick in 1..=240 {
+            let current = closure.sample(1.0 - held::progress(tick, 240));
+            assert!(fills_field(&current, field));
+            assert!(contained(&current));
+            assert!(compatible(&previous.tiles, &current.tiles));
+            assert!(
+                exchange::edge_travel(&previous, &current)
+                    <= exchange::MAX_EDGE_STEP_PX
+            );
+            crate::model::assert_gutter_routes(
+                current.gutters.iter().flatten().copied(),
+            );
+            previous = current;
+        }
+        assert!(previous.tiles[0].is_none());
+        assert!(previous.tiles.iter().flatten().copied().all(settled));
+        let [grown_left, grown_right] =
+            [previous.gutters[1].unwrap(), previous.gutters[2].unwrap()];
+        assert_eq!(grown_left.low.y, archived.low.y);
+        assert!(grown_left.high.x > left.high.x);
+        assert_eq!(grown_left.high.x, grown_right.low.x);
+        assert_eq!(grown_right.high, right.high);
+    }
 
     #[test]
     fn simultaneous_archives_can_give_space_to_the_same_neighbour() {
