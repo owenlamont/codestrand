@@ -1,6 +1,7 @@
 use super::{Node, Space, Tile, gutter_cells, held, insert, tiles};
 
 mod exchange;
+pub(super) mod retirement;
 
 const MAX_LOCAL_SPLITS: usize = 8;
 const MOVING_GUTTER_PX: f32 = 4.0;

@@ -3,7 +3,7 @@ use bevy::math::Vec2;
 use super::{Layout, Tile, compatible, connected, held};
 use crate::model::framing;
 
-const MAX_EDGE_STEP_PX: f32 = 8.0;
+pub(super) const MAX_EDGE_STEP_PX: f32 = 8.0;
 const MIN_SIDE_PX: f32 = 16.0;
 const PHASES: usize = 5;
 

@@ -1113,6 +1113,7 @@ pub(crate) struct Packing {
     birth_order: Arc<[usize]>,
     opening: Option<Opening>,
     reflows: Arc<[reflow::Change]>,
+    retirement: Option<Arc<ScheduledRetirement>>,
     labels: Arc<[String]>,
     inputs: Arc<[Vec<Input>]>,
     samples: Arc<[Sample]>,
@@ -1126,6 +1127,13 @@ pub(crate) struct Packing {
     tiling: TilingCache,
     /// Tiles every sample from scratch; tests compare against it.
     fresh_tiling: bool,
+}
+
+#[derive(Debug)]
+struct ScheduledRetirement {
+    start: usize,
+    departing: usize,
+    motion: reflow::retirement::Retirement,
 }
 
 #[derive(Clone, Debug)]
@@ -1254,7 +1262,7 @@ impl Packing {
             aspect_checkpoint,
         ) = retained_fields!(self, Packing {
             nodes, rotated, birth_order, opening, aspects, display_aspects, aspect_checkpoint;
-            gutter_scale, growth, reflows, labels, inputs, samples, exits, content_scales, center_jumps,
+            gutter_scale, growth, reflows, retirement, labels, inputs, samples, exits, content_scales, center_jumps,
             tiling, fresh_tiling,
         });
         let opening = opening.as_ref().map_or(0, |opening| {
@@ -1292,12 +1300,14 @@ impl Packing {
     }
 
     pub(crate) fn reflow_bytes(ticks: u128, repositories: u128) -> u128 {
+        let geometry = repositories * (4 * std::mem::size_of::<Option<Tile>>()) as u128;
         (1 + ticks / held::reflow_spacing() as u128)
             * (reflow::Change::retained_bytes()
-                + repositories
-                    * (2 * std::mem::size_of::<Node>()
-                        + 4 * std::mem::size_of::<Option<Tile>>())
-                        as u128)
+                + repositories * (2 * std::mem::size_of::<Node>()) as u128
+                + geometry)
+            + geometry
+            + (std::mem::size_of::<ScheduledRetirement>()
+                + 2 * std::mem::size_of::<usize>()) as u128
     }
 
     #[cfg(test)]
@@ -1562,6 +1572,7 @@ impl Packing {
             birth_order: repository_ranks(&order).into(),
             opening,
             reflows: reflows.into(),
+            retirement: None,
             labels: labels.into(),
             inputs: regions.into(),
             samples: samples.into(),
@@ -1575,6 +1586,7 @@ impl Packing {
             tiling: TilingCache::default(),
             fresh_tiling: false,
         };
+        packing.retirement = packing.plan_retirement().map(Arc::new);
         packing.center_jumps = packing.plan_center_jumps(&items);
         packing.content_scales = packing.plan_content_scales();
         packing.aspects = packing.build_aspects(
@@ -1982,6 +1994,54 @@ impl Packing {
         }
     }
 
+    fn plan_retirement(&self) -> Option<ScheduledRetirement> {
+        let (departing, exit) = self
+            .exits
+            .iter()
+            .enumerate()
+            .filter_map(|(repo, exit)| exit.map(|exit| (repo, exit)))
+            .max_by_key(|&(_, exit)| exit.end)?;
+        let start = usize::try_from(exit.start).ok()?;
+        let end = usize::try_from(exit.end).ok()?;
+        let initial = self.samples.get(start)?;
+        self.samples.get(end)?;
+        if self.reflows.last().is_some_and(|change| {
+            change.tick.saturating_add(change.duration()) >= start
+        }) || self
+            .opening
+            .as_ref()
+            .is_some_and(|opening| opening.end >= start)
+        {
+            return None;
+        }
+        if initial.presence[departing] < 1.0
+            || initial.presence.iter().any(|&p| p > 0.0 && p < 1.0)
+            || self.samples[start + 1..].iter().any(|sample| {
+                initial.presence.iter().enumerate().any(|(repo, &p)| {
+                    repo != departing
+                        && (sample.presence[repo].to_bits() != p.to_bits()
+                            || (p > 0.0
+                                && sample.weights[repo].to_bits()
+                                    != initial.weights[repo].to_bits()))
+                })
+            })
+        {
+            return None;
+        }
+        let opening = self.layout_at(start, &[], None, None);
+        let motion = reflow::retirement::Retirement::plan(
+            opening,
+            departing,
+            self.space(),
+            end - start,
+        )?;
+        Some(ScheduledRetirement {
+            start,
+            departing,
+            motion,
+        })
+    }
+
     fn layout_at(
         &self,
         tile_tick: usize,
@@ -1989,6 +2049,15 @@ impl Packing {
         presence: Option<&[f32]>,
         tiling: Option<&mut Tiling>,
     ) -> reflow::Layout {
+        if let Some(retirement) = &self.retirement
+            && tile_tick >= retirement.start
+            && births.is_empty()
+            && presence.is_none()
+        {
+            return retirement
+                .motion
+                .sample(self.samples[tile_tick].presence[retirement.departing]);
+        }
         let opening = self.opening.as_ref().filter(|opening| {
             presence.is_none_or(|mask| mask.iter().all(|&p| p >= 1.0))
                 && tile_tick <= opening.end
@@ -3054,6 +3123,33 @@ mod tests {
         let other = shared_ending.then_some(60);
         let exits = crate::model::exits_from_starts(&[Some(60), other, other]);
         Packing::from_inputs(inputs, exits.into(), 4.0, 1.0, 1).unwrap()
+    }
+
+    #[test]
+    fn completed_archive_keeps_the_flat_layout() {
+        let mut row = capacity_fixture();
+        row.truncate(2);
+        row[0].items = 64.0;
+        row[1].items = 64.0;
+        let mut inputs = Inputs::new(500);
+        for _ in 0..500 {
+            inputs.push(row.clone());
+        }
+        let exits = crate::model::exits_from_starts(&[Some(100), None]);
+        let exit = exits[0].unwrap();
+        let packing = Packing::from_inputs(inputs, exits.into(), 4.0, 1.0, 1).unwrap();
+
+        assert!(packing.retirement.is_some());
+        let at = |tick| packing.sample_split(tick, tick, &[], None).unwrap().0;
+        let start = at(exit.start);
+        let middle = at(exit.start.midpoint(exit.end));
+        let end = at(exit.end);
+        let later = at(exit.end + 15);
+        assert!(middle[0].tile.unwrap().area() < start[0].tile.unwrap().area());
+        assert!(middle[1].tile.unwrap().area() > start[1].tile.unwrap().area());
+        assert!(end[0].tile.is_none() && end[0].gutter.is_none());
+        assert_eq!(end[1].tile, later[1].tile);
+        assert_eq!(end[1].gutter, later[1].gutter);
     }
 
     #[test]
