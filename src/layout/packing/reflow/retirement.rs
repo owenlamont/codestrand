@@ -162,6 +162,48 @@ impl Retirement {
         self.departing.len()
     }
 
+    pub(super) fn finish_in_field(
+        mut self,
+        space: Space,
+        ticks: usize,
+    ) -> Option<Self> {
+        let &[departing] = self.departing.as_ref() else {
+            return Some(self);
+        };
+        let mut survivors =
+            self.to.tiles.iter().enumerate().filter_map(|(repo, tile)| {
+                (repo != departing && tile.is_some()).then_some(repo)
+            });
+        let Some(survivor) = survivors.next() else {
+            return Some(self);
+        };
+        if survivors.next().is_some() {
+            return Some(self);
+        }
+        let old_field = gutter_bounds(&self.from)?;
+        let ghost = self.to.gutters[departing]?;
+        let axis = (0..2)
+            .find(|&axis| (ghost.low[axis] - ghost.high[axis]).abs() <= EPSILON)?;
+        let high = (ghost.low[axis] - old_field.high[axis]).abs() <= EPSILON;
+        if !high && (ghost.low[axis] - old_field.low[axis]).abs() > EPSILON {
+            return None;
+        }
+        let gutter_field = space.field(super::super::GUTTER_MARGIN);
+        let glass_field = space.field(framing::MARGIN);
+        let cut = edge(gutter_field, axis, high);
+        let mut ghost = gutter_field;
+        ghost.low[axis] = cut;
+        ghost.high[axis] = cut;
+        self.to.gutters[departing] = Some(ghost);
+        self.to.tiles[departing] = Some(ghost);
+        self.to.gutters[survivor] = Some(gutter_field);
+        self.to.tiles[survivor] = Some(glass_field);
+        let max_travel =
+            exchange::MAX_EDGE_STEP_PX * held::REFLOW_LINEAR_FRACTION * count(ticks);
+        certified_closure(&self.from, &self.to, departing, gutter_field, max_travel)?;
+        Some(self)
+    }
+
     fn close(
         from: &Layout,
         departing: usize,

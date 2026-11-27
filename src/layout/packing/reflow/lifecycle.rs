@@ -144,6 +144,11 @@ impl Program {
                         fit,
                     )?
                 };
+                let motion = if events.peek().is_none() {
+                    motion.finish_in_field(packing.space(), end - start)?
+                } else {
+                    motion
+                };
                 Action::Archive(motion)
             };
             current = action.sample(1.0);
