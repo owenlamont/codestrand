@@ -172,50 +172,9 @@ impl Program {
         &self,
         space: super::Space,
     ) -> f32 {
-        use super::retirement::{fills_field, gutter_bounds, rectangle_bounds};
-        use bevy::math::Vec2;
-
-        let opening_cells = self.field();
-        let opening_glass = rectangle_bounds(&self.opening.tiles).unwrap();
-        let padding = Vec2::splat(space.gap) / framing::VIEWPORT;
-        let pixels = framing::VIEWPORT * 0.5;
         std::iter::once(self.opening.clone())
             .chain(self.phases.iter().map(|phase| phase.action.sample(1.0)))
-            .map(|layout| {
-                let Some(field) = gutter_bounds(&layout) else {
-                    return if layout.tiles.iter().any(Option::is_some) {
-                        f32::INFINITY
-                    } else {
-                        0.0
-                    };
-                };
-                if !fills_field(&layout, field) {
-                    return f32::INFINITY;
-                }
-                let visible = if field == opening_cells {
-                    opening_glass
-                } else if field == space.field(super::super::GUTTER_MARGIN) {
-                    space.field(framing::MARGIN)
-                } else {
-                    return f32::INFINITY;
-                };
-                layout
-                    .tiles
-                    .iter()
-                    .zip(&layout.gutters)
-                    .map(|(&glass, &cell)| match (glass, cell) {
-                        (Some(glass), Some(cell)) => {
-                            let expected = glass_in_cell(cell, field, visible, padding);
-                            let error = (glass.low - expected.low)
-                                .abs()
-                                .max((glass.high - expected.high).abs());
-                            (error * pixels).max_element()
-                        }
-                        (None, None) => 0.0,
-                        _ => f32::INFINITY,
-                    })
-                    .fold(0.0, f32::max)
-            })
+            .map(|layout| settled_glass_error_px(&self.opening, &layout, space))
             .fold(0.0, f32::max)
     }
 
@@ -374,7 +333,7 @@ fn insert_shift(
 }
 
 fn inset_field(packing: &Packing, layout: &mut Layout) -> Option<()> {
-    use super::retirement::{gutter_bounds, rectangle_bounds};
+    use super::retirement::{gutter_bounds, rectangle_bounds, settled};
     use bevy::math::Vec2;
 
     let outer = gutter_bounds(layout)?;
@@ -394,7 +353,13 @@ fn inset_field(packing: &Packing, layout: &mut Layout) -> Option<()> {
         *cell = cell.map(inset);
         *tile = cell.map(|cell| glass_in_cell(cell, outer, glass, gap));
     }
-    Some(())
+    layout
+        .tiles
+        .iter()
+        .flatten()
+        .copied()
+        .all(settled)
+        .then_some(())
 }
 
 fn glass_in_cell(cell: Tile, field: Tile, glass: Tile, gap: bevy::math::Vec2) -> Tile {
@@ -404,6 +369,52 @@ fn glass_in_cell(cell: Tile, field: Tile, glass: Tile, gap: bevy::math::Vec2) ->
         low: Vec2::select(cell.low.cmpeq(field.low), glass.low, cell.low + gap),
         high: Vec2::select(cell.high.cmpeq(field.high), glass.high, cell.high - gap),
     }
+}
+
+#[cfg(test)]
+pub(in crate::layout::packing) fn settled_glass_error_px(
+    before: &Layout,
+    after: &Layout,
+    space: super::Space,
+) -> f32 {
+    use super::retirement::{fills_field, gutter_bounds, rectangle_bounds};
+    use bevy::math::Vec2;
+
+    let Some(field) = gutter_bounds(after) else {
+        return if after.tiles.iter().any(Option::is_some) {
+            f32::INFINITY
+        } else {
+            0.0
+        };
+    };
+    if !fills_field(after, field) {
+        return f32::INFINITY;
+    }
+    let visible = if Some(field) == gutter_bounds(before) {
+        rectangle_bounds(&before.tiles).unwrap()
+    } else if field == space.field(super::super::GUTTER_MARGIN) {
+        space.field(framing::MARGIN)
+    } else {
+        return f32::INFINITY;
+    };
+    let padding = Vec2::splat(space.gap) / framing::VIEWPORT;
+    let pixels = framing::VIEWPORT * 0.5;
+    after
+        .tiles
+        .iter()
+        .zip(&after.gutters)
+        .map(|(&glass, &cell)| match (glass, cell) {
+            (Some(glass), Some(cell)) => {
+                let expected = glass_in_cell(cell, field, visible, padding);
+                let error = (glass.low - expected.low)
+                    .abs()
+                    .max((glass.high - expected.high).abs());
+                (error * pixels).max_element()
+            }
+            (None, None) => 0.0,
+            _ => f32::INFINITY,
+        })
+        .fold(0.0, f32::max)
 }
 
 #[cfg(test)]

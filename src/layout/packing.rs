@@ -2009,9 +2009,17 @@ impl Packing {
 
     #[cfg(test)]
     pub(crate) fn settled_glass_error_px(&self) -> f32 {
-        self.lifecycle
-            .as_ref()
-            .map_or(0.0, |program| program.settled_glass_error_px(self.space()))
+        let space = self.space();
+        if let Some(program) = &self.lifecycle {
+            return program.settled_glass_error_px(space);
+        }
+        self.retirement.as_ref().map_or(0.0, |retirement| {
+            reflow::lifecycle::settled_glass_error_px(
+                &retirement.motion.sample(1.0),
+                &retirement.motion.sample(0.0),
+                space,
+            )
+        })
     }
 
     #[cfg(test)]
@@ -3386,7 +3394,8 @@ mod tests {
         }
         let exits = crate::model::exits_from_starts(&[Some(100), None]);
         let exit = exits[0].unwrap();
-        let packing = Packing::from_inputs(inputs, exits.into(), 4.0, 1.0, 1).unwrap();
+        let mut packing =
+            Packing::from_inputs(inputs, exits.into(), 4.0, 1.0, 1).unwrap();
 
         assert!(packing.retirement.is_none());
         let at = |tick| packing.sample_split(tick, tick, &[], None).unwrap().0;
@@ -3396,6 +3405,49 @@ mod tests {
         let end = at(exit.end);
         assert!(end[0].tile.is_none() && end[0].gutter.is_none());
         assert_eq!(end[1].tile, at(exit.end + 15)[1].tile);
+
+        let start = usize::try_from(exit.start).unwrap();
+        let ticks = usize::try_from(exit.end - exit.start).unwrap();
+        let motion = reflow::retirement::Retirement::plan(
+            packing.layout_at(start, &[], None, None),
+            0,
+            packing.space(),
+            ticks,
+            |_, _| 1.0,
+        )
+        .unwrap();
+        packing.lifecycle = None;
+        packing.retirement = Some(Arc::new(ScheduledRetirement {
+            start,
+            departing: 0,
+            motion,
+        }));
+        assert!(packing.settled_glass_error_px() <= 0.01);
+        let settled = packing
+            .sample_split(exit.end, exit.end, &[], None)
+            .unwrap()
+            .0;
+        assert!(settled[0].tile.is_none() && settled[1].tile.is_some());
+    }
+
+    #[test]
+    fn a_wide_gutter_preserves_the_opening_aspect_limit() {
+        let mut row = capacity_fixture();
+        row.truncate(2);
+        row[0].items = 1.0;
+        row[1].items = 64.0;
+        let mut inputs = Inputs::new(500);
+        for _ in 0..500 {
+            inputs.push(row.clone());
+        }
+        let exits = crate::model::exits_from_starts(&[Some(100), None]);
+        let packing = Packing::from_inputs(inputs, exits.into(), 20.0, 1.0, 1).unwrap();
+        let opening = packing.sample_split(0, 0, &[], None).unwrap().0;
+        let aspect = opening[0].tile.unwrap().ground_aspect();
+        assert!(
+            (1.0 / BOUND - 1e-4..=BOUND + 1e-4).contains(&aspect),
+            "{aspect}"
+        );
     }
 
     #[test]
