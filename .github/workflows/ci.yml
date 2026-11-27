@@ -47,7 +47,7 @@ jobs:
         run: rustup show
       - name: Install uv
         if: steps.changes.outputs.rust == 'true'
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d
       - name: Restore Cargo cache
         if: steps.changes.outputs.rust == 'true'
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
@@ -178,7 +178,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install uv
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d
       - name: Install prek
         run: uv tool install prek==0.5.7
       - uses: prefix-dev/setup-pixi@9936258fee697aff89b3fed6ca1f80a382ef694e  # v0.11.3
