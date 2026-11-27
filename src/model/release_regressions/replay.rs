@@ -55,20 +55,29 @@ struct ContributorFrame {
 impl ContributorFrame {
     fn capture(sim: &Simulation, author: usize, avatar: &Avatar) -> Self {
         let gutter = sim.layout().repositories[avatar.repository].gutter;
+        let ring_dock =
+            sim.state
+                .casting_ring_seat(author)
+                .and_then(|(ring, offset)| {
+                    let seat = ring.centre(gutter?) + offset;
+                    (avatar.position.distance_squared(seat) < 1e-8).then_some(ring.dock)
+                });
+        let dock = ring_dock.or_else(|| avatar.slot.as_ref().map(|slot| slot.dock));
         Self {
             repository: avatar.repository,
             position: avatar.position,
             presence: avatar.presence,
-            dock: avatar.slot.as_ref().zip(gutter).map(|(slot, tile)| {
-                (slot.dock, slots::world(slot.dock.on_network(tile)))
-            }),
-            can_carry: !avatar.travelling
-                && avatar.dock_walk.is_none()
-                && avatar.settle.is_none()
-                && avatar.slot.as_ref().is_some_and(|slot| {
-                    avatar.transmitting
-                        || avatar.position.distance_squared(slot.world()) < 1e-8
-                }),
+            dock: dock
+                .zip(gutter)
+                .map(|(dock, tile)| (dock, slots::world(dock.on_network(tile)))),
+            can_carry: ring_dock.is_some()
+                || (!avatar.travelling
+                    && avatar.dock_walk.is_none()
+                    && avatar.settle.is_none()
+                    && avatar.slot.as_ref().is_some_and(|slot| {
+                        avatar.transmitting
+                            || avatar.position.distance_squared(slot.world()) < 1e-8
+                    })),
             travelling: avatar.travelling
                 || sim.travel.travelling(author, sim.state.tick),
             fading_lifecycle: avatar.dismissed || sim.seconds() >= avatar.expires,
