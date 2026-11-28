@@ -4,8 +4,6 @@ use crate::{
     model::{BIRTH_TICKS, framing},
 };
 
-const MAX_OPERATIONS: usize = 192;
-
 #[derive(Debug)]
 pub(in crate::layout::packing) struct Program {
     opening: Layout,
@@ -42,8 +40,7 @@ impl Program {
         (std::mem::size_of::<Self>() + 2 * std::mem::size_of::<usize>()) as u128
             + layout
             + repositories * std::mem::size_of::<usize>() as u128
-            + ((MAX_OPERATIONS as u128).min(2 * repositories)
-                + ticks / held::reflow_ticks() as u128)
+            + (2 * repositories + ticks / held::reflow_ticks() as u128)
                 * (std::mem::size_of::<Phase>() as u128 + 2 * layout)
     }
 
@@ -60,9 +57,6 @@ impl Program {
                 gutters: vec![Some(space.field(super::super::GUTTER_MARGIN))],
             };
             return Self::compile(packing, opening, &events, live_files, false);
-        }
-        if events.len() > MAX_OPERATIONS {
-            return None;
         }
         events.sort_unstable_by_key(|&(start, end, repo, birth)| {
             (if birth { start } else { end }, start, end, repo)
@@ -462,8 +456,46 @@ pub(in crate::layout::packing) fn settled_glass_error_px(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layout::{RepositoryRegion, outline, packing::Inputs};
+    use crate::layout::{
+        RepositoryRegion, outline,
+        packing::{Inputs, Sample, Space},
+    };
     use bevy::math::Vec2;
+
+    #[test]
+    fn a_late_birth_compiles_after_a_large_opening_cohort() {
+        const OPENING: usize = 193;
+        const READY: usize = 130;
+        let weights = vec![1.0; OPENING + 1];
+        let mut births = vec![0; OPENING + 1];
+        births[OPENING] = usize::MAX;
+        let (opening, space) =
+            opening::bands(Space::new(4.0, 1.0), &weights, &births).unwrap();
+        let row = Sample {
+            weights: weights.clone(),
+            presence: vec![1.0; OPENING + 1],
+        };
+        let packing = Packing {
+            gutter_scale: space.gap,
+            growth: space.growth,
+            labels: (0..=OPENING).map(|repo| repo.to_string()).collect(),
+            lifecycle: Some(Program::stationary(opening).into()),
+            samples: vec![row; READY + 1].into(),
+            ..Packing::default()
+        };
+        let mut windows = vec![(0, 1); OPENING];
+        windows.push((2, READY));
+        let live_files = vec![weights; READY + 1];
+        let plan = Program::plan(&packing, &windows, &live_files).unwrap();
+        assert_eq!(plan.counts(), (1, 0));
+        assert!(plan.sample(0, &[]).tiles[OPENING].is_none());
+        let settled = plan.sample(READY, &[]);
+        assert!(settled.tiles.iter().all(Option::is_some));
+        assert!(super::super::retirement::fills_field(
+            &settled,
+            plan.field()
+        ));
+    }
 
     #[test]
     fn flat_allocation_catches_up_after_a_late_bulk_import() {

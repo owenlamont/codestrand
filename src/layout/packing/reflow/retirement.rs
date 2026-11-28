@@ -773,9 +773,9 @@ pub(super) fn fills_field(layout: &Layout, field: Tile) -> bool {
         .gutters
         .iter()
         .flatten()
-        .map(|tile| tile.area())
-        .sum::<f32>();
-    (field.area() - area).abs() <= EPSILON * field.area().max(1.0)
+        .map(|tile| f64::from(tile.area()))
+        .sum::<f64>();
+    (f64::from(field.area()) - area).abs() <= f64::from(EPSILON * field.area().max(1.0))
         && layout.gutters.iter().flatten().all(|tile| {
             tile.low.cmpge(field.low - tolerance).all()
                 && tile.high.cmple(field.high + tolerance).all()
