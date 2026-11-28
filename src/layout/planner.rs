@@ -30,6 +30,7 @@ pub(super) struct Plan {
     samples: Arc<[Vec<Vec2>]>,
     pub(super) time: Time,
     origin: Time,
+    cursor: Time,
     step: f32,
     seconds: f64,
 }
@@ -39,7 +40,7 @@ impl Plan {
         use crate::model::checkpoint_memory::{buffer_bytes, retained_fields};
 
         let (parts,) = retained_fields!(self, Plan {
-            parts; samples, time, origin, step, seconds,
+            parts; samples, time, origin, cursor, step, seconds,
         });
         buffer_bytes::<(usize, Self)>(parts.capacity())
             + parts
@@ -144,6 +145,7 @@ impl Plan {
             samples: samples.into(),
             time: Time::ZERO,
             origin: Time::ZERO,
+            cursor: Time::ZERO,
             step,
             seconds: 0.0,
         })
@@ -163,18 +165,50 @@ impl Plan {
         Some(interpolate(row, time, self.step))
     }
 
-    fn place(&self, time: Time, dirs: &mut [super::Dir]) {
-        if self.parts.is_empty() {
-            assert_eq!(dirs.len(), self.samples.len(), "planned directories");
-            let sample = interpolator(time, self.step, self.samples[0].len());
-            for (dir, row) in dirs.iter_mut().zip(self.samples.iter()) {
-                dir.position = sample(row);
+    fn place(&mut self, time: Time, dirs: &mut [super::Dir], max_step: f32) {
+        if !self.parts.is_empty() {
+            let mut remaining = dirs;
+            for (index, (base, plan)) in self.parts.iter_mut().enumerate().rev() {
+                let (earlier, region) = remaining.split_at_mut(*base);
+                debug_assert_eq!(index == 0, earlier.is_empty());
+                plan.place(time, region, max_step);
+                remaining = earlier;
             }
+            return;
+        }
+        assert_eq!(dirs.len(), self.samples.len(), "planned directories");
+        let time = if max_step.is_finite() {
+            time.max(self.cursor)
         } else {
-            for (index, (base, plan)) in self.parts.iter().enumerate() {
-                let end = self.parts.get(index + 1).map_or(dirs.len(), |p| p.0);
-                plan.place(time, &mut dirs[*base..end]);
+            time
+        };
+        let allows = |time| {
+            let sample = interpolator(time, self.step, self.samples[0].len());
+            dirs.iter().zip(self.samples.iter()).all(|(dir, row)| {
+                !dir.live
+                    || !dir.has_landed_file
+                    || dir.position.distance_squared(sample(row)) <= max_step * max_step
+            })
+        };
+        self.cursor = if allows(time) {
+            time
+        } else {
+            // A shared cursor keeps the repository on the same crossing-free curve.
+            let start = self.cursor;
+            let (mut low, mut high) = (0.0_f32, time - start);
+            for _ in 0..10 {
+                let middle = low.midpoint(high);
+                if allows(start + middle) {
+                    low = middle;
+                } else {
+                    high = middle;
+                }
             }
+            start + low
+        };
+        let sample = interpolator(self.cursor, self.step, self.samples[0].len());
+        for (dir, row) in dirs.iter_mut().zip(self.samples.iter()) {
+            dir.position = sample(row);
         }
     }
 }
@@ -219,6 +253,30 @@ fn identical_spline_controls_keep_large_coordinates_exactly() {
     let row = [position; 4];
     let at = interpolator(Time::seconds(2.0 / 60.0), 0.25, row.len());
     assert_eq!(at(&row), position);
+}
+
+#[cfg(test)]
+#[test]
+fn retained_directory_stretches_an_overspeed_spline_segment() {
+    let controls = [0.0, 0.0, 2.0, 4.0, 4.0].map(|x| Vec2::new(x, 0.0));
+    let mut layout = Layout::planned_paths(&["src/a.rs"], 0);
+    layout.plan.samples = vec![vec![Vec2::ZERO; 5], controls.to_vec()].into();
+    layout.plan.step = 0.25;
+    layout.dirs[1].live = true;
+    layout.dirs[1].has_landed_file = true;
+    let dt = model::tick_seconds();
+    let start = Time::seconds(0.75);
+    layout.plan.place(start, &mut layout.dirs, f32::INFINITY);
+    let raw = interpolate(&controls, start + dt, 0.25);
+    assert!(layout.dirs[1].position.distance(raw) > MAX_SPEED * dt);
+    for tick in 46..=120 {
+        let before = layout.dirs[1].position;
+        layout
+            .plan
+            .place(model::tick_time(tick), &mut layout.dirs, MAX_SPEED * dt);
+        assert!(before.distance(layout.dirs[1].position) <= MAX_SPEED * dt);
+    }
+    assert_eq!(layout.dirs[1].position, Vec2::new(4.0, 0.0));
 }
 
 fn occupancy(
@@ -551,6 +609,7 @@ impl Layout {
     pub(crate) fn plan_time(&mut self, origin: Time) {
         self.plan.time = origin;
         self.plan.origin = origin;
+        self.plan.place(origin, &mut self.dirs, f32::INFINITY);
     }
 
     pub(crate) fn sample_plan(&mut self, time: Time, dt: f32) {
@@ -560,7 +619,8 @@ impl Layout {
     pub(super) fn relax(&mut self, dt: f32) {
         self.plan.time += dt;
 
-        self.plan.place(self.plan.time, &mut self.dirs);
+        self.plan
+            .place(self.plan.time, &mut self.dirs, MAX_SPEED * dt);
         let coefficient = 1.0 - (-dt / 0.2).exp();
         self.reserve_fixed_points.resize(self.dirs.len(), None);
         for (index, dir) in self.dirs.iter_mut().enumerate() {
@@ -595,7 +655,9 @@ mod tests {
 
     fn full_relax(layout: &mut Layout, dt: f32) {
         layout.plan.time += dt;
-        layout.plan.place(layout.plan.time, &mut layout.dirs);
+        layout
+            .plan
+            .place(layout.plan.time, &mut layout.dirs, MAX_SPEED * dt);
         for (index, dir) in layout.dirs.iter_mut().enumerate() {
             let target = if index != 0 && dir.files == 0 && dir.children == 0 {
                 0.0
@@ -682,7 +744,9 @@ mod tests {
                 let expected: Vec<_> = (0..layout.dirs.len())
                     .map(|index| layout.plan.position(index).unwrap())
                     .collect();
-                layout.plan.place(layout.plan.time, &mut layout.dirs);
+                layout
+                    .plan
+                    .place(layout.plan.time, &mut layout.dirs, f32::INFINITY);
                 let actual: Vec<_> =
                     layout.dirs.iter().map(|dir| dir.position).collect();
                 assert_eq!(actual, expected);
