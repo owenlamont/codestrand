@@ -63,7 +63,7 @@ fn glyph_ratio_dense_tile_growth() {
     .unwrap();
     assert!(report.comparable_glyph_frames > 0);
     println!("dense tile glyphs: {report:?}");
-    report.check_glyph_ratio().unwrap();
+    report.check_glyph_exemptions().unwrap();
 }
 
 #[test]
@@ -89,7 +89,7 @@ fn glyph_ratio_distant_directory_growth() {
     .unwrap();
     assert!(report.comparable_glyph_frames > 0);
     println!("distant directory glyphs: {report:?}");
-    report.check_glyph_ratio().unwrap();
+    report.check_glyph_exemptions().unwrap();
 }
 
 #[test]
@@ -571,10 +571,10 @@ fn short_histories_preserve_playback_invariants() {
         .run(&histories(2..=5, 1..=8, 0..=2, 6..=12), |history| {
             let report = history.replay(CI_TICK_LIMIT)?;
             println!(
-                "Worst nominal glyph width ratio {:.4} at frame {}",
-                report.worst_glyph_ratio, report.worst_glyph_tick,
+                "Raw glyph width ratios: worst {:.4} at {:?}, P90 {:?} (tick, smallest repo, largest repo)",
+                report.worst_glyph_ratio, report.worst_glyph_at, report.glyph_ratio_p90,
             );
-            report.check_glyph_ratio()
+            report.check_glyph_exemptions()
         })
         .unwrap_or_else(|error| panic!("playback seed {seed:?}: {error}"));
 }
@@ -617,10 +617,10 @@ fn extended_histories_preserve_playback_invariants() {
                 report.peak_visible_contributors, report.peak_contributors_per_repository,
                 report.passing_contacts, report.longest_parked_contact);
             println!(
-                "Worst nominal glyph width ratio {:.4} at frame {}",
-                report.worst_glyph_ratio, report.worst_glyph_tick,
+                "Raw glyph width ratios: worst {:.4} at {:?}, P90 {:?} (tick, smallest repo, largest repo)",
+                report.worst_glyph_ratio, report.worst_glyph_at, report.glyph_ratio_p90,
             );
-            report.check_glyph_ratio()
+            report.check_glyph_exemptions()
         })
         .unwrap_or_else(|error| panic!("extended playback seed {seed:?}: {error}"));
 }

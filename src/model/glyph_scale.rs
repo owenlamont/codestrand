@@ -4,7 +4,7 @@ use super::{Simulation, Time};
 use crate::layout::Presence;
 
 const GLYPH_RATIO_GRACE: f32 = 2.5;
-const RATIO: f32 = 2.0;
+const MEDIAN_CAP: f32 = 2.0;
 pub(super) const GLYPH_RATIO_MAX_EXEMPT: f32 = 10.0;
 
 #[derive(Clone, Copy, Default)]
@@ -83,23 +83,26 @@ impl GlyphScale {
                 || sim.packing.exchanging(tile_tick, repo);
             state.sample(tick, region.tile.is_some(), placing, grace);
         }
-        let minimum = layout
-            .files()
-            .filter_map(|(_, file)| {
-                let dir = layout.dir(file.dir);
-                (file.state != Presence::Leaving
-                    && self.settled(dir.repository)
-                    && dir.scale > 0.0)
-                    .then_some(dir.scale)
-            })
-            .fold(f32::INFINITY, f32::min);
+        let mut scales = vec![(0.0, 0); self.repositories.len()];
+        for (_, file) in layout.files() {
+            let dir = layout.dir(file.dir);
+            if file.state != Presence::Leaving
+                && self.settled(dir.repository)
+                && dir.scale > 0.0
+            {
+                let (scale, files) = &mut scales[dir.repository];
+                *scale = dir.scale;
+                *files += 1;
+            }
+        }
+        let median = file_weighted_median(&mut scales);
         let (focus, distance) = sim.world_view();
         self.eye_height = sim.field_space().to_planner(focus + Vec3::Y * distance).y;
         self.glyph_height = sim.theme().glyph_transform().translation.y;
-        self.maximum = if minimum.is_finite() {
+        self.maximum = if let Some(median) = median {
             // A larger glyph sits higher in the overview perspective.
-            RATIO * minimum * self.eye_height
-                / (self.eye_height + (RATIO - 1.0) * self.glyph_height * minimum)
+            MEDIAN_CAP * median * self.eye_height
+                / (self.eye_height + (MEDIAN_CAP - 1.0) * self.glyph_height * median)
         } else {
             f32::INFINITY
         };
@@ -128,9 +131,29 @@ impl GlyphScale {
     }
 }
 
+fn file_weighted_median(scales: &mut [(f32, usize)]) -> Option<f32> {
+    let files: usize = scales.iter().map(|&(_, count)| count).sum();
+    let mut remaining = files.checked_sub(1)? / 2;
+    scales.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+    scales.iter().find_map(|&(scale, count)| {
+        if count > remaining {
+            Some(scale)
+        } else {
+            remaining -= count;
+            None
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_small_outlier_does_not_anchor_the_band() {
+        let mut scales = [(2.0, 20), (0.1, 1), (4.0, 30), (0.0, 0)];
+        assert_eq!(file_weighted_median(&mut scales), Some(4.0));
+    }
 
     #[test]
     fn continuous_placement_loses_its_exemption_at_the_cap() {

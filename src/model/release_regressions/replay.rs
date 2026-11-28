@@ -40,27 +40,21 @@ pub(super) struct Replay {
     pub overlapping_exits: bool,
     pub planner_wait: Duration,
     pub worst_glyph_ratio: f32,
-    pub worst_glyph_tick: u64,
+    pub worst_glyph_at: (u64, usize, usize),
     pub comparable_glyph_frames: usize,
-    pub glyph_ratio_p90: f32,
+    pub glyph_ratio_p90: (f32, u64, usize, usize),
     pub out_of_band_glyph_frames: usize,
     pub glyph_settle_ticks: Vec<u64>,
     pub longest_glyph_exemption: u64,
 }
 
 impl Replay {
-    pub(super) fn check_glyph_ratio(&self) -> TestCaseResult {
+    pub(super) fn check_glyph_exemptions(&self) -> TestCaseResult {
         let limit = Time::seconds(glyph_scale::GLYPH_RATIO_MAX_EXEMPT).ticks(true);
         prop_assert!(
             self.longest_glyph_exemption <= limit,
             "glyph exemption lasted {} ticks (maximum {limit})",
             self.longest_glyph_exemption,
-        );
-        prop_assert!(
-            self.worst_glyph_ratio <= 2.0 + 8.0 * f32::EPSILON,
-            "nominal glyph width ratio {:.4} at frame {} exceeds 2.0",
-            self.worst_glyph_ratio,
-            self.worst_glyph_tick
         );
         Ok(())
     }
@@ -123,7 +117,7 @@ struct Audit {
     arrivals: usize,
     applied: usize,
     glyph_scale: crate::model::glyph_scale::GlyphScale,
-    glyph_ratios: Vec<f32>,
+    glyph_ratios: Vec<(f32, u64, usize, usize)>,
     glyph_exemption_ticks: Vec<u64>,
 }
 
@@ -218,9 +212,12 @@ pub(super) fn replay(
             exits.sort_unstable_by_key(|exit| exit.start);
             audit.report.overlapping_exits =
                 exits.windows(2).any(|pair| pair[1].start < pair[0].end);
-            audit.glyph_ratios.sort_unstable_by(f32::total_cmp);
-            let last = audit.glyph_ratios.len().saturating_sub(1);
-            audit.report.glyph_ratio_p90 = audit.glyph_ratios[last * 9 / 10];
+            audit
+                .glyph_ratios
+                .sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+            if let Some(last) = audit.glyph_ratios.len().checked_sub(1) {
+                audit.report.glyph_ratio_p90 = audit.glyph_ratios[last * 9 / 10];
+            }
             return Ok(audit.report);
         }
     }
@@ -344,35 +341,36 @@ impl Audit {
                     .push(std::mem::take(duration));
             }
         }
-        let mut minimum = f32::INFINITY;
-        let mut maximum = 0.0_f32;
+        let mut minimum = (f32::INFINITY, 0);
+        let mut maximum = (0.0_f32, 0);
         let mut first_repository = None;
         let mut comparable = false;
         for (_, file) in layout.files() {
             let dir = layout.dir(file.dir);
             if self.glyph_scale.settled(dir.repository)
                 && file.state != crate::layout::Presence::Leaving
+                && dir.scale > 0.0
             {
-                let scale = self.glyph_scale.scale(dir.repository, dir.scale);
-                let width = self.glyph_scale.overview_width(scale);
+                let width = self.glyph_scale.overview_width(dir.scale);
                 comparable |=
                     *first_repository.get_or_insert(dir.repository) != dir.repository;
-                minimum = minimum.min(width);
-                maximum = maximum.max(width);
+                if width < minimum.0 {
+                    minimum = (width, dir.repository);
+                }
+                if width > maximum.0 {
+                    maximum = (width, dir.repository);
+                }
             }
         }
-        let ratio = if maximum > 0.0 {
-            maximum / minimum
-        } else {
-            1.0
-        };
-        self.report.comparable_glyph_frames += usize::from(comparable);
-        self.report.out_of_band_glyph_frames +=
-            usize::from(ratio > 2.0 + 8.0 * f32::EPSILON);
-        self.glyph_ratios.push(ratio);
-        if ratio > self.report.worst_glyph_ratio {
-            self.report.worst_glyph_ratio = ratio;
-            self.report.worst_glyph_tick = tick;
+        if comparable {
+            let ratio = maximum.0 / minimum.0;
+            self.report.comparable_glyph_frames += 1;
+            self.report.out_of_band_glyph_frames += usize::from(ratio > 2.0);
+            self.glyph_ratios.push((ratio, tick, minimum.1, maximum.1));
+            if ratio > self.report.worst_glyph_ratio {
+                self.report.worst_glyph_ratio = ratio;
+                self.report.worst_glyph_at = (tick, minimum.1, maximum.1);
+            }
         }
     }
 
