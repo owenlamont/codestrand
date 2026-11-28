@@ -46,8 +46,15 @@ impl Program {
         live_files: &[Vec<f32>],
     ) -> Option<Self> {
         let mut events = lifecycle_events(packing, windows)?;
+        if packing.labels.len() == 1 {
+            let space = packing.space();
+            let opening = Layout {
+                tiles: vec![Some(space.field(framing::MARGIN))],
+                gutters: vec![Some(space.field(super::super::GUTTER_MARGIN))],
+            };
+            return Self::compile(packing, opening, &events, live_files, false);
+        }
         if events.len() > MAX_OPERATIONS
-            || packing.labels.len() < 2
             || (events.is_empty()
                 && live_files.windows(2).all(|rows| rows[0] == rows[1]))
         {
@@ -126,7 +133,9 @@ impl Program {
                     share_archive_windows,
                 );
                 let fit = opening::glyph_scales(packing, start);
-                let motion = if departing.len() == 1 {
+                let motion = if packing.labels.len() == 1 {
+                    Retirement::close_last(&current, repository, end - start)?
+                } else if departing.len() == 1 {
                     Retirement::plan(
                         current.clone(),
                         repository,

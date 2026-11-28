@@ -3103,6 +3103,22 @@ mod tests {
     }
 
     #[test]
+    fn one_live_repository_uses_the_flat_opening() {
+        let mut row = capacity_fixture();
+        row.truncate(1);
+        let mut inputs = Inputs::new(1);
+        inputs.push(row);
+        let packing =
+            Packing::from_inputs(inputs, Arc::default(), 4.0, 1.0, 1).unwrap();
+        assert!(packing.lifecycle.is_some());
+        let (regions, _, _) = packing.sample(0).unwrap();
+        assert_eq!(
+            regions[0].tile,
+            Some(packing.space().field(framing::MARGIN))
+        );
+    }
+
+    #[test]
     fn archive_presence_scales_clamps_and_returns_the_whole_view_to_a_singleton() {
         let settled = fixture().pop().unwrap();
         let packing = Packing::before_service(&[settled]);

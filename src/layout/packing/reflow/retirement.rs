@@ -14,6 +14,29 @@ pub(in crate::layout::packing) struct Retirement {
 }
 
 impl Retirement {
+    pub(super) fn close_last(
+        from: &Layout,
+        repository: usize,
+        ticks: usize,
+    ) -> Option<Self> {
+        let field = from.gutters[repository]?;
+        let centre = field.low.midpoint(field.high);
+        let point = Some(Tile {
+            low: centre,
+            high: centre,
+        });
+        let mut to = from.clone();
+        to.tiles[repository] = point;
+        to.gutters[repository] = point;
+        let max_travel =
+            exchange::MAX_EDGE_STEP_PX * held::REFLOW_LINEAR_FRACTION * count(ticks);
+        (exchange::edge_travel(from, &to) <= max_travel).then(|| Self {
+            from: from.clone(),
+            to,
+            departing: [repository].into(),
+        })
+    }
+
     pub(in crate::layout::packing) fn plan(
         from: Layout,
         departing: usize,

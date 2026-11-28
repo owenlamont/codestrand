@@ -854,6 +854,7 @@ mod tests {
                 ..Default::default()
             };
             let mut sim = playback(events, &options);
+            assert_eq!(sim.packing.flat_lifecycle_counts(), (0, 1));
             let end = sim.repository_ends[0];
             assert_eq!(
                 end,
