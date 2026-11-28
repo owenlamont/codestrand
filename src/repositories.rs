@@ -438,7 +438,8 @@ mod tests {
             &starts,
             &["First".to_owned(), "Second".to_owned()],
             &crate::progress::Progress::default(),
-        );
+        )
+        .unwrap();
         let mut identity = None;
         for event in events.iter().filter(|event| event.repository == 0) {
             let id = crate::model::apply(&mut layout, &event.changes[0], 0);

@@ -72,9 +72,10 @@ impl RegionSample {
         &self,
         labels: &[String],
         geometry: crate::theme::Geometry,
-    ) -> Vec<RepositoryRegion> {
+    ) -> (Vec<RepositoryRegion>, Vec<f32>) {
         let mut supports = vec![[f32::NEG_INFINITY; 8]; labels.len()];
         let mut counts = vec![0_u32; labels.len()];
+        let mut files = vec![0_u32; labels.len()];
         for dir in self.dirs.iter().filter(|dir| dir.live) {
             counts[dir.repository] = counts[dir.repository].saturating_add(1);
             super::outline::include(
@@ -91,6 +92,7 @@ impl RegionSample {
             let dir = &self.dirs[file.dir];
             if file.counted {
                 counts[dir.repository] = counts[dir.repository].saturating_add(1);
+                files[dir.repository] = files[dir.repository].saturating_add(1);
             }
             let presence = super::visible_presence(
                 file.presence,
@@ -109,7 +111,7 @@ impl RegionSample {
                 }
             }
         }
-        labels
+        let regions = labels
             .iter()
             .enumerate()
             .map(|(repository, label)| {
@@ -129,7 +131,11 @@ impl RegionSample {
                     stretch: Vec2::ONE,
                 }
             })
-            .collect()
+            .collect();
+        (
+            regions,
+            files.into_iter().map(crate::model::count_u32).collect(),
+        )
     }
 }
 
@@ -139,7 +145,7 @@ impl Layout {
         starts: &[crate::model::Time],
         names: &[String],
         progress: &crate::progress::Progress,
-    ) -> Self {
+    ) -> Result<Self, super::DirectoryMotionLimit> {
         let mut combined = Self::empty();
         combined.dirs.clear();
         combined.dir_index.clear();
@@ -155,10 +161,10 @@ impl Layout {
             let detailed = if names.len() == 1 { progress } else { &quiet };
             let layouts = Self::scheduled_batch(events, starts, first..end, detailed);
             for (repository, layout) in (first..end).zip(layouts) {
-                combined.append_repository(repository, &names[repository], layout);
+                combined.append_repository(repository, &names[repository], layout?);
             }
         }
-        combined
+        Ok(combined)
     }
 
     fn scheduled_batch(
@@ -166,7 +172,7 @@ impl Layout {
         starts: &[crate::model::Time],
         repositories: std::ops::Range<usize>,
         progress: &crate::progress::Progress,
-    ) -> Vec<Self> {
+    ) -> Vec<Result<Self, super::DirectoryMotionLimit>> {
         std::thread::scope(|scope| {
             let handles: Vec<_> = repositories
                 .map(|repository| {
@@ -222,7 +228,7 @@ impl Layout {
         starts: &[crate::model::Time],
         repository: usize,
         progress: &crate::progress::Progress,
-    ) -> Self {
+    ) -> Result<Self, super::DirectoryMotionLimit> {
         let mut local = Vec::new();
         let mut times = Vec::new();
         for (event, &time) in events.iter().zip(starts) {
@@ -544,7 +550,8 @@ mod tests {
             &starts,
             &["Same".to_owned(), "Same".to_owned()],
             &crate::progress::Progress::default(),
-        );
+        )
+        .unwrap();
         let first = layout.add("0/src/layout.rs", 0.0, 0);
         let second = layout.add("1/src/layout.rs", 0.0, 0);
         assert_ne!(first, second);

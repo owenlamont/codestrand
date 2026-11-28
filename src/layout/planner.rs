@@ -15,12 +15,22 @@ const SAMPLE_TICKS: usize = 15;
 const GAP: f32 = 0.08;
 pub(super) const RELEASE_RADIUS: f32 = 0.05;
 
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "directory motion exceeds the planning window near commit {commit} at {seconds:.2}s"
+)]
+pub(crate) struct DirectoryMotionLimit {
+    commit: String,
+    seconds: f32,
+}
+
 #[derive(Clone, Debug, Default)]
 pub(super) struct Plan {
     pub(super) parts: Vec<(usize, Plan)>,
     samples: Arc<[Vec<Vec2>]>,
     pub(super) time: Time,
     origin: Time,
+    cursor: Time,
     step: f32,
     seconds: f64,
 }
@@ -30,7 +40,7 @@ impl Plan {
         use crate::model::checkpoint_memory::{buffer_bytes, retained_fields};
 
         let (parts,) = retained_fields!(self, Plan {
-            parts; samples, time, origin, step, seconds,
+            parts; samples, time, origin, cursor, step, seconds,
         });
         buffer_bytes::<(usize, Self)>(parts.capacity())
             + parts
@@ -49,7 +59,7 @@ impl Plan {
         starts: &[Time],
         skip: usize,
         progress: &Progress,
-    ) -> Self {
+    ) -> Result<Self, DirectoryMotionLimit> {
         for (index, event) in events.iter().enumerate() {
             progress.report(Stage::Directories, index as u64, events.len() as u64);
             for change in &event.changes {
@@ -63,8 +73,14 @@ impl Plan {
                 children[parent].push(index);
             }
         }
-        let tree = tree::Tree::new(&children, &required);
-        let mut windows = vec![8_usize; required[0].len()];
+        let mut tree = tree::Tree::new(&children, &required);
+        // Two filters and the spline reach up to four samples beyond their support.
+        let horizon = Time::seconds(model::WINDOW_SECONDS)
+            .steps(step, usize::MAX)
+            .0;
+        let max_window = (horizon.saturating_sub(4) / 2).max(1);
+        let initial_window = 8_usize.min(max_window);
+        let mut windows = vec![initial_window; required[0].len()];
         let mut pass = 1;
         let mut samples = loop {
             let report = |phase, done, total| {
@@ -101,23 +117,44 @@ impl Plan {
             let failed = motion_failures(&samples, &required, step, |done, total| {
                 report(4, done, total);
             });
-            if !failed.iter().any(|&value| value) {
+            let Some(failure) = failed.iter().position(|&value| value) else {
                 break samples;
+            };
+            let widened = widen_windows(&windows, &failed, max_window);
+            if widened == windows {
+                if tree.retry_with_depth_bands(&children) {
+                    windows.fill(initial_window);
+                    pass += 1;
+                    continue;
+                }
+                let seconds =
+                    model::count_u32(u32::try_from(failure).expect("sample fits u32"))
+                        * step;
+                let event =
+                    starts.partition_point(|&time| time < Time::seconds(seconds));
+                return Err(DirectoryMotionLimit {
+                    commit: events
+                        .get(event)
+                        .or_else(|| events.last())
+                        .map_or_else(String::new, |event| event.commit.clone()),
+                    seconds,
+                });
             }
             pass += 1;
-            windows = widen_windows(&windows, &failed);
+            windows = widened;
         };
         for position in samples.iter_mut().flatten() {
             *position = Vec2::new(position.y, -position.x);
         }
-        Self {
+        Ok(Self {
             parts: Vec::new(),
             samples: samples.into(),
             time: Time::ZERO,
             origin: Time::ZERO,
+            cursor: Time::ZERO,
             step,
             seconds: 0.0,
-        }
+        })
     }
 
     pub(super) fn position(&self, dir: usize) -> Option<Vec2> {
@@ -134,18 +171,50 @@ impl Plan {
         Some(interpolate(row, time, self.step))
     }
 
-    fn place(&self, time: Time, dirs: &mut [super::Dir]) {
-        if self.parts.is_empty() {
-            assert_eq!(dirs.len(), self.samples.len(), "planned directories");
-            let sample = interpolator(time, self.step, self.samples[0].len());
-            for (dir, row) in dirs.iter_mut().zip(self.samples.iter()) {
-                dir.position = sample(row);
+    fn place(&mut self, time: Time, dirs: &mut [super::Dir], max_step: f32) {
+        if !self.parts.is_empty() {
+            let mut remaining = dirs;
+            for (index, (base, plan)) in self.parts.iter_mut().enumerate().rev() {
+                let (earlier, region) = remaining.split_at_mut(*base);
+                debug_assert_eq!(index == 0, earlier.is_empty());
+                plan.place(time, region, max_step);
+                remaining = earlier;
             }
+            return;
+        }
+        assert_eq!(dirs.len(), self.samples.len(), "planned directories");
+        let time = if max_step.is_finite() {
+            time.max(self.cursor)
         } else {
-            for (index, (base, plan)) in self.parts.iter().enumerate() {
-                let end = self.parts.get(index + 1).map_or(dirs.len(), |p| p.0);
-                plan.place(time, &mut dirs[*base..end]);
+            time
+        };
+        let allows = |time| {
+            let sample = interpolator(time, self.step, self.samples[0].len());
+            dirs.iter().zip(self.samples.iter()).all(|(dir, row)| {
+                !dir.live
+                    || !dir.has_landed_file
+                    || dir.position.distance_squared(sample(row)) <= max_step * max_step
+            })
+        };
+        self.cursor = if allows(time) {
+            time
+        } else {
+            // A shared cursor keeps the repository on the same crossing-free curve.
+            let start = self.cursor;
+            let (mut low, mut high) = (0.0_f32, time - start);
+            for _ in 0..10 {
+                let middle = low.midpoint(high);
+                if allows(start + middle) {
+                    low = middle;
+                } else {
+                    high = middle;
+                }
             }
+            start + low
+        };
+        let sample = interpolator(self.cursor, self.step, self.samples[0].len());
+        for (dir, row) in dirs.iter_mut().zip(self.samples.iter()) {
+            dir.position = sample(row);
         }
     }
 }
@@ -190,6 +259,30 @@ fn identical_spline_controls_keep_large_coordinates_exactly() {
     let row = [position; 4];
     let at = interpolator(Time::seconds(2.0 / 60.0), 0.25, row.len());
     assert_eq!(at(&row), position);
+}
+
+#[cfg(test)]
+#[test]
+fn retained_directory_stretches_an_overspeed_spline_segment() {
+    let controls = [0.0, 0.0, 2.0, 4.0, 4.0].map(|x| Vec2::new(x, 0.0));
+    let mut layout = Layout::planned_paths(&["src/a.rs"], 0);
+    layout.plan.samples = vec![vec![Vec2::ZERO; 5], controls.to_vec()].into();
+    layout.plan.step = 0.25;
+    layout.dirs[1].live = true;
+    layout.dirs[1].has_landed_file = true;
+    let dt = model::tick_seconds();
+    let start = Time::seconds(0.75);
+    layout.plan.place(start, &mut layout.dirs, f32::INFINITY);
+    let raw = interpolate(&controls, start + dt, 0.25);
+    assert!(layout.dirs[1].position.distance(raw) > MAX_SPEED * dt);
+    for tick in 46..=120 {
+        let before = layout.dirs[1].position;
+        layout
+            .plan
+            .place(model::tick_time(tick), &mut layout.dirs, MAX_SPEED * dt);
+        assert!(before.distance(layout.dirs[1].position) <= MAX_SPEED * dt);
+    }
+    assert_eq!(layout.dirs[1].position, Vec2::new(4.0, 0.0));
 }
 
 fn occupancy(
@@ -355,18 +448,14 @@ fn motion_failures(
     failed
 }
 
-fn widen_windows(windows: &[usize], failed: &[bool]) -> Vec<usize> {
+fn widen_windows(windows: &[usize], failed: &[bool], maximum: usize) -> Vec<usize> {
     let mut updated = windows.to_vec();
     for (index, _) in failed.iter().enumerate().filter(|&(_, failed)| *failed) {
         let window = windows[index];
-        assert!(
-            window < 16_384,
-            "layout smoothing did not meet motion bounds"
-        );
         for value in &mut updated
             [index.saturating_sub(window)..windows.len().min(index + window + 1)]
         {
-            *value = (*value).max(window * 2);
+            *value = (*value).max((window * 2).min(maximum));
         }
     }
     updated
@@ -494,6 +583,7 @@ impl Layout {
             0,
             &Progress::default(),
         )
+        .unwrap()
     }
 
     /// Plans directories for `events`, whose paths all start with `skip` bytes of
@@ -503,10 +593,10 @@ impl Layout {
         starts: &[Time],
         skip: usize,
         progress: &Progress,
-    ) -> Self {
+    ) -> Result<Self, DirectoryMotionLimit> {
         let mut layout = Self::empty();
         let started = std::time::Instant::now();
-        layout.plan = Plan::new(&mut layout, events, starts, skip, progress);
+        layout.plan = Plan::new(&mut layout, events, starts, skip, progress)?;
         layout.plan.seconds = started.elapsed().as_secs_f64();
         for (index, dir) in layout.dirs.iter_mut().enumerate() {
             dir.live = index == 0;
@@ -515,7 +605,7 @@ impl Layout {
                 dir.position = position;
             }
         }
-        layout
+        Ok(layout)
     }
 
     pub(crate) fn planning_seconds(&self) -> f64 {
@@ -525,6 +615,7 @@ impl Layout {
     pub(crate) fn plan_time(&mut self, origin: Time) {
         self.plan.time = origin;
         self.plan.origin = origin;
+        self.plan.place(origin, &mut self.dirs, f32::INFINITY);
     }
 
     pub(crate) fn sample_plan(&mut self, time: Time, dt: f32) {
@@ -534,7 +625,8 @@ impl Layout {
     pub(super) fn relax(&mut self, dt: f32) {
         self.plan.time += dt;
 
-        self.plan.place(self.plan.time, &mut self.dirs);
+        self.plan
+            .place(self.plan.time, &mut self.dirs, MAX_SPEED * dt);
         let coefficient = 1.0 - (-dt / 0.2).exp();
         self.reserve_fixed_points.resize(self.dirs.len(), None);
         for (index, dir) in self.dirs.iter_mut().enumerate() {
@@ -569,7 +661,9 @@ mod tests {
 
     fn full_relax(layout: &mut Layout, dt: f32) {
         layout.plan.time += dt;
-        layout.plan.place(layout.plan.time, &mut layout.dirs);
+        layout
+            .plan
+            .place(layout.plan.time, &mut layout.dirs, MAX_SPEED * dt);
         for (index, dir) in layout.dirs.iter_mut().enumerate() {
             let target = if index != 0 && dir.files == 0 && dir.children == 0 {
                 0.0
@@ -648,14 +742,17 @@ mod tests {
             &starts,
             &["First".into(), "Second".into(), "Third".into()],
             &crate::progress::Progress::default(),
-        );
+        )
+        .unwrap();
         for mut layout in [Layout::planned(&crate::timeline::synthetic()), combined] {
             for tick in [0, 1, 13, 90, 1000, 10_000, 90, 1] {
                 layout.plan.time = model::tick_time(tick);
                 let expected: Vec<_> = (0..layout.dirs.len())
                     .map(|index| layout.plan.position(index).unwrap())
                     .collect();
-                layout.plan.place(layout.plan.time, &mut layout.dirs);
+                layout
+                    .plan
+                    .place(layout.plan.time, &mut layout.dirs, f32::INFINITY);
                 let actual: Vec<_> =
                     layout.dirs.iter().map(|dir| dir.position).collect();
                 assert_eq!(actual, expected);
@@ -675,7 +772,8 @@ mod tests {
             &starts,
             &["Fixture".into()],
             &progress,
-        );
+        )
+        .unwrap();
 
         let updates: Vec<_> = updates.try_iter().collect();
         for stage in [
@@ -773,7 +871,7 @@ mod tests {
         let starts = [Time::ZERO, Time::seconds(12.0)];
         let events: Vec<_> = events.iter().collect();
         let (progress, updates) = Progress::channel(std::time::Duration::ZERO);
-        Layout::scheduled(&events, &starts, 0, &progress);
+        Layout::scheduled(&events, &starts, 0, &progress).unwrap();
 
         let packing: Vec<_> = updates
             .try_iter()
@@ -818,7 +916,7 @@ mod tests {
         }
         let mut failed = vec![false; 400];
         failed[200] = true;
-        let widened = widen_windows(&[8; 400], &failed);
+        let widened = widen_windows(&[8; 400], &failed, 64);
         assert_eq!(widened[200], 16);
         assert_eq!(widened[0], 8);
         assert_eq!(widened[399], 8);
@@ -967,7 +1065,8 @@ mod tests {
             &starts,
             0,
             &Progress::default(),
-        );
+        )
+        .unwrap();
         assert!(layout.plan.samples[0].len() <= 8_194);
     }
 

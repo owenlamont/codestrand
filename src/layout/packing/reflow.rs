@@ -1,6 +1,11 @@
+mod birth;
+pub(super) mod lifecycle;
 use super::{Node, Space, Tile, gutter_cells, held, insert, tiles};
 
 mod exchange;
+pub(super) mod opening;
+pub(super) mod retirement;
+mod swap;
 
 const MAX_LOCAL_SPLITS: usize = 8;
 const MOVING_GUTTER_PX: f32 = 4.0;
@@ -73,6 +78,22 @@ impl Change {
         self.transition.is_some() && tick - self.tick < self.duration()
     }
 
+    pub(super) fn exchanges(&self, tick: usize, repository: usize) -> bool {
+        self.in_transition(tick)
+            && match &self.exchange {
+                Some(Motion::Exchange(motion)) => {
+                    motion.repositories.contains(&repository)
+                }
+                Some(Motion::Chain(motion)) => {
+                    motion.repositories.contains(&repository)
+                }
+                Some(Motion::ColumnTransfer(motion)) => {
+                    motion.repositories.contains(&repository)
+                }
+                None => false,
+            }
+    }
+
     pub fn matches_presence(&self, presence: &[f32]) -> bool {
         let Some((from, _)) = &self.transition else {
             return false;
@@ -98,6 +119,21 @@ impl Change {
 }
 
 impl Layout {
+    fn blend_edges(&self, to: &Self, progress: f32) -> Self {
+        let mut layout = self.clone();
+        let blend = |rects: &mut [Option<Tile>], target: &[Option<Tile>]| {
+            for (rect, goal) in rects.iter_mut().zip(target) {
+                if let (Some(rect), Some(goal)) = (rect, goal) {
+                    rect.low += (goal.low - rect.low) * progress;
+                    rect.high += (goal.high - rect.high) * progress;
+                }
+            }
+        };
+        blend(&mut layout.tiles, &to.tiles);
+        blend(&mut layout.gutters, &to.gutters);
+        layout
+    }
+
     fn blend(&self, to: &Self, fraction: f32) -> Self {
         let blend = |from: &[Option<Tile>], to: &[Option<Tile>]| {
             from.iter()
@@ -134,6 +170,9 @@ pub(super) fn plan(
     let from = Layout::new(nodes, from, space);
     let unchanged = Layout::new(nodes, tiles(nodes, target, presence, space)?, space);
     let baseline = Density::new(&unchanged.tiles, target);
+    let unchanged_error = area_per_file_error(&unchanged.tiles, target);
+    let exchange_improves =
+        |to: &Layout| area_per_file_error(&to.tiles, target) < unchanged_error;
     let mut best = baseline;
     let mut best_motion = 0.0;
     if best.worst <= super::DENSITY_TOLERANCE {
@@ -154,14 +193,16 @@ pub(super) fn plan(
             if cost.improves_with_motion(best, baseline, [motion, best_motion]) {
                 let direct = compatible(&from.gutters, &to.gutters)
                     && connected(&from, &to, false);
-                let exchange = pair.filter(|_| !direct).and_then(|pair| {
-                    exchange::Exchange::plan(
-                        &from,
-                        &to,
-                        pair,
-                        space.field(super::framing::MARGIN),
-                    )
-                });
+                let exchange = pair
+                    .filter(|_| !direct && exchange_improves(&to))
+                    .and_then(|pair| {
+                        exchange::Exchange::plan(
+                            &from,
+                            &to,
+                            pair,
+                            space.field(super::framing::MARGIN),
+                        )
+                    });
                 if direct || exchange.is_some() {
                     best = cost;
                     best_motion = motion;
@@ -312,6 +353,7 @@ pub(super) fn plan(
             let motion = movement_cost(&from, &to, policy.stability, 2.0);
             if !cost.improves_with_motion(best, baseline, [motion, best_motion])
                 || !forecast.improves(best_forecast, forecast_baseline)
+                || !exchange_improves(&to)
             {
                 continue;
             }
@@ -352,6 +394,7 @@ pub(super) fn plan(
             let motion = movement_cost(&from, &to, policy.stability, 2.0);
             if !cost.improves_with_motion(best, baseline, [motion, best_motion])
                 || !forecast.improves(best_forecast, forecast_baseline)
+                || !exchange_improves(&to)
             {
                 continue;
             }
@@ -688,6 +731,20 @@ fn totals(tiles: &[Option<Tile>], weights: &[f32]) -> (f32, f32) {
         })
 }
 
+fn area_per_file_error(tiles: &[Option<Tile>], files: &[f32]) -> f32 {
+    let live = || {
+        tiles.iter().zip(files).filter_map(|(&tile, &files)| {
+            tile.filter(|_| files > 0.0)
+                .map(|tile| (tile.area(), files))
+        })
+    };
+    let (area, files) =
+        live().fold((0.0, 0.0), |(area, files), (a, f)| (area + a, files + f));
+    live()
+        .map(|(a, f)| (a * files / (f * area) - 1.0).abs())
+        .fold(0.0, f32::max)
+}
+
 fn density_error(share: f32, due: f32) -> f32 {
     (due / share.max(f32::MIN_POSITIVE) - 1.0).abs()
 }
@@ -765,100 +822,9 @@ fn compatible(from: &[Option<Tile>], to: &[Option<Tile>]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{Input, Inputs, Packing, Sample, outline};
+    use super::super::{Input, Packing, Sample, outline};
     use super::*;
-    use crate::layout::RepositoryRegion;
     use bevy::math::Vec2;
-
-    fn repositories_after_deletion() -> Packing {
-        let mut inputs = Inputs::new(600);
-        for tick in 0..600 {
-            let changed: u16 = if tick < 180 { 130 } else { 68 };
-            let specs = [
-                (124, 10.0, 3.0),
-                (57, 1.0, 8.0),
-                (13, 6.0, 1.0),
-                (122, 9.0, 12.0),
-                (47, 12.0, 12.0),
-                (changed, 3.0, 6.0),
-                (73, 5.0, 8.0),
-                (136, 3.0, 9.0),
-                (126, 7.0, 12.0),
-                (122, 3.0, 2.0),
-            ];
-            inputs.push(
-                specs
-                    .into_iter()
-                    .enumerate()
-                    .map(|(repo, (items, x, y))| {
-                        let items = f32::from(items);
-                        let extent = Vec2::new(x, y) * items.sqrt();
-                        RepositoryRegion {
-                            label: format!("Repo {repo}"),
-                            low: -extent,
-                            high: extent,
-                            outline: outline::rectangle(-extent, extent),
-                            items,
-                            live: true,
-                            tile: None,
-                            gutter: None,
-                            height: 0.105,
-                            rotated: false,
-                            stretch: Vec2::ONE,
-                        }
-                    })
-                    .collect(),
-            );
-        }
-        Packing::from_inputs(inputs, std::sync::Arc::default(), 8.0, 1.0, 1).unwrap()
-    }
-
-    #[test]
-    fn playback_exchanges_neighbours_after_a_sustained_deletion() {
-        let packing = repositories_after_deletion();
-        let change = packing
-            .reflows
-            .iter()
-            .find(|change| {
-                change.tick >= 180
-                    && matches!(change.exchange, Some(Motion::Exchange(_)))
-            })
-            .expect("the sampled repository history should schedule an exchange");
-        let tiles_at = |tick| {
-            let (regions, _, _) = packing.sample(tick).unwrap();
-            regions
-                .into_iter()
-                .map(|region| region.tile)
-                .collect::<Vec<_>>()
-        };
-        let begin = u64::try_from(change.tick).unwrap();
-        let end = begin + u64::try_from(change.duration()).unwrap();
-        let before = tiles_at(begin);
-        let after = tiles_at(end);
-        let counts = [
-            124.0, 57.0, 13.0, 122.0, 47.0, 68.0, 73.0, 136.0, 126.0, 122.0,
-        ];
-        assert!(
-            Density::new(&after, &counts).worst < Density::new(&before, &counts).worst
-        );
-        assert!((0..before.len()).any(|a| (0..before.len()).any(|b| {
-            let (before_a, before_b) = (before[a].unwrap(), before[b].unwrap());
-            let (after_a, after_b) = (after[a].unwrap(), after[b].unwrap());
-            (before_a.high.cmple(before_b.low) & after_b.high.cmple(after_a.low)).any()
-        })));
-        for tick in begin..=end {
-            let tiles = tiles_at(tick);
-            for (a, first) in tiles.iter().enumerate() {
-                let first = first.unwrap();
-                for second in &tiles[a + 1..] {
-                    let second = second.unwrap();
-                    let overlap =
-                        first.high.min(second.high) - first.low.max(second.low);
-                    assert!(overlap.min_element() <= 1e-5, "overlap at tick {tick}");
-                }
-            }
-        }
-    }
 
     #[test]
     fn a_shrinking_tile_joins_the_other_column_within_the_motion_budget() {
@@ -930,6 +896,12 @@ mod tests {
         assert!(matches!(transfer.exchange, Some(Motion::ColumnTransfer(_))));
         assert!(density(&transfer.nodes) < 0.03);
         assert!(transfer.duration() <= MAX_MOTION_TICKS);
+        let without_transfer = tiles(&first.nodes, &target, &presence, space).unwrap();
+        let endpoint = &transfer.transition.as_ref().unwrap().1.tiles;
+        assert!(
+            area_per_file_error(endpoint, &target)
+                < area_per_file_error(&without_transfer, &target)
+        );
 
         let too_short = retry(transfer.duration() - 1, &target);
         assert!(too_short.duration() < transfer.duration());

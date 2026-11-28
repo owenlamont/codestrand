@@ -4,6 +4,28 @@ use bevy::math::{Rect, Vec3Swizzles};
 use proptest::{prelude::*, test_runner::TestCaseResult};
 use std::time::Instant;
 
+#[derive(Clone, Copy, Debug)]
+struct LayoutSample {
+    value: f32,
+    tick: u64,
+    repository: usize,
+}
+
+fn record_maximum(
+    maximum: &mut Option<LayoutSample>,
+    value: f32,
+    tick: u64,
+    repository: usize,
+) {
+    if maximum.is_none_or(|sample| value > sample.value) {
+        *maximum = Some(LayoutSample {
+            value,
+            tick,
+            repository,
+        });
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(super) enum Fault {
     None,
@@ -33,9 +55,55 @@ pub(super) struct Replay {
     pub max_tile_step_at: Option<(usize, u64, u64)>,
     pub max_carried_step: f32,
     pub final_gap: f32,
+    pub settled_glass_error_px: f32,
     pub last_service_tile_tick: u64,
     pub last_archive_tick: u64,
+    pub flat_lifecycles: (usize, usize),
+    pub overlapping_exits: bool,
     pub planner_wait: Duration,
+    pub worst_glyph_ratio: f32,
+    pub worst_glyph_at: (u64, usize, usize),
+    pub comparable_glyph_frames: usize,
+    pub glyph_ratio_p90: (f32, u64, usize, usize),
+    pub out_of_band_glyph_frames: usize,
+    pub glyph_settle_ticks: Vec<u64>,
+    pub longest_glyph_exemption: u64,
+    pub exempt_tile_frames: usize,
+    pub live_tile_frames: usize,
+    pub settled_tile_frames: usize,
+    pub floor_bound_tile_frames: usize,
+    worst_density: Option<LayoutSample>,
+    worst_fill: Option<LayoutSample>,
+    floor_gap: Option<LayoutSample>,
+    limiting_fill: Option<(Vec2, Vec2, f32, f32, usize)>,
+    worst_coverage_spread: Option<LayoutSample>,
+}
+
+impl Replay {
+    pub(super) fn check_glyph_exemptions(&self) -> TestCaseResult {
+        let limit = Time::seconds(glyph_scale::GLYPH_RATIO_MAX_EXEMPT).ticks(true);
+        prop_assert!(
+            self.longest_glyph_exemption <= limit,
+            "glyph exemption lasted {} ticks (maximum {limit})",
+            self.longest_glyph_exemption,
+        );
+        Ok(())
+    }
+
+    pub(super) fn check_layout_quality(&self) -> TestCaseResult {
+        let violations: Vec<_> = [("density error", self.worst_density, 0.20),
+            ("glyph coverage spread", self.worst_coverage_spread, 2.5)]
+            .into_iter()
+            .filter_map(|(metric, sample, limit)| {
+                let LayoutSample { value, tick, repository } = sample?;
+                (value > limit + 1e-5).then(|| {
+                    format!("{metric} {value:.4} exceeds {limit} at tick {tick}, repository {repository}")
+                })
+            })
+            .collect();
+        prop_assert!(violations.is_empty(), "{}", violations.join("; "));
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -52,20 +120,29 @@ struct ContributorFrame {
 impl ContributorFrame {
     fn capture(sim: &Simulation, author: usize, avatar: &Avatar) -> Self {
         let gutter = sim.layout().repositories[avatar.repository].gutter;
+        let ring_dock =
+            sim.state
+                .casting_ring_seat(author)
+                .and_then(|(ring, offset)| {
+                    let seat = ring.centre(gutter?) + offset;
+                    (avatar.position.distance_squared(seat) < 1e-8).then_some(ring.dock)
+                });
+        let dock = ring_dock.or_else(|| avatar.slot.as_ref().map(|slot| slot.dock));
         Self {
             repository: avatar.repository,
             position: avatar.position,
             presence: avatar.presence,
-            dock: avatar.slot.as_ref().zip(gutter).map(|(slot, tile)| {
-                (slot.dock, slots::world(slot.dock.on_network(tile)))
-            }),
-            can_carry: !avatar.travelling
-                && avatar.dock_walk.is_none()
-                && avatar.settle.is_none()
-                && avatar.slot.as_ref().is_some_and(|slot| {
-                    avatar.transmitting
-                        || avatar.position.distance_squared(slot.world()) < 1e-8
-                }),
+            dock: dock
+                .zip(gutter)
+                .map(|(dock, tile)| (dock, slots::world(dock.on_network(tile)))),
+            can_carry: ring_dock.is_some()
+                || (!avatar.travelling
+                    && avatar.dock_walk.is_none()
+                    && avatar.settle.is_none()
+                    && avatar.slot.as_ref().is_some_and(|slot| {
+                        avatar.transmitting
+                            || avatar.position.distance_squared(slot.world()) < 1e-8
+                    })),
             travelling: avatar.travelling
                 || sim.travel.travelling(author, sim.state.tick),
             fading_lifecycle: avatar.dismissed || sim.seconds() >= avatar.expires,
@@ -77,7 +154,7 @@ impl ContributorFrame {
 struct Audit {
     report: Replay,
     directory_edges: DirectoryAudit,
-    file_parents: BTreeMap<u64, usize>,
+    visible_files: BTreeMap<u64, (usize, Vec2)>,
     files: BTreeMap<u64, u64>,
     contributors: Vec<ContributorFrame>,
     tiles: Vec<Option<Tile>>,
@@ -85,6 +162,10 @@ struct Audit {
     rings: BTreeMap<usize, f32>,
     arrivals: usize,
     applied: usize,
+    glyph_scale: crate::model::glyph_scale::GlyphScale,
+    glyph_ratios: Vec<(f32, u64, usize, usize)>,
+    glyph_exemption_ticks: Vec<u64>,
+    file_counts: Vec<(usize, u64)>,
 }
 
 pub(super) fn replay(
@@ -95,7 +176,6 @@ pub(super) fn replay(
     fault: Fault,
 ) -> Result<Replay, TestCaseError> {
     const FPS: u16 = 60;
-    let commits = events.len();
     let started = Instant::now();
     let mut sim = Simulation::try_with_repositories(
         events,
@@ -105,6 +185,7 @@ pub(super) fn replay(
         labels,
     )
     .map_err(|error| TestCaseError::fail(format!("initial planning: {error:#}")))?;
+    let commits = sim.events.len();
     let mut audit = Audit::default();
     audit.report.planner_wait = started.elapsed();
     for tick in 0..=tick_limit {
@@ -125,7 +206,17 @@ pub(super) fn replay(
         }
         let seam = sim.initial.tick != window;
         audit.report.windows += u32::from(seam);
+        let retained_file = retained_identity(&sim, u64::from(tick));
         sim.advance_to(tick, FPS);
+        if let Some((path, id)) = retained_file {
+            prop_assert_eq!(
+                sim.layout().file_identity(&path),
+                Some(id),
+                "tick {}: {} replaced a retained file identity",
+                tick,
+                path,
+            );
+        }
         if let Some(ending) = ending_arrivals {
             prop_assert_eq!(
                 arrival_revisions(&sim),
@@ -156,6 +247,25 @@ pub(super) fn replay(
                 );
             }
             audit.report.last_archive_tick = lifecycle::exit_end(&sim.repository_exits);
+            audit.report.flat_lifecycles = sim.packing.flat_lifecycle_counts();
+            audit.report.settled_glass_error_px = sim.packing.settled_glass_error_px();
+            prop_assert!(
+                audit.report.settled_glass_error_px <= 0.01,
+                "settled glass does not fill its field around the gutters: {:?}",
+                audit.report
+            );
+            let mut exits: Vec<_> =
+                sim.repository_exits.iter().flatten().copied().collect();
+            exits.sort_unstable_by_key(|exit| exit.start);
+            audit.report.overlapping_exits =
+                exits.windows(2).any(|pair| pair[1].start < pair[0].end);
+            audit
+                .glyph_ratios
+                .sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+            if !audit.glyph_ratios.is_empty() {
+                audit.report.glyph_ratio_p90 =
+                    audit.glyph_ratios[(audit.glyph_ratios.len() - 1) * 9 / 10];
+            }
             return Ok(audit.report);
         }
     }
@@ -173,6 +283,31 @@ fn arrival_revisions(sim: &Simulation) -> BTreeMap<Target, u64> {
                 .map(|arrival| (Target::Dir(id), arrival.revision))
         }))
         .collect()
+}
+
+fn arrival_destination(sim: &Simulation, target: Target, repository: usize) -> Vec3 {
+    let position = match target {
+        Target::File(id) => sim.layout().file(id).unwrap().position,
+        Target::Dir(id) => sim.layout().dir(id).position,
+    };
+    ground(position) + Vec3::Y * sim.repository_effect(repository).2
+}
+
+fn retained_identity(sim: &Simulation, tick: u64) -> Option<(String, u64)> {
+    let applied = sim.state.next_event;
+    if sim.schedule.applied(tick) != applied + 1 {
+        return None;
+    }
+    let [change] = sim.events.get(applied)?.changes.as_slice() else {
+        return None;
+    };
+    let source = match &change.kind {
+        Kind::Modified => change.path.as_str(),
+        Kind::Moved { from } => from.as_str(),
+        Kind::Added | Kind::Deleted => return None,
+    };
+    let id = sim.layout().file_identity(source)?;
+    Some((change.path.clone(), id))
 }
 
 impl Audit {
@@ -208,24 +343,206 @@ impl Audit {
         let (retained, resizing) = self.directory_edges.observe(sim, &self.tiles)?;
         self.report.directory_intervals += retained;
         self.report.resizing_directory_intervals += resizing;
+        self.measure_glyphs(sim);
         self.check_tiles(sim)?;
-        let file_parents = layout
+        let visible_files = layout
             .files()
             .filter(|(_, file)| file.presence > 0.0)
-            .map(|(id, file)| (id, file.dir))
+            .map(|(id, file)| (id, (file.dir, file.local_position())))
             .collect::<BTreeMap<_, _>>();
-        self.report.reparented_files += file_parents
-            .iter()
-            .filter(|(id, dir)| {
-                self.file_parents.get(id).is_some_and(|old| old != *dir)
-            })
-            .count();
-        self.file_parents = file_parents;
+        for (&id, &(dir, position)) in &visible_files {
+            if let Some(&(previous_dir, previous_position)) =
+                self.visible_files.get(&id)
+            {
+                self.report.reparented_files += usize::from(dir != previous_dir);
+                let movement = position.distance(previous_position);
+                prop_assert!(
+                    movement <= (crate::layout::MAX_SPEED + 0.001) * tick_seconds(),
+                    "tick {tick}: retained file {id} moved {movement} units in one frame",
+                );
+            }
+        }
+        self.visible_files = visible_files;
         let held = self.check_rays(sim, seam, fault)?;
         self.check_contributors(sim, &held)?;
         self.check_circles(sim, seam)?;
         self.measure_contacts(sim);
         Ok(())
+    }
+
+    fn measure_glyphs(&mut self, sim: &Simulation) {
+        let layout = sim.layout();
+        let tick = sim.state.tick;
+        self.glyph_scale.sample(sim);
+        self.glyph_exemption_ticks
+            .resize(layout.repositories.len(), 0);
+        for (repo, duration) in self.glyph_exemption_ticks.iter_mut().enumerate() {
+            let visible = layout.repositories[repo].tile.is_some();
+            self.report.live_tile_frames += usize::from(visible);
+            if visible && !self.glyph_scale.settled(repo) {
+                *duration += 1;
+                self.report.exempt_tile_frames += 1;
+                self.report.longest_glyph_exemption =
+                    self.report.longest_glyph_exemption.max(*duration);
+            } else if *duration > 0 {
+                self.report
+                    .glyph_settle_ticks
+                    .push(std::mem::take(duration));
+            }
+        }
+        let mut minimum = (f32::INFINITY, 0);
+        let mut maximum = (0.0, 0);
+        let mut first_repository = None;
+        let mut comparable = false;
+        let mut files = vec![0; layout.repositories.len()];
+        let mut glyph_area = vec![0.0; files.len()];
+        let mut bounds =
+            vec![
+                (Vec2::splat(f32::INFINITY), Vec2::splat(f32::NEG_INFINITY));
+                files.len()
+            ];
+        let (focus, distance) = sim.world_view();
+        let eye = sim.field_space().to_planner(focus + Vec3::Y * distance);
+        let focus = eye.xz();
+        let mesh = sim.theme().glyph_transform();
+        let corners = [(-0.5, -0.5), (-0.5, 0.5), (0.5, -0.5), (0.5, 0.5)]
+            .map(|(x, y)| mesh.transform_point(Vec3::new(x, y, 0.0)));
+        let projection = (framing::FOV * 0.5).tan() * framing::GROUND_FACTOR;
+        let aspect = framing::VIEWPORT.x / framing::VIEWPORT.y;
+        for (_, file) in layout.files() {
+            let dir = layout.dir(file.dir);
+            let repo = dir.repository;
+            if file.state == crate::layout::Presence::Leaving {
+                continue;
+            }
+            files[repo] += 1;
+            if self.glyph_scale.settled(repo) && dir.scale > 0.0 {
+                let width = self.glyph_scale.overview_width(dir.scale);
+                glyph_area[repo] += width * width;
+                comparable |= *first_repository.get_or_insert(repo) != repo;
+                if width < minimum.0 {
+                    minimum = (width, repo);
+                }
+                if width > maximum.0 {
+                    maximum = (width, repo);
+                }
+                let (low, high) = &mut bounds[repo];
+                for corner in corners {
+                    let world = ground(file.position) + corner * dir.scale;
+                    let offset = world.xz() - focus;
+                    let point = Vec2::new(offset.x / aspect, -offset.y)
+                        / (projection * (eye.y - world.y));
+                    *low = low.min(point);
+                    *high = high.max(point);
+                }
+            }
+        }
+        if comparable {
+            let ratio = maximum.0 / minimum.0;
+            self.report.comparable_glyph_frames += 1;
+            self.report.out_of_band_glyph_frames += usize::from(ratio > 2.0);
+            self.glyph_ratios.push((ratio, tick, minimum.1, maximum.1));
+            if ratio > self.report.worst_glyph_ratio {
+                self.report.worst_glyph_ratio = ratio;
+                self.report.worst_glyph_at = (tick, minimum.1, maximum.1);
+            }
+        }
+        self.measure_layout(sim, &files, &bounds, &glyph_area);
+    }
+
+    fn measure_layout(
+        &mut self,
+        sim: &Simulation,
+        files: &[usize],
+        bounds: &[(Vec2, Vec2)],
+        glyph_area: &[f32],
+    ) {
+        let tick = sim.state.tick;
+        let settle = Time::seconds(glyph_scale::GLYPH_RATIO_GRACE).ticks(true);
+        let regions = &sim.layout().repositories;
+        self.file_counts.resize(regions.len(), (0, tick));
+        let (area, total_files) = regions
+            .iter()
+            .zip(files)
+            .filter_map(|(region, &count)| {
+                (count > 0)
+                    .then_some(region.tile)
+                    .flatten()
+                    .map(|tile| (tile.area(), count))
+            })
+            .fold((0.0, 0), |(area, files), (a, n)| (area + a, files + n));
+        let field =
+            geometric_floor::bounds(regions.iter().filter_map(|region| region.tile));
+        let mut least_fill = (f32::INFINITY, 0);
+        let mut best_fill = (0.0, 0);
+        let mut least_coverage = (f32::INFINITY, 0);
+        let mut best_coverage = 0.0_f32;
+        for (repo, (region, &count)) in regions.iter().zip(files).enumerate() {
+            let (previous, changed) = &mut self.file_counts[repo];
+            if *previous != count {
+                (*previous, *changed) = (count, tick);
+            }
+            let Some(tile) = region.tile else { continue };
+            if count == 0 || tick - *changed < settle || !self.glyph_scale.settled(repo)
+            {
+                continue;
+            }
+            let ideal =
+                area * crate::model::count(count) / crate::model::count(total_files);
+            let floor = geometric_floor::minimum_area(tile, field);
+            let error = (tile.area() / ideal.max(floor) - 1.0).abs();
+            record_maximum(&mut self.report.worst_density, error, tick, repo);
+            record_maximum(
+                &mut self.report.floor_gap,
+                (floor - ideal).max(0.0) / area,
+                tick,
+                repo,
+            );
+            self.report.settled_tile_frames += 1;
+            let at_floor = geometric_floor::bound(ideal, tile.area(), floor);
+            let (low, high) = bounds[repo];
+            let coverage = glyph_area[repo] / tile.area();
+            if at_floor {
+                self.report.floor_bound_tile_frames += 1;
+                continue;
+            }
+            if low.is_finite() {
+                let fill = (high - low).element_product() * 0.25 / tile.area();
+                if fill < least_fill.0 {
+                    least_fill = (fill, repo);
+                }
+                if fill > best_fill.0 {
+                    best_fill = (fill, repo);
+                }
+                if coverage < least_coverage.0 {
+                    least_coverage = (coverage, repo);
+                }
+                best_coverage = best_coverage.max(coverage);
+            }
+        }
+        if best_fill.0 > 0.0 {
+            let spread = best_fill.0 / least_fill.0;
+            if self
+                .report
+                .worst_fill
+                .is_none_or(|sample| spread > sample.value)
+            {
+                let tile = regions[least_fill.1].tile.unwrap();
+                let (low, high) = bounds[least_fill.1];
+                let span = (high - low) * framing::VIEWPORT * 0.5;
+                self.report.limiting_fill =
+                    Some((tile.pixels(), span, least_fill.0, best_fill.0, best_fill.1));
+            }
+            record_maximum(&mut self.report.worst_fill, spread, tick, least_fill.1);
+        }
+        if best_coverage > 0.0 {
+            record_maximum(
+                &mut self.report.worst_coverage_spread,
+                best_coverage / least_coverage.0,
+                tick,
+                least_coverage.1,
+            );
+        }
     }
 
     fn check_rays(
@@ -265,6 +582,13 @@ impl Audit {
                     arrival.arrival_author, arrival.path,
                 )));
             };
+            prop_assert_eq!(
+                beam.to,
+                arrival_destination(sim, beam.target, repository),
+                "tick {}: moving arrival {} has a stale destination",
+                tick,
+                arrival.path,
+            );
             self.arrivals += 1;
             files.insert(file, arrival.arrival_revision);
             let carried = self.files.get(&file) == Some(&arrival.arrival_revision);

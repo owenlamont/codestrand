@@ -10,7 +10,7 @@ mod fit;
 mod held;
 mod reflow;
 
-const BOUND: f32 = 3.5;
+pub(crate) const BOUND: f32 = 3.5;
 pub(crate) const DENSITY_TOLERANCE: f32 = 0.25;
 const ALLOCATION_TOLERANCE_PX: f32 = 0.25;
 
@@ -871,6 +871,10 @@ fn narrow_tile_cost(tile: Tile) -> f32 {
     (1.0 - tile.ground_aspect()).max(0.0)
 }
 
+fn log_density_error(tile: Tile, files: f32, density: f32) -> f32 {
+    (tile.area() * density / files).ln().abs()
+}
+
 fn insertion_cost(
     placement: &[Option<Tile>],
     weights: &[f32],
@@ -885,7 +889,7 @@ fn insertion_cost(
         .filter_map(|(i, tile)| {
             tile.map(|tile| {
                 weights[i]
-                    * ((tile.area() * density / weights[i]).ln().abs()
+                    * (log_density_error(tile, weights[i], density)
                         + (tile.ground_aspect() / aspects[i]).ln().abs())
             })
         })
@@ -1044,6 +1048,14 @@ fn gutter_cells(
     placement: &[Option<Tile>],
     space: Space,
 ) -> Vec<Option<Tile>> {
+    gutter_cells_in(nodes, placement, space.field(GUTTER_MARGIN))
+}
+
+fn gutter_cells_in(
+    nodes: &[Node],
+    placement: &[Option<Tile>],
+    field: Tile,
+) -> Vec<Option<Tile>> {
     fn bounds(
         nodes: &[Node],
         index: usize,
@@ -1099,7 +1111,7 @@ fn gutter_cells(
         }
     }
     let mut result = vec![None; placement.len()];
-    divide(nodes, 0, space.field(GUTTER_MARGIN), placement, &mut result);
+    divide(nodes, 0, field, placement, &mut result);
     result
 }
 
@@ -1113,6 +1125,9 @@ pub(crate) struct Packing {
     birth_order: Arc<[usize]>,
     opening: Option<Opening>,
     reflows: Arc<[reflow::Change]>,
+    retirement: Option<Arc<ScheduledRetirement>>,
+    staggered: Option<Arc<reflow::opening::FlatLayout>>,
+    lifecycle: Option<Arc<reflow::lifecycle::Program>>,
     labels: Arc<[String]>,
     inputs: Arc<[Vec<Input>]>,
     samples: Arc<[Sample]>,
@@ -1126,6 +1141,13 @@ pub(crate) struct Packing {
     tiling: TilingCache,
     /// Tiles every sample from scratch; tests compare against it.
     fresh_tiling: bool,
+}
+
+#[derive(Debug)]
+struct ScheduledRetirement {
+    start: usize,
+    departing: usize,
+    motion: reflow::retirement::Retirement,
 }
 
 #[derive(Clone, Debug)]
@@ -1153,6 +1175,7 @@ pub(crate) struct Inputs {
     labels: Vec<String>,
     rows: Vec<Vec<Input>>,
     items: Vec<Vec<f32>>,
+    live_files: Vec<Vec<f32>>,
 }
 
 impl Inputs {
@@ -1161,10 +1184,21 @@ impl Inputs {
             labels: Vec::new(),
             rows: Vec::with_capacity(ticks),
             items: Vec::with_capacity(ticks),
+            live_files: Vec::with_capacity(ticks),
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn push(&mut self, regions: Vec<RepositoryRegion>) {
+        let files = regions.iter().map(|region| region.items).collect();
+        self.push_with_files(regions, files);
+    }
+
+    pub(crate) fn push_with_files(
+        &mut self,
+        regions: Vec<RepositoryRegion>,
+        files: Vec<f32>,
+    ) {
         if self.rows.is_empty() {
             self.labels = regions.iter().map(|region| region.label.clone()).collect();
         }
@@ -1177,6 +1211,7 @@ impl Inputs {
             .unzip();
         self.rows.push(rows);
         self.items.push(items);
+        self.live_files.push(files);
     }
 }
 impl Input {
@@ -1254,7 +1289,7 @@ impl Packing {
             aspect_checkpoint,
         ) = retained_fields!(self, Packing {
             nodes, rotated, birth_order, opening, aspects, display_aspects, aspect_checkpoint;
-            gutter_scale, growth, reflows, labels, inputs, samples, exits, content_scales, center_jumps,
+            gutter_scale, growth, reflows, retirement, staggered, lifecycle, labels, inputs, samples, exits, content_scales, center_jumps,
             tiling, fresh_tiling,
         });
         let opening = opening.as_ref().map_or(0, |opening| {
@@ -1278,13 +1313,13 @@ impl Packing {
     pub(crate) fn input_bytes() -> usize {
         std::mem::size_of::<Input>()
             + outline::NORMALS.len() * std::mem::size_of::<Vec2>()
-            + 6 * std::mem::size_of::<f32>()
+            + 7 * std::mem::size_of::<f32>()
     }
 
     pub(crate) fn row_bytes() -> usize {
         std::mem::size_of::<Vec<Input>>()
             + std::mem::size_of::<Sample>()
-            + 2 * std::mem::size_of::<Vec<f32>>()
+            + 3 * std::mem::size_of::<Vec<f32>>()
     }
 
     pub(crate) fn conversion_bytes() -> usize {
@@ -1292,12 +1327,17 @@ impl Packing {
     }
 
     pub(crate) fn reflow_bytes(ticks: u128, repositories: u128) -> u128 {
-        (1 + ticks / held::reflow_spacing() as u128)
+        let geometry = repositories * (4 * std::mem::size_of::<Option<Tile>>()) as u128;
+        let changes = 1 + ticks / held::reflow_spacing() as u128;
+        changes
             * (reflow::Change::retained_bytes()
-                + repositories
-                    * (2 * std::mem::size_of::<Node>()
-                        + 4 * std::mem::size_of::<Option<Tile>>())
-                        as u128)
+                + repositories * (2 * std::mem::size_of::<Node>()) as u128
+                + geometry)
+            + geometry
+            + reflow::lifecycle::Program::retained_bytes(repositories, ticks)
+            + reflow::opening::FlatLayout::retained_bytes(repositories, changes.min(8))
+            + (std::mem::size_of::<ScheduledRetirement>()
+                + 3 * std::mem::size_of::<usize>()) as u128
     }
 
     #[cfg(test)]
@@ -1341,6 +1381,7 @@ impl Packing {
             labels,
             rows: regions,
             items,
+            live_files,
         } = inputs;
         let Some(first) = regions.first().filter(|r| !r.is_empty()) else {
             return Ok(Self::default());
@@ -1399,6 +1440,17 @@ impl Packing {
                 }
             })
             .collect();
+        let (stable, space) = if first.len() > 1
+            && exits.iter().all(Option::is_none)
+            && windows.iter().all(|&(start, end)| start == end)
+            && live_files.windows(2).all(|rows| rows[0] == rows[1])
+        {
+            let (opening, grown) =
+                reflow::opening::bands(space, &live_files[0], &births)?;
+            (Some(reflow::lifecycle::Program::stationary(opening)), grown)
+        } else {
+            (None, space)
+        };
         let mut held = held::Weights::new(first.len());
         let mut reflows = Vec::<reflow::Change>::new();
         let mut was_stable = false;
@@ -1562,6 +1614,9 @@ impl Packing {
             birth_order: repository_ranks(&order).into(),
             opening,
             reflows: reflows.into(),
+            retirement: None,
+            staggered: None,
+            lifecycle: None,
             labels: labels.into(),
             inputs: regions.into(),
             samples: samples.into(),
@@ -1575,6 +1630,58 @@ impl Packing {
             tiling: TilingCache::default(),
             fresh_tiling: false,
         };
+        let program = if let Some(program) = stable {
+            program
+        } else {
+            let first = &packing.samples[0];
+            let active: Vec<_> = first
+                .presence
+                .iter()
+                .map(|&p| if p > 0.0 { 0 } else { usize::MAX })
+                .collect();
+            let (opening, grown) =
+                reflow::opening::bands(packing.space(), &first.weights, &active)?;
+            packing.growth = grown.growth;
+            reflow::lifecycle::Program::plan(&packing, opening, &windows, &live_files)
+                .ok_or_else(|| {
+                anyhow::anyhow!("repository lifecycle has no certified flat schedule")
+            })?
+        };
+        packing.lifecycle = Some(Arc::new(program));
+        if let Some(program) = &packing.lifecycle {
+            for (start, end, pair, peak, gap_ticks) in program.swap_gaps() {
+                let [first, second] =
+                    pair.map(|repo| crate::terminal_escape(&packing.labels[repo]));
+                let ticks = u64::try_from(gap_ticks).expect("bounded swap gap");
+                let seconds = crate::model::tick_time(ticks).lossy_secs_f32();
+                eprintln!(
+                    "tile swap repositories={first:?},{second:?} start_tick={start} end_tick={end} peak_gap={peak:.4} gap_seconds={seconds:.3}"
+                );
+            }
+            let end = program.last_tick().max(packing.samples.len() - 1);
+            for episode in program.aspect_episodes(end) {
+                let repository =
+                    crate::terminal_escape(&packing.labels[episode.repository]);
+                let span = u64::try_from(episode.end - episode.start)
+                    .expect("bounded archive episode");
+                let seconds = crate::model::tick_time(span).lossy_secs_f32();
+                eprintln!(
+                    "archive aspect repository={repository:?} start_tick={} end_tick={} peak={:.4} seconds={seconds:.3}",
+                    episode.start, episode.end, episode.peak
+                );
+            }
+        }
+        if packing.lifecycle.is_none() {
+            let retirement = packing.plan_retirement();
+            if let Some((opening, retirement)) =
+                packing.plan_staggered(retirement.as_ref())
+            {
+                packing.staggered = Some(Arc::new(opening));
+                packing.retirement = retirement.map(Arc::new);
+            } else {
+                packing.retirement = retirement.map(Arc::new);
+            }
+        }
         packing.center_jumps = packing.plan_center_jumps(&items);
         packing.content_scales = packing.plan_content_scales();
         packing.aspects = packing.build_aspects(
@@ -1597,6 +1704,7 @@ impl Packing {
         tick: u64,
         presence: Option<&[f32]>,
     ) -> Option<(Vec<RepositoryRegion>, Vec<Vec2>, Vec<f32>)> {
+        let presence = presence.filter(|mask| !mask.is_empty());
         self.sample_filtered(tick, presence, |_| true)
     }
 
@@ -1634,16 +1742,37 @@ impl Packing {
             .iter()
             .flatten()
             .map(|exit| (exit.start, exit.end))
-            .chain(self.reflows.iter().map(|change| {
-                let start = u64::try_from(change.tick).expect("bounded reflow");
-                let duration =
-                    u64::try_from(change.duration()).expect("bounded reflow");
-                (start, start + duration)
-            }))
+            .chain(self.lifecycle.iter().flat_map(|program| program.shifts()))
+            .chain(
+                self.reflows
+                    .iter()
+                    .filter(|_| self.lifecycle.is_none())
+                    .map(|change| {
+                        let start = u64::try_from(change.tick).expect("bounded reflow");
+                        let duration =
+                            u64::try_from(change.duration()).expect("bounded reflow");
+                        (start, start + duration)
+                    }),
+            )
+    }
+
+    pub(crate) fn exchanging(&self, tick: u64, repository: usize) -> bool {
+        let tick = usize::try_from(tick).expect("bounded reflow tick");
+        if let Some(program) = &self.lifecycle {
+            return program.exchanges(tick, repository);
+        }
+        self.staggered.is_none()
+            && self.reflows
+                [..self.reflows.partition_point(|change| change.tick <= tick)]
+                .last()
+                .is_some_and(|change| change.exchanges(tick, repository))
     }
 
     pub(crate) fn reflowing(&self, tick: u64) -> bool {
         let tick = usize::try_from(tick).expect("bounded reflow tick");
+        if let Some(program) = &self.lifecycle {
+            return program.shifting(tick);
+        }
         self.reflows[..self.reflows.partition_point(|change| change.tick <= tick)]
             .last()
             .is_some_and(|change| tick - change.tick < change.duration())
@@ -1712,17 +1841,16 @@ impl Packing {
         let tick = usize::try_from(tick)
             .unwrap_or(usize::MAX)
             .min(self.samples.len().checked_sub(1)?);
-        let tiles = usize::try_from(tiles)
-            .unwrap_or(usize::MAX)
-            .min(self.samples.len() - 1);
-        let sample = &self.samples[tiles];
+        let tiles = usize::try_from(tiles).unwrap_or(usize::MAX);
+        let row = tiles.min(self.samples.len() - 1);
+        let sample = &self.samples[row];
         let placement = self.fit_rows(tiles, tick, births, presence, None);
         let plan = if presented {
             self.display_aspects.as_ref().unwrap_or(&self.aspects)
         } else {
             &self.aspects
         };
-        let aspect_tick = u64::try_from(tiles).expect("bounded tile row");
+        let aspect_tick = u64::try_from(row).expect("bounded tile row");
         let mut regions: Vec<_> = self.inputs[tick]
             .iter()
             .zip(self.labels.iter())
@@ -1962,8 +2090,33 @@ impl Packing {
     }
 
     #[cfg(test)]
+    pub(crate) fn flat_lifecycle_counts(&self) -> (usize, usize) {
+        self.lifecycle
+            .as_ref()
+            .map_or((0, 0), |program| program.counts())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn settled_glass_error_px(&self) -> f32 {
+        let space = self.space();
+        if let Some(program) = &self.lifecycle {
+            return program.settled_glass_error_px(space);
+        }
+        self.retirement.as_ref().map_or(0.0, |retirement| {
+            reflow::lifecycle::settled_glass_error_px(
+                &retirement.motion.sample(1.0),
+                &retirement.motion.sample(0.0),
+                space,
+            )
+        })
+    }
+
+    #[cfg(test)]
     pub(crate) fn gutter_field(&self) -> Tile {
-        self.space().field(GUTTER_MARGIN)
+        self.lifecycle.as_ref().map_or_else(
+            || self.space().field(GUTTER_MARGIN),
+            |program| program.field(),
+        )
     }
 
     /// Samples tiled and samples that reused the previous polygons, since the last call.
@@ -1982,6 +2135,113 @@ impl Packing {
         }
     }
 
+    fn plan_staggered(
+        &self,
+        retirement: Option<&ScheduledRetirement>,
+    ) -> Option<(reflow::opening::FlatLayout, Option<ScheduledRetirement>)> {
+        if self.opening.is_some()
+            || self.reflows.len() > 8
+            || (retirement.is_some() && !self.reflows.is_empty())
+            || self.labels.len() < 5
+        {
+            return None;
+        }
+        let initial = &self.samples[0];
+        let end = retirement.map_or(self.samples.len() - 1, |change| change.start);
+        if initial.presence.iter().any(|&p| p > 0.0 && p < 1.0)
+            || self.samples[1..=end].iter().any(|row| {
+                initial.presence.iter().enumerate().any(|(repo, &p)| {
+                    row.presence[repo].to_bits() != p.to_bits()
+                        || (p > 0.0
+                            && retirement.is_some()
+                            && row.weights[repo].to_bits()
+                                != initial.weights[repo].to_bits())
+                })
+            })
+        {
+            return None;
+        }
+        let original = self.layout_at(0, &[], None, None);
+        let archive_fit =
+            retirement.map(|change| reflow::opening::glyph_scales(self, change.start));
+        let replan = |layout: &reflow::Layout, change: &ScheduledRetirement| {
+            let exit = self.exits[change.departing]?;
+            let ticks = usize::try_from(exit.end - exit.start).ok()?;
+            let motion = reflow::retirement::Retirement::plan(
+                layout.clone(),
+                change.departing,
+                self.space(),
+                ticks,
+                archive_fit.as_ref()?,
+            )?;
+            Some(ScheduledRetirement {
+                start: change.start,
+                departing: change.departing,
+                motion,
+            })
+        };
+        let opening = reflow::opening::plan(self, &original, |layout| {
+            retirement.is_none_or(|change| replan(layout, change).is_some())
+        })?;
+        let retirement = match retirement {
+            Some(change) => Some(replan(&opening, change)?),
+            None => None,
+        };
+        Some((
+            reflow::opening::FlatLayout::plan(self, opening)?,
+            retirement,
+        ))
+    }
+
+    fn plan_retirement(&self) -> Option<ScheduledRetirement> {
+        let (departing, exit) = self
+            .exits
+            .iter()
+            .enumerate()
+            .filter_map(|(repo, exit)| exit.map(|exit| (repo, exit)))
+            .max_by_key(|&(_, exit)| exit.end)?;
+        let start = usize::try_from(exit.start).ok()?;
+        let end = usize::try_from(exit.end).ok()?;
+        let initial = self.samples.get(start)?;
+        self.samples.get(end)?;
+        if self.reflows.last().is_some_and(|change| {
+            change.tick.saturating_add(change.duration()) >= start
+        }) || self
+            .opening
+            .as_ref()
+            .is_some_and(|opening| opening.end >= start)
+        {
+            return None;
+        }
+        if initial.presence[departing] < 1.0
+            || initial.presence.iter().any(|&p| p > 0.0 && p < 1.0)
+            || self.samples[start + 1..].iter().any(|sample| {
+                initial.presence.iter().enumerate().any(|(repo, &p)| {
+                    repo != departing
+                        && (sample.presence[repo].to_bits() != p.to_bits()
+                            || (p > 0.0
+                                && sample.weights[repo].to_bits()
+                                    != initial.weights[repo].to_bits()))
+                })
+            })
+        {
+            return None;
+        }
+        let opening = self.layout_at(start, &[], None, None);
+        let motion = reflow::retirement::Retirement::plan(
+            opening,
+            departing,
+            self.space(),
+            end - start,
+            reflow::opening::glyph_scales(self, start),
+        )?;
+        Some(ScheduledRetirement {
+            start,
+            departing,
+            motion,
+        })
+    }
+
     fn layout_at(
         &self,
         tile_tick: usize,
@@ -1989,6 +2249,27 @@ impl Packing {
         presence: Option<&[f32]>,
         tiling: Option<&mut Tiling>,
     ) -> reflow::Layout {
+        if let Some(lifecycle) = &self.lifecycle
+            && presence.is_none()
+        {
+            return lifecycle.sample(tile_tick, births);
+        }
+        let tile_tick = tile_tick.min(self.samples.len() - 1);
+        if let Some(retirement) = &self.retirement
+            && tile_tick >= retirement.start
+            && births.is_empty()
+            && presence.is_none()
+        {
+            return retirement
+                .motion
+                .sample(self.samples[tile_tick].presence[retirement.departing]);
+        }
+        if let Some(staggered) = &self.staggered
+            && births.is_empty()
+            && presence.is_none()
+        {
+            return staggered.sample(tile_tick);
+        }
         let opening = self.opening.as_ref().filter(|opening| {
             presence.is_none_or(|mask| mask.iter().all(|&p| p >= 1.0))
                 && tile_tick <= opening.end
@@ -2068,6 +2349,7 @@ impl Packing {
         tiling: Option<&mut Tiling>,
     ) -> Vec<Placement> {
         let layout = self.layout_at(tile_tick, births, presence, tiling);
+        let row = tile_tick.min(self.samples.len() - 1);
         let repositories = self.rotated.len();
         self.inputs[tick]
             .iter()
@@ -2077,7 +2359,7 @@ impl Packing {
                 let tile = layout.tiles[i];
                 let center = self.content_center(tick, &shape);
                 let (origin, scale) = tile.map_or((Vec2::ZERO, 0.0), |tile| {
-                    let mut scale = self.content_scales[tile_tick * repositories + i];
+                    let mut scale = self.content_scales[row * repositories + i];
                     if tile_tick != tick
                         || !births.is_empty()
                         || presence.is_some_and(|mask| mask.iter().any(|&p| p < 1.0))
@@ -2272,8 +2554,8 @@ impl Packing {
         let permitted = |from, to, scale: f32| {
             let (a, b) = (areas[from], areas[to]);
             (a > 0.0 && b > 0.0).then(|| {
-                // Reuse space freed by a deletion during forward playback.
-                if b > a + 1e-6 || (to > from && b + 1e-6 >= a) {
+                // A settled tile can recover between changes to its content.
+                if b + 1e-6 >= a {
                     (scale * 0.005).clamp(0.002, 0.02)
                 } else {
                     0.0
@@ -2369,6 +2651,7 @@ mod tests {
             })
             .collect();
         let packing = Packing::before_service(&vec![row; 60]);
+        assert!(packing.lifecycle.is_some());
         let (regions, _, _) = packing.sample(59).unwrap();
         let areas: Vec<_> = regions.iter().map(|r| r.tile.unwrap().area()).collect();
         let total: f32 = areas.iter().sum();
@@ -2420,7 +2703,6 @@ mod tests {
         let kept = Packing::before_service(&fixture());
         let mut fresh = kept.clone();
         fresh.tile_fresh(true);
-        kept.take_tiling_counts();
         let hidden: [f32; 30] = std::array::from_fn(|i| [0.5, 1.0, 0.25][i % 3]);
         let samples = [
             (1300, None),
@@ -2441,15 +2723,6 @@ mod tests {
                 "tick {tick}"
             );
         }
-        let (tiled, reused) = kept.take_tiling_counts();
-        assert!(
-            tiled >= samples.len(),
-            "{tiled} allocations for {} samples",
-            samples.len()
-        );
-        assert!(0 < reused && reused < tiled, "{reused} of {tiled}");
-        assert_eq!(fresh.take_tiling_counts(), (0, 0));
-
         let weights: Vec<f32> = (0..30_u8).map(|i| 1.0 + f32::from(i)).collect();
         let states = |weights: &[f32]| {
             let mut states = vec![Feasible::default(); kept.nodes.len()];
@@ -2496,6 +2769,7 @@ mod tests {
     fn births_finish_by_service_including_a_short_lead_in() {
         let regions = fixture();
         let packing = Packing::before_service(&regions);
+        assert_eq!(packing.flat_lifecycle_counts(), (29, 0));
         for repository in 0..30 {
             let birth = regions.iter().position(|r| r[repository].live).unwrap();
             assert!((packing.samples[birth].presence[repository] - 1.0).abs() < 1e-6);
@@ -2642,8 +2916,22 @@ mod tests {
             })
             .collect();
         let packing = Packing::before_service(&rows);
-        let (start, _) = packing.motion_intervals().next().unwrap();
-        assert!(start <= 270, "drift waited until tick {start}");
+        let program = packing.lifecycle.as_ref().unwrap();
+        let (start, end) = program.shifts().last().unwrap();
+        let share = |tick| {
+            let (regions, _, _) = packing.sample_split(tick, tick, &[], None).unwrap();
+            let areas: Vec<_> = regions
+                .into_iter()
+                .filter_map(|repo| repo.tile.map(Tile::area))
+                .collect();
+            areas[0] / areas.iter().sum::<f32>()
+        };
+        let before = share(start);
+        let after = share(end);
+        assert!(
+            after > before,
+            "dominant tile share grew from {before:.3} to {after:.3}"
+        );
     }
 
     #[test]
@@ -2681,6 +2969,7 @@ mod tests {
             inputs.push(row);
         }
         let packing = Packing::from_inputs(inputs, exits.into(), 0.0, 1.0, 1).unwrap();
+        assert_eq!(packing.flat_lifecycle_counts(), (1, 1));
         let mut previous: Option<(f32, f32)> = None;
         for tick in 0..520 {
             let (regions, _, scales) = packing.sample(tick).unwrap();
@@ -2689,12 +2978,6 @@ mod tests {
             if let Some((prior_area, prior_scale)) = previous {
                 let change: f32 = scale - prior_scale;
                 assert!(change.abs() <= 0.025, "scale jump at {tick}: {change}");
-                if (area - prior_area).abs() <= 1e-6 {
-                    assert_eq!(
-                        scale, prior_scale,
-                        "scale changed on a still tile at {tick}"
-                    );
-                }
                 assert!(
                     (area - prior_area) * change >= -1e-6,
                     "scale reversed at {tick}: {prior_area} to {area}, {prior_scale} to {scale}",
@@ -2702,22 +2985,23 @@ mod tests {
             }
             previous = Some((area, scale));
         }
+        assert!(packing.sample(520).unwrap().0[1].tile.is_none());
     }
 
     #[test]
     fn birth_shares_the_gutter_as_both_tiles_move() {
         let packing = two_tiles_with_birth_at(180);
-        let initial = packing.sample(0).unwrap().0[0].tile.unwrap();
+        let field = packing.sample(0).unwrap().0[0].gutter.unwrap();
         for tick in 1..=180 {
             let (regions, _, _) = packing.sample(tick).unwrap();
-            let tiles: Vec<_> = regions.iter().map(|region| region.tile).collect();
-            let (field, gutters) = partition(&packing.nodes, 0, &tiles);
-            let filled = tiles.iter().flatten().map(|tile| tile.area()).sum::<f32>();
-            let tolerance = 2e-6;
-            let field = field.unwrap();
-            assert!(field.low.abs_diff_eq(initial.low, tolerance));
-            assert!(field.high.abs_diff_eq(initial.high, tolerance));
-            assert!((filled + gutters - initial.area()).abs() < tolerance);
+            let cells: Vec<_> =
+                regions.iter().filter_map(|region| region.gutter).collect();
+            let area: f32 = cells.iter().map(|tile| tile.area()).sum();
+            assert!((area - field.area()).abs() < 2e-6);
+            if let [a, b] = cells.as_slice() {
+                assert!((a.high.cmple(b.low) | b.high.cmple(a.low)).any());
+            }
+            crate::model::assert_gutter_routes(cells.into_iter());
         }
     }
 
@@ -2760,6 +3044,7 @@ mod tests {
         row[2].live = true;
         rows.extend(std::iter::repeat_n(row, 20));
         let packing = Packing::before_service(&rows);
+        assert_eq!(packing.flat_lifecycle_counts(), (2, 0));
         let samples: Vec<_> = (0..rows.len())
             .map(|tick| packing.layout_at(tick, &[], None, None).tiles)
             .collect();
@@ -2808,7 +3093,25 @@ mod tests {
             let layout = packing.layout_at(tick, &[], None, None);
             let placement = layout.tiles;
             let moving = packing.reflowing(u64::try_from(tick).unwrap());
-            if moving {
+            if let Some(program) = &packing.lifecycle {
+                let field = program.field();
+                let cells = layout.gutters;
+                assert_disjoint(&cells);
+                assert_disjoint(&placement);
+                let area = cells
+                    .iter()
+                    .flatten()
+                    .map(|tile| f64::from(tile.area()))
+                    .sum::<f64>();
+                assert!((area - f64::from(field.area())).abs() < 2e-6, "{tick}");
+                assert!(
+                    cells.iter().flatten().all(|cell| {
+                        cell.low.cmpge(field.low).all()
+                            && cell.high.cmple(field.high).all()
+                    }),
+                    "{tick}"
+                );
+            } else if moving {
                 assert_disjoint(&placement);
             } else {
                 let tree = packing
@@ -2866,6 +3169,22 @@ mod tests {
     }
 
     #[test]
+    fn one_live_repository_uses_the_flat_opening() {
+        let mut row = capacity_fixture();
+        row.truncate(1);
+        let mut inputs = Inputs::new(1);
+        inputs.push(row);
+        let packing =
+            Packing::from_inputs(inputs, Arc::default(), 4.0, 1.0, 1).unwrap();
+        assert!(packing.lifecycle.is_some());
+        let (regions, _, _) = packing.sample(0).unwrap();
+        assert_eq!(
+            regions[0].tile,
+            Some(packing.space().field(framing::MARGIN))
+        );
+    }
+
+    #[test]
     fn archive_presence_scales_clamps_and_returns_the_whole_view_to_a_singleton() {
         let settled = fixture().pop().unwrap();
         let packing = Packing::before_service(&[settled]);
@@ -2895,27 +3214,9 @@ mod tests {
     }
 
     #[test]
-    fn left_tile_exits_beside_two_stacked_tiles() {
-        let packing = ending_fixture(false);
-        assert!(matches!(packing.nodes[0], Node::Split { axis: 0, .. }));
-        let at = |tick| packing.sample(tick).unwrap().0;
-        let before = at(60);
-        let middle = at(180);
-        let after = at(300);
-        assert!(middle[0].tile.unwrap().area() < before[0].tile.unwrap().area());
-        assert!(after[0].tile.is_none());
-        for pair in after[1..].windows(2) {
-            let a = pair[0].tile.unwrap();
-            let b = pair[1].tile.unwrap();
-            assert!(a.high.y <= b.low.y || b.high.y <= a.low.y);
-            assert!(a.ground_aspect() <= BOUND + 0.01);
-            assert!(b.ground_aspect() <= BOUND + 0.01);
-        }
-    }
-
-    #[test]
     fn repositories_with_a_shared_ending_all_shrink() {
         let packing = ending_fixture(true);
+        assert_eq!(packing.flat_lifecycle_counts(), (0, 3));
         let at = |tick| packing.sample(tick).unwrap().0;
         let mut previous = at(60);
         let mut last = [0.0; 3];
@@ -3054,6 +3355,201 @@ mod tests {
         let other = shared_ending.then_some(60);
         let exits = crate::model::exits_from_starts(&[Some(60), other, other]);
         Packing::from_inputs(inputs, exits.into(), 4.0, 1.0, 1).unwrap()
+    }
+
+    #[test]
+    fn flat_lifecycle_opens_a_late_repository_and_retains_the_archive_layout() {
+        let mut row = capacity_fixture();
+        row.truncate(3);
+        for region in &mut row {
+            region.items = 32.0;
+            let extent = Vec2::new(2.0, 3.0);
+            region.low = -extent;
+            region.high = extent;
+            region.outline = outline::rectangle(-extent, extent);
+        }
+        let mut inputs = Inputs::new(700);
+        for tick in 0..700 {
+            row[2].live = tick >= 160;
+            inputs.push(row.clone());
+        }
+        let exits = crate::model::exits_from_starts(&[None, None, Some(320)]);
+        let packing = Packing::from_inputs(inputs, exits.into(), 4.0, 1.0, 1).unwrap();
+        assert!(
+            packing.lifecycle.is_some(),
+            "legacy opening {} and {} reflows",
+            packing.opening.is_some(),
+            packing.reflows.len()
+        );
+        let sample = |tick| packing.sample_split(tick, tick, &[], None).unwrap().0;
+        assert!(sample(60)[2].tile.is_none());
+        let opening = sample(160);
+        assert!(opening[2].tile.is_some());
+        let partial = packing.sample_split(68, 68, &[(2, 45)], None).unwrap().0;
+        assert!(partial[2].tile.unwrap().area() < opening[2].tile.unwrap().area());
+        let archiving = sample(440);
+        let late_birth = packing.sample_split(440, 440, &[(2, 60)], None).unwrap().0;
+        assert_eq!(late_birth[2].tile, archiving[2].tile);
+        assert_eq!(late_birth[2].gutter, archiving[2].gutter);
+        let after = sample(600);
+        assert!(after[2].tile.is_none());
+        crate::model::assert_gutter_routes(
+            after.into_iter().filter_map(|region| region.gutter),
+        );
+    }
+
+    #[test]
+    fn adjacent_birth_windows_fit_without_reverting_a_live_tile() {
+        let mut row = capacity_fixture();
+        row.truncate(3);
+        row[0].items = 32.0;
+        let mut inputs = Inputs::new(250);
+        for tick in 0..250 {
+            row[1].live = tick >= 160;
+            row[2].live = tick >= 218;
+            if tick == 240 {
+                row[2].items = 10_000.0;
+            }
+            inputs.push(row.clone());
+        }
+        let packing =
+            Packing::from_inputs(inputs, vec![None; 3].into(), 20.0, 1.0, 1).unwrap();
+        assert_eq!(packing.flat_lifecycle_counts(), (2, 0));
+        let layout =
+            |tick, births| packing.sample_split(tick, tick, births, None).unwrap().0;
+        let first = layout(126, &[]);
+        let early_second = layout(126, &[(2, 10)]);
+        assert_eq!(first[1].tile, early_second[1].tile);
+        assert!(early_second[2].tile.is_none());
+        let second = layout(138, &[]);
+        let late_first = layout(138, &[(1, 40)]);
+        assert_eq!(second[2].tile, late_first[2].tile);
+        assert!(second[2].tile.is_some());
+        for tick in 69..218 {
+            for (before, after) in
+                layout(tick, &[]).into_iter().zip(layout(tick + 1, &[]))
+            {
+                if let Some((before, after)) = before.tile.zip(after.tile) {
+                    let travel = (before.low - after.low)
+                        .abs()
+                        .max((before.high - after.high).abs());
+                    assert!((travel * framing::VIEWPORT * 0.5).max_element() <= 8.001);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_stable_wide_gutter_opening_uses_the_flat_partition() {
+        let mut row = capacity_fixture();
+        row.truncate(5);
+        let shapes = [
+            (48.0, Vec2::new(30.0, 28.0)),
+            (69.0, Vec2::new(13.0, 15.0)),
+            (90.0, Vec2::new(26.0, 32.0)),
+            (111.0, Vec2::new(9.0, 19.0)),
+            (132.0, Vec2::new(22.0, 6.0)),
+        ];
+        for (region, (items, extent)) in row.iter_mut().zip(shapes) {
+            region.items = items;
+            region.low = -extent;
+            region.high = extent;
+            region.outline = outline::rectangle(-extent, extent);
+        }
+        let mut inputs = Inputs::new(10);
+        for _ in 0..10 {
+            inputs.push(row.clone());
+        }
+        let packing =
+            Packing::from_inputs(inputs, Arc::default(), 20.0, 1.0, 1).unwrap();
+        let program = packing.lifecycle.as_ref().expect("flat opening");
+        let cells = |tick| {
+            packing
+                .sample_split(tick, tick, &[], None)
+                .unwrap()
+                .0
+                .into_iter()
+                .map(|region| region.gutter.unwrap())
+                .collect::<Vec<_>>()
+        };
+        let opening = cells(0);
+        let layout = program.sample(0, &[]);
+        assert_eq!(program.field(), packing.space().field(GUTTER_MARGIN));
+        assert!(packing.settled_glass_error_px() < 0.001);
+        assert!(layout.tiles.iter().flatten().all(|tile| {
+            tile.pixels().min_element() >= 16.0
+                && (1.0 / BOUND..=BOUND).contains(&tile.ground_aspect())
+        }));
+        assert_eq!(opening, cells(9));
+        crate::model::assert_gutter_routes(opening.into_iter());
+    }
+
+    #[test]
+    fn an_exterior_archive_stays_visible_until_presence_is_zero() {
+        let mut row = capacity_fixture();
+        row.truncate(2);
+        row[0].items = 64.0;
+        row[1].items = 64.0;
+        let mut inputs = Inputs::new(500);
+        for _ in 0..500 {
+            inputs.push(row.clone());
+        }
+        let exits = crate::model::exits_from_starts(&[Some(100), None]);
+        let exit = exits[0].unwrap();
+        let mut packing =
+            Packing::from_inputs(inputs, exits.into(), 4.0, 1.0, 1).unwrap();
+
+        assert!(packing.retirement.is_none());
+        let at = |tick| packing.sample_split(tick, tick, &[], None).unwrap().0;
+        for tick in exit.start..exit.end {
+            assert!(at(tick)[0].tile.is_some(), "archive vanished at {tick}");
+        }
+        let end = at(exit.end);
+        assert!(end[0].tile.is_none() && end[0].gutter.is_none());
+        assert_eq!(end[1].tile, at(exit.end + 15)[1].tile);
+
+        let start = usize::try_from(exit.start).unwrap();
+        let ticks = usize::try_from(exit.end - exit.start).unwrap();
+        let motion = reflow::retirement::Retirement::plan(
+            packing.layout_at(start, &[], None, None),
+            0,
+            packing.space(),
+            ticks,
+            |_, _| 1.0,
+        )
+        .unwrap();
+        packing.lifecycle = None;
+        packing.retirement = Some(Arc::new(ScheduledRetirement {
+            start,
+            departing: 0,
+            motion,
+        }));
+        assert!(packing.settled_glass_error_px() <= 0.01);
+        let settled = packing
+            .sample_split(exit.end, exit.end, &[], None)
+            .unwrap()
+            .0;
+        assert!(settled[0].tile.is_none() && settled[1].tile.is_some());
+    }
+
+    #[test]
+    fn a_wide_gutter_preserves_the_opening_aspect_limit() {
+        let mut row = capacity_fixture();
+        row.truncate(2);
+        row[0].items = 1.0;
+        row[1].items = 64.0;
+        let mut inputs = Inputs::new(500);
+        for _ in 0..500 {
+            inputs.push(row.clone());
+        }
+        let exits = crate::model::exits_from_starts(&[Some(100), None]);
+        let packing = Packing::from_inputs(inputs, exits.into(), 20.0, 1.0, 1).unwrap();
+        let opening = packing.sample_split(0, 0, &[], None).unwrap().0;
+        let aspect = opening[0].tile.unwrap().ground_aspect();
+        assert!(
+            (1.0 / BOUND - 1e-4..=BOUND + 1e-4).contains(&aspect),
+            "{aspect}"
+        );
     }
 
     #[test]

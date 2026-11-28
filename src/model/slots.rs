@@ -3591,7 +3591,10 @@ mod tests {
         state.avatars.push(newcomer);
         state.place_slots(&sim.envelopes, sim.seconds());
         assert_eq!(state.avatars[1].slot.as_ref().unwrap().dock, dock);
-        sim.advance_to(780, 60);
+        let reentry =
+            u32::try_from(sim.schedule.commit_ticks().last().unwrap()).unwrap();
+        assert!(reentry >= 660, "return must follow parking");
+        sim.advance_to(reentry, 60);
         assert_eq!(sim.state.avatars[0].repository, 1);
         assert!(sim.state.avatars[0].presence > 0.0);
         assert_eq!(

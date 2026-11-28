@@ -137,7 +137,7 @@ impl Schedule {
             .iter()
             .map(|event| event.repository)
             .collect();
-        let selected = &events[range];
+        let selected = &events[range.clone()];
         let opening = seen.is_empty();
         let mut schedule = Self::build(
             selected,
@@ -146,6 +146,7 @@ impl Schedule {
             |_| 0,
             |index| seen.insert(selected[index].repository) && !(opening && index == 0),
         );
+        schedule.separate_births_from_archives(events, options, range);
         let mut transmitters = std::collections::HashMap::new();
         let mut ring_members = std::collections::HashMap::new();
         let mut latest_arrival = None;
@@ -187,6 +188,68 @@ impl Schedule {
             }
         }
         schedule
+    }
+
+    fn separate_births_from_archives(
+        &mut self,
+        events: &[Event],
+        options: &super::Options,
+        selected: std::ops::Range<usize>,
+    ) {
+        use super::lifecycle;
+
+        if !options.repository_archived.contains(&true)
+            && options.repository_ends.iter().all(Option::is_none)
+        {
+            return;
+        }
+        let exits = |schedule: &Self| {
+            lifecycle::repository_exits(&lifecycle::planned_repository_ends(
+                events,
+                schedule,
+                options,
+                selected.clone(),
+            ))
+        };
+        let mut current_exits = exits(self);
+        let mut cursor = 0;
+        while let Some((offset, birth)) = self.services[cursor..]
+            .iter()
+            .enumerate()
+            .find(|(_, service)| service.birth)
+        {
+            let index = cursor + offset;
+            cursor = index + 1;
+            let service = birth.tick;
+            let max_wait = lifecycle::MAX_BIRTH_ARCHIVE_WAIT;
+            let wait_for = |tick: u64, exits: &[Option<lifecycle::RepositoryExit>]| {
+                let end = tick.saturating_sub(1);
+                let start = end.saturating_sub(BIRTH_TICKS);
+                exits
+                    .iter()
+                    .flatten()
+                    .filter(|exit| exit.start < end && exit.end > start)
+                    .map(|exit| exit.end - start)
+                    .max()
+                    .unwrap_or(0)
+            };
+            let mut wait = wait_for(service, &current_exits);
+            while (1..=max_wait).contains(&wait) {
+                let ticks = u32::try_from(wait).expect("bounded birth wait");
+                let candidate = self.with_travel(self.services.len(), |i| {
+                    ticks * u32::from(i == index)
+                });
+                let candidate_exits = exits(&candidate);
+                let further =
+                    wait_for(candidate.services[index].tick, &candidate_exits);
+                if further == 0 {
+                    *self = candidate;
+                    current_exits = candidate_exits;
+                    break;
+                }
+                wait += further;
+            }
+        }
     }
 
     pub(super) fn protect_opening_rays(&mut self, events: &[Event], end: u64) {
@@ -665,6 +728,42 @@ mod tests {
                 .copied()
                 .zip(nominal.commit_ticks())
                 .all(|(actual, nominal)| { actual - nominal <= BIRTH_TICKS })
+        );
+    }
+
+    #[test]
+    fn a_repository_birth_waits_for_an_archived_tiles_closure() {
+        use super::super::{Options, lifecycle};
+
+        let (mut events, _) = super::super::tests::short_repository_history(2);
+        events.truncate(2);
+        let mut options = Options {
+            seconds_per_day: 5.0,
+            max_idle_seconds: 5.0,
+            repository_ends: vec![None; 2],
+            ..Default::default()
+        };
+        let nominal = Schedule::for_replay(&events, &options);
+        options.repository_archived = vec![true, false];
+        let exits = |schedule: &Schedule| {
+            lifecycle::repository_exits(&lifecycle::planned_repository_ends(
+                &events,
+                schedule,
+                &options,
+                0..2,
+            ))
+        };
+        let archive = exits(&nominal)[0].unwrap();
+        let nominal_birth = nominal.births().next().unwrap().1 - BIRTH_TICKS - 1;
+        assert!(nominal_birth < archive.end);
+        assert!(nominal_birth + BIRTH_TICKS > archive.start);
+
+        let delayed = Schedule::for_replay(&events, &options);
+        assert_eq!(delayed.starts[0], nominal.starts[0]);
+        assert_eq!(exits(&delayed)[0].unwrap().end, archive.end);
+        assert_eq!(
+            delayed.births().next(),
+            Some((1, archive.end + BIRTH_TICKS + 1))
         );
     }
 

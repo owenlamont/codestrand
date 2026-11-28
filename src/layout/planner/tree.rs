@@ -1,3 +1,4 @@
+mod active;
 mod compact;
 
 use bevy::math::{DVec2, Vec2};
@@ -11,8 +12,7 @@ use super::GAP;
 const GRID_TRIALS: usize = 4;
 const POINT_VISITS_PER_DIRECTORY: usize = 64;
 const ANGULAR_MARGIN: f64 = 1e-8;
-const MAX_COMPACT_DIRECTORIES: usize = 320;
-const MAX_SECTOR_VALIDATION: usize = 1_024;
+const MAX_COMPACT_DIRECTORIES: usize = 384;
 
 #[derive(Clone, Copy)]
 struct Site {
@@ -22,36 +22,99 @@ struct Site {
     row: usize,
 }
 
-pub(super) struct Tree {
+pub(super) enum Tree {
+    Template(Template),
+    Active(active::Tree),
+}
+
+pub(super) struct Template {
     sites: Vec<Site>,
     reservation: Reservation,
+    has_late_directories: bool,
 }
 
 enum Reservation {
     Grid(Option<compact::Clearance>),
     Compact(compact::Clearance),
-    Lifetime,
 }
 
 impl Tree {
     pub(super) fn new(children: &[Vec<usize>], required: &[Vec<f32>]) -> Self {
-        let peak: Vec<_> = required
+        let opening = required
             .iter()
-            .map(|row| row.iter().copied().fold(0.0, f32::max) + GAP)
+            .skip(1)
+            .filter_map(|radii| radii.iter().position(|&radius| radius > 0.0))
+            .min()
+            .unwrap_or(0);
+        let end = (opening + 2).min(required[0].len() - 1);
+        let mut radii: Vec<_> = required
+            .iter()
+            .map(|row| row[..=end].iter().copied().fold(0.0, f32::max))
             .collect();
-        if children.len() > 5 {
-            if children.len() <= MAX_COMPACT_DIRECTORIES
-                && let Some(points) = compact::choose_template(children, &peak)
+        let has_late_directories = radii.contains(&0.0);
+        if children.len() <= MAX_COMPACT_DIRECTORIES
+            && (children.len() > 5 || !has_late_directories)
+        {
+            // Dormant directories use the opening size only to choose a planar embedding.
+            let seed_radius = radii.iter().copied().fold(0.4_f32, f32::max);
+            for radius in &mut radii {
+                if *radius == 0.0 {
+                    *radius = seed_radius;
+                }
+            }
+            if let Some(template) = Template::new(children, radii, has_late_directories)
             {
+                return Self::Template(template);
+            }
+        }
+        Self::Active(active::Tree::new(children))
+    }
+
+    pub(super) fn retry_with_depth_bands(&mut self, children: &[Vec<usize>]) -> bool {
+        if matches!(self, Self::Template(template) if template.has_late_directories) {
+            *self = Self::Active(active::Tree::new(children));
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(super) fn pack(
+        &self,
+        reserved: &[Vec<f32>],
+        report: impl Fn(usize, usize),
+    ) -> Vec<Vec<Vec2>> {
+        match self {
+            Self::Template(tree) => tree.pack(reserved, report),
+            Self::Active(tree) => tree.pack(reserved, report),
+        }
+    }
+}
+
+impl Template {
+    fn new(
+        children: &[Vec<usize>],
+        mut radii: Vec<f32>,
+        has_late_directories: bool,
+    ) -> Option<Self> {
+        for radius in &mut radii {
+            *radius += GAP;
+        }
+        if children.len() > 5 {
+            if let Some(points) = compact::choose_template(children, &radii) {
                 let reservation =
                     Reservation::Compact(compact::Clearance::new(&points, children));
                 let mut sites = depth_order(children);
                 for (site, point) in sites.iter_mut().zip(points) {
                     site.point = point;
                 }
-                return Self { sites, reservation };
+                return Some(Self {
+                    sites,
+                    reservation,
+                    has_late_directories,
+                });
             }
-            return Self::reserve_large_tree(children, &peak);
+            return None;
         }
         let mut counts = vec![1; children.len()];
         for (parent, children) in children.iter().enumerate().rev() {
@@ -70,8 +133,8 @@ impl Tree {
             let Some(sites) = embed(children, &counts, slots, heading) else {
                 continue;
             };
-            let stretch = scale(&sites, |index| peak[index]);
-            let (low, high) = sites.iter().zip(&peak).fold(
+            let stretch = scale(&sites, |index| radii[index]);
+            let (low, high) = sites.iter().zip(&radii).fold(
                 (Vec2::splat(f32::INFINITY), Vec2::splat(f32::NEG_INFINITY)),
                 |(low, high), (site, &radius)| {
                     (
@@ -83,7 +146,7 @@ impl Tree {
             let score = (high - low).element_product();
             widths.fill(GAP);
             heights.fill(GAP);
-            for (site, &radius) in sites.iter().zip(&peak) {
+            for (site, &radius) in sites.iter().zip(&radii) {
                 widths[site.column] = widths[site.column].max(radius);
                 heights[site.row] = heights[site.row].max(radius);
             }
@@ -101,49 +164,13 @@ impl Tree {
             .as_ref()
             .is_some_and(|clearance| !clearance.is_finite())
         {
-            return Self::reserve_large_tree(children, &peak);
+            return None;
         }
-        Self {
+        Some(Self {
             sites,
             reservation: Reservation::Grid(clearance),
-        }
-    }
-
-    fn reserve_large_tree(children: &[Vec<usize>], peak: &[f32]) -> Self {
-        let mut sites = depth_order(children);
-        if children.len() <= MAX_SECTOR_VALIDATION
-            && let Some(points) = compact::large_template(children, peak)
-        {
-            for (site, point) in sites.iter_mut().zip(points) {
-                site.point = point;
-            }
-        } else {
-            // Each edge joins adjacent integer depth columns. An unrelated site is
-            // at least one row from its endpoint on either column.
-            let placed = &sites;
-            let width = children
-                .iter()
-                .enumerate()
-                .flat_map(|(parent, branches)| {
-                    let row = placed[parent].point.y;
-                    branches
-                        .iter()
-                        .map(move |&child| (placed[child].point.y - row).abs())
-                })
-                .fold(0.0_f32, f32::max);
-            let radius = peak.iter().copied().fold(0.0_f32, f32::max);
-            let minimum_spacing = (2.0 * radius).max(radius * width.hypot(1.0));
-            // Power-of-two spacing scales integer sites without rounding the rows apart.
-            let spacing =
-                f32::from_bits((minimum_spacing.to_bits() & 0x7f80_0000) + 0x0080_0000);
-            for site in &mut sites {
-                site.point *= spacing;
-            }
-        }
-        Self {
-            sites,
-            reservation: Reservation::Lifetime,
-        }
+            has_late_directories,
+        })
     }
 
     pub(super) fn pack(
@@ -164,9 +191,12 @@ impl Tree {
                     })
                 }
                 Reservation::Compact(clearance) => {
-                    Vec2::splat(clearance.scale(reserved, sample))
+                    Vec2::splat(if self.has_late_directories {
+                        clearance.occupied_scale(reserved, sample)
+                    } else {
+                        clearance.scale(reserved, sample)
+                    })
                 }
-                Reservation::Lifetime => Vec2::ONE,
             };
             let root = self.sites[0].point;
             // A common positive stretch keeps every separation line valid through the spline.
@@ -376,22 +406,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_large_tree_reserves_clear_clusters_and_edges_for_later_growth() {
-        for count in [MAX_COMPACT_DIRECTORIES + 1, MAX_SECTOR_VALIDATION + 1] {
-            let mut children = vec![Vec::new(); count];
-            for child in 1..count {
-                children[(child - 1) / 3].push(child);
-            }
-            let required = vec![vec![0.5, 2.0]; count];
-            let tree = Tree::new(&children, &required);
-            let positions = tree.pack(&required, |_, _| {});
-            let initial: Vec<_> = positions.iter().map(|row| row[0]).collect();
-            assert!(positions.iter().all(|row| row[0] == row[1]));
-            assert!(compact::validate_template(
-                &initial,
-                &vec![2.0; count],
-                &children
-            ));
-        }
+    fn distant_directories_do_not_reserve_opening_space() {
+        let count = MAX_COMPACT_DIRECTORIES + 1;
+        let mut children = vec![Vec::new(); count];
+        children[0] = (1..count).collect();
+        let mut required = vec![vec![0.0, 0.0, 0.0, 0.0, 2.0]; count];
+        required[..3].fill(vec![0.5; 5]);
+        let tree = Tree::new(&children, &required);
+        let positions = tree.pack(&required, |_, _| {});
+        assert!(positions[1][0].distance(positions[2][0]) < 2.0);
+        assert!(positions[1][4].distance(positions[count - 1][4]) > 100.0);
     }
 }

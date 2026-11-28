@@ -185,7 +185,15 @@ pub(super) fn progress(elapsed: usize, duration: usize) -> f32 {
 }
 
 pub(super) fn birth_ease(elapsed: usize, duration: usize) -> f32 {
-    ease(elapsed, duration, 0.25)
+    ease(elapsed, duration, birth_ramp(duration))
+}
+
+pub(super) fn birth_ramp(duration: usize) -> f32 {
+    if duration < usize::try_from(crate::model::BIRTH_TICKS).expect("bounded birth") {
+        0.0625
+    } else {
+        0.25
+    }
 }
 
 fn ease(elapsed: usize, duration: usize, ramp_fraction: f32) -> f32 {

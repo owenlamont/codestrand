@@ -10,6 +10,112 @@ use std::{fmt::Write, ops::RangeInclusive, time::Instant};
 
 const CI_TICK_LIMIT: u32 = 3_600;
 
+#[test]
+fn glyph_ratio_dense_tile_growth() {
+    let shallow = |file| format!("group-{}/file-{file}.rs", file % 6);
+    let deep =
+        |file| format!("group-{}/node-{}/leaf/file-{file}.rs", file % 6, file / 32);
+    let event = |repo, day, changes| {
+        let name = ["sparse", "dense", "control"][repo];
+        namespaced_event(
+            repo,
+            day,
+            Identity::new(name, &format!("{name}@example.invalid")),
+            changes,
+        )
+    };
+    let events = vec![
+        event(
+            0,
+            0,
+            (0..6).map(|i| change(&shallow(i), Kind::Added)).collect(),
+        ),
+        event(
+            1,
+            5,
+            (0..24).map(|i| change(&deep(i), Kind::Added)).collect(),
+        ),
+        event(
+            2,
+            10,
+            (0..24).map(|i| change(&shallow(i), Kind::Added)).collect(),
+        ),
+        event(
+            1,
+            16,
+            (24..216).map(|i| change(&deep(i), Kind::Added)).collect(),
+        ),
+        event(2, 33, vec![change(&shallow(0), Kind::Modified)]),
+        event(1, 42, vec![change(&deep(0), Kind::Modified)]),
+    ];
+    let options = Options {
+        seconds_per_day: 1.0,
+        max_idle_seconds: 8.0,
+        ..Options::default()
+    };
+    let report = replay(
+        events,
+        &["sparse".into(), "dense".into(), "control".into()],
+        &options,
+        CI_TICK_LIMIT,
+        Fault::None,
+    )
+    .unwrap();
+    assert!(report.comparable_glyph_frames > 0);
+    println!("dense tile glyphs: {report:?}");
+    report.check_glyph_exemptions().unwrap();
+}
+
+#[test]
+fn glyph_ratio_distant_directory_growth() {
+    let events = vec![
+        write(0, 0, (0..7).map(|dir| format!("early/{dir}/initial.rs"))),
+        write(1, 1, (0..7).map(|dir| format!("stable/{dir}/initial.rs"))),
+        write(0, 30, (0..350).map(|dir| format!("future/{dir}/new.rs"))),
+    ];
+    let options = Options {
+        seconds_per_day: 0.6,
+        max_idle_seconds: 20.0,
+        travel_window_seconds: Some(8.0),
+        ..Options::default()
+    };
+    let report = replay(
+        events,
+        &["Growth".into(), "Stable".into()],
+        &options,
+        CI_TICK_LIMIT,
+        Fault::None,
+    )
+    .unwrap();
+    assert!(report.comparable_glyph_frames > 0);
+    println!("distant directory glyphs: {report:?}");
+    report.check_glyph_exemptions().unwrap();
+}
+
+#[test]
+fn ongoing_directory_growth_cannot_extend_a_glyph_exemption() {
+    let events = (0..=18)
+        .map(|day| write(0, day, (0..8).map(|file| format!("group-{day}/{file}.rs"))))
+        .collect();
+    let report = replay(
+        events,
+        &["Growing".into()],
+        &Options {
+            seconds_per_day: 1.0,
+            max_idle_seconds: 1.0,
+            ..Options::default()
+        },
+        CI_TICK_LIMIT,
+        Fault::None,
+    )
+    .unwrap();
+    assert!(
+        report.longest_glyph_exemption <= Time::seconds(10.0).ticks(true),
+        "continuous glyph exemption lasted {} ticks",
+        report.longest_glyph_exemption
+    );
+}
+
 fn seam_history(extra_files: u8, fault: Fault) -> Result<Replay, TestCaseError> {
     let events = vec![
         write(0, 0, ["first.rs".into()]),
@@ -454,6 +560,18 @@ fn playback_variations() -> impl Strategy<Value = PlaybackVariation> {
 }
 
 #[test]
+#[ignore = "Brief 9, 20:34:49: trial 2 is incremental and the density gate remains open"]
+fn settled_layout_meets_density_and_coverage_limits() {
+    let config = property_config(8);
+    let seed = config.rng_seed;
+    TestRunner::new(config)
+        .run(&histories(2..=5, 1..=8, 0..=2, 6..=12), |history| {
+            history.replay(CI_TICK_LIMIT)?.check_layout_quality()
+        })
+        .unwrap_or_else(|error| panic!("layout quality seed {seed:?}: {error}"));
+}
+
+#[test]
 fn short_histories_preserve_playback_invariants() {
     let config = property_config(8);
     let seed = config.rng_seed;
@@ -463,7 +581,12 @@ fn short_histories_preserve_playback_invariants() {
     );
     TestRunner::new(config)
         .run(&histories(2..=5, 1..=8, 0..=2, 6..=12), |history| {
-            history.replay(CI_TICK_LIMIT).map(|_| ())
+            let report = history.replay(CI_TICK_LIMIT)?;
+            println!(
+                "Raw glyph width ratios: worst {:.4} at {:?}, P90 {:?} (tick, smallest repo, largest repo)",
+                report.worst_glyph_ratio, report.worst_glyph_at, report.glyph_ratio_p90,
+            );
+            report.check_glyph_exemptions()
         })
         .unwrap_or_else(|error| panic!("playback seed {seed:?}: {error}"));
 }
@@ -505,7 +628,11 @@ fn extended_histories_preserve_playback_invariants() {
             println!("{} visible contributors at peak, {} assigned to one repository, {} passing contacts, {} ticks of parked overlap",
                 report.peak_visible_contributors, report.peak_contributors_per_repository,
                 report.passing_contacts, report.longest_parked_contact);
-            Ok(())
+            println!(
+                "Raw glyph width ratios: worst {:.4} at {:?}, P90 {:?} (tick, smallest repo, largest repo)",
+                report.worst_glyph_ratio, report.worst_glyph_at, report.glyph_ratio_p90,
+            );
+            report.check_glyph_exemptions()
         })
         .unwrap_or_else(|error| panic!("extended playback seed {seed:?}: {error}"));
 }
@@ -542,6 +669,68 @@ fn archive_and_rank_change_under_sustained_writes() {
     assert!(report.arrivals_at_seam > 0);
     assert!(report.max_carried_step > 0.0);
     assert!(report.final_gap <= 1e-5, "settled gutter gap: {report:?}");
+}
+
+#[test]
+fn a_generated_late_birth_and_overlapping_exits_use_flat_cells() {
+    TestRunner::new(property_config(8))
+        .run(&(1..=4_u8, any::<bool>()), |(files, shared)| {
+            let author = |repo: usize| {
+                let id = if shared { 0 } else { repo };
+                Identity::new(&format!("Author {id}"), &format!("a{id}@example.test"))
+            };
+            let mut events = Vec::new();
+            for (repo, day) in [(0, 0), (1, 1), (2, 6), (3, 9)] {
+                let changes = (0..files)
+                    .map(|file| change(&format!("dir/{file}.rs"), Kind::Added))
+                    .collect();
+                events.push(namespaced_event(repo, day, author(repo), changes));
+            }
+            for day in 10..=30 {
+                let repo = usize::try_from(day % 2).unwrap();
+                events.push(namespaced_event(
+                    repo,
+                    day,
+                    author(repo),
+                    vec![change(&format!("live/{day}.rs"), Kind::Added)],
+                ));
+            }
+            let labels = ["One", "Two", "Third", "Fourth"].map(str::to_owned);
+            let report = replay(
+                events,
+                &labels,
+                &Options {
+                    start: 2,
+                    seconds_per_day: 0.5,
+                    max_idle_seconds: 1.5,
+                    travel_window_seconds: Some(0.75),
+                    repository_ends: vec![
+                        None,
+                        None,
+                        Some(12 * 86_400),
+                        Some(16 * 86_400),
+                    ],
+                    repository_archived: vec![false, false, true, true],
+                    ..Options::default()
+                },
+                CI_TICK_LIMIT,
+                Fault::None,
+            )?;
+            prop_assert_eq!(
+                report.flat_lifecycles,
+                (2, 2),
+                "replay fell back to slicing: {:?}",
+                report
+            );
+            prop_assert!(report.overlapping_exits && report.arrivals_at_seam > 0);
+            prop_assert!(
+                report.max_tile_step_px <= 8.001 && report.final_gap <= 1e-5,
+                "{:?}",
+                report
+            );
+            Ok(())
+        })
+        .unwrap();
 }
 
 #[test]

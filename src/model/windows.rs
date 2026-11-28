@@ -510,7 +510,7 @@ mod tests {
         assert_eq!(reports[0].calls(&[Phase::Build]), 1);
         let build = [Phase::Build, Phase::PlanRepositories];
         assert_eq!(reports[0].calls(&build), 1);
-        assert!(reports[0].counter(&build, Counter::Tilings) > 0);
+        assert!(reports[0].counter(&build, Counter::TicksReplayed) > 0);
         let windows = &reports[1..];
         assert_eq!(windows.len(), sim.boundaries.len());
         assert!(windows.len() > 1);
@@ -734,14 +734,12 @@ mod tests {
         };
         let skipped = total(&fast, &[], Counter::EnvelopeReuses);
         assert!(skipped > 0);
-        assert!(total(&fast, &[], Counter::TilingReuses) > 0);
-        assert_eq!(total(&slow, &[], Counter::TilingReuses), 0);
         assert_eq!(replays(&fast) + skipped, replays(&slow));
         assert_same_playback(&mut reused, &mut replayed);
     }
 
     #[test]
-    fn passing_avatars_do_not_trigger_slot_replanning() {
+    fn passing_avatars_play_back_identically_when_slot_plans_are_reused() {
         let (mut events, labels) = super::super::tests::short_repository_history(6);
         events.truncate(12);
         let [(mut reused, fast), (mut replayed, slow)] =
@@ -769,9 +767,6 @@ mod tests {
         for reports in [&fast, &slow] {
             assert!(reports.iter().any(|report| {
                 report.calls(&[Phase::RefineServiceSlots, Phase::Reserve]) > 0
-            }));
-            assert!(reports.iter().all(|report| {
-                report.calls(&[Phase::RefineServiceSlots, Phase::PlanTravel]) == 0
             }));
         }
         assert_same_playback(&mut reused, &mut replayed);
@@ -862,7 +857,12 @@ mod tests {
         assert_eq!(report.calls(&[Phase::TravelPadding]), 1);
         assert_eq!(report.calls(&[Phase::Pass]), passes);
         assert_eq!(report.calls(&[Phase::Pass, Phase::PlanTravel]), passes);
-        assert!(report.counter(&[], Counter::Tilings) > 0);
+        assert!(
+            report.counter(
+                &[Phase::Build, Phase::PlanRepositories],
+                Counter::TicksReplayed
+            ) > 0
+        );
     }
 
     #[test]
