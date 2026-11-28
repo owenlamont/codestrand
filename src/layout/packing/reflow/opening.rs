@@ -17,6 +17,203 @@ const HIGH_X: [f32; 3] = [0.72, 0.81, 0.87];
 const LOW_Y: [f32; 3] = [0.11, 0.17, 0.23];
 const HIGH_Y: [f32; 3] = [0.77, 0.85, 0.91];
 
+pub(in crate::layout::packing) fn bands(
+    mut space: Space,
+    weights: &[f32],
+    births: &[usize],
+) -> anyhow::Result<(Layout, Space)> {
+    use super::super::FIELD_GROWTH_STEP;
+
+    let mut active: Vec<_> = births
+        .iter()
+        .enumerate()
+        .filter_map(|(repo, &birth)| (birth != usize::MAX).then_some(repo))
+        .collect();
+    if active.is_empty() {
+        active.push(0);
+    }
+    loop {
+        if let Some(layout) = band_layout(space, weights, &active) {
+            return Ok((layout, space));
+        }
+        space.growth *= FIELD_GROWTH_STEP;
+        anyhow::ensure!(
+            space
+                .field(framing::MARGIN)
+                .pixels()
+                .length_squared()
+                .is_finite(),
+            "repository field dimensions exceed finite layout arithmetic"
+        );
+    }
+}
+
+fn band_layout(space: Space, weights: &[f32], active: &[usize]) -> Option<Layout> {
+    use super::super::log_density_error;
+    let total = active
+        .iter()
+        .map(|&repo| weights[repo].max(1.0))
+        .sum::<f32>();
+    let mut best = None;
+    let mut best_cost = f32::INFINITY;
+    for axis in 0..2 {
+        let centre = active.len().isqrt();
+        let mut choices = [
+            1,
+            centre.saturating_sub(1).max(1),
+            centre,
+            (centre + 1).min(active.len()),
+        ];
+        choices.sort_unstable();
+        for (i, &bands) in choices.iter().enumerate() {
+            if i > 0 && choices[i - 1] == bands {
+                continue;
+            }
+            let Some(layout) = build_bands(space, weights, active, axis, bands, true)
+                .or_else(|| build_bands(space, weights, active, axis, bands, false))
+            else {
+                continue;
+            };
+            let area = layout
+                .tiles
+                .iter()
+                .flatten()
+                .copied()
+                .map(Tile::area)
+                .sum::<f32>();
+            let cost = active
+                .iter()
+                .map(|&repo| {
+                    let files = weights[repo].max(1.0);
+                    files
+                        * log_density_error(
+                            layout.tiles[repo].unwrap(),
+                            files,
+                            total / area,
+                        )
+                })
+                .sum::<f32>();
+            if cost < best_cost {
+                best = Some(layout);
+                best_cost = cost;
+            }
+        }
+    }
+    best
+}
+
+fn build_bands(
+    space: Space,
+    weights: &[f32],
+    active: &[usize],
+    axis: usize,
+    bands: usize,
+    weighted: bool,
+) -> Option<Layout> {
+    use super::super::{BOUND, GUTTER_MARGIN};
+
+    let cross = 1 - axis;
+    let glass = space.field(framing::MARGIN);
+    let field = space.field(GUTTER_MARGIN);
+    let pixels = glass.pixels();
+    let gap = space.gap;
+    let thickness = (pixels[cross] - count(bands - 1) * gap) / count(bands);
+    if thickness < 16.0 {
+        return None;
+    }
+    let mut layout = Layout {
+        tiles: vec![None; weights.len()],
+        gutters: vec![None; weights.len()],
+    };
+    let mut offset = 0;
+    for band in 0..bands {
+        let members = active.len() / bands + usize::from(band < active.len() % bands);
+        let length = pixels[axis] - count(members - 1) * gap;
+        let min = (thickness / BOUND).max(16.0) + 0.001;
+        let max = thickness * BOUND - 0.001;
+        let repos = &active[offset..offset + members];
+        let spans = if weighted {
+            weighted_spans(repos, weights, length, min, max)?
+        } else {
+            vec![length / count(members); members]
+        };
+        let mut edge = 0.0;
+        for (column, (&repo, span)) in repos.iter().zip(spans).enumerate() {
+            let along = |px| glass.low[axis] + px * 2.0 / framing::VIEWPORT[axis];
+            let across = |px| glass.low[cross] + px * 2.0 / framing::VIEWPORT[cross];
+            let band_edge = count(band) * (thickness + gap);
+            let next = edge + span + gap;
+            let mut tile = glass;
+            tile.low[axis] = along(edge);
+            tile.low[cross] = across(band_edge);
+            if column + 1 < members {
+                tile.high[axis] = along(next - gap);
+            }
+            if band + 1 < bands {
+                tile.high[cross] = across(band_edge + thickness);
+            }
+            let mut cell = field;
+            if column > 0 {
+                cell.low[axis] = along(edge - gap * 0.5);
+            }
+            if column + 1 < members {
+                cell.high[axis] = along(next - gap * 0.5);
+            }
+            if band > 0 {
+                cell.low[cross] = across(band_edge - gap * 0.5);
+            }
+            if band + 1 < bands {
+                cell.high[cross] =
+                    across(count(band + 1) * (thickness + gap) - gap * 0.5);
+            }
+            layout.tiles[repo] = Some(tile);
+            layout.gutters[repo] = Some(cell);
+            edge = next;
+        }
+        offset += members;
+    }
+    (layout.tiles.iter().flatten().copied().all(settled)
+        && super::retirement::fills_field(&layout, field)
+        && super::retirement::contained(&layout)
+        && connected(&layout, &layout, false))
+    .then_some(layout)
+}
+
+fn weighted_spans(
+    repositories: &[usize],
+    weights: &[f32],
+    length: f32,
+    min: f32,
+    max: f32,
+) -> Option<Vec<f32>> {
+    let members = count(repositories.len());
+    if !(min * members..=max * members).contains(&length) {
+        return None;
+    }
+    let span =
+        |repo: usize, scale: f32| (weights[repo].max(1.0) * scale).clamp(min, max);
+    let mut lower = 0.0_f32;
+    let mut upper = max;
+    for _ in 0..40 {
+        let scale = lower.midpoint(upper);
+        let filled = repositories
+            .iter()
+            .map(|&repo| span(repo, scale))
+            .sum::<f32>();
+        if filled < length {
+            lower = scale;
+        } else {
+            upper = scale;
+        }
+    }
+    Some(
+        repositories
+            .iter()
+            .map(|&repo| span(repo, lower.midpoint(upper)))
+            .collect(),
+    )
+}
+
 fn fields(field: Tile, [x1, x2, y1, y2]: [f32; 4], mirrored: bool) -> [Tile; 5] {
     let [left, low] = field.low.to_array();
     let [right, high] = field.high.to_array();

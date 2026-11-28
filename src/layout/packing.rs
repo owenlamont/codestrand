@@ -1440,6 +1440,17 @@ impl Packing {
                 }
             })
             .collect();
+        let (stable, space) = if first.len() > 1
+            && exits.iter().all(Option::is_none)
+            && windows.iter().all(|&(start, end)| start == end)
+            && live_files.windows(2).all(|rows| rows[0] == rows[1])
+        {
+            let (opening, grown) =
+                reflow::opening::bands(space, &live_files[0], &births)?;
+            (Some(reflow::lifecycle::Program::stationary(opening)), grown)
+        } else {
+            (None, space)
+        };
         let mut held = held::Weights::new(first.len());
         let mut reflows = Vec::<reflow::Change>::new();
         let mut was_stable = false;
@@ -1619,9 +1630,11 @@ impl Packing {
             tiling: TilingCache::default(),
             fresh_tiling: false,
         };
-        packing.lifecycle =
-            reflow::lifecycle::Program::plan(&packing, &windows, &live_files)
-                .map(Arc::new);
+        packing.lifecycle = stable
+            .or_else(|| {
+                reflow::lifecycle::Program::plan(&packing, &windows, &live_files)
+            })
+            .map(Arc::new);
         if packing.lifecycle.is_none() {
             let retirement = packing.plan_retirement();
             if let Some((opening, retirement)) =
@@ -2598,6 +2611,7 @@ mod tests {
             })
             .collect();
         let packing = Packing::before_service(&vec![row; 60]);
+        assert!(packing.lifecycle.is_some());
         let (regions, _, _) = packing.sample(59).unwrap();
         let areas: Vec<_> = regions.iter().map(|r| r.tile.unwrap().area()).collect();
         let total: f32 = areas.iter().sum();
@@ -3392,7 +3406,7 @@ mod tests {
     }
 
     #[test]
-    fn playback_can_open_without_a_through_cut() {
+    fn a_stable_wide_gutter_opening_uses_the_flat_partition() {
         let mut row = capacity_fixture();
         row.truncate(5);
         let shapes = [
@@ -3414,6 +3428,7 @@ mod tests {
         }
         let packing =
             Packing::from_inputs(inputs, Arc::default(), 20.0, 1.0, 1).unwrap();
+        let program = packing.lifecycle.as_ref().expect("flat opening");
         let cells = |tick| {
             packing
                 .sample_split(tick, tick, &[], None)
@@ -3424,21 +3439,13 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         let opening = cells(0);
-        let field = packing.space().field(GUTTER_MARGIN);
-        for axis in 0..2 {
-            for cut in opening
-                .iter()
-                .flat_map(|tile| [tile.low[axis], tile.high[axis]])
-            {
-                if field.low[axis] < cut && cut < field.high[axis] {
-                    assert!(
-                        opening
-                            .iter()
-                            .any(|tile| tile.low[axis] < cut && cut < tile.high[axis])
-                    );
-                }
-            }
-        }
+        let layout = program.sample(0, &[]);
+        assert_eq!(program.field(), packing.space().field(GUTTER_MARGIN));
+        assert!(packing.settled_glass_error_px() < 0.001);
+        assert!(layout.tiles.iter().flatten().all(|tile| {
+            tile.pixels().min_element() >= 16.0
+                && (1.0 / BOUND..=BOUND).contains(&tile.ground_aspect())
+        }));
         assert_eq!(opening, cells(9));
         crate::model::assert_gutter_routes(opening.into_iter());
     }

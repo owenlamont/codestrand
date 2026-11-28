@@ -27,6 +27,13 @@ enum Action {
 }
 
 impl Program {
+    pub(in crate::layout::packing) fn stationary(opening: Layout) -> Self {
+        Self {
+            opening,
+            phases: Vec::new(),
+        }
+    }
+
     pub(in crate::layout::packing) fn retained_bytes(
         repositories: u128,
         ticks: u128,
@@ -54,10 +61,7 @@ impl Program {
             };
             return Self::compile(packing, opening, &events, live_files, false);
         }
-        if events.len() > MAX_OPERATIONS
-            || (events.is_empty()
-                && live_files.windows(2).all(|rows| rows[0] == rows[1]))
-        {
+        if events.len() > MAX_OPERATIONS {
             return None;
         }
         events.sort_unstable_by_key(|&(start, end, repo, birth)| {
