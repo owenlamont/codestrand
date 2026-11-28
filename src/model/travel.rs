@@ -2175,7 +2175,7 @@ mod tests {
 
     #[test]
     fn capped_births_fade_and_bots_keep_their_policy() {
-        for (cap, bot) in [(0.0, false), (0.4, true)] {
+        for (cap, bot, speed) in [(0.0, false, 10.0), (0.4, true, 480.0)] {
             let mut events = Vec::new();
             for i in 0..4 {
                 let mut history = vec![crate::timeline::synthetic().remove(0)];
@@ -2189,12 +2189,11 @@ mod tests {
             let options = super::super::Options {
                 travel_cap: super::super::TravelCap::Seconds(cap),
                 seconds_per_day: 0.3,
+                avatar_max_speed: speed,
                 ..Default::default()
             };
             let mappings = crate::contributors::Mappings::default();
             mappings.apply(&mut events);
-            let nominal = super::super::Schedule::for_replay(&events, &options)
-                .with_travel(events.len(), |_| 0);
             let sim = Simulation::with_repositories(
                 events,
                 &options,
@@ -2202,10 +2201,14 @@ mod tests {
                 &mappings,
                 &["A".into(), "B".into()],
             );
+            for index in 0..sim.events.len() {
+                let travel =
+                    sim.schedule.padding(index) - sim.clock.history.padding(index);
+                assert_eq!(travel, 0, "event {index} incurred travel padding");
+            }
             if bot {
-                assert_eq!(sim.schedule.starts, nominal.starts);
+                assert_eq!(sim.travel.stats.routed, 0);
             } else {
-                assert_eq!(sim.schedule.starts, nominal.starts);
                 assert_eq!(sim.travel.stats.birth_fades, 1);
             }
         }

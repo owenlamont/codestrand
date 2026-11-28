@@ -1389,8 +1389,8 @@ impl Simulation {
                 .map(|sample| sample.regions(labels, geometry))
                 .collect()
         });
-        for regions in regions {
-            samples.push(regions);
+        for (regions, files) in regions {
+            samples.push_with_files(regions, files);
         }
         pending.clear();
     }
@@ -5850,12 +5850,13 @@ mod tests {
                 &Mappings::default(),
                 &names,
             );
-            let first_write = if start == 1 {
-                tick_time(BIRTH_TICKS + 1)
-            } else {
-                Time::seconds(LEAD_IN)
-            };
-            assert_eq!(simulation.duration(), first_write + TAIL);
+            let expected = options.selected_range(events.len()).len();
+            assert_eq!(simulation.events.len(), expected);
+            let final_write = simulation.schedule.starts.last().copied();
+            assert_eq!(
+                simulation.duration(),
+                final_write.unwrap_or(Time::seconds(LEAD_IN)) + TAIL
+            );
         }
         events[1].seconds = events[0].seconds;
         assert!(

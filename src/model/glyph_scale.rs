@@ -1,30 +1,54 @@
-use bevy::math::{Vec2, Vec3};
+use bevy::math::Vec3;
 
 use super::{Simulation, Time};
-use crate::layout::{Presence, packing::Tile};
+use crate::layout::Presence;
 
 const GLYPH_RATIO_GRACE: f32 = 2.5;
 const RATIO: f32 = 2.0;
-const GEOMETRY_EPSILON: f32 = 1e-5;
+pub(super) const GLYPH_RATIO_MAX_EXEMPT: f32 = 10.0;
 
 #[derive(Clone, Copy, Default)]
 struct Repository {
-    tile: Option<Tile>,
-    last_motion: u64,
-    settled: bool,
+    visible: bool,
+    exemption: Option<Exemption>,
 }
 
-#[derive(Clone, Copy, Default)]
-struct Directory {
-    live: bool,
-    position: Vec2,
-    radius: f32,
+#[derive(Clone, Copy)]
+struct Exemption {
+    start: u64,
+    last_placement: u64,
+}
+
+impl Repository {
+    fn sample(&mut self, tick: u64, visible: bool, placing: bool, grace: u64) {
+        if !visible {
+            *self = Self::default();
+        } else if placing || !self.visible {
+            let episode = self.exemption.get_or_insert(Exemption {
+                start: tick,
+                last_placement: tick,
+            });
+            episode.last_placement = tick;
+        } else if self
+            .exemption
+            .is_some_and(|episode| tick - episode.last_placement >= grace)
+        {
+            self.exemption = None;
+        }
+        self.visible = visible;
+    }
+
+    fn eligible(self, tick: u64, limit: u64) -> bool {
+        self.visible
+            && self
+                .exemption
+                .is_none_or(|episode| tick - episode.start >= limit)
+    }
 }
 
 #[derive(Default)]
 pub(crate) struct GlyphScale {
     repositories: Vec<Repository>,
-    directories: Vec<Directory>,
     tick: Option<u64>,
     maximum: f32,
     eye_height: f32,
@@ -44,36 +68,20 @@ impl GlyphScale {
         let layout = sim.layout();
         self.repositories
             .resize(layout.repositories.len(), Repository::default());
-        self.directories
-            .resize(layout.dir_count(), Directory::default());
-        for (state, region) in self.repositories.iter_mut().zip(&layout.repositories) {
-            if state.tile != region.tile {
-                state.last_motion = tick;
-                state.tile = region.tile;
-            }
-        }
-        for (id, previous) in self.directories.iter_mut().enumerate() {
-            let dir = layout.dir(id);
-            let after = Directory {
-                live: dir.live,
-                position: dir.position,
-                radius: dir.radius(),
-            };
-            if (previous.live != after.live
-                || after.live
-                    && (previous.position.distance_squared(after.position)
-                        > GEOMETRY_EPSILON * GEOMETRY_EPSILON
-                        || (previous.radius - after.radius).abs() > GEOMETRY_EPSILON))
-                && let Some(state) = self.repositories.get_mut(dir.repository)
-            {
-                state.last_motion = tick;
-            }
-            *previous = after;
-        }
         let grace = Time::seconds(GLYPH_RATIO_GRACE).ticks(true);
-        for state in &mut self.repositories {
-            state.settled =
-                state.tile.is_some() && tick.saturating_sub(state.last_motion) > grace;
+        let tile_tick = sim.clock.rows(tick).0;
+        for (repo, (state, region)) in self
+            .repositories
+            .iter_mut()
+            .zip(&layout.repositories)
+            .enumerate()
+        {
+            let placing = sim
+                .births
+                .iter()
+                .any(|&(birth, ready, _)| birth == repo && tick <= ready)
+                || sim.packing.exchanging(tile_tick, repo);
+            state.sample(tick, region.tile.is_some(), placing, grace);
         }
         let minimum = layout
             .files()
@@ -98,14 +106,12 @@ impl GlyphScale {
     }
 
     pub(crate) fn settled(&self, repository: usize) -> bool {
-        self.repositories
-            .get(repository)
-            .is_some_and(|state| state.settled)
-    }
-
-    #[cfg(test)]
-    pub(super) fn last_motion(&self, repository: usize) -> u64 {
-        self.repositories[repository].last_motion
+        self.repositories.get(repository).is_some_and(|state| {
+            state.eligible(
+                self.tick.unwrap_or(0),
+                Time::seconds(GLYPH_RATIO_MAX_EXEMPT).ticks(true),
+            )
+        })
     }
 
     pub(crate) fn scale(&self, repository: usize, nominal: f32) -> f32 {
@@ -119,5 +125,24 @@ impl GlyphScale {
     #[cfg(test)]
     pub(super) fn overview_width(&self, scale: f32) -> f32 {
         scale / (self.eye_height - self.glyph_height * scale)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn continuous_placement_loses_its_exemption_at_the_cap() {
+        let grace = Time::seconds(GLYPH_RATIO_GRACE).ticks(true);
+        let cap = Time::seconds(GLYPH_RATIO_MAX_EXEMPT).ticks(true);
+        let mut repo = Repository::default();
+        for tick in 0..=cap {
+            repo.sample(tick, true, true, grace);
+            assert_eq!(repo.eligible(tick, cap), tick == cap);
+        }
+        repo.sample(cap + grace, true, false, grace);
+        repo.sample(cap + grace + 1, true, true, grace);
+        assert!(!repo.eligible(cap + grace + 1, cap));
     }
 }

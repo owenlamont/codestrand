@@ -5,7 +5,6 @@ use crate::{
 };
 
 const MAX_OPERATIONS: usize = 192;
-const MAX_SHIFTS: usize = 8;
 
 #[derive(Debug)]
 pub(in crate::layout::packing) struct Program {
@@ -28,21 +27,30 @@ enum Action {
 }
 
 impl Program {
-    pub(in crate::layout::packing) fn retained_bytes(repositories: u128) -> u128 {
+    pub(in crate::layout::packing) fn retained_bytes(
+        repositories: u128,
+        ticks: u128,
+    ) -> u128 {
         let layout = repositories * (2 * std::mem::size_of::<Option<Tile>>()) as u128;
         (std::mem::size_of::<Self>() + 2 * std::mem::size_of::<usize>()) as u128
             + layout
             + repositories * std::mem::size_of::<usize>() as u128
-            + (MAX_OPERATIONS as u128).min(2 * repositories + MAX_SHIFTS as u128)
+            + ((MAX_OPERATIONS as u128).min(2 * repositories)
+                + ticks / held::reflow_ticks() as u128)
                 * (std::mem::size_of::<Phase>() as u128 + 2 * layout)
     }
 
     pub(in crate::layout::packing) fn plan(
         packing: &Packing,
         windows: &[(usize, usize)],
+        live_files: &[Vec<f32>],
     ) -> Option<Self> {
         let mut events = lifecycle_events(packing, windows)?;
-        if events.is_empty() || events.len() > MAX_OPERATIONS {
+        if events.len() > MAX_OPERATIONS
+            || packing.labels.len() < 2
+            || (events.is_empty()
+                && live_files.windows(2).all(|rows| rows[0] == rows[1]))
+        {
             return None;
         }
         events.sort_unstable_by_key(|&(start, end, repo, birth)| {
@@ -52,8 +60,8 @@ impl Program {
         let preferred = opening::plan(packing, &base, |_| true);
         preferred.into_iter().chain([base]).find_map(|mut opening| {
             inset_field(packing, &mut opening)?;
-            Self::compile(packing, opening.clone(), &events, false)
-                .or_else(|| Self::compile(packing, opening, &events, true))
+            Self::compile(packing, opening.clone(), &events, live_files, false)
+                .or_else(|| Self::compile(packing, opening, &events, live_files, true))
         })
     }
 
@@ -61,32 +69,22 @@ impl Program {
         packing: &Packing,
         opening: Layout,
         events: &[(usize, usize, usize, bool)],
+        live_files: &[Vec<f32>],
         share_archive_windows: bool,
     ) -> Option<Self> {
         let mut current = opening.clone();
-        let budget = (MAX_OPERATIONS - events.len()).min(MAX_SHIFTS);
-        let mut phases = Vec::with_capacity(events.len() + budget);
-        let mut shifts = packing
-            .reflows
-            .iter()
-            .filter(|shift| {
-                !events.iter().any(|&(start, end, _, _)| {
-                    shift.tick < end && shift.tick + shift.duration() > start
-                })
-            })
-            .take(budget)
-            .peekable();
+        let mut phases = Vec::with_capacity(events.len());
         let mut available = 0;
         let mut events = events.iter().copied().peekable();
         while let Some((start, end, repository, birth)) = events.next() {
             let requested = start;
-            while shifts
-                .peek()
-                .is_some_and(|shift| shift.tick + shift.duration() <= start)
-            {
-                let shift = shifts.next().unwrap();
-                insert_shift(packing, shift, available, &mut current, &mut phases);
-            }
+            insert_shifts(
+                packing,
+                live_files,
+                available..start,
+                &mut current,
+                &mut phases,
+            );
             if birth && start == 0 && current.tiles[repository].is_some() {
                 continue;
             }
@@ -156,10 +154,35 @@ impl Program {
             available = end;
             phases.push(Phase { start, end, action });
         }
-        for shift in shifts {
-            insert_shift(packing, shift, available, &mut current, &mut phases);
-        }
+        insert_shifts(
+            packing,
+            live_files,
+            available..live_files.len() - 1,
+            &mut current,
+            &mut phases,
+        );
         Some(Self { opening, phases })
+    }
+
+    pub(in crate::layout::packing) fn shifts(
+        &self,
+    ) -> impl Iterator<Item = (u64, u64)> + '_ {
+        self.phases
+            .iter()
+            .filter(|phase| matches!(phase.action, Action::Shift { .. }))
+            .map(|phase| {
+                (
+                    u64::try_from(phase.start).expect("bounded shift tick"),
+                    u64::try_from(phase.end).expect("bounded shift tick"),
+                )
+            })
+    }
+
+    pub(in crate::layout::packing) fn shifting(&self, tick: usize) -> bool {
+        let index = self.phases.partition_point(|phase| phase.start <= tick);
+        self.phases[..index].last().is_some_and(|phase| {
+            tick < phase.end && matches!(phase.action, Action::Shift { .. })
+        })
     }
 
     #[cfg(test)]
@@ -306,30 +329,36 @@ fn lifecycle_events(
     Some(events)
 }
 
-fn insert_shift(
+fn insert_shifts(
     packing: &Packing,
-    shift: &super::Change,
-    available: usize,
+    live_files: &[Vec<f32>],
+    window: std::ops::Range<usize>,
     current: &mut Layout,
     phases: &mut Vec<Phase>,
 ) {
-    let start = shift.tick;
-    let end = (start + shift.duration()).min(packing.samples.len() - 1);
-    if start < available
-        || end <= start
-        || phases.last().is_some_and(|phase| phase.end > start)
-    {
-        return;
+    let duration = held::reflow_ticks();
+    let mut rejected = None;
+    let mut start = window.start;
+    while window.end.saturating_sub(start) >= duration {
+        let end = start + duration;
+        let weights = &live_files[end];
+        if rejected != Some(weights) {
+            if let Some(after) =
+                opening::plan_shift(packing, current, weights, duration)
+            {
+                let before = std::mem::replace(current, after.clone());
+                phases.push(Phase {
+                    start,
+                    end,
+                    action: Action::Shift { before, after },
+                });
+                rejected = None;
+            } else {
+                rejected = Some(weights);
+            }
+        }
+        start = end;
     }
-    let Some(after) = opening::plan_shift(packing, current, end, end - start) else {
-        return;
-    };
-    let before = std::mem::replace(current, after.clone());
-    phases.push(Phase {
-        start,
-        end,
-        action: Action::Shift { before, after },
-    });
 }
 
 fn inset_field(packing: &Packing, layout: &mut Layout) -> Option<()> {
@@ -424,6 +453,63 @@ mod tests {
     use bevy::math::Vec2;
 
     #[test]
+    fn flat_allocation_catches_up_after_a_late_bulk_import() {
+        const BIRTH: usize = 1_120;
+        const IMPORT: usize = 1_400;
+        const END: usize = 2_600;
+        let mut inputs = Inputs::new(END + 1);
+        for tick in 0..=END {
+            inputs.push(
+                [25.0, 25.0, if tick < IMPORT { 1.0 } else { 100.0 }]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(repo, items)| RepositoryRegion {
+                        label: format!("repo {repo}"),
+                        low: -Vec2::ONE,
+                        high: Vec2::ONE,
+                        live: repo < 2 || tick > BIRTH,
+                        items,
+                        tile: None,
+                        gutter: None,
+                        outline: outline::rectangle(-Vec2::ONE, Vec2::ONE),
+                        height: 0.1,
+                        rotated: false,
+                        stretch: Vec2::ONE,
+                    })
+                    .collect(),
+            );
+        }
+        let packing =
+            Packing::from_inputs(inputs, vec![None; 3].into(), 4.0, 1.0, 1).unwrap();
+        let mut opening = packing.layout_at(0, &[], None, None);
+        inset_field(&packing, &mut opening).unwrap();
+        let events = [(BIRTH - 90, BIRTH, 2, true)];
+        let live_files: Vec<_> = (0..=END)
+            .map(|tick| vec![25.0, 25.0, if tick < IMPORT { 1.0 } else { 100.0 }])
+            .collect();
+        let plan =
+            Program::compile(&packing, opening, &events, &live_files, false).unwrap();
+        let arrival = plan.sample(BIRTH, &[]);
+        let final_layout = plan.sample(END, &[]);
+        let share = |layout: Layout| {
+            let area = layout.tiles[2].unwrap().area();
+            area / layout
+                .tiles
+                .into_iter()
+                .flatten()
+                .map(Tile::area)
+                .sum::<f32>()
+        };
+        let initial = share(arrival);
+        assert!(initial < 0.28, "initial share {initial:.3}");
+        let actual = share(final_layout.clone());
+        assert!(
+            (actual - 2.0 / 3.0).abs() < 0.05,
+            "import share {actual:.3}, final {final_layout:?}"
+        );
+    }
+
+    #[test]
     fn nearly_simultaneous_archives_can_share_their_overlapping_window() {
         let mut inputs = Inputs::new(264);
         for _ in 0..264 {
@@ -469,8 +555,13 @@ mod tests {
             gutters: cells.into_iter().map(Some).collect(),
         };
         let events = [(20, 260, 0, false), (23, 263, 2, false)];
-        assert!(Program::compile(&packing, opening.clone(), &events, false).is_none());
-        let plan = Program::compile(&packing, opening, &events, true).unwrap();
+        let live_files = vec![vec![20.0; 3]; 264];
+        assert!(
+            Program::compile(&packing, opening.clone(), &events, &live_files, false)
+                .is_none()
+        );
+        let plan =
+            Program::compile(&packing, opening, &events, &live_files, true).unwrap();
         assert_eq!(plan.counts(), (0, 2));
         assert_eq!(plan.phases.len(), 1);
         let phase = &plan.phases[0];

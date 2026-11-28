@@ -77,6 +77,22 @@ impl Change {
         self.transition.is_some() && tick - self.tick < self.duration()
     }
 
+    pub(super) fn exchanges(&self, tick: usize, repository: usize) -> bool {
+        self.in_transition(tick)
+            && match &self.exchange {
+                Some(Motion::Exchange(motion)) => {
+                    motion.repositories.contains(&repository)
+                }
+                Some(Motion::Chain(motion)) => {
+                    motion.repositories.contains(&repository)
+                }
+                Some(Motion::ColumnTransfer(motion)) => {
+                    motion.repositories.contains(&repository)
+                }
+                None => false,
+            }
+    }
+
     pub fn matches_presence(&self, presence: &[f32]) -> bool {
         let Some((from, _)) = &self.transition else {
             return false;

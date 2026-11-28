@@ -259,25 +259,24 @@ fn glyph_fit<'a>(
 pub(super) fn plan_shift(
     packing: &Packing,
     current: &Layout,
-    tick: usize,
+    weights: &[f32],
     ticks: usize,
 ) -> Option<Layout> {
-    let active: Vec<_> = current
-        .tiles
-        .iter()
-        .enumerate()
-        .filter_map(|(repo, tile)| tile.map(|_| repo))
-        .collect();
-    if active.len() < 2 {
+    if current.tiles.iter().flatten().take(2).count() < 2 {
         return None;
     }
-    let fit = glyph_fit(packing, tick, &active);
-    let gutter_cost = shared_gutters(current).max(1.0);
-    let weights = &packing.samples[tick].weights;
-    best_slide(current, packing.space(), ticks, Some(weights), |layout| {
-        fit(layout).0
-            - 0.05 * shared_gutters(layout) / gutter_cost
-            - 0.4 * super::Density::new(&layout.tiles, weights).score()
+    let weights: Vec<_> = weights.iter().map(|&weight| weight.max(1.0)).collect();
+    best_slide(current, packing.space(), ticks, Some(&weights), |layout| {
+        let (area, total) = super::totals(&layout.tiles, &weights);
+        let squared_error: f32 = layout
+            .tiles
+            .iter()
+            .zip(&weights)
+            .filter_map(|(&tile, &files)| {
+                tile.map(|tile| (tile.area() / area - files / total).powi(2))
+            })
+            .sum();
+        -squared_error
     })
 }
 

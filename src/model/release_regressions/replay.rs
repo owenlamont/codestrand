@@ -45,10 +45,17 @@ pub(super) struct Replay {
     pub glyph_ratio_p90: f32,
     pub out_of_band_glyph_frames: usize,
     pub glyph_settle_ticks: Vec<u64>,
+    pub longest_glyph_exemption: u64,
 }
 
 impl Replay {
     pub(super) fn check_glyph_ratio(&self) -> TestCaseResult {
+        let limit = Time::seconds(glyph_scale::GLYPH_RATIO_MAX_EXEMPT).ticks(true);
+        prop_assert!(
+            self.longest_glyph_exemption <= limit,
+            "glyph exemption lasted {} ticks (maximum {limit})",
+            self.longest_glyph_exemption,
+        );
         prop_assert!(
             self.worst_glyph_ratio <= 2.0 + 8.0 * f32::EPSILON,
             "nominal glyph width ratio {:.4} at frame {} exceeds 2.0",
@@ -117,7 +124,7 @@ struct Audit {
     applied: usize,
     glyph_scale: crate::model::glyph_scale::GlyphScale,
     glyph_ratios: Vec<f32>,
-    glyph_motion_start: Vec<Option<u64>>,
+    glyph_exemption_ticks: Vec<u64>,
 }
 
 pub(super) fn replay(
@@ -322,17 +329,19 @@ impl Audit {
         let layout = sim.layout();
         let tick = sim.state.tick;
         self.glyph_scale.sample(sim);
-        self.glyph_motion_start
-            .resize(layout.repositories.len(), None);
-        for (repo, start) in self.glyph_motion_start.iter_mut().enumerate() {
-            let visible = layout.repositories[repo].tile.is_some();
-            let last = self.glyph_scale.last_motion(repo);
-            if visible && last == tick {
-                start.get_or_insert(tick);
-            } else if (self.glyph_scale.settled(repo) || !visible)
-                && let Some(start) = start.take()
+        self.glyph_exemption_ticks
+            .resize(layout.repositories.len(), 0);
+        for (repo, duration) in self.glyph_exemption_ticks.iter_mut().enumerate() {
+            if layout.repositories[repo].tile.is_some()
+                && !self.glyph_scale.settled(repo)
             {
-                self.report.glyph_settle_ticks.push(last - start + 1);
+                *duration += 1;
+                self.report.longest_glyph_exemption =
+                    self.report.longest_glyph_exemption.max(*duration);
+            } else if *duration > 0 {
+                self.report
+                    .glyph_settle_ticks
+                    .push(std::mem::take(duration));
             }
         }
         let mut minimum = f32::INFINITY;

@@ -92,6 +92,30 @@ fn glyph_ratio_distant_directory_growth() {
     report.check_glyph_ratio().unwrap();
 }
 
+#[test]
+fn ongoing_directory_growth_cannot_extend_a_glyph_exemption() {
+    let events = (0..=18)
+        .map(|day| write(0, day, (0..8).map(|file| format!("group-{day}/{file}.rs"))))
+        .collect();
+    let report = replay(
+        events,
+        &["Growing".into()],
+        &Options {
+            seconds_per_day: 1.0,
+            max_idle_seconds: 1.0,
+            ..Options::default()
+        },
+        CI_TICK_LIMIT,
+        Fault::None,
+    )
+    .unwrap();
+    assert!(
+        report.longest_glyph_exemption <= Time::seconds(10.0).ticks(true),
+        "continuous glyph exemption lasted {} ticks",
+        report.longest_glyph_exemption
+    );
+}
+
 fn seam_history(extra_files: u8, fault: Fault) -> Result<Replay, TestCaseError> {
     let events = vec![
         write(0, 0, ["first.rs".into()]),

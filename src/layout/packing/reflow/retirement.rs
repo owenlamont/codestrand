@@ -426,6 +426,8 @@ pub(super) fn best_slide(
     let mut best = None;
     let field = space.field(framing::MARGIN);
     let gutters = gutter_bounds(from)?;
+    let max_travel =
+        exchange::MAX_EDGE_STEP_PX * held::REFLOW_LINEAR_FRACTION * count(ticks);
     let gap = Vec2::splat(space.gap) * 2.0 / framing::VIEWPORT;
     let density = weights.and_then(|weights| {
         let total: f32 = from
@@ -454,14 +456,15 @@ pub(super) fn best_slide(
                 .map(|fraction| gutters.low[axis] + extent * fraction);
             let proportional = density
                 .map(|(weights, scale)| group.density_target(from, weights, scale));
+            let Some((low, high)) = group.slide_limits(from, max_travel) else {
+                continue;
+            };
             for cut in local.into_iter().chain(broad).chain(proportional) {
+                let cut = cut.clamp(low, high);
                 let to = group.finish(from, None, cut, field);
                 if !to.tiles.iter().zip(&from.tiles).all(|(&after, &before)| {
                     after == before || after.is_none_or(settled)
-                }) || exchange::edge_travel(from, &to)
-                    > exchange::MAX_EDGE_STEP_PX
-                        * held::REFLOW_LINEAR_FRACTION
-                        * count(ticks)
+                }) || exchange::edge_travel(from, &to) > max_travel + EPSILON
                 {
                     continue;
                 }
@@ -592,6 +595,28 @@ impl Group {
             members,
             donors,
         })
+    }
+
+    fn slide_limits(&self, layout: &Layout, max_travel: f32) -> Option<(f32, f32)> {
+        let pixels_per_unit = framing::VIEWPORT[self.axis] * 0.5;
+        let max_offset = max_travel / pixels_per_unit;
+        let mut low = -max_offset;
+        let mut high = max_offset;
+        for member in &self.members {
+            let size = layout.tiles[member.repo]?.pixels();
+            let cross = size[1 - self.axis];
+            let length = size[self.axis];
+            let minimum = (cross / super::super::BOUND).max(16.0) + 0.001;
+            let maximum = cross * super::super::BOUND - 0.001;
+            let bounds = if member.high {
+                (minimum - length, maximum - length)
+            } else {
+                (length - maximum, length - minimum)
+            };
+            low = low.max(bounds.0 / pixels_per_unit);
+            high = high.min(bounds.1 / pixels_per_unit);
+        }
+        (low <= high).then_some((self.cut + low, self.cut + high))
     }
 
     fn density_target(&self, layout: &Layout, weights: &[f32], scale: f32) -> f32 {

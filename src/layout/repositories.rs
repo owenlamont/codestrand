@@ -72,9 +72,10 @@ impl RegionSample {
         &self,
         labels: &[String],
         geometry: crate::theme::Geometry,
-    ) -> Vec<RepositoryRegion> {
+    ) -> (Vec<RepositoryRegion>, Vec<f32>) {
         let mut supports = vec![[f32::NEG_INFINITY; 8]; labels.len()];
         let mut counts = vec![0_u32; labels.len()];
+        let mut files = vec![0_u32; labels.len()];
         for dir in self.dirs.iter().filter(|dir| dir.live) {
             counts[dir.repository] = counts[dir.repository].saturating_add(1);
             super::outline::include(
@@ -91,6 +92,7 @@ impl RegionSample {
             let dir = &self.dirs[file.dir];
             if file.counted {
                 counts[dir.repository] = counts[dir.repository].saturating_add(1);
+                files[dir.repository] = files[dir.repository].saturating_add(1);
             }
             let presence = super::visible_presence(
                 file.presence,
@@ -109,7 +111,7 @@ impl RegionSample {
                 }
             }
         }
-        labels
+        let regions = labels
             .iter()
             .enumerate()
             .map(|(repository, label)| {
@@ -129,7 +131,11 @@ impl RegionSample {
                     stretch: Vec2::ONE,
                 }
             })
-            .collect()
+            .collect();
+        (
+            regions,
+            files.into_iter().map(crate::model::count_u32).collect(),
+        )
     }
 }
 

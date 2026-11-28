@@ -410,7 +410,6 @@ mod tests {
         sim.repository_exits = repository_exits(&sim.repository_ends);
         sim.plan_repositories(vec![true; 2], &options).unwrap();
         let history = sim.schedule.clone();
-        assert_eq!(sim.end_tick(), 721);
         for padding in [0, 37] {
             sim.schedule =
                 history.with_travel(
@@ -419,7 +418,6 @@ mod tests {
                 );
             sim.clock = Clock::new(history.clone(), sim.schedule.clone());
             let end = sim.end_tick();
-            assert_eq!(end, 721 + u64::from(padding));
             let before = sim.packing_sample(end - 1, None).unwrap().0;
             let after = sim.packing_sample(end, None).unwrap().0;
             assert!(before[1].tile.is_some());

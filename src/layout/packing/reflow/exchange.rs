@@ -35,7 +35,7 @@ impl Footprint {
 
 #[derive(Clone, Debug)]
 pub(super) struct Exchange {
-    repositories: [usize; 2],
+    pub(super) repositories: [usize; 2],
     waypoints: [[Footprint; 2]; PHASES - 1],
     durations: [usize; PHASES],
 }
@@ -188,7 +188,7 @@ const CHAIN_STEPS: usize = 8;
 
 #[derive(Clone, Debug)]
 pub(super) struct Chain {
-    repositories: [usize; 3],
+    pub(super) repositories: [usize; 3],
     waypoints: [[Footprint; 3]; CHAIN_STEPS - 1],
     durations: [usize; CHAIN_STEPS],
 }
@@ -309,7 +309,7 @@ pub(super) struct Restack {
 
 #[derive(Clone, Debug)]
 pub(super) struct ColumnTransfer {
-    repositories: [usize; 4],
+    pub(super) repositories: [usize; 4],
     waypoints: [[Footprint; 4]; 3],
     durations: [usize; 4],
 }

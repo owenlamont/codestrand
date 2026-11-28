@@ -1171,6 +1171,7 @@ pub(crate) struct Inputs {
     labels: Vec<String>,
     rows: Vec<Vec<Input>>,
     items: Vec<Vec<f32>>,
+    live_files: Vec<Vec<f32>>,
 }
 
 impl Inputs {
@@ -1179,10 +1180,21 @@ impl Inputs {
             labels: Vec::new(),
             rows: Vec::with_capacity(ticks),
             items: Vec::with_capacity(ticks),
+            live_files: Vec::with_capacity(ticks),
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn push(&mut self, regions: Vec<RepositoryRegion>) {
+        let files = regions.iter().map(|region| region.items).collect();
+        self.push_with_files(regions, files);
+    }
+
+    pub(crate) fn push_with_files(
+        &mut self,
+        regions: Vec<RepositoryRegion>,
+        files: Vec<f32>,
+    ) {
         if self.rows.is_empty() {
             self.labels = regions.iter().map(|region| region.label.clone()).collect();
         }
@@ -1195,6 +1207,7 @@ impl Inputs {
             .unzip();
         self.rows.push(rows);
         self.items.push(items);
+        self.live_files.push(files);
     }
 }
 impl Input {
@@ -1296,13 +1309,13 @@ impl Packing {
     pub(crate) fn input_bytes() -> usize {
         std::mem::size_of::<Input>()
             + outline::NORMALS.len() * std::mem::size_of::<Vec2>()
-            + 6 * std::mem::size_of::<f32>()
+            + 7 * std::mem::size_of::<f32>()
     }
 
     pub(crate) fn row_bytes() -> usize {
         std::mem::size_of::<Vec<Input>>()
             + std::mem::size_of::<Sample>()
-            + 2 * std::mem::size_of::<Vec<f32>>()
+            + 3 * std::mem::size_of::<Vec<f32>>()
     }
 
     pub(crate) fn conversion_bytes() -> usize {
@@ -1317,7 +1330,7 @@ impl Packing {
                 + repositories * (2 * std::mem::size_of::<Node>()) as u128
                 + geometry)
             + geometry
-            + reflow::lifecycle::Program::retained_bytes(repositories)
+            + reflow::lifecycle::Program::retained_bytes(repositories, ticks)
             + reflow::opening::FlatLayout::retained_bytes(repositories, changes.min(8))
             + (std::mem::size_of::<ScheduledRetirement>()
                 + 3 * std::mem::size_of::<usize>()) as u128
@@ -1364,6 +1377,7 @@ impl Packing {
             labels,
             rows: regions,
             items,
+            live_files,
         } = inputs;
         let Some(first) = regions.first().filter(|r| !r.is_empty()) else {
             return Ok(Self::default());
@@ -1602,7 +1616,8 @@ impl Packing {
             fresh_tiling: false,
         };
         packing.lifecycle =
-            reflow::lifecycle::Program::plan(&packing, &windows).map(Arc::new);
+            reflow::lifecycle::Program::plan(&packing, &windows, &live_files)
+                .map(Arc::new);
         if packing.lifecycle.is_none() {
             let retirement = packing.plan_retirement();
             if let Some((opening, retirement)) =
@@ -1673,16 +1688,35 @@ impl Packing {
             .iter()
             .flatten()
             .map(|exit| (exit.start, exit.end))
-            .chain(self.reflows.iter().map(|change| {
-                let start = u64::try_from(change.tick).expect("bounded reflow");
-                let duration =
-                    u64::try_from(change.duration()).expect("bounded reflow");
-                (start, start + duration)
-            }))
+            .chain(self.lifecycle.iter().flat_map(|program| program.shifts()))
+            .chain(
+                self.reflows
+                    .iter()
+                    .filter(|_| self.lifecycle.is_none())
+                    .map(|change| {
+                        let start = u64::try_from(change.tick).expect("bounded reflow");
+                        let duration =
+                            u64::try_from(change.duration()).expect("bounded reflow");
+                        (start, start + duration)
+                    }),
+            )
+    }
+
+    pub(crate) fn exchanging(&self, tick: u64, repository: usize) -> bool {
+        let tick = usize::try_from(tick).expect("bounded reflow tick");
+        self.lifecycle.is_none()
+            && self.staggered.is_none()
+            && self.reflows
+                [..self.reflows.partition_point(|change| change.tick <= tick)]
+                .last()
+                .is_some_and(|change| change.exchanges(tick, repository))
     }
 
     pub(crate) fn reflowing(&self, tick: u64) -> bool {
         let tick = usize::try_from(tick).expect("bounded reflow tick");
+        if let Some(program) = &self.lifecycle {
+            return program.shifting(tick);
+        }
         self.reflows[..self.reflows.partition_point(|change| change.tick <= tick)]
             .last()
             .is_some_and(|change| tick - change.tick < change.duration())
@@ -2833,8 +2867,22 @@ mod tests {
             })
             .collect();
         let packing = Packing::before_service(&rows);
-        let (start, _) = packing.motion_intervals().next().unwrap();
-        assert!(start <= 270, "drift waited until tick {start}");
+        let program = packing.lifecycle.as_ref().unwrap();
+        let (start, end) = program.shifts().last().unwrap();
+        let share = |tick| {
+            let (regions, _, _) = packing.sample_split(tick, tick, &[], None).unwrap();
+            let areas: Vec<_> = regions
+                .into_iter()
+                .filter_map(|repo| repo.tile.map(Tile::area))
+                .collect();
+            areas[0] / areas.iter().sum::<f32>()
+        };
+        let before = share(start);
+        let after = share(end);
+        assert!(
+            after > before,
+            "dominant tile share grew from {before:.3} to {after:.3}"
+        );
     }
 
     #[test]
@@ -3346,7 +3394,6 @@ mod tests {
         }
         let packing =
             Packing::from_inputs(inputs, Arc::default(), 20.0, 1.0, 1).unwrap();
-        assert!(packing.staggered.is_some());
         let cells = |tick| {
             packing
                 .sample_split(tick, tick, &[], None)

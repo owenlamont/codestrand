@@ -812,7 +812,13 @@ pub(crate) mod tests {
             unpadded,
             complete: false,
         });
-        let expected = unpadded.ticks(true) + u64::from(waits) * 4;
+        let known_delay = end - sim.clock.rows(end).1;
+        let known_commits = u64::try_from(sim.schedule.applied(end)).unwrap();
+        let total_commits = u64::try_from(sim.events.len()).unwrap();
+        assert!(known_delay >= u64::from(waits));
+        assert!(total_commits > known_commits);
+        let expected =
+            unpadded.ticks(true) + known_delay * total_commits / known_commits;
         assert_eq!(sim.projected_end_tick(), expected);
     }
 
