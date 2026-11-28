@@ -3,6 +3,7 @@ use super::{
     birth::{Birth, BirthBatch},
     held, opening,
     retirement::Retirement,
+    swap::Swap,
 };
 use crate::{
     layout::packing::{Packing, Tile, birth_presence},
@@ -36,6 +37,7 @@ enum Action {
     Births(BirthBatch),
     Archive(Retirement),
     Shift { before: Layout, after: Layout },
+    Swap(Box<Swap>),
 }
 
 #[derive(Clone, Copy)]
@@ -65,6 +67,8 @@ impl Program {
             + repositories * std::mem::size_of::<usize>() as u128
             + (2 * repositories + ticks / held::reflow_ticks() as u128)
                 * (std::mem::size_of::<Phase>() as u128 + 2 * layout)
+            + (ticks / held::reflow_ticks() as u128)
+                * std::mem::size_of::<Swap>() as u128
     }
 
     pub(in crate::layout::packing) fn plan(
@@ -261,13 +265,47 @@ impl Program {
     ) -> impl Iterator<Item = (u64, u64)> + '_ {
         self.phases
             .iter()
-            .filter(|phase| matches!(phase.action, Action::Shift { .. }))
+            .filter(|phase| {
+                matches!(phase.action, Action::Shift { .. } | Action::Swap(_))
+            })
             .map(|phase| {
                 (
                     u64::try_from(phase.start).expect("bounded shift tick"),
                     u64::try_from(phase.end).expect("bounded shift tick"),
                 )
             })
+    }
+
+    pub(in crate::layout::packing) fn exchanges(
+        &self,
+        tick: usize,
+        repository: usize,
+    ) -> bool {
+        let index = self.phases.partition_point(|phase| phase.start <= tick);
+        self.phases[..index].last().is_some_and(|phase| {
+            tick < phase.end && matches!(&phase.action, Action::Swap(swap) if swap.repositories().contains(&repository))
+        })
+    }
+
+    pub(in crate::layout::packing) fn swap_gaps(
+        &self,
+    ) -> impl Iterator<Item = (usize, usize, [usize; 2], f32, usize)> + '_ {
+        self.phases.iter().filter_map(|phase| {
+            let Action::Swap(swap) = &phase.action else {
+                return None;
+            };
+            Some((
+                phase.start,
+                phase.end,
+                swap.repositories(),
+                swap.peak_gap,
+                swap.uncovered_ticks,
+            ))
+        })
+    }
+
+    pub(in crate::layout::packing) fn last_tick(&self) -> usize {
+        self.phases.last().map_or(0, |phase| phase.end)
     }
 
     pub(in crate::layout::packing) fn aspect_episodes(
@@ -311,7 +349,8 @@ impl Program {
     pub(in crate::layout::packing) fn shifting(&self, tick: usize) -> bool {
         let index = self.phases.partition_point(|phase| phase.start <= tick);
         self.phases[..index].last().is_some_and(|phase| {
-            tick < phase.end && matches!(phase.action, Action::Shift { .. })
+            tick < phase.end
+                && matches!(phase.action, Action::Shift { .. } | Action::Swap(_))
         })
     }
 
@@ -339,7 +378,7 @@ impl Program {
                 Action::Birth(_) => (births + 1, archives),
                 Action::Births(ref batch) => (births + batch.count(), archives),
                 Action::Archive(ref archive) => (births, archives + archive.count()),
-                Action::Shift { .. } => (births, archives),
+                Action::Shift { .. } | Action::Swap(_) => (births, archives),
             })
     }
 
@@ -385,6 +424,9 @@ impl Program {
                 batch.sample(tick, births)
             };
         }
+        if let Action::Swap(swap) = &phase.action {
+            return swap.sample(tick - phase.start);
+        }
         let progress = if tick >= phase.end {
             1.0
         } else {
@@ -392,7 +434,9 @@ impl Program {
             let duration = phase.end - phase.start;
             match phase.action {
                 Action::Birth(_) => held::birth_ease(elapsed, duration),
-                Action::Births(_) => unreachable!("sampled at its own birth windows"),
+                Action::Births(_) | Action::Swap(_) => {
+                    unreachable!("sampled at its own phase ticks")
+                }
                 Action::Archive(_) | Action::Shift { .. } => {
                     held::progress(elapsed, duration)
                 }
@@ -510,7 +554,6 @@ fn archive_phase(
     start: usize,
     policy: CompilePolicy,
 ) -> Option<Phase> {
-    packing.samples.get(end)?;
     let (start, departing) = archive_members(
         events,
         (requested, end, repository),
@@ -519,7 +562,7 @@ fn archive_phase(
     );
     let space = packing.space();
     let ticks = end - start;
-    let fit = opening::glyph_scales(packing, start);
+    let fit = opening::glyph_scales(packing, start.min(packing.samples.len() - 1));
     let motion = if current.tiles.iter().flatten().count() == departing.len() {
         Retirement::close_all(current, &departing, ticks)?
     } else if departing.len() == 1 {
@@ -579,6 +622,7 @@ impl Action {
         match self {
             Self::Birth(birth) => birth.sample(progress),
             Self::Births(batch) => batch.settled(),
+            Self::Swap(swap) => swap.settled(),
             Self::Archive(archive) => archive.sample(1.0 - progress),
             Self::Shift { before, after } => {
                 if progress >= 1.0 {
@@ -630,15 +674,9 @@ fn insert_shifts(
         let end = start + duration;
         let weights = &live_files[end];
         if rejected != Some(weights) {
-            if let Some(after) =
-                opening::plan_shift(packing, current, weights, duration)
-            {
-                let before = std::mem::replace(current, after.clone());
-                phases.push(Phase {
-                    start,
-                    end,
-                    action: Action::Shift { before, after },
-                });
+            if let Some(action) = plan_shift(packing, current, weights, duration) {
+                *current = action.sample(1.0);
+                phases.push(Phase { start, end, action });
                 rejected = None;
             } else {
                 rejected = Some(weights);
@@ -646,6 +684,27 @@ fn insert_shifts(
         }
         start = end;
     }
+}
+
+fn plan_shift(
+    packing: &Packing,
+    current: &Layout,
+    weights: &[f32],
+    duration: usize,
+) -> Option<Action> {
+    let after = opening::plan_shift(packing, current, weights, duration);
+    if let Some(swap) = Swap::plan(
+        current,
+        after.as_ref().unwrap_or(current),
+        packing.space(),
+        weights,
+    ) {
+        return Some(Action::Swap(Box::new(swap)));
+    }
+    after.map(|after| Action::Shift {
+        before: current.clone(),
+        after,
+    })
 }
 
 fn inset_field(packing: &Packing, layout: &mut Layout) -> Option<()> {
@@ -697,7 +756,12 @@ fn clip_gutters(packing: &Packing, layout: &mut Layout) -> Option<()> {
     .then_some(())
 }
 
-fn glass_in_cell(cell: Tile, field: Tile, glass: Tile, gap: bevy::math::Vec2) -> Tile {
+pub(super) fn glass_in_cell(
+    cell: Tile,
+    field: Tile,
+    glass: Tile,
+    gap: bevy::math::Vec2,
+) -> Tile {
     use bevy::math::Vec2;
 
     Tile {
@@ -760,6 +824,51 @@ mod tests {
         packing::{Inputs, Sample, Space},
     };
     use bevy::math::Vec2;
+
+    #[test]
+    fn playback_exchanges_neighbours_when_a_seam_cannot_match_density() {
+        let pixels = framing::VIEWPORT * 0.5;
+        let field = Tile {
+            low: Vec2::new(-180.0, -280.0) / pixels,
+            high: Vec2::new(180.0, 280.0) / pixels,
+        };
+        let mut cells = [field, field];
+        cells[0].high.x = 0.0;
+        cells[1].low.x = 0.0;
+        let padding = Vec2::splat(4.0) / framing::VIEWPORT;
+        let opening = Layout {
+            tiles: cells
+                .map(|cell| Some(glass_in_cell(cell, field, field, padding)))
+                .into(),
+            gutters: cells.map(Some).into(),
+        };
+        let packing = Packing {
+            gutter_scale: 4.0,
+            growth: 1.0,
+            ..Packing::default()
+        };
+        let files = vec![1.0, 4.0];
+        let ticks = held::reflow_ticks();
+        let without = opening::plan_shift(&packing, &opening, &files, ticks).unwrap();
+        let plan = Program::compile(
+            &packing,
+            opening,
+            &[],
+            &vec![files.clone(); ticks + 1],
+            CompilePolicy::Serial,
+        )
+        .unwrap();
+        assert!(plan.exchanges(1, 0) && plan.exchanges(1, 1));
+        let (_, _, pair, gap, uncovered) = plan.swap_gaps().next().unwrap();
+        assert!(pair.contains(&0) && pair.contains(&1));
+        assert!((0.49..=0.51).contains(&gap) && uncovered < ticks);
+        let settled = plan.sample(ticks, &[]);
+        assert!(super::super::retirement::fills_field(&settled, field));
+        assert!(
+            opening::density_cost(&settled, &files)
+                < opening::density_cost(&without, &files)
+        );
+    }
 
     #[test]
     fn joint_birth_opens_both_tiles_by_the_first_service() {

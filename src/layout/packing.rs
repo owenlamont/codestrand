@@ -1636,7 +1636,17 @@ impl Packing {
             })
             .map(Arc::new);
         if let Some(program) = &packing.lifecycle {
-            for episode in program.aspect_episodes(packing.samples.len() - 1) {
+            for (start, end, pair, peak, gap_ticks) in program.swap_gaps() {
+                let [first, second] =
+                    pair.map(|repo| crate::terminal_escape(&packing.labels[repo]));
+                let ticks = u64::try_from(gap_ticks).expect("bounded swap gap");
+                let seconds = crate::model::tick_time(ticks).lossy_secs_f32();
+                eprintln!(
+                    "tile swap repositories={first:?},{second:?} start_tick={start} end_tick={end} peak_gap={peak:.4} gap_seconds={seconds:.3}"
+                );
+            }
+            let end = program.last_tick().max(packing.samples.len() - 1);
+            for episode in program.aspect_episodes(end) {
                 let repository =
                     crate::terminal_escape(&packing.labels[episode.repository]);
                 let span = u64::try_from(episode.end - episode.start)
@@ -1735,8 +1745,10 @@ impl Packing {
 
     pub(crate) fn exchanging(&self, tick: u64, repository: usize) -> bool {
         let tick = usize::try_from(tick).expect("bounded reflow tick");
-        self.lifecycle.is_none()
-            && self.staggered.is_none()
+        if let Some(program) = &self.lifecycle {
+            return program.exchanges(tick, repository);
+        }
+        self.staggered.is_none()
             && self.reflows
                 [..self.reflows.partition_point(|change| change.tick <= tick)]
                 .last()
@@ -1816,17 +1828,16 @@ impl Packing {
         let tick = usize::try_from(tick)
             .unwrap_or(usize::MAX)
             .min(self.samples.len().checked_sub(1)?);
-        let tiles = usize::try_from(tiles)
-            .unwrap_or(usize::MAX)
-            .min(self.samples.len() - 1);
-        let sample = &self.samples[tiles];
+        let tiles = usize::try_from(tiles).unwrap_or(usize::MAX);
+        let row = tiles.min(self.samples.len() - 1);
+        let sample = &self.samples[row];
         let placement = self.fit_rows(tiles, tick, births, presence, None);
         let plan = if presented {
             self.display_aspects.as_ref().unwrap_or(&self.aspects)
         } else {
             &self.aspects
         };
-        let aspect_tick = u64::try_from(tiles).expect("bounded tile row");
+        let aspect_tick = u64::try_from(row).expect("bounded tile row");
         let mut regions: Vec<_> = self.inputs[tick]
             .iter()
             .zip(self.labels.iter())
@@ -2230,6 +2241,7 @@ impl Packing {
         {
             return lifecycle.sample(tile_tick, births);
         }
+        let tile_tick = tile_tick.min(self.samples.len() - 1);
         if let Some(retirement) = &self.retirement
             && tile_tick >= retirement.start
             && births.is_empty()
@@ -2324,6 +2336,7 @@ impl Packing {
         tiling: Option<&mut Tiling>,
     ) -> Vec<Placement> {
         let layout = self.layout_at(tile_tick, births, presence, tiling);
+        let row = tile_tick.min(self.samples.len() - 1);
         let repositories = self.rotated.len();
         self.inputs[tick]
             .iter()
@@ -2333,7 +2346,7 @@ impl Packing {
                 let tile = layout.tiles[i];
                 let center = self.content_center(tick, &shape);
                 let (origin, scale) = tile.map_or((Vec2::ZERO, 0.0), |tile| {
-                    let mut scale = self.content_scales[tile_tick * repositories + i];
+                    let mut scale = self.content_scales[row * repositories + i];
                     if tile_tick != tick
                         || !births.is_empty()
                         || presence.is_some_and(|mask| mask.iter().any(|&p| p < 1.0))
@@ -2943,6 +2956,7 @@ mod tests {
             inputs.push(row);
         }
         let packing = Packing::from_inputs(inputs, exits.into(), 0.0, 1.0, 1).unwrap();
+        assert_eq!(packing.flat_lifecycle_counts(), (1, 1));
         let mut previous: Option<(f32, f32)> = None;
         for tick in 0..520 {
             let (regions, _, scales) = packing.sample(tick).unwrap();
@@ -2958,6 +2972,7 @@ mod tests {
             }
             previous = Some((area, scale));
         }
+        assert!(packing.sample(520).unwrap().0[1].tile.is_none());
     }
 
     #[test]

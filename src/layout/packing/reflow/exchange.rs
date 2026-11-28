@@ -173,7 +173,7 @@ impl Exchange {
             .count();
         for (phase, &duration) in self.durations[..phases].iter().enumerate() {
             if elapsed < duration {
-                return self.layout(from, to, phase, phases).blend(
+                return self.layout(from, to, phase, phases).blend_edges(
                     &self.layout(from, to, phase + 1, phases),
                     held::progress(elapsed, duration),
                 );

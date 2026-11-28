@@ -462,40 +462,45 @@ pub(super) fn plan_shift(
     if current.tiles.iter().flatten().take(2).count() < 2 {
         return None;
     }
-    let excess = |layout: &Layout| {
-        layout
-            .tiles
-            .iter()
-            .flatten()
-            .map(|tile| {
-                let ratio = tile.ground_aspect();
-                (ratio.max(ratio.recip()) - super::super::BOUND).max(0.0)
-            })
-            .sum::<f32>()
-    };
-    if excess(current) > 1e-6
+    if aspect_excess(current) > 1e-6
         && let Some(restored) =
             best_slide(current, packing.space(), ticks, Some(weights), |layout| {
-                -excess(layout)
+                -aspect_excess(layout)
             })
     {
         return Some(restored);
     }
     best_slide(current, packing.space(), ticks, Some(weights), |layout| {
-        let (area, total) = super::totals(&layout.tiles, weights);
-        let density = total / area;
-        -layout
-            .tiles
-            .iter()
-            .zip(weights)
-            .filter(|&(_, &files)| files > 0.0)
-            .filter_map(|(&tile, &files)| {
-                tile.map(|tile| {
-                    files * super::super::log_density_error(tile, files, density)
-                })
-            })
-            .sum::<f32>()
+        -density_cost(layout, weights)
     })
+}
+
+pub(super) fn aspect_excess(layout: &Layout) -> f32 {
+    layout
+        .tiles
+        .iter()
+        .flatten()
+        .map(|tile| {
+            let ratio = tile.ground_aspect();
+            (ratio.max(ratio.recip()) - super::super::BOUND).max(0.0)
+        })
+        .sum()
+}
+
+pub(super) fn density_cost(layout: &Layout, weights: &[f32]) -> f32 {
+    let (area, total) = super::totals(&layout.tiles, weights);
+    let density = total / area;
+    layout
+        .tiles
+        .iter()
+        .zip(weights)
+        .filter(|&(_, &files)| files > 0.0)
+        .filter_map(|(&tile, &files)| {
+            tile.map(|tile| {
+                files * super::super::log_density_error(tile, files, density)
+            })
+        })
+        .sum()
 }
 
 pub(in crate::layout::packing) fn plan(
