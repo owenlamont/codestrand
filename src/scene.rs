@@ -387,6 +387,7 @@ impl DirectoryHues {
 
 #[derive(Resource, Default)]
 struct Pools {
+    glyph_scale: model::glyph_scale::GlyphScale,
     sync_stamp: Option<SyncStamp>,
     lod: lod::Lod,
     names: names::Names,
@@ -405,6 +406,7 @@ struct Pools {
 pub(super) fn reset_scene_pools(world: &mut World) {
     if let Some(pools) = world.remove_resource::<Pools>() {
         let Pools {
+            glyph_scale: _,
             sync_stamp: _,
             lod: _,
             names: _,
@@ -1646,6 +1648,7 @@ fn sync_files(
     simulation: &Simulation,
 ) {
     let layout = simulation.layout();
+    pools.glyph_scale.sample(simulation);
     pools.hues.sync(layout);
     let mut seen = 0;
     for (id, file) in layout.files() {
@@ -1664,9 +1667,17 @@ fn sync_files(
         let (position, grey, alpha) = simulation.file_effect(id, file);
         set_visible(world, entity, alpha > 0.0);
         if let Some(mut transform) = world.get_mut::<Transform>(entity) {
-            transform.set_if_neq(Transform::from_translation(position).with_scale(
-                Vec3::splat(file.draw_scale(layout.dir(file.dir)) * detail),
-            ));
+            let dir = layout.dir(file.dir);
+            let nominal = pools.glyph_scale.scale(dir.repository, dir.scale);
+            let ratio = if dir.scale > 0.0 {
+                nominal / dir.scale
+            } else {
+                1.0
+            };
+            transform.set_if_neq(
+                Transform::from_translation(position)
+                    .with_scale(Vec3::splat(file.draw_scale(dir) * detail * ratio)),
+            );
         }
         let visual = world
             .get::<FileVisual>(entity)
@@ -1900,6 +1911,7 @@ fn sync_directory_edges(
     simulation: &Simulation,
 ) {
     let layout = simulation.layout();
+    pools.glyph_scale.sample(simulation);
     let edges: Vec<_> = layout
         .dirs()
         .filter_map(|(index, dir)| {
@@ -1911,7 +1923,8 @@ fn sync_directory_edges(
                 return None;
             }
             let parent = layout.dir(dir.parent?);
-            let width = simulation.theme().directory_edge_width(dir.depth) * dir.scale;
+            let width = simulation.theme().directory_edge_width(dir.depth)
+                * pools.glyph_scale.scale(dir.repository, dir.scale);
             let height =
                 palette.directory_edge_height(pools.hues.slots[index], dir.depth);
             Some((

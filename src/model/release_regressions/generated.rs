@@ -10,6 +10,88 @@ use std::{fmt::Write, ops::RangeInclusive, time::Instant};
 
 const CI_TICK_LIMIT: u32 = 3_600;
 
+#[test]
+fn glyph_ratio_dense_tile_growth() {
+    let shallow = |file| format!("group-{}/file-{file}.rs", file % 6);
+    let deep =
+        |file| format!("group-{}/node-{}/leaf/file-{file}.rs", file % 6, file / 32);
+    let event = |repo, day, changes| {
+        let name = ["sparse", "dense", "control"][repo];
+        namespaced_event(
+            repo,
+            day,
+            Identity::new(name, &format!("{name}@example.invalid")),
+            changes,
+        )
+    };
+    let events = vec![
+        event(
+            0,
+            0,
+            (0..6).map(|i| change(&shallow(i), Kind::Added)).collect(),
+        ),
+        event(
+            1,
+            5,
+            (0..24).map(|i| change(&deep(i), Kind::Added)).collect(),
+        ),
+        event(
+            2,
+            10,
+            (0..24).map(|i| change(&shallow(i), Kind::Added)).collect(),
+        ),
+        event(
+            1,
+            16,
+            (24..216).map(|i| change(&deep(i), Kind::Added)).collect(),
+        ),
+        event(2, 33, vec![change(&shallow(0), Kind::Modified)]),
+        event(1, 42, vec![change(&deep(0), Kind::Modified)]),
+    ];
+    let options = Options {
+        seconds_per_day: 1.0,
+        max_idle_seconds: 8.0,
+        ..Options::default()
+    };
+    let report = replay(
+        events,
+        &["sparse".into(), "dense".into(), "control".into()],
+        &options,
+        CI_TICK_LIMIT,
+        Fault::None,
+    )
+    .unwrap();
+    assert!(report.comparable_glyph_frames > 0);
+    println!("dense tile glyphs: {report:?}");
+    report.check_glyph_ratio().unwrap();
+}
+
+#[test]
+fn glyph_ratio_distant_directory_growth() {
+    let events = vec![
+        write(0, 0, (0..7).map(|dir| format!("early/{dir}/initial.rs"))),
+        write(1, 1, (0..7).map(|dir| format!("stable/{dir}/initial.rs"))),
+        write(0, 30, (0..350).map(|dir| format!("future/{dir}/new.rs"))),
+    ];
+    let options = Options {
+        seconds_per_day: 0.6,
+        max_idle_seconds: 20.0,
+        travel_window_seconds: Some(8.0),
+        ..Options::default()
+    };
+    let report = replay(
+        events,
+        &["Growth".into(), "Stable".into()],
+        &options,
+        CI_TICK_LIMIT,
+        Fault::None,
+    )
+    .unwrap();
+    assert!(report.comparable_glyph_frames > 0);
+    println!("distant directory glyphs: {report:?}");
+    report.check_glyph_ratio().unwrap();
+}
+
 fn seam_history(extra_files: u8, fault: Fault) -> Result<Replay, TestCaseError> {
     let events = vec![
         write(0, 0, ["first.rs".into()]),
@@ -463,7 +545,12 @@ fn short_histories_preserve_playback_invariants() {
     );
     TestRunner::new(config)
         .run(&histories(2..=5, 1..=8, 0..=2, 6..=12), |history| {
-            history.replay(CI_TICK_LIMIT).map(|_| ())
+            let report = history.replay(CI_TICK_LIMIT)?;
+            println!(
+                "Worst nominal glyph width ratio {:.4} at frame {}",
+                report.worst_glyph_ratio, report.worst_glyph_tick,
+            );
+            report.check_glyph_ratio()
         })
         .unwrap_or_else(|error| panic!("playback seed {seed:?}: {error}"));
 }
@@ -505,7 +592,11 @@ fn extended_histories_preserve_playback_invariants() {
             println!("{} visible contributors at peak, {} assigned to one repository, {} passing contacts, {} ticks of parked overlap",
                 report.peak_visible_contributors, report.peak_contributors_per_repository,
                 report.passing_contacts, report.longest_parked_contact);
-            Ok(())
+            println!(
+                "Worst nominal glyph width ratio {:.4} at frame {}",
+                report.worst_glyph_ratio, report.worst_glyph_tick,
+            );
+            report.check_glyph_ratio()
         })
         .unwrap_or_else(|error| panic!("extended playback seed {seed:?}: {error}"));
 }

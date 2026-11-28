@@ -2463,8 +2463,8 @@ impl Packing {
         let permitted = |from, to, scale: f32| {
             let (a, b) = (areas[from], areas[to]);
             (a > 0.0 && b > 0.0).then(|| {
-                // Reuse space freed by a deletion during forward playback.
-                if b > a + 1e-6 || (to > from && b + 1e-6 >= a) {
+                // A settled tile can recover between changes to its content.
+                if b + 1e-6 >= a {
                     (scale * 0.005).clamp(0.002, 0.02)
                 } else {
                     0.0
@@ -2880,12 +2880,6 @@ mod tests {
             if let Some((prior_area, prior_scale)) = previous {
                 let change: f32 = scale - prior_scale;
                 assert!(change.abs() <= 0.025, "scale jump at {tick}: {change}");
-                if (area - prior_area).abs() <= 1e-6 {
-                    assert_eq!(
-                        scale, prior_scale,
-                        "scale changed on a still tile at {tick}"
-                    );
-                }
                 assert!(
                     (area - prior_area) * change >= -1e-6,
                     "scale reversed at {tick}: {prior_area} to {area}, {prior_scale} to {scale}",

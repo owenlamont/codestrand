@@ -39,6 +39,24 @@ pub(super) struct Replay {
     pub flat_lifecycles: (usize, usize),
     pub overlapping_exits: bool,
     pub planner_wait: Duration,
+    pub worst_glyph_ratio: f32,
+    pub worst_glyph_tick: u64,
+    pub comparable_glyph_frames: usize,
+    pub glyph_ratio_p90: f32,
+    pub out_of_band_glyph_frames: usize,
+    pub glyph_settle_ticks: Vec<u64>,
+}
+
+impl Replay {
+    pub(super) fn check_glyph_ratio(&self) -> TestCaseResult {
+        prop_assert!(
+            self.worst_glyph_ratio <= 2.0 + 8.0 * f32::EPSILON,
+            "nominal glyph width ratio {:.4} at frame {} exceeds 2.0",
+            self.worst_glyph_ratio,
+            self.worst_glyph_tick
+        );
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -89,7 +107,7 @@ impl ContributorFrame {
 struct Audit {
     report: Replay,
     directory_edges: DirectoryAudit,
-    file_parents: BTreeMap<u64, usize>,
+    visible_files: BTreeMap<u64, (usize, Vec2)>,
     files: BTreeMap<u64, u64>,
     contributors: Vec<ContributorFrame>,
     tiles: Vec<Option<Tile>>,
@@ -97,6 +115,9 @@ struct Audit {
     rings: BTreeMap<usize, f32>,
     arrivals: usize,
     applied: usize,
+    glyph_scale: crate::model::glyph_scale::GlyphScale,
+    glyph_ratios: Vec<f32>,
+    glyph_motion_start: Vec<Option<u64>>,
 }
 
 pub(super) fn replay(
@@ -137,7 +158,17 @@ pub(super) fn replay(
         }
         let seam = sim.initial.tick != window;
         audit.report.windows += u32::from(seam);
+        let retained_file = retained_identity(&sim, u64::from(tick));
         sim.advance_to(tick, FPS);
+        if let Some((path, id)) = retained_file {
+            prop_assert_eq!(
+                sim.layout().file_identity(&path),
+                Some(id),
+                "tick {}: {} replaced a retained file identity",
+                tick,
+                path,
+            );
+        }
         if let Some(ending) = ending_arrivals {
             prop_assert_eq!(
                 arrival_revisions(&sim),
@@ -180,6 +211,9 @@ pub(super) fn replay(
             exits.sort_unstable_by_key(|exit| exit.start);
             audit.report.overlapping_exits =
                 exits.windows(2).any(|pair| pair[1].start < pair[0].end);
+            audit.glyph_ratios.sort_unstable_by(f32::total_cmp);
+            let last = audit.glyph_ratios.len().saturating_sub(1);
+            audit.report.glyph_ratio_p90 = audit.glyph_ratios[last * 9 / 10];
             return Ok(audit.report);
         }
     }
@@ -197,6 +231,31 @@ fn arrival_revisions(sim: &Simulation) -> BTreeMap<Target, u64> {
                 .map(|arrival| (Target::Dir(id), arrival.revision))
         }))
         .collect()
+}
+
+fn arrival_destination(sim: &Simulation, target: Target, repository: usize) -> Vec3 {
+    let position = match target {
+        Target::File(id) => sim.layout().file(id).unwrap().position,
+        Target::Dir(id) => sim.layout().dir(id).position,
+    };
+    ground(position) + Vec3::Y * sim.repository_effect(repository).2
+}
+
+fn retained_identity(sim: &Simulation, tick: u64) -> Option<(String, u64)> {
+    let applied = sim.state.next_event;
+    if sim.schedule.applied(tick) != applied + 1 {
+        return None;
+    }
+    let [change] = sim.events.get(applied)?.changes.as_slice() else {
+        return None;
+    };
+    let source = match &change.kind {
+        Kind::Modified => change.path.as_str(),
+        Kind::Moved { from } => from.as_str(),
+        Kind::Added | Kind::Deleted => return None,
+    };
+    let id = sim.layout().file_identity(source)?;
+    Some((change.path.clone(), id))
 }
 
 impl Audit {
@@ -232,24 +291,80 @@ impl Audit {
         let (retained, resizing) = self.directory_edges.observe(sim, &self.tiles)?;
         self.report.directory_intervals += retained;
         self.report.resizing_directory_intervals += resizing;
+        self.measure_glyphs(sim);
         self.check_tiles(sim)?;
-        let file_parents = layout
+        let visible_files = layout
             .files()
             .filter(|(_, file)| file.presence > 0.0)
-            .map(|(id, file)| (id, file.dir))
+            .map(|(id, file)| (id, (file.dir, file.local_position())))
             .collect::<BTreeMap<_, _>>();
-        self.report.reparented_files += file_parents
-            .iter()
-            .filter(|(id, dir)| {
-                self.file_parents.get(id).is_some_and(|old| old != *dir)
-            })
-            .count();
-        self.file_parents = file_parents;
+        for (&id, &(dir, position)) in &visible_files {
+            if let Some(&(previous_dir, previous_position)) =
+                self.visible_files.get(&id)
+            {
+                self.report.reparented_files += usize::from(dir != previous_dir);
+                let movement = position.distance(previous_position);
+                prop_assert!(
+                    movement <= (crate::layout::MAX_SPEED + 0.001) * tick_seconds(),
+                    "tick {tick}: retained file {id} moved {movement} units in one frame",
+                );
+            }
+        }
+        self.visible_files = visible_files;
         let held = self.check_rays(sim, seam, fault)?;
         self.check_contributors(sim, &held)?;
         self.check_circles(sim, seam)?;
         self.measure_contacts(sim);
         Ok(())
+    }
+
+    fn measure_glyphs(&mut self, sim: &Simulation) {
+        let layout = sim.layout();
+        let tick = sim.state.tick;
+        self.glyph_scale.sample(sim);
+        self.glyph_motion_start
+            .resize(layout.repositories.len(), None);
+        for (repo, start) in self.glyph_motion_start.iter_mut().enumerate() {
+            let visible = layout.repositories[repo].tile.is_some();
+            let last = self.glyph_scale.last_motion(repo);
+            if visible && last == tick {
+                start.get_or_insert(tick);
+            } else if (self.glyph_scale.settled(repo) || !visible)
+                && let Some(start) = start.take()
+            {
+                self.report.glyph_settle_ticks.push(last - start + 1);
+            }
+        }
+        let mut minimum = f32::INFINITY;
+        let mut maximum = 0.0_f32;
+        let mut first_repository = None;
+        let mut comparable = false;
+        for (_, file) in layout.files() {
+            let dir = layout.dir(file.dir);
+            if self.glyph_scale.settled(dir.repository)
+                && file.state != crate::layout::Presence::Leaving
+            {
+                let scale = self.glyph_scale.scale(dir.repository, dir.scale);
+                let width = self.glyph_scale.overview_width(scale);
+                comparable |=
+                    *first_repository.get_or_insert(dir.repository) != dir.repository;
+                minimum = minimum.min(width);
+                maximum = maximum.max(width);
+            }
+        }
+        let ratio = if maximum > 0.0 {
+            maximum / minimum
+        } else {
+            1.0
+        };
+        self.report.comparable_glyph_frames += usize::from(comparable);
+        self.report.out_of_band_glyph_frames +=
+            usize::from(ratio > 2.0 + 8.0 * f32::EPSILON);
+        self.glyph_ratios.push(ratio);
+        if ratio > self.report.worst_glyph_ratio {
+            self.report.worst_glyph_ratio = ratio;
+            self.report.worst_glyph_tick = tick;
+        }
     }
 
     fn check_rays(
@@ -289,6 +404,13 @@ impl Audit {
                     arrival.arrival_author, arrival.path,
                 )));
             };
+            prop_assert_eq!(
+                beam.to,
+                arrival_destination(sim, beam.target, repository),
+                "tick {}: moving arrival {} has a stale destination",
+                tick,
+                arrival.path,
+            );
             self.arrivals += 1;
             files.insert(file, arrival.arrival_revision);
             let carried = self.files.get(&file) == Some(&arrival.arrival_revision);

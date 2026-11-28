@@ -139,7 +139,7 @@ impl Layout {
         starts: &[crate::model::Time],
         names: &[String],
         progress: &crate::progress::Progress,
-    ) -> Self {
+    ) -> Result<Self, super::DirectoryMotionLimit> {
         let mut combined = Self::empty();
         combined.dirs.clear();
         combined.dir_index.clear();
@@ -155,10 +155,10 @@ impl Layout {
             let detailed = if names.len() == 1 { progress } else { &quiet };
             let layouts = Self::scheduled_batch(events, starts, first..end, detailed);
             for (repository, layout) in (first..end).zip(layouts) {
-                combined.append_repository(repository, &names[repository], layout);
+                combined.append_repository(repository, &names[repository], layout?);
             }
         }
-        combined
+        Ok(combined)
     }
 
     fn scheduled_batch(
@@ -166,7 +166,7 @@ impl Layout {
         starts: &[crate::model::Time],
         repositories: std::ops::Range<usize>,
         progress: &crate::progress::Progress,
-    ) -> Vec<Self> {
+    ) -> Vec<Result<Self, super::DirectoryMotionLimit>> {
         std::thread::scope(|scope| {
             let handles: Vec<_> = repositories
                 .map(|repository| {
@@ -222,7 +222,7 @@ impl Layout {
         starts: &[crate::model::Time],
         repository: usize,
         progress: &crate::progress::Progress,
-    ) -> Self {
+    ) -> Result<Self, super::DirectoryMotionLimit> {
         let mut local = Vec::new();
         let mut times = Vec::new();
         for (event, &time) in events.iter().zip(starts) {
@@ -544,7 +544,8 @@ mod tests {
             &starts,
             &["Same".to_owned(), "Same".to_owned()],
             &crate::progress::Progress::default(),
-        );
+        )
+        .unwrap();
         let first = layout.add("0/src/layout.rs", 0.0, 0);
         let second = layout.add("1/src/layout.rs", 0.0, 0);
         assert_ne!(first, second);

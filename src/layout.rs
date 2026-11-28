@@ -10,6 +10,7 @@ pub(crate) mod outline;
 pub(crate) mod packing;
 mod planner;
 mod repositories;
+pub(crate) use planner::DirectoryMotionLimit;
 pub(crate) use repositories::{RegionSample, in_order};
 
 #[derive(Clone, Debug)]
@@ -53,7 +54,7 @@ impl RepositoryRegion {
 
 const SPACING: f32 = 0.62;
 const GOLDEN_ANGLE: f32 = 2.399_963_2;
-const MAX_SPEED: f32 = 3.0;
+pub(crate) const MAX_SPEED: f32 = 3.0;
 const MAX_ACCELERATION: f32 = 48.0;
 const FILE_EASE: f32 = 5.0;
 pub(super) const FADE_SECONDS: f32 = 0.6;
@@ -88,6 +89,11 @@ pub(super) struct File {
 }
 
 impl File {
+    #[cfg(test)]
+    pub(super) fn local_position(&self) -> Vec2 {
+        self.local_position
+    }
+
     fn replay_bytes(&self) -> u128 {
         let (path,) = retained_fields!(self, Self {
             path; local_position, dir, slot, slot_offset, position, velocity, presence,
@@ -521,6 +527,11 @@ impl Layout {
 
     pub(super) fn file(&self, id: u64) -> Option<&File> {
         self.files.get(&id)
+    }
+
+    #[cfg(test)]
+    pub(super) fn file_identity(&self, path: &str) -> Option<u64> {
+        self.file_index.get(path).copied()
     }
 
     pub(super) fn dirs(&self) -> impl Iterator<Item = (usize, &Dir)> {

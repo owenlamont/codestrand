@@ -17,6 +17,7 @@ use crate::{
 
 pub(crate) mod caption;
 pub(crate) mod framing;
+pub(crate) mod glyph_scale;
 mod lifecycle;
 pub(crate) use lifecycle::RepositoryExit;
 #[cfg(test)]
@@ -64,7 +65,7 @@ const LEAD_IN: f32 = 0.5;
 const TAIL: f32 = 2.5;
 // Sixty-second windows beat fifteen on whole mid30 (459 vs 514 s) and tie thirty within
 // 2% over five paired runs, though thirty reaches the first frame about 2.5 s sooner.
-const WINDOW_SECONDS: f32 = 60.0;
+pub(crate) const WINDOW_SECONDS: f32 = 60.0;
 const PULSE_SECONDS: f32 = 1.3;
 /// Beam crossings per second at the default `--fragment-speed` of 1.
 const FRAGMENT_SPEED: f32 = 1.1;
@@ -1180,11 +1181,11 @@ impl Simulation {
         repositories: &[String],
         layout_cache: &mut Option<(Vec<Time>, Layout)>,
         progress: &Progress,
-    ) -> Layout {
+    ) -> Result<Layout, crate::layout::DirectoryMotionLimit> {
         if let Some((starts, layout)) = layout_cache
             && *starts == layout_starts
         {
-            layout.clone()
+            Ok(layout.clone())
         } else {
             #[cfg(test)]
             tests::LAYOUT_COUNTS
@@ -1194,9 +1195,9 @@ impl Simulation {
                 layout_starts,
                 repositories,
                 progress,
-            );
+            )?;
             *layout_cache = Some((layout_starts.to_vec(), layout.clone()));
-            layout
+            Ok(layout)
         }
     }
 
@@ -1267,7 +1268,7 @@ impl Simulation {
                 repositories,
                 layout_cache,
                 &options.progress,
-            )
+            )?
         };
         let mut state = State::new(layout, theme.geometry(), options);
         state.apply_history(&events[..start]);

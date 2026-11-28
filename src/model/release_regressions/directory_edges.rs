@@ -157,6 +157,14 @@ impl DirectoryAudit {
             if let Some(before) =
                 swept.filter(|frame| frame.visible_edge && after.visible_edge)
             {
+                let movement = before.local.distance(after.local);
+                proptest::prop_assert!(
+                    movement <= (crate::layout::MAX_SPEED + 0.001) * tick_seconds(),
+                    "tick {}: retained directory {} moved {} units in one frame",
+                    sim.state.tick,
+                    dir.path,
+                    movement,
+                );
                 retained += 1;
                 let repo = dir.repository;
                 let new_tile = layout.repositories[repo].tile;
