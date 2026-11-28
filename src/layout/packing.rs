@@ -1635,6 +1635,19 @@ impl Packing {
                 reflow::lifecycle::Program::plan(&packing, &windows, &live_files)
             })
             .map(Arc::new);
+        if let Some(program) = &packing.lifecycle {
+            for episode in program.aspect_episodes(packing.samples.len() - 1) {
+                let repository =
+                    crate::terminal_escape(&packing.labels[episode.repository]);
+                let span = u64::try_from(episode.end - episode.start)
+                    .expect("bounded archive episode");
+                let seconds = crate::model::tick_time(span).lossy_secs_f32();
+                eprintln!(
+                    "archive aspect repository={repository:?} start_tick={} end_tick={} peak={:.4} seconds={seconds:.3}",
+                    episode.start, episode.end, episode.peak
+                );
+            }
+        }
         if packing.lifecycle.is_none() {
             let retirement = packing.plan_retirement();
             if let Some((opening, retirement)) =
@@ -3176,6 +3189,7 @@ mod tests {
     fn left_tile_exits_beside_two_stacked_tiles() {
         let packing = ending_fixture(false);
         assert!(matches!(packing.nodes[0], Node::Split { axis: 0, .. }));
+        assert_eq!(packing.flat_lifecycle_counts(), (0, 1));
         let at = |tick| packing.sample(tick).unwrap().0;
         let before = at(60);
         let middle = at(180);
@@ -3186,14 +3200,24 @@ mod tests {
             let a = pair[0].tile.unwrap();
             let b = pair[1].tile.unwrap();
             assert!(a.high.y <= b.low.y || b.high.y <= a.low.y);
-            assert!(a.ground_aspect() <= BOUND + 0.01);
-            assert!(b.ground_aspect() <= BOUND + 0.01);
+            let minimum = packing.space().field(framing::MARGIN).pixels();
+            let minimum = 2.0 * minimum.x / (minimum.y - packing.gutter_scale);
+            let observed = a.ground_aspect().max(b.ground_aspect());
+            assert!((observed - minimum).abs() < 0.01, "{observed} != {minimum}");
         }
+        let episodes = packing.lifecycle.as_ref().unwrap().aspect_episodes(300);
+        assert_eq!(episodes.len(), 2);
+        assert!(
+            episodes
+                .iter()
+                .all(|episode| episode.start < 300 && episode.end == 300)
+        );
     }
 
     #[test]
     fn repositories_with_a_shared_ending_all_shrink() {
         let packing = ending_fixture(true);
+        assert_eq!(packing.flat_lifecycle_counts(), (0, 3));
         let at = |tick| packing.sample(tick).unwrap().0;
         let mut previous = at(60);
         let mut last = [0.0; 3];

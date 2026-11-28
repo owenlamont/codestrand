@@ -15,6 +15,14 @@ pub(in crate::layout::packing) struct Program {
     phases: Vec<Phase>,
 }
 
+#[derive(Clone, Copy)]
+pub(in crate::layout::packing) struct AspectEpisode {
+    pub repository: usize,
+    pub start: usize,
+    pub end: usize,
+    pub peak: f32,
+}
+
 #[derive(Debug)]
 struct Phase {
     start: usize,
@@ -36,6 +44,7 @@ enum CompilePolicy {
     SharedArchives,
     SharedLifecycle,
     JointBirths,
+    ArchiveAspect,
 }
 
 impl Program {
@@ -130,6 +139,21 @@ impl Program {
                         })
                     })
             })
+            .or_else(|| {
+                if events.iter().all(|&(_, _, _, birth)| birth) {
+                    return None;
+                }
+                openings.into_iter().rev().find_map(|mut opening| {
+                    clip_gutters(packing, &mut opening)?;
+                    Self::compile(
+                        packing,
+                        opening,
+                        &events,
+                        live_files,
+                        CompilePolicy::ArchiveAspect,
+                    )
+                })
+            })
     }
 
     fn compile(
@@ -157,7 +181,9 @@ impl Program {
             }
             let overlap = matches!(
                 policy,
-                CompilePolicy::SharedLifecycle | CompilePolicy::JointBirths
+                CompilePolicy::SharedLifecycle
+                    | CompilePolicy::JointBirths
+                    | CompilePolicy::ArchiveAspect
             );
             if birth && available > start && !overlap {
                 return None;
@@ -213,7 +239,7 @@ impl Program {
                     &mut events,
                     (requested, end, repository),
                     start,
-                    !matches!(policy, CompilePolicy::Serial),
+                    policy,
                 )?
             };
             current = phase.action.sample(1.0);
@@ -242,6 +268,44 @@ impl Program {
                     u64::try_from(phase.end).expect("bounded shift tick"),
                 )
             })
+    }
+
+    pub(in crate::layout::packing) fn aspect_episodes(
+        &self,
+        end: usize,
+    ) -> Vec<AspectEpisode> {
+        let mut eligible = vec![false; self.opening.tiles.len()];
+        let mut active = vec![None::<AspectEpisode>; eligible.len()];
+        let mut episodes = Vec::new();
+        for phase in self.phases.iter().take_while(|phase| phase.start <= end) {
+            if let Action::Archive(archive) = &phase.action {
+                episodes.extend(archive.departing().iter().filter_map(|&repo| {
+                    eligible[repo] = false;
+                    active[repo].take().map(|entry| AspectEpisode {
+                        end: phase.start,
+                        ..entry
+                    })
+                }));
+                for repo in archive.over_cap_survivors() {
+                    eligible[repo] = true;
+                }
+            }
+            if !eligible.iter().any(|&tracked| tracked) {
+                continue;
+            }
+            for tick in phase.start..=phase.end.min(end) {
+                observe_aspects(
+                    &self.sample(tick, &[]),
+                    tick,
+                    end,
+                    &mut eligible,
+                    &mut active,
+                    &mut episodes,
+                );
+            }
+        }
+        episodes.extend(active.into_iter().flatten());
+        episodes
     }
 
     pub(in crate::layout::packing) fn shifting(&self, tick: usize) -> bool {
@@ -363,6 +427,40 @@ impl Program {
     }
 }
 
+fn observe_aspects(
+    layout: &Layout,
+    tick: usize,
+    end: usize,
+    eligible: &mut [bool],
+    active: &mut [Option<AspectEpisode>],
+    episodes: &mut Vec<AspectEpisode>,
+) {
+    for (repo, (tracked, entry)) in eligible.iter_mut().zip(active).enumerate() {
+        if !*tracked {
+            continue;
+        }
+        let peak = layout.tiles[repo].map_or(1.0, |tile| {
+            let aspect = tile.ground_aspect();
+            aspect.max(aspect.recip())
+        });
+        if peak > super::super::BOUND + 1e-6 {
+            let entry = entry.get_or_insert(AspectEpisode {
+                repository: repo,
+                start: tick,
+                end,
+                peak,
+            });
+            entry.peak = entry.peak.max(peak);
+        } else if let Some(finished) = entry.take() {
+            episodes.push(AspectEpisode {
+                end: tick,
+                ..finished
+            });
+            *tracked = false;
+        }
+    }
+}
+
 fn batch_births(
     packing: &Packing,
     opening: Layout,
@@ -410,24 +508,36 @@ fn archive_phase(
     events: &mut std::iter::Peekable<impl Iterator<Item = (usize, usize, usize, bool)>>,
     (requested, end, repository): (usize, usize, usize),
     start: usize,
-    share_archive_windows: bool,
+    policy: CompilePolicy,
 ) -> Option<Phase> {
     packing.samples.get(end)?;
     let (start, departing) = archive_members(
         events,
         (requested, end, repository),
         start,
-        share_archive_windows,
+        !matches!(policy, CompilePolicy::Serial),
     );
     let space = packing.space();
     let ticks = end - start;
     let fit = opening::glyph_scales(packing, start);
-    let motion = if packing.labels.len() == 1 {
-        Retirement::close_last(current, repository, ticks)?
+    let motion = if current.tiles.iter().flatten().count() == departing.len() {
+        Retirement::close_all(current, &departing, ticks)?
     } else if departing.len() == 1 {
-        Retirement::plan(current.clone(), repository, space, ticks, fit)?
+        Retirement::plan(current.clone(), repository, space, ticks, fit).or_else(
+            || {
+                matches!(policy, CompilePolicy::ArchiveAspect)
+                    .then(|| Retirement::lowest_peak(current, repository, space, ticks))
+                    .flatten()
+            },
+        )?
     } else {
-        Retirement::together(current, &departing, space, ticks, fit)?
+        Retirement::together(current, &departing, space, ticks, fit).or_else(|| {
+            matches!(policy, CompilePolicy::ArchiveAspect)
+                .then(|| {
+                    Retirement::together_lowest_peak(current, &departing, space, ticks)
+                })
+                .flatten()
+        })?
     };
     let motion = if events.peek().is_none() {
         motion.finish_in_field(space, ticks)

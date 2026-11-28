@@ -14,26 +14,39 @@ pub(in crate::layout::packing) struct Retirement {
 }
 
 impl Retirement {
-    pub(super) fn close_last(
+    pub(super) fn close_all(
         from: &Layout,
-        repository: usize,
+        departing: &[usize],
         ticks: usize,
     ) -> Option<Self> {
-        let field = from.gutters[repository]?;
+        let field = gutter_bounds(from)?;
+        if !fills_field(from, field)
+            || !contained(from)
+            || !connected(from, from, false)
+            || from
+                .tiles
+                .iter()
+                .enumerate()
+                .any(|(repo, tile)| tile.is_some() && !departing.contains(&repo))
+        {
+            return None;
+        }
         let centre = field.low.midpoint(field.high);
         let point = Some(Tile {
             low: centre,
             high: centre,
         });
         let mut to = from.clone();
-        to.tiles[repository] = point;
-        to.gutters[repository] = point;
+        for &repo in departing {
+            to.tiles[repo] = to.tiles[repo].and(point);
+            to.gutters[repo] = to.gutters[repo].and(point);
+        }
         let max_travel =
             exchange::MAX_EDGE_STEP_PX * held::REFLOW_LINEAR_FRACTION * count(ticks);
         (exchange::edge_travel(from, &to) <= max_travel).then(|| Self {
             from: from.clone(),
             to,
-            departing: [repository].into(),
+            departing: departing.into(),
         })
     }
 
@@ -46,7 +59,6 @@ impl Retirement {
     ) -> Option<Self> {
         let field = space.field(framing::MARGIN);
         let gutters = gutter_bounds(&from)?;
-        let retiring = from.gutters.get(departing).copied().flatten()?;
         if !fills_field(&from, gutters) || !contained(&from) {
             return None;
         }
@@ -63,30 +75,15 @@ impl Retirement {
             .collect();
         let max_travel =
             exchange::MAX_EDGE_STEP_PX * held::REFLOW_LINEAR_FRACTION * count(ticks);
-        for axis in 0..2 {
-            let low = Group::find(&from, departing, axis, true);
-            let high = Group::find(&from, departing, axis, false);
-            for part in 0..=8_u8 {
-                let share = f32::from(part) / 8.0;
-                let Some((mut to, donors)) = Self::close(
-                    &from,
-                    departing,
-                    field,
-                    retiring,
-                    axis,
-                    [&low, &high],
-                    share,
-                ) else {
-                    continue;
-                };
-                expand_last_tile(&mut to, &from, departing);
-                if !settled_changes(&from, &to, departing) {
-                    blocked_shapes.push((to, donors, 1 - axis));
-                } else if let Some(travel) =
-                    certified_closure(&from, &to, departing, gutters, max_travel)
-                {
-                    closures.push((to, donors, travel));
-                }
+        for (to, donors, perpendicular) in
+            Self::close_candidates(&from, departing, field)?
+        {
+            if !settled_changes(&from, &to, departing) {
+                blocked_shapes.push((to, donors, perpendicular));
+            } else if let Some(travel) =
+                certified_closure(&from, &to, departing, gutters, max_travel)
+            {
+                closures.push((to, donors, travel));
             }
         }
         if closures.is_empty() {
@@ -135,6 +132,68 @@ impl Retirement {
         })
     }
 
+    fn close_candidates(
+        from: &Layout,
+        departing: usize,
+        field: Tile,
+    ) -> Option<Vec<(Layout, usize, usize)>> {
+        let retiring = from.gutters.get(departing).copied().flatten()?;
+        let mut candidates = Vec::new();
+        for axis in 0..2 {
+            let low = Group::find(from, departing, axis, true);
+            let high = Group::find(from, departing, axis, false);
+            for part in 0..=8_u8 {
+                let share = f32::from(part) / 8.0;
+                if let Some((mut to, donors)) = Self::close(
+                    from,
+                    departing,
+                    field,
+                    retiring,
+                    axis,
+                    [&low, &high],
+                    share,
+                ) {
+                    expand_last_tile(&mut to, from, departing);
+                    candidates.push((to, donors, 1 - axis));
+                }
+            }
+        }
+        Some(candidates)
+    }
+
+    pub(super) fn lowest_peak(
+        from: &Layout,
+        departing: usize,
+        space: Space,
+        ticks: usize,
+    ) -> Option<Self> {
+        let field = space.field(framing::MARGIN);
+        let gutters = gutter_bounds(from)?;
+        if !fills_field(from, gutters) || !contained(from) {
+            return None;
+        }
+        let max_travel =
+            exchange::MAX_EDGE_STEP_PX * held::REFLOW_LINEAR_FRACTION * count(ticks);
+        let (to, ..) = Self::close_candidates(from, departing, field)?
+            .into_iter()
+            .flat_map(|(to, _, _)| {
+                let balanced = balance_pair(&to, departing, field);
+                std::iter::once(to).chain(balanced)
+            })
+            .filter_map(|to| {
+                let peak = survivor_peak(&to, &[departing])?;
+                let travel =
+                    certified_closure(from, &to, departing, gutters, max_travel)?;
+                Some((to, peak, travel))
+            })
+            .min_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.2.total_cmp(&b.2)))?;
+        Some(Self {
+            from: from.clone(),
+            to,
+            departing: [departing].into(),
+        })
+    }
+
     pub(super) fn together(
         from: &Layout,
         departing: &[usize],
@@ -142,45 +201,112 @@ impl Retirement {
         ticks: usize,
         glyph_size: impl Fn(usize, Tile) -> f32,
     ) -> Option<Self> {
+        let close = |remaining: &Layout, repository| {
+            Self::plan(remaining.clone(), repository, space, ticks, &glyph_size)
+        };
+        Self::assemble(from, departing, departing.iter().copied(), ticks, close)
+            .or_else(|| {
+                Self::assemble(
+                    from,
+                    departing,
+                    departing.iter().rev().copied(),
+                    ticks,
+                    close,
+                )
+            })
+    }
+
+    pub(super) fn together_lowest_peak(
+        from: &Layout,
+        departing: &[usize],
+        space: Space,
+        ticks: usize,
+    ) -> Option<Self> {
+        let close = |remaining: &Layout, repository| {
+            Self::lowest_peak(remaining, repository, space, ticks)
+        };
+        let rotations = if departing.len() <= 4 {
+            departing.len()
+        } else {
+            1
+        };
+        (0..rotations)
+            .flat_map(|start| [false, true].map(move |reverse| (start, reverse)))
+            .filter_map(|(start, reverse)| {
+                let order = (0..departing.len()).map(|offset| {
+                    let offset = if reverse {
+                        departing.len() - 1 - offset
+                    } else {
+                        offset
+                    };
+                    departing[(start + offset) % departing.len()]
+                });
+                let motion = Self::assemble(from, departing, order, ticks, close)?;
+                let peak = survivor_peak(&motion.to, departing)?;
+                Some((motion, peak))
+            })
+            .min_by(|(_, a), (_, b)| a.total_cmp(b))
+            .map(|(motion, _)| motion)
+    }
+
+    fn assemble(
+        from: &Layout,
+        departing: &[usize],
+        order: impl Iterator<Item = usize>,
+        ticks: usize,
+        close: impl Fn(&Layout, usize) -> Option<Self>,
+    ) -> Option<Self> {
         let gutters = gutter_bounds(from)?;
         let max_travel =
             exchange::MAX_EDGE_STEP_PX * held::REFLOW_LINEAR_FRACTION * count(ticks);
-        let assemble = |order: &mut dyn Iterator<Item = &usize>| {
-            let mut remaining = from.clone();
-            let mut ghosts = Vec::with_capacity(departing.len());
-            for &repository in order {
-                let next =
-                    Self::plan(remaining, repository, space, ticks, &glyph_size)?;
-                ghosts.push((
-                    repository,
-                    next.to.tiles[repository],
-                    next.to.gutters[repository],
-                ));
-                remaining = next.sample(0.0);
-            }
-            for (repo, tile, cell) in ghosts {
-                remaining.tiles[repo] = tile;
-                remaining.gutters[repo] = cell;
-            }
-            (exchange::edge_travel(from, &remaining) <= max_travel
-                && fills_sweep(from, &remaining, gutters)
-                && contained(&remaining)
-                && compatible(&from.tiles, &remaining.tiles)
-                && compatible(&from.gutters, &remaining.gutters)
-                && archive_gutters_connected(from, &remaining, departing))
-            .then_some(Self {
-                from: from.clone(),
-                to: remaining,
-                departing: departing.into(),
-            })
-        };
-        assemble(&mut departing.iter())
-            .or_else(|| assemble(&mut departing.iter().rev()))
+        let mut remaining = from.clone();
+        let mut ghosts = Vec::with_capacity(departing.len());
+        for repository in order {
+            let next = close(&remaining, repository)?;
+            ghosts.push((
+                repository,
+                next.to.tiles[repository],
+                next.to.gutters[repository],
+            ));
+            remaining = next.sample(0.0);
+        }
+        for (repo, tile, cell) in ghosts {
+            remaining.tiles[repo] = tile;
+            remaining.gutters[repo] = cell;
+        }
+        (exchange::edge_travel(from, &remaining) <= max_travel
+            && fills_sweep(from, &remaining, gutters)
+            && contained(&remaining)
+            && compatible(&from.tiles, &remaining.tiles)
+            && compatible(&from.gutters, &remaining.gutters)
+            && archive_gutters_connected(from, &remaining, departing))
+        .then_some(Self {
+            from: from.clone(),
+            to: remaining,
+            departing: departing.into(),
+        })
     }
 
     #[cfg(test)]
     pub(super) fn count(&self) -> usize {
         self.departing.len()
+    }
+
+    pub(super) fn over_cap_survivors(&self) -> impl Iterator<Item = usize> + '_ {
+        self.to
+            .tiles
+            .iter()
+            .enumerate()
+            .filter_map(|(repo, &tile)| {
+                let aspect = tile.map(Tile::ground_aspect)?;
+                (aspect.max(aspect.recip()) > super::super::BOUND + EPSILON
+                    && !self.departing.contains(&repo))
+                .then_some(repo)
+            })
+    }
+
+    pub(super) fn departing(&self) -> &[usize] {
+        &self.departing
     }
 
     pub(super) fn finish_in_field(mut self, space: Space, ticks: usize) -> Self {
@@ -298,6 +424,56 @@ fn settled_changes(from: &Layout, to: &Layout, departing: usize) -> bool {
         .all(|(repo, (&after, &before))| {
             repo == departing || after == before || after.is_none_or(settled)
         })
+}
+
+fn survivor_peak(layout: &Layout, departing: &[usize]) -> Option<f32> {
+    let mut peak = 1.0_f32;
+    for (repo, tile) in layout.tiles.iter().enumerate() {
+        if let Some(tile) = tile.filter(|_| !departing.contains(&repo)) {
+            if tile.pixels().min_element() < 16.0 {
+                return None;
+            }
+            let aspect = tile.ground_aspect();
+            peak = peak.max(aspect).max(aspect.recip());
+        }
+    }
+    Some(peak)
+}
+
+fn balance_pair(closed: &Layout, departing: usize, field: Tile) -> Option<Layout> {
+    let mut survivors = closed.clone();
+    let ghost = (
+        survivors.tiles[departing].take()?,
+        survivors.gutters[departing].take()?,
+    );
+    let mut live = survivors
+        .gutters
+        .iter()
+        .enumerate()
+        .filter_map(|(repo, &cell)| cell.map(|cell| (repo, cell)));
+    let (a, first) = live.next()?;
+    let (b, second) = live.next()?;
+    if live.next().is_some() {
+        return None;
+    }
+    for axis in 0..2 {
+        let first_high = first.low[axis].to_bits() == second.high[axis].to_bits();
+        if !first_high && first.high[axis].to_bits() != second.low[axis].to_bits() {
+            continue;
+        }
+        let group = Group::find(&survivors, a, axis, first_high)?;
+        let length = |repo: usize| {
+            survivors.tiles[repo].map(|tile| tile.high[axis] - tile.low[axis])
+        };
+        let offset = (length(b)? - length(a)?) * if first_high { -0.5 } else { 0.5 };
+        let cut = group.cut + offset;
+        let mut balanced = group.finish(&survivors, None, cut, field);
+        let (tile, cell) = group.move_ghost(ghost, cut);
+        balanced.tiles[departing] = Some(tile);
+        balanced.gutters[departing] = Some(cell);
+        return Some(balanced);
+    }
+    None
 }
 
 fn certified_closure(

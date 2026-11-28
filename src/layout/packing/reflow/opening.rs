@@ -462,6 +462,25 @@ pub(super) fn plan_shift(
     if current.tiles.iter().flatten().take(2).count() < 2 {
         return None;
     }
+    let excess = |layout: &Layout| {
+        layout
+            .tiles
+            .iter()
+            .flatten()
+            .map(|tile| {
+                let ratio = tile.ground_aspect();
+                (ratio.max(ratio.recip()) - super::super::BOUND).max(0.0)
+            })
+            .sum::<f32>()
+    };
+    if excess(current) > 1e-6
+        && let Some(restored) =
+            best_slide(current, packing.space(), ticks, Some(weights), |layout| {
+                -excess(layout)
+            })
+    {
+        return Some(restored);
+    }
     best_slide(current, packing.space(), ticks, Some(weights), |layout| {
         let (area, total) = super::totals(&layout.tiles, weights);
         let density = total / area;
