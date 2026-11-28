@@ -61,10 +61,10 @@ impl Birth {
         }
         let field = space.field(framing::MARGIN);
         let gap = Vec2::splat(space.gap) / framing::VIEWPORT;
-        let speed = exchange::MAX_EDGE_STEP_PX * 0.75;
+        let speed = exchange::MAX_EDGE_STEP_PX * (1.0 - super::held::birth_ramp(ticks));
         let max_travel = speed * count(ticks);
         let mut best = None;
-        let mut cost = f32::INFINITY;
+        let mut cost = (true, f32::INFINITY);
         for (host, (&tile, &cell)) in
             layout.tiles.iter().zip(&layout.gutters).enumerate()
         {
@@ -76,10 +76,25 @@ impl Birth {
             let cuts = [(0, false), (0, true), (1, false), (1, true)]
                 .into_iter()
                 .flat_map(|(axis, high)| {
-                    [0.15, 0.20, 0.25, 1.0 / 3.0, 0.5]
-                        .map(move |fraction| (axis, high, fraction))
+                    let min_px = (tile.pixels()[1 - axis] / super::super::BOUND)
+                        .max(16.0)
+                        + 0.001;
+                    let inset = if high {
+                        cell.high[axis] - tile.high[axis]
+                    } else {
+                        tile.low[axis] - cell.low[axis]
+                    };
+                    let minimum =
+                        (min_px * 2.0 / framing::VIEWPORT[axis] + inset + gap[axis])
+                            / (cell.high[axis] - cell.low[axis]);
+                    [0.15, 0.20, 0.25, 1.0 / 3.0, 0.5, minimum]
+                        .into_iter()
+                        .enumerate()
+                        .map(move |(index, fraction)| {
+                            (axis, high, fraction, index == 5)
+                        })
                 });
-            for (axis, high, fraction) in cuts {
+            for (axis, high, fraction, at_minimum) in cuts {
                 let edge = if high {
                     cell.high[axis]
                 } else {
@@ -110,7 +125,8 @@ impl Birth {
                         tile.low[axis] - edge
                     },
                 };
-                let candidate_cost = (ratio - share).abs() + fraction * 0.1;
+                let candidate_cost =
+                    (at_minimum, (ratio - share).abs() + fraction * 0.1);
                 if candidate_cost >= cost || !available(cut_recipe) {
                     continue;
                 }
@@ -159,6 +175,7 @@ impl BirthBatch {
         space: Space,
         births: &[(usize, usize, usize)],
         weights: impl Fn(usize) -> Option<&'a [f32]>,
+        allow_perpendicular: bool,
     ) -> Option<(Self, usize, usize)> {
         let mut current = opening.clone();
         let mut cuts: Vec<(usize, usize, Cut)> = Vec::with_capacity(births.len());
@@ -184,6 +201,7 @@ impl BirthBatch {
                             cut.host != earlier.host
                                 || (cut.axis == earlier.axis
                                     && cut.high != earlier.high)
+                                || (cut.axis != earlier.axis && allow_perpendicular)
                         })
                 },
             ) else {
@@ -225,6 +243,11 @@ impl BirthBatch {
             return None;
         }
         let births = &births[..processed];
+        if let Some(batch) =
+            Self::joint_opening(&opening, space, births, start, end, &weights)
+        {
+            return Some((batch, processed, end));
+        }
         let mut settled = opening.clone();
         let mut ghosts = opening.clone();
         let mut cuts = Vec::with_capacity(processed);
@@ -244,9 +267,9 @@ impl BirthBatch {
                     rect.low[cut.axis]
                 }
             };
-            ghosts.tiles[guest] = Some(collapsed(host_tile, cut.axis, side(host_tile)));
-            ghosts.gutters[guest] =
-                Some(collapsed(host_cell, cut.axis, side(host_cell)));
+            let edge = side(host_cell);
+            ghosts.tiles[guest] = Some(collapsed(host_tile, cut.axis, edge));
+            ghosts.gutters[guest] = Some(collapsed(host_cell, cut.axis, edge));
             settled = birth.end;
             cuts.push((start, end, cut));
         }
@@ -273,6 +296,128 @@ impl BirthBatch {
             processed,
             end,
         ))
+    }
+
+    fn joint_opening<'a>(
+        opening: &Layout,
+        space: Space,
+        births: &[(usize, usize, usize)],
+        start: usize,
+        end: usize,
+        weights: impl Fn(usize) -> Option<&'a [f32]>,
+    ) -> Option<Self> {
+        if births.len() < 3 {
+            return None;
+        }
+        let mut present = opening
+            .gutters
+            .iter()
+            .enumerate()
+            .filter_map(|(repo, &cell)| cell.map(|cell| (repo, cell)));
+        let (host, _) = present.next()?;
+        if present.next().is_some() {
+            return None;
+        }
+        let mut sizes = vec![0.0; opening.tiles.len()];
+        for &(_, ready, repo) in births {
+            sizes[repo] = weights(ready)?[repo].max(1.0);
+        }
+        let mut members: Vec<_> = births.iter().map(|&(_, _, repo)| repo).collect();
+        members.retain(|&repo| repo != host);
+        members.insert(members.len() / 2, host);
+        let basis = weights(end)?[host].max(1.0);
+        let limit = members.len().min(12);
+        let shapes =
+            (0..2).flat_map(|axis| (1..=limit).map(move |bands| (axis, bands)));
+        for scale in [1.0, 1.5, 2.0, 3.0, 4.0] {
+            sizes[host] = basis * scale;
+            let candidate = shapes.clone().find_map(|(axis, bands)| {
+                let settled = super::opening::build_bands(
+                    space, &sizes, &members, axis, bands, true,
+                )?;
+                let (settled, collapsed) = Self::certify_bands(
+                    opening,
+                    settled,
+                    births,
+                    host,
+                    axis,
+                    (start, end),
+                )?;
+                Some(Self {
+                    opening: opening.clone(),
+                    settled,
+                    cuts: Vec::new(),
+                    gap: space.gap,
+                    joint: Some(JointBirth {
+                        start,
+                        end,
+                        collapsed,
+                    }),
+                })
+            });
+            if candidate.is_some() {
+                return candidate;
+            }
+        }
+        None
+    }
+
+    fn certify_bands(
+        opening: &Layout,
+        mut settled: Layout,
+        births: &[(usize, usize, usize)],
+        host: usize,
+        axis: usize,
+        (start, end): (usize, usize),
+    ) -> Option<(Layout, Layout)> {
+        let cross = 1 - axis;
+        let field = opening.gutters[host]?;
+        let glass = opening.tiles[host]?;
+        for cell in settled.gutters.iter_mut().flatten() {
+            cell.low = cell.low.max(field.low);
+            cell.high = cell.high.min(field.high);
+        }
+        let host_cell = settled.gutters[host]?;
+        let mut ghosts = opening.clone();
+        for &(_, _, repo) in births {
+            if repo == host {
+                continue;
+            }
+            let mut cell = settled.gutters[repo]?;
+            let mut tile = settled.tiles[repo]?;
+            if cell.high[cross] <= host_cell.low[cross] {
+                cell = collapsed(cell, cross, field.low[cross]);
+                tile = collapsed(tile, cross, field.low[cross]);
+            } else if cell.low[cross] >= host_cell.high[cross] {
+                cell = collapsed(cell, cross, field.high[cross]);
+                tile = collapsed(tile, cross, field.high[cross]);
+            } else {
+                let edge = if cell.high[axis] <= host_cell.low[axis] {
+                    field.low[axis]
+                } else {
+                    field.high[axis]
+                };
+                cell = collapsed(cell, axis, edge);
+                tile = collapsed(tile, axis, edge);
+                cell.low[cross] = field.low[cross];
+                cell.high[cross] = field.high[cross];
+                tile.low[cross] = glass.low[cross];
+                tile.high[cross] = glass.high[cross];
+            }
+            ghosts.tiles[repo] = Some(tile);
+            ghosts.gutters[repo] = Some(cell);
+        }
+        let settled = Self::certify(opening, births, start, end, |tick| {
+            if tick == end {
+                settled.clone()
+            } else {
+                ghosts.blend_edges(
+                    &settled,
+                    super::held::birth_ease(tick - start, end - start),
+                )
+            }
+        })?;
+        Some((settled, ghosts))
     }
 
     fn certify(
@@ -360,7 +505,12 @@ impl BirthBatch {
 
     #[cfg(test)]
     pub(super) fn count(&self) -> usize {
-        self.cuts.len()
+        if self.joint.is_some() {
+            self.settled.tiles.iter().flatten().count()
+                - self.opening.tiles.iter().flatten().count()
+        } else {
+            self.cuts.len()
+        }
     }
 }
 

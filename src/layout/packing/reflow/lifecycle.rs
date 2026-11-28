@@ -47,6 +47,7 @@ enum CompilePolicy {
     SharedLifecycle,
     JointBirths,
     ArchiveAspect,
+    JointBirthsWithArchiveAspect,
 }
 
 impl Program {
@@ -73,91 +74,40 @@ impl Program {
 
     pub(in crate::layout::packing) fn plan(
         packing: &Packing,
+        mut opening: Layout,
         windows: &[(usize, usize)],
         live_files: &[Vec<f32>],
     ) -> Option<Self> {
         let mut events = lifecycle_events(packing, windows)?;
-        if packing.labels.len() == 1 {
-            let space = packing.space();
-            let opening = Layout {
-                tiles: vec![Some(space.field(framing::MARGIN))],
-                gutters: vec![Some(space.field(super::super::GUTTER_MARGIN))],
-            };
-            return Self::compile(
-                packing,
-                opening,
-                &events,
-                live_files,
-                CompilePolicy::Serial,
-            );
+        if events.is_empty() && live_files.windows(2).all(|rows| rows[0] == rows[1]) {
+            return Some(Self::stationary(opening));
         }
         events.sort_unstable_by_key(|&(start, end, repo, birth)| {
             (if birth { start } else { end }, start, end, repo)
         });
-        let base = packing.layout_at(0, &[], None, None);
-        let preferred = opening::plan(packing, &base, |_| true);
-        let openings: Vec<_> = preferred.into_iter().chain([base]).collect();
-        openings
-            .iter()
-            .filter_map(|opening| {
-                let mut opening = opening.clone();
-                inset_field(packing, &mut opening)?;
-                Some(opening)
+        let mut inset = opening.clone();
+        let fields = if packing.labels.len() > 1 {
+            [
+                clip_gutters(packing, &mut opening).map(|()| opening),
+                inset_field(packing, &mut inset).map(|()| inset),
+            ]
+        } else {
+            [Some(opening), None]
+        };
+        fields.into_iter().flatten().find_map(|opening| {
+            [
+                CompilePolicy::Serial,
+                CompilePolicy::SharedArchives,
+                CompilePolicy::SharedLifecycle,
+                CompilePolicy::JointBirths,
+                CompilePolicy::ArchiveAspect,
+                CompilePolicy::JointBirthsWithArchiveAspect,
+            ]
+            .into_iter()
+            .find_map(|policy| {
+                Self::compile(packing, opening.clone(), &events, live_files, policy)
             })
-            .find_map(|opening| {
-                Self::compile(
-                    packing,
-                    opening.clone(),
-                    &events,
-                    live_files,
-                    CompilePolicy::Serial,
-                )
-                .or_else(|| {
-                    Self::compile(
-                        packing,
-                        opening,
-                        &events,
-                        live_files,
-                        CompilePolicy::SharedArchives,
-                    )
-                })
-            })
-            .or_else(|| {
-                if !events.iter().any(|&(_, _, _, birth)| birth) {
-                    return None;
-                }
-                [CompilePolicy::SharedLifecycle, CompilePolicy::JointBirths]
-                    .into_iter()
-                    .filter(|policy| {
-                        !matches!(policy, CompilePolicy::JointBirths)
-                            || packing
-                                .reflows
-                                .iter()
-                                .all(|change| change.transition.is_none())
-                    })
-                    .find_map(|policy| {
-                        openings.iter().find_map(|opening| {
-                            let mut opening = opening.clone();
-                            clip_gutters(packing, &mut opening)?;
-                            Self::compile(packing, opening, &events, live_files, policy)
-                        })
-                    })
-            })
-            .or_else(|| {
-                if events.iter().all(|&(_, _, _, birth)| birth) {
-                    return None;
-                }
-                openings.into_iter().rev().find_map(|mut opening| {
-                    clip_gutters(packing, &mut opening)?;
-                    Self::compile(
-                        packing,
-                        opening,
-                        &events,
-                        live_files,
-                        CompilePolicy::ArchiveAspect,
-                    )
-                })
-            })
+        })
     }
 
     fn compile(
@@ -188,6 +138,7 @@ impl Program {
                 CompilePolicy::SharedLifecycle
                     | CompilePolicy::JointBirths
                     | CompilePolicy::ArchiveAspect
+                    | CompilePolicy::JointBirthsWithArchiveAspect
             );
             if birth && available > start && !overlap {
                 return None;
@@ -531,10 +482,21 @@ fn batch_births(
             .map(|sample| sample.weights.as_slice())
     };
     let space = packing.space();
-    let (batch, consumed, end) = if matches!(policy, CompilePolicy::JointBirths) {
-        BirthBatch::plan_together(opening, space, &group, weights)?
+    let (batch, consumed, end) = if matches!(
+        policy,
+        CompilePolicy::JointBirths | CompilePolicy::JointBirthsWithArchiveAspect
+    ) {
+        BirthBatch::plan(opening.clone(), space, &group, weights, false)
+            .filter(|&(_, consumed, _)| consumed == group.len())
+            .or_else(|| {
+                BirthBatch::plan_together(opening.clone(), space, &group, weights)
+            })
+            .or_else(|| {
+                BirthBatch::plan(opening.clone(), space, &group, weights, true)
+                    .filter(|&(_, consumed, _)| consumed == group.len())
+            })?
     } else {
-        BirthBatch::plan(opening, space, &group, weights)?
+        BirthBatch::plan(opening, space, &group, weights, false)?
     };
     for _ in 1..consumed {
         events.next()?;
@@ -568,18 +530,26 @@ fn archive_phase(
     } else if departing.len() == 1 {
         Retirement::plan(current.clone(), repository, space, ticks, fit).or_else(
             || {
-                matches!(policy, CompilePolicy::ArchiveAspect)
-                    .then(|| Retirement::lowest_peak(current, repository, space, ticks))
-                    .flatten()
+                matches!(
+                    policy,
+                    CompilePolicy::ArchiveAspect
+                        | CompilePolicy::JointBirthsWithArchiveAspect
+                )
+                .then(|| Retirement::lowest_peak(current, repository, space, ticks))
+                .flatten()
             },
         )?
     } else {
         Retirement::together(current, &departing, space, ticks, fit).or_else(|| {
-            matches!(policy, CompilePolicy::ArchiveAspect)
-                .then(|| {
-                    Retirement::together_lowest_peak(current, &departing, space, ticks)
-                })
-                .flatten()
+            matches!(
+                policy,
+                CompilePolicy::ArchiveAspect
+                    | CompilePolicy::JointBirthsWithArchiveAspect
+            )
+            .then(|| {
+                Retirement::together_lowest_peak(current, &departing, space, ticks)
+            })
+            .flatten()
         })?
     };
     let motion = if events.peek().is_none() {
@@ -821,9 +791,73 @@ mod tests {
     use super::*;
     use crate::layout::{
         RepositoryRegion, outline,
-        packing::{Inputs, Sample, Space},
+        packing::{Input, Inputs, Sample, Space},
     };
     use bevy::math::Vec2;
+
+    #[test]
+    fn left_tile_exits_beside_two_stacked_tiles() {
+        let half = Vec2::new(800.0, 400.0) / framing::VIEWPORT;
+        let field = Tile {
+            low: -half,
+            high: half,
+        };
+        let cells = [
+            Tile {
+                high: Vec2::new(0.0, half.y),
+                ..field
+            },
+            Tile {
+                low: Vec2::new(0.0, -half.y),
+                high: Vec2::new(half.x, 0.0),
+            },
+            Tile {
+                low: Vec2::ZERO,
+                ..field
+            },
+        ];
+        let opening = Layout {
+            tiles: cells.map(Some).into(),
+            gutters: cells.map(Some).into(),
+        };
+        let input = Input {
+            low: -Vec2::ONE,
+            high: Vec2::ONE,
+            outline: outline::rectangle(-Vec2::ONE, Vec2::ONE).into_boxed_slice(),
+            height: 0.1,
+            live: true,
+        };
+        let counts = vec![1.0; 3];
+        let packing = Packing {
+            growth: 1.0,
+            inputs: vec![vec![input; 3]].into(),
+            samples: vec![Sample {
+                weights: counts.clone(),
+                presence: counts.clone(),
+            }]
+            .into(),
+            rotated: vec![false; 3],
+            ..Packing::default()
+        };
+        let plan = Program::compile(
+            &packing,
+            opening,
+            &[(0, 240, 0, false)],
+            &vec![counts; 241],
+            CompilePolicy::ArchiveAspect,
+        )
+        .unwrap();
+        assert_eq!(plan.counts(), (0, 1));
+        assert!(plan.sample(120, &[]).tiles[0].unwrap().area() < cells[0].area());
+        assert!(plan.sample(240, &[]).tiles[0].is_none());
+        let episodes = plan.aspect_episodes(240);
+        assert_eq!(episodes.len(), 2);
+        assert!(episodes.iter().all(|episode| {
+            episode.start < 240
+                && episode.end == 240
+                && (episode.peak - 4.0).abs() < 0.01
+        }));
+    }
 
     #[test]
     fn playback_exchanges_neighbours_when_a_seam_cannot_match_density() {
@@ -960,14 +994,13 @@ mod tests {
             gutter_scale: space.gap,
             growth: space.growth,
             labels: (0..=OPENING).map(|repo| repo.to_string()).collect(),
-            lifecycle: Some(Program::stationary(opening).into()),
             samples: vec![row; READY + 1].into(),
             ..Packing::default()
         };
         let mut windows = vec![(0, 1); OPENING];
         windows.push((2, READY));
         let live_files = vec![weights; READY + 1];
-        let plan = Program::plan(&packing, &windows, &live_files).unwrap();
+        let plan = Program::plan(&packing, opening, &windows, &live_files).unwrap();
         assert_eq!(plan.counts(), (1, 0));
         assert!(plan.sample(0, &[]).tiles[OPENING].is_none());
         let settled = plan.sample(READY, &[]);

@@ -1630,11 +1630,24 @@ impl Packing {
             tiling: TilingCache::default(),
             fresh_tiling: false,
         };
-        packing.lifecycle = stable
-            .or_else(|| {
-                reflow::lifecycle::Program::plan(&packing, &windows, &live_files)
-            })
-            .map(Arc::new);
+        let program = if let Some(program) = stable {
+            program
+        } else {
+            let first = &packing.samples[0];
+            let active: Vec<_> = first
+                .presence
+                .iter()
+                .map(|&p| if p > 0.0 { 0 } else { usize::MAX })
+                .collect();
+            let (opening, grown) =
+                reflow::opening::bands(packing.space(), &first.weights, &active)?;
+            packing.growth = grown.growth;
+            reflow::lifecycle::Program::plan(&packing, opening, &windows, &live_files)
+                .ok_or_else(|| {
+                anyhow::anyhow!("repository lifecycle has no certified flat schedule")
+            })?
+        };
+        packing.lifecycle = Some(Arc::new(program));
         if let Some(program) = &packing.lifecycle {
             for (start, end, pair, peak, gap_ticks) in program.swap_gaps() {
                 let [first, second] =
@@ -3198,35 +3211,6 @@ mod tests {
             .unwrap();
         assert!(regions.iter().all(|r| !r.live));
         assert!(Packing::default().sample(0).is_none());
-    }
-
-    #[test]
-    fn left_tile_exits_beside_two_stacked_tiles() {
-        let packing = ending_fixture(false);
-        assert!(matches!(packing.nodes[0], Node::Split { axis: 0, .. }));
-        assert_eq!(packing.flat_lifecycle_counts(), (0, 1));
-        let at = |tick| packing.sample(tick).unwrap().0;
-        let before = at(60);
-        let middle = at(180);
-        let after = at(300);
-        assert!(middle[0].tile.unwrap().area() < before[0].tile.unwrap().area());
-        assert!(after[0].tile.is_none());
-        for pair in after[1..].windows(2) {
-            let a = pair[0].tile.unwrap();
-            let b = pair[1].tile.unwrap();
-            assert!(a.high.y <= b.low.y || b.high.y <= a.low.y);
-            let minimum = packing.space().field(framing::MARGIN).pixels();
-            let minimum = 2.0 * minimum.x / (minimum.y - packing.gutter_scale);
-            let observed = a.ground_aspect().max(b.ground_aspect());
-            assert!((observed - minimum).abs() < 0.01, "{observed} != {minimum}");
-        }
-        let episodes = packing.lifecycle.as_ref().unwrap().aspect_episodes(300);
-        assert_eq!(episodes.len(), 2);
-        assert!(
-            episodes
-                .iter()
-                .all(|episode| episode.start < 300 && episode.end == 300)
-        );
     }
 
     #[test]

@@ -102,7 +102,7 @@ fn band_layout(space: Space, weights: &[f32], active: &[usize]) -> Option<Layout
     best
 }
 
-fn build_bands(
+pub(super) fn build_bands(
     space: Space,
     weights: &[f32],
     active: &[usize],
