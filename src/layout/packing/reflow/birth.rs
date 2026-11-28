@@ -1,12 +1,40 @@
 use super::{Layout, Space, Tile, compatible, connected, exchange, retirement};
 use crate::model::{count, framing};
-use bevy::math::Vec2;
+use bevy::math::{FloatExt, Vec2};
 
 #[derive(Debug)]
 pub(super) struct Birth {
     start: Layout,
     end: Layout,
     pub(super) guest: usize,
+    cut: Cut,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Cut {
+    host: usize,
+    guest: usize,
+    axis: usize,
+    high: bool,
+    start: f32,
+    end: f32,
+    outer_inset: f32,
+}
+
+#[derive(Debug)]
+pub(super) struct BirthBatch {
+    opening: Layout,
+    settled: Layout,
+    cuts: Vec<(usize, usize, Cut)>,
+    gap: f32,
+    joint: Option<JointBirth>,
+}
+
+#[derive(Debug)]
+struct JointBirth {
+    start: usize,
+    end: usize,
+    collapsed: Layout,
 }
 
 impl Birth {
@@ -16,6 +44,17 @@ impl Birth {
         guest: usize,
         weights: &[f32],
         ticks: usize,
+    ) -> Option<Self> {
+        Self::with_edges(layout, space, guest, weights, ticks, |_| true)
+    }
+
+    fn with_edges(
+        layout: &Layout,
+        space: Space,
+        guest: usize,
+        weights: &[f32],
+        ticks: usize,
+        available: impl Fn(Cut) -> bool,
     ) -> Option<Self> {
         if layout.tiles.get(guest)?.is_some() {
             return None;
@@ -58,8 +97,21 @@ impl Birth {
                     continue;
                 }
                 let ratio = gutter_cells[1].area() / cell.area();
+                let cut_recipe = Cut {
+                    host,
+                    guest,
+                    axis,
+                    high,
+                    start: edge,
+                    end: cut,
+                    outer_inset: if high {
+                        edge - tile.high[axis]
+                    } else {
+                        tile.low[axis] - edge
+                    },
+                };
                 let candidate_cost = (ratio - share).abs() + fraction * 0.1;
-                if candidate_cost >= cost {
+                if candidate_cost >= cost || !available(cut_recipe) {
                     continue;
                 }
                 let mut start = layout.clone();
@@ -77,7 +129,12 @@ impl Birth {
                     continue;
                 }
                 cost = candidate_cost;
-                best = Some(Self { start, end, guest });
+                best = Some(Self {
+                    start,
+                    end,
+                    guest,
+                    cut: cut_recipe,
+                });
             }
         }
         best
@@ -93,6 +150,254 @@ impl Birth {
             layout.gutters[self.guest] = None;
         }
         layout
+    }
+}
+
+impl BirthBatch {
+    pub(super) fn plan<'a>(
+        opening: Layout,
+        space: Space,
+        births: &[(usize, usize, usize)],
+        weights: impl Fn(usize) -> Option<&'a [f32]>,
+    ) -> Option<(Self, usize, usize)> {
+        let mut current = opening.clone();
+        let mut cuts: Vec<(usize, usize, Cut)> = Vec::with_capacity(births.len());
+        let mut processed = 0;
+        for &(start, end, guest) in births {
+            if current.tiles[guest].is_some() {
+                processed += 1;
+                continue;
+            }
+            let Some(duration) = end.checked_sub(start).filter(|&ticks| ticks > 0)
+            else {
+                break;
+            };
+            let Some(birth) = Birth::with_edges(
+                &current,
+                space,
+                guest,
+                weights(end)?,
+                duration,
+                |cut| {
+                    opening.tiles[cut.host].is_some()
+                        && cuts.iter().all(|&(_, _, earlier)| {
+                            cut.host != earlier.host
+                                || (cut.axis == earlier.axis
+                                    && cut.high != earlier.high)
+                        })
+                },
+            ) else {
+                break;
+            };
+            current = birth.end;
+            cuts.push((start, end, birth.cut));
+            processed += 1;
+        }
+        let births = &births[..processed];
+        let start = births.first()?.0;
+        let end = births.iter().map(|&(_, end, _)| end).max()?;
+        let settled = Self::certify(&opening, births, start, end, |tick| {
+            Self::apply_cuts(&opening, &cuts, space.gap, tick, &[])
+        })?;
+        Some((
+            Self {
+                opening,
+                settled,
+                cuts,
+                gap: space.gap,
+                joint: None,
+            },
+            processed,
+            end,
+        ))
+    }
+
+    pub(super) fn plan_together<'a>(
+        opening: Layout,
+        space: Space,
+        births: &[(usize, usize, usize)],
+        weights: impl Fn(usize) -> Option<&'a [f32]>,
+    ) -> Option<(Self, usize, usize)> {
+        let start = births.first()?.0;
+        let end = births.iter().map(|&(_, ready, _)| ready).min()?;
+        let processed = births.partition_point(|&(begin, _, _)| begin < end);
+        if processed < 2 || end <= start {
+            return None;
+        }
+        let births = &births[..processed];
+        let mut settled = opening.clone();
+        let mut ghosts = opening.clone();
+        let mut cuts = Vec::with_capacity(processed);
+        for &(_, ready, guest) in births {
+            if settled.tiles[guest].is_some() {
+                continue;
+            }
+            let birth =
+                Birth::plan(&settled, space, guest, weights(ready)?, end - start)?;
+            let cut = birth.cut;
+            let host_tile = ghosts.tiles[cut.host]?;
+            let host_cell = ghosts.gutters[cut.host]?;
+            let side = |rect: Tile| {
+                if cut.high {
+                    rect.high[cut.axis]
+                } else {
+                    rect.low[cut.axis]
+                }
+            };
+            ghosts.tiles[guest] = Some(collapsed(host_tile, cut.axis, side(host_tile)));
+            ghosts.gutters[guest] =
+                Some(collapsed(host_cell, cut.axis, side(host_cell)));
+            settled = birth.end;
+            cuts.push((start, end, cut));
+        }
+        Self::certify(&opening, births, start, end, |tick| {
+            let progress = super::held::birth_ease(tick - start, end - start);
+            if tick == end {
+                settled.clone()
+            } else {
+                ghosts.blend_edges(&settled, progress)
+            }
+        })?;
+        Some((
+            Self {
+                opening,
+                settled,
+                cuts,
+                gap: space.gap,
+                joint: Some(JointBirth {
+                    start,
+                    end,
+                    collapsed: ghosts,
+                }),
+            },
+            processed,
+            end,
+        ))
+    }
+
+    fn certify(
+        opening: &Layout,
+        births: &[(usize, usize, usize)],
+        start: usize,
+        end: usize,
+        sample: impl Fn(usize) -> Layout,
+    ) -> Option<Layout> {
+        let field = retirement::gutter_bounds(opening)?;
+        let mut previous = sample(start);
+        for tick in start + 1..=end {
+            let next = sample(tick);
+            if exchange::edge_travel(&previous, &next) > exchange::MAX_EDGE_STEP_PX
+                || !retirement::fills_field(&next, field)
+                || !retirement::contained(&next)
+                || !compatible(&previous.tiles, &next.tiles)
+                || !compatible(&previous.gutters, &next.gutters)
+                || !connected(&next, &next, false)
+                || births.iter().any(|&(_, ready, repo)| {
+                    ready.min(end) == tick && next.tiles[repo].is_none()
+                })
+            {
+                return None;
+            }
+            previous = next;
+        }
+        Some(previous)
+    }
+
+    pub(super) fn sample(&self, tick: usize, overrides: &[(usize, u64)]) -> Layout {
+        if let Some(joint) = &self.joint {
+            if tick <= joint.start {
+                return self.opening.clone();
+            }
+            if tick >= joint.end {
+                return self.settled();
+            }
+            let progress =
+                super::held::birth_ease(tick - joint.start, joint.end - joint.start);
+            return joint.collapsed.blend_edges(&self.settled, progress);
+        }
+        Self::apply_cuts(&self.opening, &self.cuts, self.gap, tick, overrides)
+    }
+
+    pub(super) fn settled(&self) -> Layout {
+        self.settled.clone()
+    }
+
+    fn apply_cuts(
+        opening: &Layout,
+        cuts: &[(usize, usize, Cut)],
+        gap: f32,
+        tick: usize,
+        overrides: &[(usize, u64)],
+    ) -> Layout {
+        let mut layout = opening.clone();
+        for &(start, end, cut) in cuts {
+            let progress = overrides
+                .iter()
+                .find(|&&(repo, _)| repo == cut.guest)
+                .map_or_else(
+                    || super::held::birth_ease(tick.saturating_sub(start), end - start),
+                    |&(_, elapsed)| crate::layout::packing::birth_presence(elapsed),
+                );
+            if progress > 0.0 {
+                cut.apply(&mut layout, gap, progress);
+            }
+        }
+        layout
+    }
+
+    pub(super) fn has_override(
+        &self,
+        overrides: &[(usize, u64)],
+        accept: impl Fn(u64) -> bool,
+    ) -> bool {
+        self.joint.is_none()
+            && self.cuts.iter().any(|&(_, _, cut)| {
+                overrides
+                    .iter()
+                    .any(|&(repo, elapsed)| repo == cut.guest && accept(elapsed))
+            })
+    }
+
+    #[cfg(test)]
+    pub(super) fn count(&self) -> usize {
+        self.cuts.len()
+    }
+}
+
+impl Cut {
+    fn apply(self, layout: &mut Layout, gap: f32, progress: f32) {
+        let Self {
+            host,
+            guest,
+            axis,
+            high,
+            start,
+            end,
+            outer_inset,
+        } = self;
+        let Some((tile, cell)) = layout.tiles[host].zip(layout.gutters[host]) else {
+            return;
+        };
+        let margin = gap / framing::VIEWPORT[axis];
+        let host_inset = outer_inset.lerp(margin, progress);
+        let guest_inset = margin * progress;
+        let guest_outer = outer_inset * progress;
+        let cut = start.lerp(end, progress);
+        let [before, after] = if high {
+            [cut - host_inset, cut + guest_inset]
+        } else {
+            [cut - guest_inset, cut + host_inset]
+        };
+        let [host_tile, mut guest_tile] = halves(tile, axis, high, before, after);
+        if high {
+            guest_tile.high[axis] = start - guest_outer;
+        } else {
+            guest_tile.low[axis] = start + guest_outer;
+        }
+        let [host_cell, guest_cell] = halves(cell, axis, high, cut, cut);
+        [layout.tiles[host], layout.tiles[guest]] = [Some(host_tile), Some(guest_tile)];
+        [layout.gutters[host], layout.gutters[guest]] =
+            [Some(host_cell), Some(guest_cell)];
     }
 }
 

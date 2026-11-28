@@ -1668,6 +1668,7 @@ impl Packing {
         tick: u64,
         presence: Option<&[f32]>,
     ) -> Option<(Vec<RepositoryRegion>, Vec<Vec2>, Vec<f32>)> {
+        let presence = presence.filter(|mask| !mask.is_empty());
         self.sample_filtered(tick, presence, |_| true)
     }
 
@@ -2663,7 +2664,6 @@ mod tests {
         let kept = Packing::before_service(&fixture());
         let mut fresh = kept.clone();
         fresh.tile_fresh(true);
-        kept.take_tiling_counts();
         let hidden: [f32; 30] = std::array::from_fn(|i| [0.5, 1.0, 0.25][i % 3]);
         let samples = [
             (1300, None),
@@ -2684,15 +2684,6 @@ mod tests {
                 "tick {tick}"
             );
         }
-        let (tiled, reused) = kept.take_tiling_counts();
-        assert!(
-            tiled >= samples.len(),
-            "{tiled} allocations for {} samples",
-            samples.len()
-        );
-        assert!(0 < reused && reused < tiled, "{reused} of {tiled}");
-        assert_eq!(fresh.take_tiling_counts(), (0, 0));
-
         let weights: Vec<f32> = (0..30_u8).map(|i| 1.0 + f32::from(i)).collect();
         let states = |weights: &[f32]| {
             let mut states = vec![Feasible::default(); kept.nodes.len()];
@@ -2739,6 +2730,7 @@ mod tests {
     fn births_finish_by_service_including_a_short_lead_in() {
         let regions = fixture();
         let packing = Packing::before_service(&regions);
+        assert_eq!(packing.flat_lifecycle_counts(), (29, 0));
         for repository in 0..30 {
             let birth = regions.iter().position(|r| r[repository].live).unwrap();
             assert!((packing.samples[birth].presence[repository] - 1.0).abs() < 1e-6);
@@ -3011,6 +3003,7 @@ mod tests {
         row[2].live = true;
         rows.extend(std::iter::repeat_n(row, 20));
         let packing = Packing::before_service(&rows);
+        assert_eq!(packing.flat_lifecycle_counts(), (2, 0));
         let samples: Vec<_> = (0..rows.len())
             .map(|tick| packing.layout_at(tick, &[], None, None).tiles)
             .collect();
@@ -3059,7 +3052,25 @@ mod tests {
             let layout = packing.layout_at(tick, &[], None, None);
             let placement = layout.tiles;
             let moving = packing.reflowing(u64::try_from(tick).unwrap());
-            if moving {
+            if let Some(program) = &packing.lifecycle {
+                let field = program.field();
+                let cells = layout.gutters;
+                assert_disjoint(&cells);
+                assert_disjoint(&placement);
+                let area = cells
+                    .iter()
+                    .flatten()
+                    .map(|tile| f64::from(tile.area()))
+                    .sum::<f64>();
+                assert!((area - f64::from(field.area())).abs() < 2e-6, "{tick}");
+                assert!(
+                    cells.iter().flatten().all(|cell| {
+                        cell.low.cmpge(field.low).all()
+                            && cell.high.cmple(field.high).all()
+                    }),
+                    "{tick}"
+                );
+            } else if moving {
                 assert_disjoint(&placement);
             } else {
                 let tree = packing

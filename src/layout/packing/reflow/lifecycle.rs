@@ -1,4 +1,9 @@
-use super::{Layout, birth::Birth, held, opening, retirement::Retirement};
+use super::{
+    Layout,
+    birth::{Birth, BirthBatch},
+    held, opening,
+    retirement::Retirement,
+};
 use crate::{
     layout::packing::{Packing, Tile, birth_presence},
     model::{BIRTH_TICKS, framing},
@@ -20,8 +25,17 @@ struct Phase {
 #[derive(Debug)]
 enum Action {
     Birth(Birth),
+    Births(BirthBatch),
     Archive(Retirement),
     Shift { before: Layout, after: Layout },
+}
+
+#[derive(Clone, Copy)]
+enum CompilePolicy {
+    Serial,
+    SharedArchives,
+    SharedLifecycle,
+    JointBirths,
 }
 
 impl Program {
@@ -56,18 +70,66 @@ impl Program {
                 tiles: vec![Some(space.field(framing::MARGIN))],
                 gutters: vec![Some(space.field(super::super::GUTTER_MARGIN))],
             };
-            return Self::compile(packing, opening, &events, live_files, false);
+            return Self::compile(
+                packing,
+                opening,
+                &events,
+                live_files,
+                CompilePolicy::Serial,
+            );
         }
         events.sort_unstable_by_key(|&(start, end, repo, birth)| {
             (if birth { start } else { end }, start, end, repo)
         });
         let base = packing.layout_at(0, &[], None, None);
         let preferred = opening::plan(packing, &base, |_| true);
-        preferred.into_iter().chain([base]).find_map(|mut opening| {
-            inset_field(packing, &mut opening)?;
-            Self::compile(packing, opening.clone(), &events, live_files, false)
-                .or_else(|| Self::compile(packing, opening, &events, live_files, true))
-        })
+        let openings: Vec<_> = preferred.into_iter().chain([base]).collect();
+        openings
+            .iter()
+            .filter_map(|opening| {
+                let mut opening = opening.clone();
+                inset_field(packing, &mut opening)?;
+                Some(opening)
+            })
+            .find_map(|opening| {
+                Self::compile(
+                    packing,
+                    opening.clone(),
+                    &events,
+                    live_files,
+                    CompilePolicy::Serial,
+                )
+                .or_else(|| {
+                    Self::compile(
+                        packing,
+                        opening,
+                        &events,
+                        live_files,
+                        CompilePolicy::SharedArchives,
+                    )
+                })
+            })
+            .or_else(|| {
+                if !events.iter().any(|&(_, _, _, birth)| birth) {
+                    return None;
+                }
+                [CompilePolicy::SharedLifecycle, CompilePolicy::JointBirths]
+                    .into_iter()
+                    .filter(|policy| {
+                        !matches!(policy, CompilePolicy::JointBirths)
+                            || packing
+                                .reflows
+                                .iter()
+                                .all(|change| change.transition.is_none())
+                    })
+                    .find_map(|policy| {
+                        openings.iter().find_map(|opening| {
+                            let mut opening = opening.clone();
+                            clip_gutters(packing, &mut opening)?;
+                            Self::compile(packing, opening, &events, live_files, policy)
+                        })
+                    })
+            })
     }
 
     fn compile(
@@ -75,7 +137,7 @@ impl Program {
         opening: Layout,
         events: &[(usize, usize, usize, bool)],
         live_files: &[Vec<f32>],
-        share_archive_windows: bool,
+        policy: CompilePolicy,
     ) -> Option<Self> {
         let mut current = opening.clone();
         let mut phases = Vec::with_capacity(events.len());
@@ -93,12 +155,34 @@ impl Program {
             if birth && start == 0 && current.tiles[repository].is_some() {
                 continue;
             }
-            if birth && available > start {
+            let overlap = matches!(
+                policy,
+                CompilePolicy::SharedLifecycle | CompilePolicy::JointBirths
+            );
+            if birth && available > start && !overlap {
                 return None;
             }
-            let mut start = start.max(available);
+            let start = start.max(available);
             if start >= end {
                 return None;
+            }
+            if birth
+                && overlap
+                && events
+                    .peek()
+                    .is_some_and(|&(next, _, _, birth)| birth && next < end)
+            {
+                let phase = batch_births(
+                    packing,
+                    current,
+                    &mut events,
+                    (start, end, repository),
+                    policy,
+                )?;
+                current = phase.action.sample(1.0);
+                available = phase.end;
+                phases.push(phase);
+                continue;
             }
             let ready = end;
             let end = if birth {
@@ -109,57 +193,32 @@ impl Program {
             } else {
                 end
             };
-            let action = if birth {
+            let phase = if birth {
                 if end <= start {
                     return None;
                 }
                 let row = packing.samples.get(ready)?;
-                Action::Birth(Birth::plan(
+                let action = Action::Birth(Birth::plan(
                     &current,
                     packing.space(),
                     repository,
                     &row.weights,
                     end - start,
-                )?)
+                )?);
+                Phase { start, end, action }
             } else {
-                packing.samples.get(end)?;
-                let departing;
-                (start, departing) = archive_members(
+                archive_phase(
+                    packing,
+                    &current,
                     &mut events,
                     (requested, end, repository),
                     start,
-                    share_archive_windows,
-                );
-                let fit = opening::glyph_scales(packing, start);
-                let motion = if packing.labels.len() == 1 {
-                    Retirement::close_last(&current, repository, end - start)?
-                } else if departing.len() == 1 {
-                    Retirement::plan(
-                        current.clone(),
-                        repository,
-                        packing.space(),
-                        end - start,
-                        fit,
-                    )?
-                } else {
-                    Retirement::together(
-                        &current,
-                        &departing,
-                        packing.space(),
-                        end - start,
-                        fit,
-                    )?
-                };
-                let motion = if events.peek().is_none() {
-                    motion.finish_in_field(packing.space(), end - start)
-                } else {
-                    motion
-                };
-                Action::Archive(motion)
+                    !matches!(policy, CompilePolicy::Serial),
+                )?
             };
-            current = action.sample(1.0);
-            available = end;
-            phases.push(Phase { start, end, action });
+            current = phase.action.sample(1.0);
+            available = phase.end;
+            phases.push(phase);
         }
         insert_shifts(
             packing,
@@ -214,6 +273,7 @@ impl Program {
             .iter()
             .fold((0, 0), |(births, archives), phase| match phase.action {
                 Action::Birth(_) => (births + 1, archives),
+                Action::Births(ref batch) => (births + batch.count(), archives),
                 Action::Archive(ref archive) => (births, archives + archive.count()),
                 Action::Shift { .. } => (births, archives),
             })
@@ -225,12 +285,42 @@ impl Program {
         births: &[(usize, u64)],
     ) -> Layout {
         let index = self.phases.partition_point(|phase| phase.start <= tick);
+        if !births.is_empty()
+            && let Some(batch) = self.phases[..index].iter().find_map(|phase| {
+                let Action::Births(batch) = &phase.action else {
+                    return None;
+                };
+                batch
+                    .has_override(births, |elapsed| elapsed < BIRTH_TICKS)
+                    .then_some(batch)
+            })
+        {
+            return batch.sample(tick, births);
+        }
+        if let Some(Phase {
+            action: Action::Births(batch),
+            ..
+        }) = self.phases.get(index)
+            && self.phases[..index]
+                .last()
+                .is_none_or(|prior| tick >= prior.end)
+            && batch.has_override(births, |elapsed| elapsed > 0)
+        {
+            return batch.sample(tick, births);
+        }
         if let Some((birth, elapsed)) = self.overridden_birth(tick, index, births) {
             return birth.sample(birth_presence(elapsed));
         }
         let Some(phase) = self.phases[..index].last() else {
             return self.opening.clone();
         };
+        if let Action::Births(batch) = &phase.action {
+            return if tick >= phase.end && births.is_empty() {
+                batch.settled()
+            } else {
+                batch.sample(tick, births)
+            };
+        }
         let progress = if tick >= phase.end {
             1.0
         } else {
@@ -238,6 +328,7 @@ impl Program {
             let duration = phase.end - phase.start;
             match phase.action {
                 Action::Birth(_) => held::birth_ease(elapsed, duration),
+                Action::Births(_) => unreachable!("sampled at its own birth windows"),
                 Action::Archive(_) | Action::Shift { .. } => {
                     held::progress(elapsed, duration)
                 }
@@ -272,6 +363,84 @@ impl Program {
     }
 }
 
+fn batch_births(
+    packing: &Packing,
+    opening: Layout,
+    events: &mut std::iter::Peekable<
+        impl Iterator<Item = (usize, usize, usize, bool)> + Clone,
+    >,
+    (start, mut end, repository): (usize, usize, usize),
+    policy: CompilePolicy,
+) -> Option<Phase> {
+    let mut group = vec![(start, end, repository)];
+    let mut probe = (*events).clone();
+    while probe
+        .peek()
+        .is_some_and(|&(next, _, _, birth)| birth && next < end)
+    {
+        let (begin, ready, guest, _) = probe.next()?;
+        end = end.max(ready);
+        group.push((begin.max(start), ready, guest));
+    }
+    let weights = |tick: usize| {
+        packing
+            .samples
+            .get(tick)
+            .map(|sample| sample.weights.as_slice())
+    };
+    let space = packing.space();
+    let (batch, consumed, end) = if matches!(policy, CompilePolicy::JointBirths) {
+        BirthBatch::plan_together(opening, space, &group, weights)?
+    } else {
+        BirthBatch::plan(opening, space, &group, weights)?
+    };
+    for _ in 1..consumed {
+        events.next()?;
+    }
+    Some(Phase {
+        start,
+        end,
+        action: Action::Births(batch),
+    })
+}
+
+fn archive_phase(
+    packing: &Packing,
+    current: &Layout,
+    events: &mut std::iter::Peekable<impl Iterator<Item = (usize, usize, usize, bool)>>,
+    (requested, end, repository): (usize, usize, usize),
+    start: usize,
+    share_archive_windows: bool,
+) -> Option<Phase> {
+    packing.samples.get(end)?;
+    let (start, departing) = archive_members(
+        events,
+        (requested, end, repository),
+        start,
+        share_archive_windows,
+    );
+    let space = packing.space();
+    let ticks = end - start;
+    let fit = opening::glyph_scales(packing, start);
+    let motion = if packing.labels.len() == 1 {
+        Retirement::close_last(current, repository, ticks)?
+    } else if departing.len() == 1 {
+        Retirement::plan(current.clone(), repository, space, ticks, fit)?
+    } else {
+        Retirement::together(current, &departing, space, ticks, fit)?
+    };
+    let motion = if events.peek().is_none() {
+        motion.finish_in_field(space, ticks)
+    } else {
+        motion
+    };
+    Some(Phase {
+        start,
+        end,
+        action: Action::Archive(motion),
+    })
+}
+
 fn archive_members(
     events: &mut std::iter::Peekable<impl Iterator<Item = (usize, usize, usize, bool)>>,
     (requested, end, repository): (usize, usize, usize),
@@ -299,6 +468,7 @@ impl Action {
     fn sample(&self, progress: f32) -> Layout {
         match self {
             Self::Birth(birth) => birth.sample(progress),
+            Self::Births(batch) => batch.settled(),
             Self::Archive(archive) => archive.sample(1.0 - progress),
             Self::Shift { before, after } => {
                 if progress >= 1.0 {
@@ -398,6 +568,25 @@ fn inset_field(packing: &Packing, layout: &mut Layout) -> Option<()> {
         .then_some(())
 }
 
+fn clip_gutters(packing: &Packing, layout: &mut Layout) -> Option<()> {
+    use super::retirement::{contained, fills_field, settled};
+    use bevy::math::Vec2;
+    let space = packing.space();
+    let field = space.field(framing::MARGIN);
+    let padding = Vec2::splat(space.gap) / framing::VIEWPORT;
+    for (tile, cell) in layout.tiles.iter_mut().zip(&mut layout.gutters) {
+        *cell = cell.map(|cell| Tile {
+            low: cell.low.max(field.low),
+            high: cell.high.min(field.high),
+        });
+        *tile = cell.map(|cell| glass_in_cell(cell, field, field, padding));
+    }
+    (fills_field(layout, field)
+        && contained(layout)
+        && layout.tiles.iter().flatten().copied().all(settled))
+    .then_some(())
+}
+
 fn glass_in_cell(cell: Tile, field: Tile, glass: Tile, gap: bevy::math::Vec2) -> Tile {
     use bevy::math::Vec2;
 
@@ -461,6 +650,79 @@ mod tests {
         packing::{Inputs, Sample, Space},
     };
     use bevy::math::Vec2;
+
+    #[test]
+    fn joint_birth_opens_both_tiles_by_the_first_service() {
+        let space = Space::new(4.0, 1.0);
+        let field = Tile {
+            low: Vec2::new(-0.4, -0.3),
+            high: Vec2::new(0.4, 0.3),
+        };
+        let opening = Layout {
+            tiles: vec![Some(field), None, None],
+            gutters: vec![Some(field), None, None],
+        };
+        let weights = [1.0; 3];
+        let (batch, guests, end) = BirthBatch::plan_together(
+            opening,
+            space,
+            &[(59, 149, 1), (67, 157, 2)],
+            |_| Some(&weights),
+        )
+        .unwrap();
+        assert_eq!((guests, end), (2, 149));
+        assert_eq!(batch.sample(59, &[]).tiles, vec![Some(field), None, None]);
+        assert!(batch.sample(end, &[]).tiles.iter().all(Option::is_some));
+    }
+
+    #[test]
+    fn opposite_opening_cuts_accept_independent_presentation_progress() {
+        use super::super::{exchange, retirement};
+
+        let space = Space::new(4.0, 1.0);
+        let field = space.field(framing::MARGIN);
+        let opening = Layout {
+            tiles: vec![Some(field), None, None],
+            gutters: vec![Some(field), None, None],
+        };
+        let weights = vec![1.0; 3];
+        let row = Sample {
+            weights: weights.clone(),
+            presence: vec![1.0; 3],
+        };
+        let packing = Packing {
+            gutter_scale: space.gap,
+            growth: space.growth,
+            samples: vec![row; 158].into(),
+            ..Packing::default()
+        };
+        let events = [(59, 149, 1, true), (67, 157, 2, true)];
+        let plan = Program::compile(
+            &packing,
+            opening,
+            &events,
+            &vec![weights; 158],
+            CompilePolicy::SharedLifecycle,
+        )
+        .unwrap();
+        assert_eq!(plan.counts(), (2, 0));
+        assert_eq!(
+            plan.sample(149, &[]).tiles[1],
+            plan.sample(157, &[]).tiles[1]
+        );
+        for presentation in [false, true] {
+            let mut previous = plan.sample(59, &[]);
+            for tick in 60_usize..=157 {
+                let early = [(2, u64::try_from(tick.saturating_sub(63)).unwrap())];
+                let overrides = if presentation { &early[..] } else { &[] };
+                let current = plan.sample(tick, overrides);
+                assert!(exchange::edge_travel(&previous, &current) <= 8.0, "{tick}");
+                assert!(retirement::fills_field(&current, field), "{tick}");
+                assert!(retirement::contained(&current), "{tick}");
+                previous = current;
+            }
+        }
+    }
 
     #[test]
     fn a_late_birth_compiles_after_a_large_opening_cohort() {
@@ -532,8 +794,14 @@ mod tests {
         let live_files: Vec<_> = (0..=END)
             .map(|tick| vec![25.0, 25.0, if tick < IMPORT { 1.0 } else { 100.0 }])
             .collect();
-        let plan =
-            Program::compile(&packing, opening, &events, &live_files, false).unwrap();
+        let plan = Program::compile(
+            &packing,
+            opening,
+            &events,
+            &live_files,
+            CompilePolicy::Serial,
+        )
+        .unwrap();
         let arrival = plan.sample(BIRTH, &[]);
         let final_layout = plan.sample(END, &[]);
         let share = |layout: Layout| {
@@ -602,11 +870,23 @@ mod tests {
         let events = [(20, 260, 0, false), (23, 263, 2, false)];
         let live_files = vec![vec![20.0; 3]; 264];
         assert!(
-            Program::compile(&packing, opening.clone(), &events, &live_files, false)
-                .is_none()
+            Program::compile(
+                &packing,
+                opening.clone(),
+                &events,
+                &live_files,
+                CompilePolicy::Serial
+            )
+            .is_none()
         );
-        let plan =
-            Program::compile(&packing, opening, &events, &live_files, true).unwrap();
+        let plan = Program::compile(
+            &packing,
+            opening,
+            &events,
+            &live_files,
+            CompilePolicy::SharedArchives,
+        )
+        .unwrap();
         assert_eq!(plan.counts(), (0, 2));
         assert_eq!(plan.phases.len(), 1);
         let phase = &plan.phases[0];
