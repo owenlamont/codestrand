@@ -422,7 +422,7 @@ pub(super) fn best_slide(
     weights: Option<&[f32]>,
     score: impl Fn(&Layout) -> f32,
 ) -> Option<Layout> {
-    let mut best_score = score(from) + 0.005;
+    let mut best_score = score(from);
     let mut best = None;
     let field = space.field(framing::MARGIN);
     let gutters = gutter_bounds(from)?;
@@ -430,13 +430,8 @@ pub(super) fn best_slide(
         exchange::MAX_EDGE_STEP_PX * held::REFLOW_LINEAR_FRACTION * count(ticks);
     let gap = Vec2::splat(space.gap) * 2.0 / framing::VIEWPORT;
     let density = weights.and_then(|weights| {
-        let total: f32 = from
-            .gutters
-            .iter()
-            .zip(weights)
-            .filter_map(|(cell, &weight)| cell.map(|_| weight))
-            .sum();
-        (total > 0.0).then_some((weights, gutters.area() / total))
+        let (area, total) = super::totals(&from.tiles, weights);
+        (total > 0.0).then_some((weights, area, total))
     });
     for (repo, cell) in from.gutters.iter().enumerate() {
         if cell.is_none() {
@@ -454,12 +449,19 @@ pub(super) fn best_slide(
             let extent = gutters.high[axis] - gutters.low[axis];
             let broad = [0.15, 0.25, 1.0 / 3.0, 0.5, 2.0 / 3.0, 0.75, 0.85]
                 .map(|fraction| gutters.low[axis] + extent * fraction);
-            let proportional = density
-                .map(|(weights, scale)| group.density_target(from, weights, scale));
+            let proportional = density.and_then(|(weights, area, total)| {
+                group.density_target(from, weights, area, total)
+            });
             let Some((low, high)) = group.slide_limits(from, max_travel) else {
                 continue;
             };
-            for cut in local.into_iter().chain(broad).chain(proportional) {
+            let limits = density.map(|_| [low, high]).into_iter().flatten();
+            for cut in local
+                .into_iter()
+                .chain(broad)
+                .chain(proportional)
+                .chain(limits)
+            {
                 let cut = cut.clamp(low, high);
                 let to = group.finish(from, None, cut, field);
                 if !to.tiles.iter().zip(&from.tiles).all(|(&after, &before)| {
@@ -619,17 +621,35 @@ impl Group {
         (low <= high).then_some((self.cut + low, self.cut + high))
     }
 
-    fn density_target(&self, layout: &Layout, weights: &[f32], scale: f32) -> f32 {
+    fn density_target(
+        &self,
+        layout: &Layout,
+        weights: &[f32],
+        area: f32,
+        files: f32,
+    ) -> Option<f32> {
         let cross = 1 - self.axis;
-        let (numerator, denominator) =
-            self.members.iter().fold((0.0, 0.0), |(lhs, rhs), member| {
-                let cell = layout.gutters[member.repo].unwrap();
-                let slope = (cell.high[cross] - cell.low[cross])
-                    * if member.high { 0.25 } else { -0.25 };
-                let desired = weights[member.repo] * scale;
-                (lhs + slope * (desired - cell.area()), rhs + slope * slope)
-            });
-        self.cut + numerator / denominator
+        let terms = |member: &Member| {
+            let tile = layout.tiles[member.repo].unwrap();
+            let share = weights[member.repo] / files;
+            let slope = (tile.high[cross] - tile.low[cross])
+                * if member.high { 0.25 } else { -0.25 };
+            (tile.area(), share, slope)
+        };
+        let total_slope: f32 = self.members.iter().map(|member| terms(member).2).sum();
+        let (tile_area, share, slope) = self
+            .members
+            .iter()
+            .map(terms)
+            .filter(|&(_, share, _)| share > 0.0)
+            .max_by(|a, b| {
+                let error = |(tile_area, share, _): (f32, f32, f32)| {
+                    (tile_area / (share * area) - 1.0).abs()
+                };
+                error(*a).total_cmp(&error(*b))
+            })?;
+        let offset = (share * area - tile_area) / (slope - share * total_slope);
+        offset.is_finite().then_some(self.cut + offset)
     }
 
     fn finish(

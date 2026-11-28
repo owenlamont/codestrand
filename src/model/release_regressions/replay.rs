@@ -4,6 +4,28 @@ use bevy::math::{Rect, Vec3Swizzles};
 use proptest::{prelude::*, test_runner::TestCaseResult};
 use std::time::Instant;
 
+#[derive(Clone, Copy, Debug)]
+struct LayoutSample {
+    value: f32,
+    tick: u64,
+    repository: usize,
+}
+
+fn record_maximum(
+    maximum: &mut Option<LayoutSample>,
+    value: f32,
+    tick: u64,
+    repository: usize,
+) {
+    if maximum.is_none_or(|sample| value > sample.value) {
+        *maximum = Some(LayoutSample {
+            value,
+            tick,
+            repository,
+        });
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(super) enum Fault {
     None,
@@ -46,6 +68,15 @@ pub(super) struct Replay {
     pub out_of_band_glyph_frames: usize,
     pub glyph_settle_ticks: Vec<u64>,
     pub longest_glyph_exemption: u64,
+    pub exempt_tile_frames: usize,
+    pub live_tile_frames: usize,
+    pub settled_tile_frames: usize,
+    pub floor_bound_tile_frames: usize,
+    worst_density: Option<LayoutSample>,
+    worst_fill: Option<LayoutSample>,
+    floor_gap: Option<LayoutSample>,
+    limiting_fill: Option<(Vec2, Vec2, f32, f32, usize)>,
+    worst_coverage_spread: Option<LayoutSample>,
 }
 
 impl Replay {
@@ -56,6 +87,21 @@ impl Replay {
             "glyph exemption lasted {} ticks (maximum {limit})",
             self.longest_glyph_exemption,
         );
+        Ok(())
+    }
+
+    pub(super) fn check_layout_quality(&self) -> TestCaseResult {
+        let violations: Vec<_> = [("density error", self.worst_density, 0.20),
+            ("glyph coverage spread", self.worst_coverage_spread, 2.5)]
+            .into_iter()
+            .filter_map(|(metric, sample, limit)| {
+                let LayoutSample { value, tick, repository } = sample?;
+                (value > limit + 1e-5).then(|| {
+                    format!("{metric} {value:.4} exceeds {limit} at tick {tick}, repository {repository}")
+                })
+            })
+            .collect();
+        prop_assert!(violations.is_empty(), "{}", violations.join("; "));
         Ok(())
     }
 }
@@ -119,6 +165,7 @@ struct Audit {
     glyph_scale: crate::model::glyph_scale::GlyphScale,
     glyph_ratios: Vec<(f32, u64, usize, usize)>,
     glyph_exemption_ticks: Vec<u64>,
+    file_counts: Vec<(usize, u64)>,
 }
 
 pub(super) fn replay(
@@ -215,8 +262,9 @@ pub(super) fn replay(
             audit
                 .glyph_ratios
                 .sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
-            if let Some(last) = audit.glyph_ratios.len().checked_sub(1) {
-                audit.report.glyph_ratio_p90 = audit.glyph_ratios[last * 9 / 10];
+            if !audit.glyph_ratios.is_empty() {
+                audit.report.glyph_ratio_p90 =
+                    audit.glyph_ratios[(audit.glyph_ratios.len() - 1) * 9 / 10];
             }
             return Ok(audit.report);
         }
@@ -329,10 +377,11 @@ impl Audit {
         self.glyph_exemption_ticks
             .resize(layout.repositories.len(), 0);
         for (repo, duration) in self.glyph_exemption_ticks.iter_mut().enumerate() {
-            if layout.repositories[repo].tile.is_some()
-                && !self.glyph_scale.settled(repo)
-            {
+            let visible = layout.repositories[repo].tile.is_some();
+            self.report.live_tile_frames += usize::from(visible);
+            if visible && !self.glyph_scale.settled(repo) {
                 *duration += 1;
+                self.report.exempt_tile_frames += 1;
                 self.report.longest_glyph_exemption =
                     self.report.longest_glyph_exemption.max(*duration);
             } else if *duration > 0 {
@@ -342,23 +391,49 @@ impl Audit {
             }
         }
         let mut minimum = (f32::INFINITY, 0);
-        let mut maximum = (0.0_f32, 0);
+        let mut maximum = (0.0, 0);
         let mut first_repository = None;
         let mut comparable = false;
+        let mut files = vec![0; layout.repositories.len()];
+        let mut glyph_area = vec![0.0; files.len()];
+        let mut bounds =
+            vec![
+                (Vec2::splat(f32::INFINITY), Vec2::splat(f32::NEG_INFINITY));
+                files.len()
+            ];
+        let (focus, distance) = sim.world_view();
+        let eye = sim.field_space().to_planner(focus + Vec3::Y * distance);
+        let focus = eye.xz();
+        let mesh = sim.theme().glyph_transform();
+        let corners = [(-0.5, -0.5), (-0.5, 0.5), (0.5, -0.5), (0.5, 0.5)]
+            .map(|(x, y)| mesh.transform_point(Vec3::new(x, y, 0.0)));
+        let projection = (framing::FOV * 0.5).tan() * framing::GROUND_FACTOR;
+        let aspect = framing::VIEWPORT.x / framing::VIEWPORT.y;
         for (_, file) in layout.files() {
             let dir = layout.dir(file.dir);
-            if self.glyph_scale.settled(dir.repository)
-                && file.state != crate::layout::Presence::Leaving
-                && dir.scale > 0.0
-            {
+            let repo = dir.repository;
+            if file.state == crate::layout::Presence::Leaving {
+                continue;
+            }
+            files[repo] += 1;
+            if self.glyph_scale.settled(repo) && dir.scale > 0.0 {
                 let width = self.glyph_scale.overview_width(dir.scale);
-                comparable |=
-                    *first_repository.get_or_insert(dir.repository) != dir.repository;
+                glyph_area[repo] += width * width;
+                comparable |= *first_repository.get_or_insert(repo) != repo;
                 if width < minimum.0 {
-                    minimum = (width, dir.repository);
+                    minimum = (width, repo);
                 }
                 if width > maximum.0 {
-                    maximum = (width, dir.repository);
+                    maximum = (width, repo);
+                }
+                let (low, high) = &mut bounds[repo];
+                for corner in corners {
+                    let world = ground(file.position) + corner * dir.scale;
+                    let offset = world.xz() - focus;
+                    let point = Vec2::new(offset.x / aspect, -offset.y)
+                        / (projection * (eye.y - world.y));
+                    *low = low.min(point);
+                    *high = high.max(point);
                 }
             }
         }
@@ -371,6 +446,102 @@ impl Audit {
                 self.report.worst_glyph_ratio = ratio;
                 self.report.worst_glyph_at = (tick, minimum.1, maximum.1);
             }
+        }
+        self.measure_layout(sim, &files, &bounds, &glyph_area);
+    }
+
+    fn measure_layout(
+        &mut self,
+        sim: &Simulation,
+        files: &[usize],
+        bounds: &[(Vec2, Vec2)],
+        glyph_area: &[f32],
+    ) {
+        let tick = sim.state.tick;
+        let settle = Time::seconds(glyph_scale::GLYPH_RATIO_GRACE).ticks(true);
+        let regions = &sim.layout().repositories;
+        self.file_counts.resize(regions.len(), (0, tick));
+        let (area, total_files) = regions
+            .iter()
+            .zip(files)
+            .filter_map(|(region, &count)| {
+                (count > 0)
+                    .then_some(region.tile)
+                    .flatten()
+                    .map(|tile| (tile.area(), count))
+            })
+            .fold((0.0, 0), |(area, files), (a, n)| (area + a, files + n));
+        let field =
+            geometric_floor::bounds(regions.iter().filter_map(|region| region.tile));
+        let mut least_fill = (f32::INFINITY, 0);
+        let mut best_fill = (0.0, 0);
+        let mut least_coverage = (f32::INFINITY, 0);
+        let mut best_coverage = 0.0_f32;
+        for (repo, (region, &count)) in regions.iter().zip(files).enumerate() {
+            let (previous, changed) = &mut self.file_counts[repo];
+            if *previous != count {
+                (*previous, *changed) = (count, tick);
+            }
+            let Some(tile) = region.tile else { continue };
+            if count == 0 || tick - *changed < settle || !self.glyph_scale.settled(repo)
+            {
+                continue;
+            }
+            let ideal =
+                area * crate::model::count(count) / crate::model::count(total_files);
+            let floor = geometric_floor::minimum_area(tile, field);
+            let error = (tile.area() / ideal.max(floor) - 1.0).abs();
+            record_maximum(&mut self.report.worst_density, error, tick, repo);
+            record_maximum(
+                &mut self.report.floor_gap,
+                (floor - ideal).max(0.0) / area,
+                tick,
+                repo,
+            );
+            self.report.settled_tile_frames += 1;
+            let at_floor = geometric_floor::bound(ideal, tile.area(), floor);
+            let (low, high) = bounds[repo];
+            let coverage = glyph_area[repo] / tile.area();
+            if at_floor {
+                self.report.floor_bound_tile_frames += 1;
+                continue;
+            }
+            if low.is_finite() {
+                let fill = (high - low).element_product() * 0.25 / tile.area();
+                if fill < least_fill.0 {
+                    least_fill = (fill, repo);
+                }
+                if fill > best_fill.0 {
+                    best_fill = (fill, repo);
+                }
+                if coverage < least_coverage.0 {
+                    least_coverage = (coverage, repo);
+                }
+                best_coverage = best_coverage.max(coverage);
+            }
+        }
+        if best_fill.0 > 0.0 {
+            let spread = best_fill.0 / least_fill.0;
+            if self
+                .report
+                .worst_fill
+                .is_none_or(|sample| spread > sample.value)
+            {
+                let tile = regions[least_fill.1].tile.unwrap();
+                let (low, high) = bounds[least_fill.1];
+                let span = (high - low) * framing::VIEWPORT * 0.5;
+                self.report.limiting_fill =
+                    Some((tile.pixels(), span, least_fill.0, best_fill.0, best_fill.1));
+            }
+            record_maximum(&mut self.report.worst_fill, spread, tick, least_fill.1);
+        }
+        if best_coverage > 0.0 {
+            record_maximum(
+                &mut self.report.worst_coverage_spread,
+                best_coverage / least_coverage.0,
+                tick,
+                least_coverage.1,
+            );
         }
     }
 

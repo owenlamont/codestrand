@@ -560,6 +560,18 @@ fn playback_variations() -> impl Strategy<Value = PlaybackVariation> {
 }
 
 #[test]
+#[ignore = "Brief 9, 20:34:49: trial 2 is incremental and the density gate remains open"]
+fn settled_layout_meets_density_and_coverage_limits() {
+    let config = property_config(8);
+    let seed = config.rng_seed;
+    TestRunner::new(config)
+        .run(&histories(2..=5, 1..=8, 0..=2, 6..=12), |history| {
+            history.replay(CI_TICK_LIMIT)?.check_layout_quality()
+        })
+        .unwrap_or_else(|error| panic!("layout quality seed {seed:?}: {error}"));
+}
+
+#[test]
 fn short_histories_preserve_playback_invariants() {
     let config = property_config(8);
     let seed = config.rng_seed;

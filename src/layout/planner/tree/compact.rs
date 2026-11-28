@@ -48,6 +48,25 @@ impl Clearance {
         scale.max(self.edge_scale(reserved, sample))
     }
 
+    pub(super) fn occupied_scale(&self, reserved: &[Vec<f32>], sample: usize) -> f32 {
+        let mut scale = 0.0_f32;
+        let padding = super::GAP * 0.125;
+        for &(a, b, inverse_distance) in &self.pairs {
+            let (a, b) = (reserved[a][sample], reserved[b][sample]);
+            if a > 0.0 && b > 0.0 {
+                scale = scale.max((a + b + 2.0 * padding) * inverse_distance);
+            }
+        }
+        for (row, &inverse_distance) in
+            reserved.iter().zip(&self.inverse_edge_clearance)
+        {
+            if row[sample] > 0.0 {
+                scale = scale.max((row[sample] + padding) * inverse_distance);
+            }
+        }
+        scale
+    }
+
     pub(super) fn edge_scale(&self, reserved: &[Vec<f32>], sample: usize) -> f32 {
         self.inverse_edge_clearance
             .iter()

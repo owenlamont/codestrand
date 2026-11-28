@@ -3,7 +3,7 @@ use bevy::math::Vec3;
 use super::{Simulation, Time};
 use crate::layout::Presence;
 
-const GLYPH_RATIO_GRACE: f32 = 2.5;
+pub(super) const GLYPH_RATIO_GRACE: f32 = 2.5;
 const MEDIAN_CAP: f32 = 2.0;
 pub(super) const GLYPH_RATIO_MAX_EXEMPT: f32 = 10.0;
 

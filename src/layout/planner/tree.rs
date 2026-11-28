@@ -12,7 +12,7 @@ use super::GAP;
 const GRID_TRIALS: usize = 4;
 const POINT_VISITS_PER_DIRECTORY: usize = 64;
 const ANGULAR_MARGIN: f64 = 1e-8;
-const MAX_COMPACT_DIRECTORIES: usize = 320;
+const MAX_COMPACT_DIRECTORIES: usize = 384;
 
 #[derive(Clone, Copy)]
 struct Site {
@@ -30,6 +30,7 @@ pub(super) enum Tree {
 pub(super) struct Template {
     sites: Vec<Site>,
     reservation: Reservation,
+    has_late_directories: bool,
 }
 
 enum Reservation {
@@ -46,17 +47,35 @@ impl Tree {
             .min()
             .unwrap_or(0);
         let end = (opening + 2).min(required[0].len() - 1);
-        let radii: Vec<_> = required
+        let mut radii: Vec<_> = required
             .iter()
             .map(|row| row[..=end].iter().copied().fold(0.0, f32::max))
             .collect();
+        let has_late_directories = radii.contains(&0.0);
         if children.len() <= MAX_COMPACT_DIRECTORIES
-            && radii.iter().all(|&radius| radius > 0.0)
-            && let Some(template) = Template::new(children, radii)
+            && (children.len() > 5 || !has_late_directories)
         {
-            Self::Template(template)
+            // Dormant directories use the opening size only to choose a planar embedding.
+            let seed_radius = radii.iter().copied().fold(0.4_f32, f32::max);
+            for radius in &mut radii {
+                if *radius == 0.0 {
+                    *radius = seed_radius;
+                }
+            }
+            if let Some(template) = Template::new(children, radii, has_late_directories)
+            {
+                return Self::Template(template);
+            }
+        }
+        Self::Active(active::Tree::new(children))
+    }
+
+    pub(super) fn retry_with_depth_bands(&mut self, children: &[Vec<usize>]) -> bool {
+        if matches!(self, Self::Template(template) if template.has_late_directories) {
+            *self = Self::Active(active::Tree::new(children));
+            true
         } else {
-            Self::Active(active::Tree::new(children))
+            false
         }
     }
 
@@ -73,19 +92,27 @@ impl Tree {
 }
 
 impl Template {
-    fn new(children: &[Vec<usize>], mut peak: Vec<f32>) -> Option<Self> {
-        for radius in &mut peak {
+    fn new(
+        children: &[Vec<usize>],
+        mut radii: Vec<f32>,
+        has_late_directories: bool,
+    ) -> Option<Self> {
+        for radius in &mut radii {
             *radius += GAP;
         }
         if children.len() > 5 {
-            if let Some(points) = compact::choose_template(children, &peak) {
+            if let Some(points) = compact::choose_template(children, &radii) {
                 let reservation =
                     Reservation::Compact(compact::Clearance::new(&points, children));
                 let mut sites = depth_order(children);
                 for (site, point) in sites.iter_mut().zip(points) {
                     site.point = point;
                 }
-                return Some(Self { sites, reservation });
+                return Some(Self {
+                    sites,
+                    reservation,
+                    has_late_directories,
+                });
             }
             return None;
         }
@@ -106,8 +133,8 @@ impl Template {
             let Some(sites) = embed(children, &counts, slots, heading) else {
                 continue;
             };
-            let stretch = scale(&sites, |index| peak[index]);
-            let (low, high) = sites.iter().zip(&peak).fold(
+            let stretch = scale(&sites, |index| radii[index]);
+            let (low, high) = sites.iter().zip(&radii).fold(
                 (Vec2::splat(f32::INFINITY), Vec2::splat(f32::NEG_INFINITY)),
                 |(low, high), (site, &radius)| {
                     (
@@ -119,7 +146,7 @@ impl Template {
             let score = (high - low).element_product();
             widths.fill(GAP);
             heights.fill(GAP);
-            for (site, &radius) in sites.iter().zip(&peak) {
+            for (site, &radius) in sites.iter().zip(&radii) {
                 widths[site.column] = widths[site.column].max(radius);
                 heights[site.row] = heights[site.row].max(radius);
             }
@@ -142,6 +169,7 @@ impl Template {
         Some(Self {
             sites,
             reservation: Reservation::Grid(clearance),
+            has_late_directories,
         })
     }
 
@@ -163,7 +191,11 @@ impl Template {
                     })
                 }
                 Reservation::Compact(clearance) => {
-                    Vec2::splat(clearance.scale(reserved, sample))
+                    Vec2::splat(if self.has_late_directories {
+                        clearance.occupied_scale(reserved, sample)
+                    } else {
+                        clearance.scale(reserved, sample)
+                    })
                 }
             };
             let root = self.sites[0].point;

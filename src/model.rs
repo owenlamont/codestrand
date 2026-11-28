@@ -17,6 +17,8 @@ use crate::{
 
 pub(crate) mod caption;
 pub(crate) mod framing;
+#[cfg(test)]
+mod geometric_floor;
 pub(crate) mod glyph_scale;
 mod lifecycle;
 pub(crate) use lifecycle::RepositoryExit;

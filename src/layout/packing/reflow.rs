@@ -169,6 +169,9 @@ pub(super) fn plan(
     let from = Layout::new(nodes, from, space);
     let unchanged = Layout::new(nodes, tiles(nodes, target, presence, space)?, space);
     let baseline = Density::new(&unchanged.tiles, target);
+    let unchanged_error = area_per_file_error(&unchanged.tiles, target);
+    let exchange_improves =
+        |to: &Layout| area_per_file_error(&to.tiles, target) < unchanged_error;
     let mut best = baseline;
     let mut best_motion = 0.0;
     if best.worst <= super::DENSITY_TOLERANCE {
@@ -189,14 +192,16 @@ pub(super) fn plan(
             if cost.improves_with_motion(best, baseline, [motion, best_motion]) {
                 let direct = compatible(&from.gutters, &to.gutters)
                     && connected(&from, &to, false);
-                let exchange = pair.filter(|_| !direct).and_then(|pair| {
-                    exchange::Exchange::plan(
-                        &from,
-                        &to,
-                        pair,
-                        space.field(super::framing::MARGIN),
-                    )
-                });
+                let exchange = pair
+                    .filter(|_| !direct && exchange_improves(&to))
+                    .and_then(|pair| {
+                        exchange::Exchange::plan(
+                            &from,
+                            &to,
+                            pair,
+                            space.field(super::framing::MARGIN),
+                        )
+                    });
                 if direct || exchange.is_some() {
                     best = cost;
                     best_motion = motion;
@@ -347,6 +352,7 @@ pub(super) fn plan(
             let motion = movement_cost(&from, &to, policy.stability, 2.0);
             if !cost.improves_with_motion(best, baseline, [motion, best_motion])
                 || !forecast.improves(best_forecast, forecast_baseline)
+                || !exchange_improves(&to)
             {
                 continue;
             }
@@ -387,6 +393,7 @@ pub(super) fn plan(
             let motion = movement_cost(&from, &to, policy.stability, 2.0);
             if !cost.improves_with_motion(best, baseline, [motion, best_motion])
                 || !forecast.improves(best_forecast, forecast_baseline)
+                || !exchange_improves(&to)
             {
                 continue;
             }
@@ -723,6 +730,20 @@ fn totals(tiles: &[Option<Tile>], weights: &[f32]) -> (f32, f32) {
         })
 }
 
+fn area_per_file_error(tiles: &[Option<Tile>], files: &[f32]) -> f32 {
+    let live = || {
+        tiles.iter().zip(files).filter_map(|(&tile, &files)| {
+            tile.filter(|_| files > 0.0)
+                .map(|tile| (tile.area(), files))
+        })
+    };
+    let (area, files) =
+        live().fold((0.0, 0.0), |(area, files), (a, f)| (area + a, files + f));
+    live()
+        .map(|(a, f)| (a * files / (f * area) - 1.0).abs())
+        .fold(0.0, f32::max)
+}
+
 fn density_error(share: f32, due: f32) -> f32 {
     (due / share.max(f32::MIN_POSITIVE) - 1.0).abs()
 }
@@ -965,6 +986,12 @@ mod tests {
         assert!(matches!(transfer.exchange, Some(Motion::ColumnTransfer(_))));
         assert!(density(&transfer.nodes) < 0.03);
         assert!(transfer.duration() <= MAX_MOTION_TICKS);
+        let without_transfer = tiles(&first.nodes, &target, &presence, space).unwrap();
+        let endpoint = &transfer.transition.as_ref().unwrap().1.tiles;
+        assert!(
+            area_per_file_error(endpoint, &target)
+                < area_per_file_error(&without_transfer, &target)
+        );
 
         let too_short = retry(transfer.duration() - 1, &target);
         assert!(too_short.duration() < transfer.duration());

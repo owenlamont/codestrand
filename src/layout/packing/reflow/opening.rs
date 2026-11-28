@@ -265,18 +265,20 @@ pub(super) fn plan_shift(
     if current.tiles.iter().flatten().take(2).count() < 2 {
         return None;
     }
-    let weights: Vec<_> = weights.iter().map(|&weight| weight.max(1.0)).collect();
-    best_slide(current, packing.space(), ticks, Some(&weights), |layout| {
-        let (area, total) = super::totals(&layout.tiles, &weights);
-        let squared_error: f32 = layout
+    best_slide(current, packing.space(), ticks, Some(weights), |layout| {
+        let (area, total) = super::totals(&layout.tiles, weights);
+        let density = total / area;
+        -layout
             .tiles
             .iter()
-            .zip(&weights)
+            .zip(weights)
+            .filter(|&(_, &files)| files > 0.0)
             .filter_map(|(&tile, &files)| {
-                tile.map(|tile| (tile.area() / area - files / total).powi(2))
+                tile.map(|tile| {
+                    files * super::super::log_density_error(tile, files, density)
+                })
             })
-            .sum();
-        -squared_error
+            .sum::<f32>()
     })
 }
 

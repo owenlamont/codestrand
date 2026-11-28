@@ -10,7 +10,7 @@ mod fit;
 mod held;
 mod reflow;
 
-const BOUND: f32 = 3.5;
+pub(crate) const BOUND: f32 = 3.5;
 pub(crate) const DENSITY_TOLERANCE: f32 = 0.25;
 const ALLOCATION_TOLERANCE_PX: f32 = 0.25;
 
@@ -871,6 +871,10 @@ fn narrow_tile_cost(tile: Tile) -> f32 {
     (1.0 - tile.ground_aspect()).max(0.0)
 }
 
+fn log_density_error(tile: Tile, files: f32, density: f32) -> f32 {
+    (tile.area() * density / files).ln().abs()
+}
+
 fn insertion_cost(
     placement: &[Option<Tile>],
     weights: &[f32],
@@ -885,7 +889,7 @@ fn insertion_cost(
         .filter_map(|(i, tile)| {
             tile.map(|tile| {
                 weights[i]
-                    * ((tile.area() * density / weights[i]).ln().abs()
+                    * (log_density_error(tile, weights[i], density)
                         + (tile.ground_aspect() / aspects[i]).ln().abs())
             })
         })

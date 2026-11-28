@@ -73,13 +73,14 @@ impl Plan {
                 children[parent].push(index);
             }
         }
-        let tree = tree::Tree::new(&children, &required);
+        let mut tree = tree::Tree::new(&children, &required);
         // Two filters and the spline reach up to four samples beyond their support.
         let horizon = Time::seconds(model::WINDOW_SECONDS)
             .steps(step, usize::MAX)
             .0;
         let max_window = (horizon.saturating_sub(4) / 2).max(1);
-        let mut windows = vec![8_usize.min(max_window); required[0].len()];
+        let initial_window = 8_usize.min(max_window);
+        let mut windows = vec![initial_window; required[0].len()];
         let mut pass = 1;
         let mut samples = loop {
             let report = |phase, done, total| {
@@ -121,6 +122,11 @@ impl Plan {
             };
             let widened = widen_windows(&windows, &failed, max_window);
             if widened == windows {
+                if tree.retry_with_depth_bands(&children) {
+                    windows.fill(initial_window);
+                    pass += 1;
+                    continue;
+                }
                 let seconds =
                     model::count_u32(u32::try_from(failure).expect("sample fits u32"))
                         * step;
